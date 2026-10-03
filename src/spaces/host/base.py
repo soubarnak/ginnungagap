@@ -39,6 +39,10 @@ class HostBackend(ABC):
         """
 
     @abstractmethod
+    def forget_unit(self, name: str) -> None:
+        """Remove any init-system service definition for a deleted space."""
+
+    @abstractmethod
     def enable_user_autostart(self, user_name: str, name: str) -> None:
         """Enable the space's per-user autostart.
 

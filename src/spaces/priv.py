@@ -793,6 +793,7 @@ def delete(request: dict[str, Any]) -> None:
     with _space_lock(space):
         host.get_backend().stop_unit(name)
         _assert_no_mounts(space)
+        host.get_backend().forget_unit(name)
         shortcuts.remove(name)
         _remove_rootfs(core.CACHE_ROOT / name)
         if purge:

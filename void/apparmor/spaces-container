@@ -28,6 +28,7 @@ profile spaces-container flags=(attach_disconnected,mediate_deleted) {
   mount options=(ro, bind) /** -> /**,
   mount options=(ro, remount, bind) -> /**,
   mount options=(rw, remount, bind) -> /**,
+  mount options=(rw, remount, bind, nosuid, nodev, noexec) -> /**,
   mount options=(remount, bind, nosuid, nodev, noexec, ro) -> /**,
   mount options=(rw, rslave) -> /**,
   mount options=(rw, rprivate) -> /**,

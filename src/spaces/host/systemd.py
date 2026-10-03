@@ -75,6 +75,10 @@ class SystemdBackend(HostBackend):
             check=True,
         ).returncode
 
+    def forget_unit(self, name: str) -> None:
+        # The spaces@.service template needs no per-space definition.
+        return None
+
     def enable_user_autostart(self, user_name: str, name: str) -> None:
         # Reenable also removes symlinks left under the former default.target.
         subprocess.run(

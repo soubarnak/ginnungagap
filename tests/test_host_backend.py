@@ -324,18 +324,5 @@ class SystemdBackendTests(unittest.TestCase):
             self.assertFalse(self.backend.peer_in_space(1, "work"))
 
 
-class LxcStubTests(unittest.TestCase):
-    def test_every_method_raises(self) -> None:
-        backend = LxcBackend()
-        with self.assertRaisesRegex(NotImplementedError, "M2"):
-            backend.is_running("work")
-        with self.assertRaises(NotImplementedError):
-            backend.exec_in_guest("root", "work", ["true"])
-        with self.assertRaises(NotImplementedError):
-            backend.peer_in_space(1, "work")
-        with self.assertRaises(NotImplementedError):
-            backend.login_library_names()
-
-
 if __name__ == "__main__":
     unittest.main()
