@@ -26,6 +26,7 @@ from . import _
 from . import auth
 from . import core
 from . import devices
+from . import host
 from . import host_config
 from . import session
 from . import shortcuts
@@ -1326,49 +1327,22 @@ def _set_device_policy(
 ) -> None:
     """Atomically replace the service instance's device cgroup policy."""
 
-    unit = f"spaces@{space_name}.service"
     if level == "full":
-        policy = "auto"
         allowed: tuple[tuple[str, str], ...] = ()
     else:
-        policy = "closed"
         allowed = (
             *BASE_DEVICE_ALLOW,
             *((node.allow_spec, "rw") for node in sorted(nodes)),
         )
-    subprocess.run(
-        [
-            BUSCTL,
-            "call",
-            "org.freedesktop.systemd1",
-            "/org/freedesktop/systemd1",
-            "org.freedesktop.systemd1.Manager",
-            "SetUnitProperties",
-            "sba(sv)",
-            unit,
-            "true",
-            "2",
-            "DevicePolicy",
-            "s",
-            policy,
-            "DeviceAllow",
-            "a(ss)",
-            str(len(allowed)),
-            *(
-                value
-                for device_allow in allowed
-                for value in device_allow
-            ),
-        ],
-        check=True,
-    )
+    host.get_backend().set_device_policy(space_name, level, allowed)
 
 
 class _LoginMonitor:
     """Small ctypes wrapper around systemd's sd-login monitor."""
 
     def __init__(self) -> None:
-        library_name = ctypes.util.find_library("systemd") or "libsystemd.so.0"
+        find_name, fallback = host.get_backend().login_library_names()
+        library_name = ctypes.util.find_library(find_name) or fallback
         self._library = ctypes.CDLL(library_name, use_errno=True)
         self._libc = ctypes.CDLL(None, use_errno=True)
         self._configure_functions()
@@ -1795,43 +1769,17 @@ class _MountWorker:
         process = self._process
         assert process is not None
         while not self._stopping.is_set() and process.poll() is None:
-            machine = subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    "show",
-                    "--property=Leader",
-                    "--value",
-                    self._space_name,
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if machine.returncode != 0:
+            if not host.get_backend().probe_registered(self._space_name):
                 self._stopping.wait(0.05)
                 continue
-            guest_shell = subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    "--uid=root",
-                    "--",
-                    "shell",
-                    self._space_name,
-                    "/usr/bin/true",
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            guest_shell = host.get_backend().probe_guest_shell(
+                self._space_name
             )
             # Registration precedes the guest system bus during early boot.
             # Desktop setup uses machinectl shell, so starting it before both
             # probes succeed leaves forwarding inactive until another login
             # event happens to trigger reconciliation.
-            if guest_shell.returncode == 0:
+            if guest_shell:
                 self._registered = True
                 return True
             self._stopping.wait(0.05)
@@ -1988,18 +1936,8 @@ class _MountWorker:
                 )
 
     def _add(self, mount: HomeMount) -> None:
-        subprocess.run(
-            [
-                MACHINECTL,
-                "--quiet",
-                "--no-ask-password",
-                "--mkdir",
-                "bind",
-                self._space_name,
-                str(mount.source),
-                mount.destination,
-            ],
-            check=True,
+        host.get_backend().bind_into(
+            self._space_name, str(mount.source), mount.destination
         )
 
     def _remove(self, mount: HomeMount) -> None:
@@ -2009,28 +1947,7 @@ class _MountWorker:
 def _unmount_in_machine(space_name: str, destination: str) -> None:
     """Lazily revoke one runtime bind from a running space."""
 
-    # LazyUnmount= is a mount-unit setting, but systemd does not expose it
-    # through systemctl set-property. Run the stable umount(8) interface in
-    # the guest manager instead; every supported systemd has these
-    # systemd-run options (the newest, --pipe, was added in systemd 235).
-    subprocess.run(
-        [
-            SYSTEMD_RUN,
-            f"--machine={space_name}",
-            "--no-ask-password",
-            "--quiet",
-            "--wait",
-            "--pipe",
-            "--collect",
-            "--service-type=exec",
-            "--",
-            UMOUNT,
-            "--lazy",
-            "--",
-            destination,
-        ],
-        check=True,
-    )
+    host.get_backend().unmount_in(space_name, destination)
 
 
 class _DeviceWorker:
@@ -2096,39 +2013,13 @@ class _DeviceWorker:
         process = self._process
         assert process is not None
         while not self._stopping.is_set() and process.poll() is None:
-            machine = subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    "show",
-                    "--property=Leader",
-                    "--value",
-                    self._space_name,
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if machine.returncode != 0:
+            if not host.get_backend().probe_registered(self._space_name):
                 self._stopping.wait(0.05)
                 continue
-            guest_shell = subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    "--uid=root",
-                    "--",
-                    "shell",
-                    self._space_name,
-                    "/usr/bin/true",
-                ],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+            guest_shell = host.get_backend().probe_guest_shell(
+                self._space_name
             )
-            if guest_shell.returncode == 0:
+            if guest_shell:
                 return True
             self._stopping.wait(0.05)
         return False
@@ -2157,18 +2048,10 @@ class _DeviceWorker:
             proposed = {*self._mounted, node}
             try:
                 _set_device_policy(self._space_name, self._level, proposed)
-                subprocess.run(
-                    [
-                        MACHINECTL,
-                        "--quiet",
-                        "--no-ask-password",
-                        "--mkdir",
-                        "bind",
-                        self._space_name,
-                        str(node.source),
-                        str(node.destination),
-                    ],
-                    check=True,
+                host.get_backend().bind_into(
+                    self._space_name,
+                    str(node.source),
+                    str(node.destination),
                 )
             except (OSError, subprocess.CalledProcessError) as error:
                 _set_device_policy(
@@ -2467,7 +2350,7 @@ def launch(space_name: str) -> int:
             bool(portal_binds),
         )
         worker.start()
-        process = subprocess.Popen(
+        process = host.get_backend().run_launcher(
             _command(
                 space_name,
                 rootfs,

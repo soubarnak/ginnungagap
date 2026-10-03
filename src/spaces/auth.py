@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import _
 from . import core
+from . import host
 
 
 logger = logging.getLogger(__name__)
@@ -281,16 +282,6 @@ class _WorkerPool:
                 pass
 
 
-def _cgroup_components(pid: int) -> set[str]:
-    value = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
-    return {
-        component
-        for line in value.splitlines()
-        for component in line.partition(":")[2].split("/")
-        if component
-    }
-
-
 class AuthenticationService:
     """Authentication listener owned by one running space."""
 
@@ -369,14 +360,7 @@ class AuthenticationService:
         return pid
 
     def _peer_in_space(self, pid: int) -> bool:
-        try:
-            components = _cgroup_components(pid)
-        except OSError:
-            return False
-        return (
-            f"spaces@{self.space_name}.service" in components
-            or f"machine-{self.space_name}.scope" in components
-        )
+        return host.get_backend().peer_in_space(pid, self.space_name)
 
     def _consume_attempt(self, uid: int) -> None:
         if uid not in self.users:

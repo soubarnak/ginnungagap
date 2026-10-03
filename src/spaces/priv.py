@@ -26,6 +26,7 @@ from typing import Any
 
 from . import _
 from . import core
+from . import host
 from . import session
 from . import storage
 
@@ -260,17 +261,7 @@ def _enable_user_service(name: str, uid: int, gid: int) -> None:
         )
     # Reenable also removes symlinks left under the former default.target.
     try:
-        subprocess.run(
-            [
-                SYSTEMCTL,
-                f"--machine={account.pw_name}@.host",
-                "--user",
-                "--no-reload",
-                "reenable",
-                f"spaces@{name}.service",
-            ],
-            check=True,
-        )
+        host.get_backend().enable_user_autostart(account.pw_name, name)
     except subprocess.CalledProcessError as error:
         raise core.SpacesError(
             _(
@@ -310,13 +301,7 @@ def _space_info(name: str) -> dict[str, Any]:
 
 
 def _ensure_space_started(name: str, *, entering: bool = False) -> int:
-    available = subprocess.run(
-        [MACHINECTL, "--quiet", "show", name],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    ).returncode == 0
-    if available:
+    if host.get_backend().is_running(name):
         return 0
 
     visible = entering and bool(
@@ -331,10 +316,7 @@ def _ensure_space_started(name: str, *, entering: bool = False) -> int:
         sys.stdout.flush()
 
     try:
-        return subprocess.run(
-            [SYSTEMCTL, "start", f"spaces@{name}.service"],
-            check=False,
-        ).returncode
+        return host.get_backend().start_unit(name)
     finally:
         if visible:
             sys.stdout.write("\033[F\033[2K")
@@ -396,28 +378,26 @@ def _machine_shell(
         **(environment or {}),
         **(launch_environment or {}),
     }
-    machine_command = [
-        MACHINECTL,
-        "--quiet",
-        f"--uid={user_name}",
-        *(
-            f"--setenv={name}={value}"
-            for name, value in sorted(command_environment.items())
-        ),
-        "--",
-        "shell",
-        space_name,
-        *actual_command,
-    ]
+    backend = host.get_backend()
     if caller_pidfd is None:
-        return subprocess.run(machine_command, check=False).returncode
+        return backend.exec_in_guest(
+            user_name,
+            space_name,
+            actual_command,
+            env=command_environment,
+        ).returncode
 
     poller = select.poll()
     poller.register(caller_pidfd, select.POLLIN)
     if poller.poll(0):
         return 128 + signal.SIGTERM
 
-    process = subprocess.Popen(machine_command)
+    process = backend.spawn_in_guest(
+        user_name,
+        space_name,
+        actual_command,
+        env=command_environment,
+    )
     process_pidfd = os.pidfd_open(process.pid)
     try:
         poller.register(process_pidfd, select.POLLIN)
@@ -782,14 +762,7 @@ def configure(patch: dict[str, Any]) -> None:
         }
         core.validate_info(info)
         _write_info(space, info)
-        subprocess.run(
-            [
-                SYSTEMCTL,
-                "try-restart",
-                f"spaces@{patch['name']}.service",
-            ],
-            check=True,
-        )
+        host.get_backend().try_restart_unit(patch["name"])
         system_permissions = core.effective_system_permissions(
             permissions["system"]
         )
@@ -818,10 +791,7 @@ def delete(request: dict[str, Any]) -> None:
     space = core.STATE_ROOT / name
 
     with _space_lock(space):
-        subprocess.run(
-            [SYSTEMCTL, "stop", f"spaces@{name}.service"],
-            check=True,
-        )
+        host.get_backend().stop_unit(name)
         _assert_no_mounts(space)
         shortcuts.remove(name)
         _remove_rootfs(core.CACHE_ROOT / name)

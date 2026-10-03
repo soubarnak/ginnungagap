@@ -26,6 +26,7 @@ from typing import Protocol
 
 from . import _
 from . import core
+from . import host
 
 
 MAX_ENVIRONMENT_VALUE = 4096
@@ -440,31 +441,10 @@ def _parse_environment(output: str) -> dict[str, str]:
 def host_manager_environment(user: DesktopUser) -> dict[str, str]:
     """Read the host user manager without creating another login session."""
 
-    # Do not use ``--machine=<user>@.host`` here. That transport starts a
-    # systemd-stdio-bridge PAM session; logind then wakes this monitor again,
-    # turning one environment read into an unbounded reconciliation loop.
-    completed = subprocess.run(
-        [
-            SYSTEMCTL,
-            "--user",
-            "--no-ask-password",
-            "show-environment",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        env={
-            "DBUS_SESSION_BUS_ADDRESS": (
-                f"unix:path=/run/user/{user.uid}/bus"
-            ),
-            "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
-        },
-        user=user.uid,
-        group=user.gid,
-    )
-    if completed.returncode != 0:
+    raw = host.get_backend().host_user_environment(user.uid, user.gid)
+    if raw is None:
         return {}
-    return _parse_environment(completed.stdout)
+    return _parse_environment(raw)
 
 
 def portal_bind_arguments(rootfs: Path) -> tuple[str, ...]:
@@ -940,7 +920,7 @@ def start_portal_proxy(
         f"{space_name}-{generation}.scope"
     )
     control_read, control_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
-    address = f"unix:path=/run/user/{user.uid}/bus"
+    address = host.get_backend().session_bus_address(user.uid)
     broker_process: subprocess.Popen[bytes] | None = None
     broker_name: str | None = None
     identity = _install_portal_identity(space_name, user)
@@ -968,13 +948,6 @@ def start_portal_proxy(
             pass
         raise
     command = [
-        SYSTEMD_RUN,
-        "--user",
-        "--scope",
-        "--quiet",
-        f"--unit={unit}",
-        "--description=Spaces desktop portal proxy",
-        "--",
         XDG_DBUS_PROXY,
         address,
         str(socket_path),
@@ -982,19 +955,19 @@ def start_portal_proxy(
         *_portal_policy_arguments(broker_name),
     ]
     try:
-        process = subprocess.Popen(
+        process = host.get_backend().spawn_user_scope(
+            unit,
             command,
-            env={
+            {
                 "DBUS_SESSION_BUS_ADDRESS": address,
                 "LANG": "C.UTF-8",
                 "PATH": "/usr/bin",
                 "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",
             },
-            user=user.uid,
-            group=user.gid,
+            description="Spaces desktop portal proxy",
+            uid=user.uid,
+            gid=user.gid,
             pass_fds=(control_write,),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
     except Exception:
         os.close(control_read)
@@ -2637,19 +2610,11 @@ class DesktopController:
                         destination=binding.destination,
                     )
                 )
-            subprocess.run(
-                [
-                    MACHINECTL,
-                    "--quiet",
-                    "--no-ask-password",
-                    "--mkdir",
-                    "--read-only",
-                    "bind",
-                    self.space_name,
-                    f"/proc/{os.getpid()}/fd/{descriptor}",
-                    binding.destination,
-                ],
-                check=True,
+            host.get_backend().bind_into(
+                self.space_name,
+                f"/proc/{os.getpid()}/fd/{descriptor}",
+                binding.destination,
+                read_only=True,
             )
         finally:
             os.close(descriptor)
@@ -2673,16 +2638,10 @@ class DesktopController:
         self.destination_sources.pop(binding.destination, None)
 
     def _machine_root(self, command: list[str]) -> None:
-        subprocess.run(
-            [
-                MACHINECTL,
-                "--quiet",
-                "--uid=root",
-                "--",
-                "shell",
-                self.space_name,
-                *command,
-            ],
+        host.get_backend().exec_in_guest(
+            "root",
+            self.space_name,
+            command,
             check=True,
             stdout=subprocess.DEVNULL,
         )
@@ -2694,20 +2653,11 @@ class DesktopController:
         *,
         environment: dict[str, str] | None = None,
     ) -> None:
-        subprocess.run(
-            [
-                MACHINECTL,
-                "--quiet",
-                f"--uid={user.name}",
-                *(
-                    f"--setenv={name}={value}"
-                    for name, value in sorted((environment or {}).items())
-                ),
-                "--",
-                "shell",
-                self.space_name,
-                *command,
-            ],
+        host.get_backend().exec_in_guest(
+            user.name,
+            self.space_name,
+            command,
+            env=environment,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
