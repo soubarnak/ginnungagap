@@ -23,16 +23,22 @@ LXC 6.0.3. Guest: Ubuntu noble from `debootstrap`, systemd as PID 1, shared host
    `void/bin/spaces-lxc`, which hides `/sys/fs/cgroup/elogind` in a private mount namespace.
    The host's elogind is untouched. All `lxc-start`, `lxc-attach`, `lxc-cgroup`, `lxc-stop`
    calls must use the wrapper, otherwise lxc-attach falls back to the same failure.
-2. **Void does not load LXC container AppArmor profiles at boot.** Only the `lxc-*` tool
+2. **Stock LXC AppArmor profiles break systemd-logind.** Under `lxc-container-default-cgns`,
+   `-with-nesting` and `-with-mounting`, guest `systemd-logind` fails: AppArmor denies the
+   `rbind` of `/` to `/run/systemd/mount-rootfs/` that systemd uses for unit sandboxing.
+   Fix: `void/apparmor/spaces-container`, a derived profile that allows those mounts. With it
+   the guest reaches `running`, and `systemd-run -p PAMName=login --uid=1000` creates a real
+   logind session. Residual: a `proc` mount under `/run/systemd` was denied once (rule added).
+3. **Void does not load LXC container AppArmor profiles at boot.** Only the `lxc-*` tool
    profiles were loaded. The spaces runit service must load the profile itself with
    `apparmor_parser -r` before `lxc-start`. `apparmor_parser` warns
    `Found reference to variable PROC, but is never declared` for `lxc-containers`; the
    container profiles still load.
-3. The guest's `/proc/self/cgroup` lists `1:name=elogind:/` for attached processes. This is
+4. The guest's `/proc/self/cgroup` lists `1:name=elogind:/` for attached processes. This is
    the kernel listing the host's hierarchies; guest systemd only uses the mounted cgroup2.
 
 ## Open items for M2
 
-- Guest reports `degraded` under AppArmor: identify the failing unit (`systemctl --failed`).
+- Re-run the guest boot with the added proc rule and confirm zero DENIED lines.
 - Test `lxc-container-default-with-nesting` for development/admin spaces.
 - Re-test live device updates with a real device policy (closed list) rather than `/dev/null`.

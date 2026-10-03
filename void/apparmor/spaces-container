@@ -1,0 +1,38 @@
+# AppArmor profile for Spaces guests running under LXC on Void Linux.
+# Based on LXC's lxc-container-default-cgns, extended so a full systemd guest
+# can build its unit sandboxes (ProtectSystem=, PrivateTmp=, ...), which rbind
+# the guest root and remount it. Stock LXC profiles deny that, and
+# systemd-logind then fails to start. Load with: apparmor_parser -r <file>
+# Replaces the SELinux confinement used by upstream on Fedora.
+
+#include <tunables/global>
+
+profile spaces-container flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/lxc/container-base>
+
+  deny mount fstype=devpts,
+  mount fstype=cgroup -> /sys/fs/cgroup/**,
+  mount fstype=cgroup2 -> /sys/fs/cgroup/**,
+  mount fstype=overlay,
+  mount fstype=ext*,
+  mount fstype=xfs,
+  mount fstype=btrfs,
+  mount fstype=tmpfs,
+  mount fstype=fuse*,
+  mount fstype=proc -> /run/systemd/**,
+
+  # systemd unit sandboxing: bind, rbind, remount and move mounts inside the guest.
+  mount options=(rw, rbind) / -> /run/systemd/**,
+  mount options=(rw, bind) /** -> /**,
+  mount options=(rw, rbind) /** -> /**,
+  mount options=(ro, bind) /** -> /**,
+  mount options=(ro, remount, bind) -> /**,
+  mount options=(rw, remount, bind) -> /**,
+  mount options=(remount, bind, nosuid, nodev, noexec, ro) -> /**,
+  mount options=(rw, rslave) -> /**,
+  mount options=(rw, rprivate) -> /**,
+  mount options=(rw, rshared) -> /**,
+  mount options=(rw, move) /** -> /**,
+  umount,
+  pivot_root,
+}
