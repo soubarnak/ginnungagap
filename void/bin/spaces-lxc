@@ -1,0 +1,10 @@
+#!/bin/sh
+# Run an lxc-* tool with elogind's named cgroup v1 hierarchy hidden.
+#
+# Void's elogind mounts a named v1 hierarchy at /sys/fs/cgroup/elogind next to
+# the unified cgroup2 mount. LXC then classifies the host as a legacy/hybrid
+# layout and fails with: Failed to set "devices.deny" to "a". Hiding that one
+# mount in a private mount namespace gives LXC (and the guest) a pure cgroup2
+# view without touching the host's elogind. Usage: spaces-lxc lxc-start ...
+exec unshare --mount --propagation private -- \
+    sh -c 'umount /sys/fs/cgroup/elogind 2>/dev/null; exec "$@"' sh "$@"
