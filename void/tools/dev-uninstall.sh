@@ -1,0 +1,124 @@
+#!/bin/bash
+# Revert void/tools/dev-install.sh.
+#
+# Usage: sudo void/tools/dev-uninstall.sh [--purge] [--remove-packages]
+#
+#   (default)           stop and remove every spaces runit service, remove all
+#                       installed files. Spaces (/var/lib/spaces), caches and
+#                       logs are KEPT, so a later dev-install picks them up.
+#   --purge             also delete /var/lib/spaces (every space and its home
+#                       directories), /var/cache/spaces and /var/log/spaces.
+#                       Refuses to run while anything is mounted below them.
+#   --remove-packages   also xbps-remove the packages dev-install installed.
+set -euo pipefail
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "dev-uninstall.sh must run as root (use sudo)" >&2
+    exit 1
+fi
+
+PURGE=0
+REMOVE_PACKAGES=0
+for argument in "$@"; do
+    case "$argument" in
+        --purge) PURGE=1 ;;
+        --remove-packages) REMOVE_PACKAGES=1 ;;
+        *) echo "unknown option: $argument" >&2; exit 2 ;;
+    esac
+done
+
+STATE=/etc/spaces/dev-install.state
+KEYRING=/usr/share/keyrings/ubuntu-archive-keyring.gpg
+declare -A STATE_KV
+if [ -f "$STATE" ]; then
+    while IFS='=' read -r key value; do
+        [ -n "$key" ] && STATE_KV[$key]=$value
+    done <"$STATE"
+fi
+log() { printf '==> %s\n' "$*"; }
+
+# ---------------------------------------------------------------- services
+# sv down asks spaces.priv launch to stop the guest gracefully (lxc-stop).
+shopt -s nullglob
+for service in /var/service/spaces-* /etc/sv/spaces-*; do
+    case "$service" in */log) continue ;; esac
+    if [ -e "$service/supervise/ok" ] || [ -L "$service" ]; then
+        log "stopping $(basename "$service")"
+        sv -w 90 down "$service" >/dev/null 2>&1 || true
+    fi
+done
+for link in /var/service/spaces-*; do
+    [ -L "$link" ] && rm -f "$link"
+done
+# runsvdir reaps the now-unlinked runsv; give it its five second scan.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    pgrep -f '^runsv spaces-' >/dev/null || break
+    sleep 1
+done
+rm -rf /etc/sv/spaces-* /run/runit/supervise.spaces-*
+shopt -u nullglob
+
+if pgrep -x lxc-start >/dev/null; then
+    echo "an lxc-start process is still running; stop it first" >&2
+    exit 1
+fi
+
+# ------------------------------------------------------------------- files
+log "removing installed files"
+if [ -e /etc/apparmor.d/spaces-container ] && command -v apparmor_parser >/dev/null; then
+    apparmor_parser -R /etc/apparmor.d/spaces-container 2>/dev/null || true
+fi
+rm -f /etc/apparmor.d/spaces-container
+SITE=$(/usr/bin/python3 -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+rm -rf "$SITE/spaces"
+rm -f /usr/bin/spaces /usr/bin/spaces.priv
+rm -rf /usr/lib/spaces /usr/share/spaces
+rm -f /usr/share/polkit-1/actions/org.anatase.spaces.policy /etc/pam.d/spaces
+# Runtime artifacts: exported application shortcuts and the tmpfs state.
+rm -f /usr/local/share/applications/spaces-*.desktop
+rm -rf /usr/local/share/applications/spaces-icons
+rm -rf /run/spaces
+
+if [ "${STATE_KV[config]:-}" = created ] && [ -f /etc/spaces/config.json ]; then
+    if python3 -I - <<'PYEOF'
+import json, sys
+packages = ["fastfetch", "screen", "tmux", "zsh"]
+expected = {"version": 1, "distros": {d: {"packages": packages} for d in ("arch", "fedora", "kali", "ubuntu")}}
+sys.exit(0 if json.load(open("/etc/spaces/config.json")) == expected else 1)
+PYEOF
+    then
+        rm -f /etc/spaces/config.json
+    else
+        echo "keeping /etc/spaces/config.json: it was edited after install" >&2
+    fi
+fi
+case "${STATE_KV[keyring]:-}" in
+    installed) rm -f "$KEYRING" ;;
+    replaced)
+        [ -f "$KEYRING.dev-install-backup" ] && mv -f "$KEYRING.dev-install-backup" "$KEYRING"
+        ;;
+esac
+rm -f "$STATE"
+rmdir /etc/spaces 2>/dev/null || true
+
+# ------------------------------------------------------------------- purge
+if [ "$PURGE" -eq 1 ]; then
+    if grep -E ' /(var/lib|var/cache|var/log)/spaces' /proc/mounts >/dev/null; then
+        echo "refusing --purge: something is still mounted below /var/{lib,cache,log}/spaces" >&2
+        exit 1
+    fi
+    log "purging /var/lib/spaces, /var/cache/spaces, /var/log/spaces"
+    rm -rf /var/lib/spaces /var/cache/spaces /var/log/spaces
+else
+    log "kept /var/lib/spaces (spaces and homes), /var/cache/spaces, /var/log/spaces; use --purge to delete"
+fi
+
+# ---------------------------------------------------------------- packages
+if [ "$REMOVE_PACKAGES" -eq 1 ] && [ -n "${STATE_KV[packages]:-}" ]; then
+    log "removing packages: ${STATE_KV[packages]}"
+    # shellcheck disable=SC2086
+    xbps-remove -y ${STATE_KV[packages]}
+elif [ -n "${STATE_KV[packages]:-}" ]; then
+    echo "packages installed by dev-install and kept: ${STATE_KV[packages]} (use --remove-packages)"
+fi
+log "done"

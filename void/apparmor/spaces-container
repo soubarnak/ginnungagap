@@ -34,6 +34,8 @@ profile spaces-container flags=(attach_disconnected,mediate_deleted) {
   mount options=(rw, rprivate) -> /**,
   mount options=(rw, rshared) -> /**,
   mount options=(rw, move) /** -> /**,
+  # move_mount(2) from an fd (systemd 258+ credentials) has no source path.
+  mount options=(rw, move) -> /**,
   umount,
   pivot_root,
 }

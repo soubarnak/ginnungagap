@@ -1,0 +1,26 @@
+# Template file for 'ubuntu-keyring'
+pkgname=ubuntu-keyring
+version=2026.08.18
+revision=1
+hostmakedepends="gnupg"
+short_desc="GnuPG keys of the Ubuntu archive"
+maintainer="Spaces on Void <spaces@localhost>"
+license="GPL-2.0-or-later"
+homepage="https://launchpad.net/ubuntu/+source/ubuntu-keyring"
+# ubuntu-keyring is a native Debian source package, so there is no .orig tarball.
+distfiles="http://archive.ubuntu.com/ubuntu/pool/main/u/ubuntu-keyring/ubuntu-keyring_${version}.tar.xz"
+checksum=652d6b53b7fd676e7d45e99076ebd44624d477f3883c1bcb7bcf6f2855cdf7c4
+wrksrc="ubuntu-keyring-${version}"
+
+# The distfile checksum only pins the tarball. Also require the Ubuntu Archive
+# Automatic Signing Key (2018), which debootstrap needs for noble and later.
+post_extract() {
+	local fpr=F6ECB3762474EDA9D21B7022871920D1991BC93C
+	gpg --show-keys --with-colons keyrings/ubuntu-archive-keyring.gpg |
+		grep -q "^fpr:::::::::${fpr}:" ||
+		vdie "ubuntu-archive-keyring.gpg does not contain ${fpr}"
+}
+
+do_install() {
+	vinstall keyrings/ubuntu-archive-keyring.gpg 644 usr/share/keyrings
+}

@@ -8,9 +8,11 @@ foreground through run_launcher().
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -19,7 +21,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -174,7 +176,7 @@ def ensure_service(name: str) -> Path:
         directory / "run",
         "#!/bin/sh\n"
         "exec 2>&1\n"
-        f"export PATH={shlex.quote(SERVICE_PATH)}\n"
+        f"export PATH={shlex.quote(SERVICE_PATH)} HOME=/root LANG=C.UTF-8\n"
         f"exec {shlex.quote(priv)} launch {shlex.quote(name)}\n",
         0o755,
     )
@@ -245,6 +247,116 @@ def _precreate(rootfs: Path, relative: str, kind: str) -> None:
             raise OSError(f"{current} is not a directory")
         if last and (kind == "dir") != bool(stat.S_ISDIR(mode)):
             raise OSError(f"{current} has the wrong type for a bind target")
+
+
+_StdioState = tuple[int, int, int, int]
+
+
+def _stdio_snapshot(*extra: int | None) -> list[_StdioState]:
+    """Record owner and mode of regular files used as standard descriptors."""
+
+    saved: list[_StdioState] = []
+    for descriptor in (0, 1, 2, *(e for e in extra if isinstance(e, int))):
+        try:
+            status = os.fstat(descriptor)
+        except OSError:
+            continue
+        if stat.S_ISREG(status.st_mode):
+            saved.append(
+                (
+                    descriptor,
+                    status.st_uid,
+                    status.st_gid,
+                    stat.S_IMODE(status.st_mode),
+                )
+            )
+    return saved
+
+
+def _restore_stdio(saved: Sequence[_StdioState]) -> None:
+    for descriptor, uid, gid, mode in saved:
+        try:
+            os.fchown(descriptor, uid, gid)
+            os.fchmod(descriptor, mode)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def _preserve_stdio(*extra: int | None) -> Iterator[None]:
+    """Undo lxc-attach's ownership change of regular-file stdio.
+
+    lxc-attach hands the standard descriptors to the payload's user (root) and
+    drops group and other access, which would leave a user's ``> out.txt``
+    owned by root with mode 0600 after ``spaces enter NAME -- cmd > out.txt``.
+    Pipes, sockets and terminals do not need this.
+    """
+
+    saved = _stdio_snapshot(*extra)
+    try:
+        yield
+    finally:
+        _restore_stdio(saved)
+
+
+class _GuestProcess(subprocess.Popen):  # type: ignore[type-arg]
+    """A guest command started with spawn_in_guest.
+
+    The command runs in a transient guest unit, so killing the lxc-attach
+    client would leave it running. terminate() and kill() stop the unit first.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        *,
+        name: str,
+        unit: str,
+        saved: Sequence[_StdioState],
+    ) -> None:
+        self._guest_name = name
+        self._guest_unit = unit
+        self._saved_stdio = list(saved)
+        super().__init__(command)
+
+    def _restore(self) -> None:
+        saved, self._saved_stdio = self._saved_stdio, []
+        _restore_stdio(saved)
+
+    def poll(self) -> int | None:
+        code = super().poll()
+        if code is not None:
+            self._restore()
+        return code
+
+    def wait(self, timeout: float | None = None) -> int:
+        code = super().wait(timeout)
+        self._restore()
+        return code
+
+    def _stop_unit(self, *arguments: str) -> None:
+        _quiet(
+            _lxc(
+                "lxc-attach",
+                self._guest_name,
+                "--clear-env",
+                "--",
+                "/usr/bin/systemctl",
+                *arguments,
+                self._guest_unit,
+            ),
+            timeout=30,
+        )
+
+    def terminate(self) -> None:
+        if self.returncode is None:
+            self._stop_unit("stop")
+        super().terminate()
+
+    def kill(self) -> None:
+        if self.returncode is None:
+            self._stop_unit("kill", "--signal=SIGKILL")
+        super().kill()
 
 
 class _Launcher:
@@ -611,6 +723,7 @@ class LxcBackend(HostBackend):
         name: str,
         command: Sequence[str],
         env: Mapping[str, str] | None,
+        unit: str | None = None,
     ) -> list[str]:
         settings = sorted((env or {}).items())
         if user_name == "root":
@@ -637,6 +750,7 @@ class LxcBackend(HostBackend):
             "--wait",
             "--collect",
             "--service-type=exec",
+            *((f"--unit={unit}",) if unit else ()),
             f"--uid={user_name}",
             "-p",
             "PAMName=login",
@@ -665,11 +779,12 @@ class LxcBackend(HostBackend):
             options["stdout"] = stdout
         if stderr is not None:
             options["stderr"] = stderr
-        return subprocess.run(
-            self._attach(user_name, name, command, env),
-            check=check,
-            **options,
-        )
+        with _preserve_stdio(stdout, stderr):
+            return subprocess.run(
+                self._attach(user_name, name, command, env),
+                check=check,
+                **options,
+            )
 
     def spawn_in_guest(
         self,
@@ -679,7 +794,22 @@ class LxcBackend(HostBackend):
         *,
         env: Mapping[str, str] | None = None,
     ) -> subprocess.Popen[Any]:
-        return subprocess.Popen(self._attach(user_name, name, command, env))
+        # The unit name lets terminate() stop a command whose lxc-attach
+        # client is gone. Root commands run without a transient unit.
+        unit = (
+            None
+            if user_name == "root"
+            else f"spaces-enter-{secrets.token_hex(6)}"
+        )
+        command_line = self._attach(user_name, name, command, env, unit)
+        if unit is None:
+            return subprocess.Popen(command_line)
+        return _GuestProcess(
+            command_line,
+            name=name,
+            unit=unit,
+            saved=_stdio_snapshot(),
+        )
 
     # ------------------------------------------------------------------ mounts
 

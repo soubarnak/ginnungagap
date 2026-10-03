@@ -482,14 +482,23 @@ def enter(
         user_permissions.get("credential_agents", True)
         and caller_uid != 0
     )
-    environment = (
-        session.desktop_environment(
-            space_name,
-            user.pw_uid,
-        )
-        if desktop or credential_agents
-        else {}
-    )
+    environment: dict[str, str] = {}
+    if desktop or credential_agents:
+        try:
+            environment = session.desktop_environment(
+                space_name,
+                user.pw_uid,
+            )
+        except core.SpacesError as error:
+            # Terminal use must not depend on desktop forwarding.
+            print(
+                _(
+                    "spaces: warning: desktop forwarding is unavailable: "
+                    "{error}",
+                    error=error,
+                ),
+                file=sys.stderr,
+            )
     if not environment:
         return _machine_shell(
             user.pw_name,
@@ -647,10 +656,7 @@ def create(request: dict[str, Any]) -> None:
     space = core.STATE_ROOT / name
 
     with _space_lock(space, create=True):
-        subprocess.run(
-            ["/usr/bin/systemctl", "stop", f"spaces@{name}.service"],
-            check=True,
-        )
+        host.get_backend().stop_unit(name)
         shortcuts.remove(name)
         home = space / "home"
         cache = core.CACHE_ROOT / name

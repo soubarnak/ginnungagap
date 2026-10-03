@@ -78,6 +78,13 @@ class ServiceTests(Base):
             f"{self.root}/run/supervise.spaces-work.log",
         )
 
+    def test_service_environment_is_explicit(self) -> None:
+        self.adopt("work")
+        lxc.ensure_service("work")
+        run = (self.root / "sv" / "spaces-work" / "run").read_text()
+        self.assertIn("HOME=/root", run)
+        self.assertIn("LANG=C.UTF-8", run)
+
     def test_ensure_is_idempotent_and_keeps_down_file(self) -> None:
         self.adopt("work")
         lxc.ensure_service("work")
@@ -228,6 +235,48 @@ class CommandTests(Base):
                 self.assertNotIn("-v", command)
                 self.assertEqual(tail[-2:], ["ls", "-l"])
                 self.assertNotIn("--set-var", command)
+
+    def test_spawn_names_a_unit_for_users_only(self) -> None:
+        with (
+            mock.patch.object(lxc, "_GuestProcess") as guest,
+            mock.patch.object(lxc.subprocess, "Popen") as popen,
+            mock.patch.object(lxc.shutil, "which", lambda tool: f"/bin/{tool}"),
+        ):
+            self.backend.spawn_in_guest("alice", "work", ["sleep", "9"])
+            self.backend.spawn_in_guest("root", "work", ["sleep", "9"])
+        command = guest.call_args.args[0]
+        unit = guest.call_args.kwargs["unit"]
+        self.assertRegex(unit, r"^spaces-enter-[0-9a-f]{12}$")
+        self.assertIn(f"--unit={unit}", command)
+        self.assertNotIn("--unit", " ".join(popen.call_args.args[0]))
+
+    def test_guest_process_stops_the_unit_before_signalling(self) -> None:
+        stopped: list[list[str]] = []
+        with (
+            mock.patch.object(
+                lxc, "_quiet", lambda command, **kwargs: stopped.append(list(command))
+            ),
+            mock.patch.object(lxc.shutil, "which", lambda tool: f"/bin/{tool}"),
+        ):
+            process = lxc._GuestProcess(
+                ["sleep", "30"], name="work", unit="spaces-enter-x", saved=[]
+            )
+            self.addCleanup(process.wait)
+            process.terminate()
+            process.wait()
+        self.assertEqual(
+            stopped[0][-3:], ["/usr/bin/systemctl", "stop", "spaces-enter-x"]
+        )
+        self.assertEqual(process.returncode, -signal.SIGTERM)
+
+    def test_stdio_ownership_and_mode_are_restored(self) -> None:
+        path = self.root / "out.txt"
+        path.write_text("")
+        os.chmod(path, 0o644)
+        with open(path, "wb") as handle:
+            with lxc._preserve_stdio(handle.fileno()):
+                os.fchmod(handle.fileno(), 0o600)
+            self.assertEqual(stat.S_IMODE(os.fstat(handle.fileno()).st_mode), 0o644)
 
     def test_probes(self) -> None:
         def fake_run(command, **kwargs):

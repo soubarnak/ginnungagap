@@ -13,12 +13,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from spaces import core, host_config, priv, session, shortcuts
+from spaces import core, host, host_config, priv, session, shortcuts
 from spaces.distro import ubuntu
+from spaces.host.systemd import SystemdBackend
 
 
 class PrivilegedTests(unittest.TestCase):
     def setUp(self) -> None:
+        # priv.create stops the unit through the backend; pin systemd so the
+        # expected systemctl calls do not depend on the host's init system.
+        host.set_backend(SystemdBackend())
+        self.addCleanup(host.set_backend, None)
         self.temporary = tempfile.TemporaryDirectory()
         self.state_root = Path(self.temporary.name) / "spaces"
         self.cache_root = Path(self.temporary.name) / "cache"
@@ -33,6 +38,12 @@ class PrivilegedTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(core, "STATE_ROOT", self.state_root),
             mock.patch.object(core, "CACHE_ROOT", self.cache_root),
+            # Never read the machine's real /etc/spaces/config.json.
+            mock.patch.object(
+                host_config,
+                "CONFIG_PATH",
+                Path(self.temporary.name) / "config.json",
+            ),
             mock.patch.object(
                 shortcuts,
                 "APPLICATIONS_ROOT",
@@ -1460,6 +1471,32 @@ class PrivilegedTests(unittest.TestCase):
             launcher=True,
             agent="/agent",
         )
+
+    def test_enter_degrades_to_a_terminal_when_forwarding_fails(self) -> None:
+        info = core.create_info(
+            "work",
+            {"id": "ubuntu", "version": "noble"},
+            core.Identity(1000, 1000, Path("/home/alice")),
+            "basic",
+            [],
+        )
+        account = mock.Mock(pw_uid=1000, pw_name="alice")
+        with (
+            mock.patch.object(priv, "_caller_uid", return_value=1000),
+            mock.patch.object(priv.pwd, "getpwnam", return_value=account),
+            mock.patch.object(priv, "_space_info", return_value=info),
+            mock.patch.object(priv, "_ensure_space_started", return_value=0),
+            mock.patch.object(
+                session,
+                "desktop_environment",
+                side_effect=core.SpacesError("timed out"),
+            ),
+            mock.patch.object(priv, "_machine_shell", return_value=0) as shell,
+            mock.patch.object(priv.sys, "stderr", io.StringIO()) as stderr,
+        ):
+            self.assertEqual(priv.enter("alice@work", ["id"]), 0)
+        shell.assert_called_once_with("alice", "work", ["id"])
+        self.assertIn("desktop forwarding is unavailable", stderr.getvalue())
 
     def test_disabled_desktop_uses_launcher_without_environment(self) -> None:
         info = core.create_info(
