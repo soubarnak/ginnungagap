@@ -75,8 +75,9 @@ Verified on this host:
 
 Unexpected:
 
-- `systemd-run --working-directory=~` fails with status 200/CHDIR in the guest. The user command
-  is now wrapped in `sh -c 'cd "$HOME"; exec "$@"'`.
+- `systemd-run --working-directory=~` fails with status 200/CHDIR: under `lxc-attach --clear-env`
+  there is no `$HOME`, so the client expands `~` to `/root`. `-p WorkingDirectory=~` is
+  expanded by the guest manager against `--uid` and works.
 - One AppArmor denial remained (remount of `/run/systemd/mount-rootfs/proc` with
   nosuid,nodev,noexec). A rule was added to `spaces-container`; zero DENIED lines since.
 - `/dev/kmsg` is a poor probe for device policy: opening it needs CAP_SYSLOG, which the guest

@@ -265,7 +265,7 @@ class _Launcher:
         self._cleanup_actions = list(cleanup)
         self._stop_event = stop_event
         self._threads = list(threads)
-        self._stop_lock = threading.Lock()
+        self._stop_lock = threading.RLock()
         self._stopper: threading.Thread | None = None
         self._cleaned = False
         self._clean_lock = threading.Lock()
@@ -640,14 +640,12 @@ class LxcBackend(HostBackend):
             f"--uid={user_name}",
             "-p",
             "PAMName=login",
+            # "--working-directory=~" is expanded by the client, which has no
+            # HOME under --clear-env; the unit property is expanded in the guest.
+            "-p",
+            "WorkingDirectory=~",
             *(f"--setenv={k}={v}" for k, v in settings),
             "--",
-            # systemd-run --working-directory=~ fails with 200/CHDIR here, so
-            # enter the home directory (set by PAM) before running the command.
-            "/bin/sh",
-            "-c",
-            'cd "$HOME" 2>/dev/null; exec "$@"',
-            "sh",
             *command,
         )
 
