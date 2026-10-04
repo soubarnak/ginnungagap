@@ -47,13 +47,37 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
    command, because their util-linux uses the new API; with the classic `mount(2)`, a bind mount of `/proc/sys`
    that is remounted read-write works too (the `rw, remount, bind` rule that systemd's sandboxing needs). The
    file rules of `container-base` only protect `/proc/sys/...` at its own path.
-   What was tried: a seccomp `ENOSYS` for `fsopen`, `fsconfig`, `fsmount` and `fspick`. It stopped the fresh
-   mounts (libmount falls back to `mount(2)`, which the profile denies) but the guests came up `degraded`
-   (Fedora: `dbus-broker`, `journald`, `logind`, `tmpfiles-setup` failed) because systemd does not cope with the
-   missing syscalls. Not shipped. What would actually fix it: a user namespace for the guest (not possible with
-   the shared host network, host PAM and device model of this port), or a kernel/LSM that mediates the new mount
-   API (Landlock, or AppArmor with its mount hooks completed). Upstream on Fedora relies on SELinux for this
-   (the container domain may not write `sysctl_t`).
+   Seccomp was tried twice and is **not shipped**; the failing unit was found (post-M9, Ubuntu 26.04 with systemd 259.5):
+   * `fsopen errno 38` and `fspick errno 38` (the compiled profile really returns ENOSYS, checked with a
+     `fsopen` call in the guest, and does not fall into the default action): the guest comes up `degraded` with
+     `systemd-journald`, `systemd-tmpfiles-setup*`, `systemd-udev-load-credentials` and the journald sockets failed,
+     all with `status=243/CREDENTIALS`. Not container-specific units: every unit with `LoadCredential=` or
+     `ImportCredential=` fails, because systemd's credential setup does `fsopen("tmpfs")`, `fsconfig` and `fsmount`
+     in the unit's exec child (seen with `strace -f` on a private `systemd --user`, PID 1 cannot be traced) and
+     treats ENOSYS as fatal; there is no `mount(2)` fallback on that path. So the fallback on ENOSYS that systemd
+     has elsewhere does not exist where it matters. Masking those units is not an option.
+   * `fsmount errno 38` alone fails the same way (`fsmount(4, ...) = -1 ENOSYS` in the credential setup), and the
+     fresh proc needs `fsmount`, so nothing between the two ends can be blocked: a seccomp filter cannot tell
+     `fsopen("proc")` from `fsopen("tmpfs")` because the file system name is a user pointer.
+   * `mount_setattr errno 38` alone: the guest boots `degraded` (`systemd-logind` and its Varlink socket fail),
+     and a unit with `ProtectSystem=strict`, `PrivateTmp=` and the other sandbox options fails to start. It does
+     close the `open_tree` clone path (`clone:read-only`), but the `mount(2)` bind of `/proc/sys` remounted
+     read-write (`bind-remount:WRITABLE`) stays open, and that rule is the one systemd's own sandboxing needs, so
+     blocking `mount_setattr` buys nothing and costs the guests' sandboxes.
+   Other ways that were ruled out: a path rule for `core_pattern` and friends (the fresh proc can be mounted
+   anywhere and any directory of it can be cloned again, so the path is the attacker's choice), restricting
+   `move_mount` (a detached `tmpfs` of the credential setup and a detached `proc` look the same to the profile).
+   What would fix it: a user namespace for the guest with a *shifted* id map (`lxc.idmap = u 0 100000 65536`) and
+   idmapped binds of the home entries, so that guest root is not host root; sysctl permission compares the kuid with
+   the global root, so an identity-mapped namespace (`lxc.idmap = u 0 0 N`) changes nothing. That is a future
+   milestone (the shared host network, host PAM and the device model have to be reworked for it). Alternatives are a
+   `seccomp` user-notification supervisor that checks the `fsopen` file system name and performs the call itself
+   (large, and the guest-visible semantics must be exact), or an LSM that mediates the new mount API (Landlock,
+   AppArmor with complete mount hooks). Upstream parity: `systemd-nspawn` without SELinux has the same hole (on
+   Fedora the container domain may not write `sysctl_t`, which is what upstream relies on).
+   **Accepted risk until the user namespace exists.** `m9_check.py` probes it on every guest (a fresh proc
+   writable at `sys/kernel/core_pattern` and `sysrq-trigger`, a writable clone of `/proc/sys`) and reports SKIP
+   "known open" while any of them works; it turns into a PASS when they stop working.
    Until then: do not run an untrusted workload as a guest root. Every distro's `sudo` in a space is host-PAM
    authenticated, so a program running as the user needs the host password to become guest root, but a guest
    package script runs as root.

@@ -212,8 +212,13 @@ os.rmdir(t)
 
 # The new mount API (fsopen/fsmount/open_tree/mount_setattr/move_mount) creates and re-flags
 # mounts without the AppArmor mount checks (only move_mount is seen, and the profile allows it
-# for systemd). A seccomp ENOSYS for fsopen and friends was tried and broke the systemd
-# sandboxes of the guests, so this stays open.
+# for systemd). Seccomp cannot close it: systemd sets up unit credentials with fsopen and
+# fsmount and fails the unit when they return ENOSYS (journald, tmpfiles and udev then fail),
+# and blocking mount_setattr breaks logind and every unit sandbox while the mount(2) bind
+# remount stays open anyway (void/spike/RESULTS.md, "Post-M9 gaps"). The probe therefore
+# reports what a guest root can still reach: a fresh proc written at `new-proc-core_pattern`
+# (write back the value it read) and `new-proc-sysrq` (open for writing, nothing is written),
+# and a writable clone of /proc/sys.
 NEW_API = r"""
 import ctypes, errno, os
 libc = ctypes.CDLL(None, use_errno=True)
@@ -234,7 +239,13 @@ for fs in (b"proc", b"sysfs"):
         print("new-" + fs.decode() + ":" + name()); continue
     sc(FSCONFIG, fd, 6, None, None, 0); m = sc(FSMOUNT, fd, 1, 0)
     ok = m >= 0 and sc(MOVE_MOUNT, m, b"", AT_FDCWD, t, EMPTY) == 0
-    print("new-" + fs.decode() + ":" + ("MOUNTED" if ok else "denied")); umount()
+    print("new-" + fs.decode() + ":" + ("MOUNTED" if ok else "denied"))
+    if ok and fs == b"proc":
+        print("new-proc-core_pattern:" + ("WRITABLE" if writable("/run/systemd/m9n/sys/kernel/core_pattern") else "read-only"))
+        try:
+            os.close(os.open("/run/systemd/m9n/sysrq-trigger", os.O_WRONLY)); print("new-proc-sysrq:WRITABLE")
+        except OSError: print("new-proc-sysrq:read-only")
+    umount()
 fd = sc(OPEN_TREE, AT_FDCWD, b"/proc/sys", 1 | 0o2000000)
 if fd >= 0:
     class A(ctypes.Structure):
@@ -298,8 +309,14 @@ def check_apparmor() -> None:
         skip(f"{label} a bind mount of /proc/sys remounted rw (mount(2)) stays read-only", f"known open: {result.get('bind-remount')}")
         modern = dict(line.split(":", 1) for line in in_guest_root(space, "python3", "-c", NEW_API).stdout.split() if ":" in line)
         # Known open (void/docs/apparmor-review.md, finding 1): AppArmor does not mediate the new
-        # mount API, so these succeed. Reported, not asserted.
-        skip(f"{label} the new mount API (fsopen/fsmount/open_tree/mount_setattr) is not mediated", f"known open: {modern}")
+        # mount API and seccomp cannot take it away from systemd. A guest root can still reach the
+        # host's /proc/sys that way. Reported as SKIP while that is so, and a PASS (so the day it
+        # is closed shows up) when neither a fresh proc nor a clone of /proc/sys is writable.
+        reachable = [key for key in ("new-proc-core_pattern", "new-proc-sysrq", "clone") if modern.get(key) == "WRITABLE"]
+        if reachable:
+            skip(f"{label} the new mount API (fsopen/fsmount/open_tree/mount_setattr) cannot write host /proc/sys", f"known open: {modern}")
+        else:
+            check(f"{label} the new mount API cannot write host /proc/sys (fresh proc, sysrq-trigger, cloned /proc/sys)", True, str(modern))
 
 
 # -------------------------------------------------------------------- main

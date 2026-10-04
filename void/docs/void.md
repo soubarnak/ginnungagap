@@ -245,8 +245,11 @@ What is lost or different compared with upstream on Fedora/Anatase:
   (`launch._prepare_mounts` refuses hidden directories, `core.validate_home_name` allows only `.ssh/config`),
   not by a second MAC layer: the host makes those binds, so no container profile could see them.
 * AppArmor does not mediate the new mount API (`fsopen`, `open_tree`, `mount_setattr`), so root in a space
-  can mount a fresh `proc` and write host sysctls such as `core_pattern`; a seccomp filter against it broke
-  the guests' systemd. Do not run untrusted code as root in a space (`void/docs/apparmor-review.md`, finding 1).
+  can mount a fresh `proc` and write host sysctls such as `core_pattern` and `sysrq-trigger`. Seccomp cannot
+  close it: systemd 259 needs `fsopen`/`fsmount` for its unit credentials and fails (journald, tmpfiles) without them,
+  and `mount_setattr` cannot be taken away either. This is an accepted risk with upstream parity (`systemd-nspawn`
+  without SELinux has it too); the real fix is a user namespace with a shifted id map and idmapped home binds.
+  Do not run untrusted code as root in a space (`void/docs/apparmor-review.md`, finding 1).
 * **The LXC monitor's command socket** is an abstract socket, and abstract sockets belong to a network
   namespace, which the guest shares with the host. `/usr/lib/spaces/spaces-lxc` therefore starts `lxc-start`
   in a new network namespace that it pins at `/run/spaces/lxc/NAME/netns` (a bind mount of the namespace

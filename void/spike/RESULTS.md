@@ -902,3 +902,40 @@ Full text and evidence: `void/docs/apparmor-review.md`.
 - Distro `.desktop` files and icons are not shipped (documented in `void.md`).
 - The NVIDIA acceleration items of `m5_check.py` section 4 fail on this host independent of M9.
 
+
+## Post-M9 gaps
+
+Work on the items of "Open after M9". Each subsection says what was proven on the machine and what was not.
+
+### 1. New mount API hole: not closable with seccomp, accepted risk
+
+Done on the Ubuntu guest (the package's `lxc_config.py` was patched in place to add the seccomp lines, then restored
+byte for byte; nothing of it is shipped). All three experiments used the real compiled profile
+(`/run/spaces/lxc/ubuntu/seccomp.profile`); a guest call `fsopen("proc", 1)` returned `-1`, `errno` 38, so the
+filter returns ENOSYS and does not fall through to the default action.
+
+| Seccomp rule | Result |
+|---|---|
+| `fsopen errno 38`, `fspick errno 38` | `degraded`: `systemd-journald`, `systemd-tmpfiles-setup{,-dev,-dev-early}`, `systemd-udev-load-credentials`, `systemd-journal-flush`, both journald sockets failed, every one `status=243/CREDENTIALS`. A transient unit with `LoadCredential=` fails the same way, one with `PrivateTmp=` alone works |
+| `fsmount errno 38` only | same `degraded` set |
+| `mount_setattr errno 38` only | `degraded` (`systemd-logind`, its Varlink socket) and a unit with `ProtectSystem=strict` plus `PrivateTmp`, `ProtectKernelTunables`, `PrivateNetwork`, `ProtectHome`, `NoNewPrivileges` fails to start |
+
+- The failing unit is systemd core, not something to mask: PID 1 cannot be traced from the guest, so a private
+  `systemd --user` was run under `strace -f` with a unit that has `LoadCredential=`. The exec child does
+  `fsopen("tmpfs", FSOPEN_CLOEXEC)` and `fsconfig`, and with `fsopen` returning ENOSYS it exits 243; with `fsmount` returning ENOSYS
+  (`fsopen`, `fsconfig(CMD_CREATE)` ok, then `fsmount(4, FSMOUNT_CLOEXEC, 0) = -1 ENOSYS`) it exits 243 as well. systemd 259.5
+  does not fall back to `mount(2)` in its credential setup, so the premise "modern systemd falls back on ENOSYS" holds
+  elsewhere but not on this path, and the journal line cannot be read because journald is itself the first casualty.
+- With `mount_setattr` blocked the clone path is closed (`clone:read-only`), but the `mount(2)` bind of `/proc/sys`
+  remounted read-write is still `WRITABLE` (that is the `rw, remount, bind` rule systemd's sandboxes need), so
+  `mount_setattr` is not worth the breakage even if the guests had survived. The condition "keep it only if all four guests
+  boot to `running`" is not met (tried on Ubuntu only, because one guest already fails; the other three were not
+  repeated).
+- Baseline with the shipped profile, new probe in `m9_check.py` on Ubuntu: fresh proc mounted, `sys/kernel/core_pattern`
+  `WRITABLE` (the value read was written back), `sysrq-trigger` opens for writing, cloned `/proc/sys` `WRITABLE`.
+- Decision: accepted risk with upstream parity, written down in `void/docs/apparmor-review.md` (finding 1) and
+  `void/docs/void.md`. The way out is a user namespace with a shifted id map (`lxc.idmap = u 0 100000 65536`) plus
+  idmapped home binds; an identity map (`u 0 0 N`) changes nothing because sysctl permission compares the kuid with the
+  global root. A seccomp user-notification supervisor that inspects the `fsopen` name is the other possibility (not tried).
+- `m9_check.py`: the probe now also tests the fresh proc's `core_pattern` and `sysrq-trigger`; the two SKIP lines per
+  space stay while any of the three routes is writable and turn into a PASS when none is.
