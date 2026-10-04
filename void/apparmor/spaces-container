@@ -11,7 +11,6 @@ profile spaces-container flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/lxc/container-base>
 
   deny mount fstype=devpts,
-  mount fstype=cgroup -> /sys/fs/cgroup/**,
   mount fstype=cgroup2 -> /sys/fs/cgroup/**,
   mount fstype=overlay,
   mount fstype=ext*,
@@ -19,7 +18,11 @@ profile spaces-container flags=(attach_disconnected,mediate_deleted) {
   mount fstype=btrfs,
   mount fstype=tmpfs,
   mount fstype=fuse*,
-  mount fstype=proc -> /run/systemd/**,
+  # Not allowed on purpose: a fresh proc or sysfs mount (systemd tries both for
+  # PrivateNetwork=, ProtectProc= and PrivatePIDs=, and falls back to the existing
+  # mounts when they are refused), nor the legacy cgroup v1 filesystem. A fresh proc
+  # mounted anywhere shows the host's writable /proc/sys, and the guest has no user
+  # namespace that would keep it read-only (core_pattern is a host-wide root command).
 
   # systemd unit sandboxing: bind, rbind, remount and move mounts inside the guest.
   mount options=(rw, rbind) / -> /run/systemd/**,

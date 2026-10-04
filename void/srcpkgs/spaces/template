@@ -124,6 +124,7 @@ post_install() {
 
 	vdoc void/docs/void.md
 	vdoc void/docs/portal-filter-review.md
+	vdoc void/docs/apparmor-review.md
 	vdoc readme.md
 	vlicense LICENSE
 }
