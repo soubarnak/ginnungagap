@@ -509,8 +509,8 @@ Host side (`void/tools/dev-install-arch.sh`, called by `dev-install.sh`, `--skip
 
 Bug found and fixed: `native/spaces.c` waited for polkit-kde to print "Authentication agent result: true"
 on stderr and printed "polkit agent did not become ready" after 2 s on every `spaces enter` in Arch (and Fedora).
-Qt built with journald support logs to the journal when `JOURNAL_STREAM` is set, as it is under a guest
-systemd unit (the message was in `journalctl`). `execute_agent` now also sets `QT_FORCE_STDERR_LOGGING=1`.
+Qt built with journald support logs to the journal unless stderr is a console, and the agent's stderr is a pipe
+(the message was in `journalctl`; Debian and Ubuntu builds log to stderr). `execute_agent` now also sets `QT_FORCE_STDERR_LOGGING=1`.
 
 AUR/yay works in the guest (`makepkg` in the chroot). `pacman -S nvidia-utils` in the guest fails with
 "exists in filesystem" for every placeholder (see below): the guest does not need its own NVIDIA userspace.

@@ -829,9 +829,9 @@ static void execute_agent(
      * message as its readiness signal.
      */
     /*
-     * Qt built with journald support (Arch, Fedora) sends messages to the
-     * journal when the process has JOURNAL_STREAM, as it has under a guest
-     * systemd unit, so the pipe would stay empty.
+     * Qt built with journald support (Arch, Fedora) logs to the journal
+     * unless stderr is a console; this stderr is a pipe, so the supervisor
+     * would never see the message.
      */
     if (setenv("QT_FORCE_STDERR_LOGGING", "1", 1) < 0
         || setenv("QT_LOGGING_RULES", "default.debug=true", 1) < 0) {
