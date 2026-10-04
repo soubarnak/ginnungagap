@@ -688,3 +688,102 @@ session look new (that would have undone a deliberate `sv down`), and the logout
 have unit tests. The final `dev-uninstall.sh`/`dev-install.sh` cycle of the check removed `/etc/sv/spaces-*` and
 `/var/service/spaces-*` for the four spaces; each is recreated on the space's next start (`spaces-void doctor` warns until then).
 Not verified: autostart on a second real login, zsh and fish, file-level collision of the entry names with packages that are not installed.
+
+
+## M8: xbps-src packaging (2026-10-04)
+
+The dev install was replaced by five xbps packages built with void-packages' `xbps-src` from this checkout
+(`void/tools/xbps-build.sh`); the machine runs them. New: `void/srcpkgs/{spaces,spaces-arch-install-scripts,
+spaces-archlinux-keyring,spaces-rankmirrors,ubuntu-keyring}` (the last three existed as drafts; the Arch ones were
+renamed `spaces-*`), `void/srcpkgs/spaces/{INSTALL,REMOVE,INSTALL.msg}`, `spaces-archlinux-keyring/INSTALL`,
+`void/wrappers/{spaces.priv,spaces-session-env,spaces-void,spaces-nvidia-sync,spaces-stop-services}` (the wrappers
+`dev-install.sh` used to write from heredocs, now shared), `void/data/void.json`, `void/tools/xbps-build.sh`,
+`void/spike/m8_check.py`. Changed: `native/spaces_system_broker.c`, `src/spaces/host/lxc.py`, their tests,
+`dev-install.sh`, `dev-uninstall.sh`, `void.md`, `INSTALLED.md`, `readme.md`.
+
+### Bug fix: orphaned `spaces-system-broker`
+
+- Cause: `SystemBusService` starts the broker with `subprocess.Popen`; nothing tied it to the launcher, and
+  `kill_stale_helpers` only knew `spaces-broker` and `xdg-dbus-proxy`.
+- Fix (a): `kill_stale_helpers` also SIGTERMs `spaces-system-broker --broker /run/spaces/NAME/system-bus/...` of
+  this space only (exact path prefix; `--relay`, other spaces and `work2` vs `work` are untouched). It runs after
+  the per-space launcher lock is taken, so no live launcher can own a victim. Fix (b): `prctl(PR_SET_PDEATHSIG,
+  SIGKILL)` in `spaces_system_broker.c`, only in `--broker` mode (the guest `--relay` is started by dbus-daemon),
+  with the `getppid() == 1` race check; 9 added lines, no change to `system_bus.py` (the spawning thread is the
+  launcher's main or supervisor thread, which lives as long as the launcher). `spaces-broker` (session broker) was
+  left alone: it is spawned from session threads, where PDEATHSIG (per thread) could kill it early; fix (a)'s
+  existing reaping covers it.
+- Real test with the packaged binary (before: orphans of hours were seen at M7): `ubuntu id`, launcher python 5226
+  (parent runsv), broker 5538 (ppid 5226); `kill -9 5226` at 11:43:22.59; one second later no
+  `spaces-system-broker --broker` process (the container 5298 and the session broker 5599 survived, as before);
+  next `ubuntu id` 3.8 s: new lxc-start 6001, broker 6213, session broker 6259, the old ones gone, exactly one of
+  each; `sv down` leaves only runsv/svlogd. Fix (a) alone: two fake brokers (`/run/spaces/ubuntu/...` and
+  `/run/spaces/other/...`) started as root outside any launcher; the next start of ubuntu killed the first and left
+  the second. `m8_check.py` repeats the kill -9 test automatically (4 checks).
+- svlogd warnings in the runsvdir title ("unable to lock directory: /var/log/spaces/ubuntu", "no functional log
+  directories", "unable to open supervise/stat.new"): the title is runsvdir's buffer of past stderr text, not live
+  processes, and it only changes when something new is written (it did not change over start/stop cycles, a
+  `xbps-remove` and the new retire script). Flow that produced it: remove `/etc/sv/spaces-NAME` and `/run/runit/
+  supervise.spaces-*` (the old `dev-uninstall.sh`, and `forget_unit` by deleting the directories) while runsv and
+  svlogd of the service still run: runsv then cannot write `supervise/stat.new`/`log/supervise/pid.new`, and a service
+  recreated at the same path gets a second svlogd that cannot take the lock the old one holds. Reproduced with a
+  private runsvdir (`warning: unable to open log/supervise/pid.new: file does not exist`). Fix:
+  `/usr/lib/spaces/spaces-stop-services [--remove]` (`sv down`, unlink, `sv force-shutdown`, wait for runsv and
+  svlogd to be gone, pkill as a last resort, only then delete) is used by the REMOVE hook and by `dev-uninstall.sh`;
+  `LxcBackend.forget_unit` does the same through `_shutdown_runsv` (supervise/lock probe). Not cleared: the text that
+  is still in the title of the running runsvdir (it goes away at the next boot).
+
+### Packages
+
+- `spaces` 0.0.1_1 (pyproject says 0.0.1; no tag exists), `archs=x86_64`, `build_style=python3-pep517`, native helpers
+  built in `post_build`/`post_install` with xbps-src's CFLAGS plus `-std=gnu11 -fPIC -Wall -Wextra` (no -Werror); the
+  hardening flags pass `check_guest_abi.py --glibc-max 2.17` unchanged, so no `-U_FORTIFY_SOURCE` was needed. The wheel
+  data files are used and compared against `data/portal` and `data/system-bridge` (`diff -r`, build fails otherwise);
+  upstream's `usr/lib/systemd` is removed, the mount unit condition is patched as in the dev install. Unit tests run in
+  the chroot with `--check`: 639 passed, 21 skipped, 1 deselected (the Ctrl-C test needs a controlling terminal).
+- Packaging decisions: `ubuntu-keyring` keeps the name and the path `/usr/share/keyrings/ubuntu-archive-keyring.gpg`
+  (debootstrap's fixed path: a future Void package of that name replaces ours); the Arch tools and keyring are
+  `spaces-arch-install-scripts` and `spaces-archlinux-keyring` in private paths, so neither a future same-named Void
+  package nor a file collision can break `pacstrap`; `rankmirrors` is its own package (`spaces-rankmirrors`, pinned
+  commit, `skip_extraction`). `/etc/spaces/config.json` is generated, not packaged (the sha256 sidecar logic of
+  `nvidia.py` is untouched); `/etc/spaces/void.json` is a conf file. The distro `.desktop` files and icons are not
+  shipped (same as the dev install). `zstd` and `python3-platformdirs` from the task's list were left out: nothing in
+  `src/` executes `zstd` (pacman links libarchive) or imports `platformdirs` (textual depends on it); `m4` is a build
+  dependency of `spaces-arch-install-scripts` only; `sudo` was added (`spaces-void` re-runs itself through it).
+- `xlint` clean on all five templates except the maintainer message (xlint rejects every
+  `@users.noreply.github.com` address; `xbps-build.sh` filters exactly that message). `wrksrc` is not needed
+  (xbps-src renames the single top directory of a tarball).
+- Traps found: xbps-src treats a symlinked `srcpkgs/NAME` as a subpackage of its target (`xbps-build.sh` copies the
+  templates); `checkdepends=util-linux` replaces the chroot's `chroot-util-linux` and its autodeps cleanup then removes
+  `getopt` from the masterdir (all later builds fail in the install wrapper; fix: `./xbps-src zap`, bootstrap again);
+  `xbps-rindex` refuses to register an older revision after a revision-2 test build (remove the file, `xbps-rindex -r`).
+
+### Verification on the machine
+
+- `dev-uninstall.sh` without `--purge`: `/var/lib/spaces/{arch,fedora,kali,ubuntu}` and `.host/{arch/gnupg,fedora,nvidia}`
+  intact, no runsv/svlogd processes, `/etc/sv` without spaces services; the installer-owned keyring and `/etc/spaces`
+  went away as designed.
+- `xbps-install -R <repo> spaces` installs the five packages; `xbps-pkgdb` reports nothing; the files outside
+  `/etc/spaces/config.json{,.generated}` are all owned; modes are root-owned 0755/0644 and no setuid/setgid bit exists
+  (same as the dev install); `spaces-void doctor` 18 checks, 0 FAIL, 4 WARN (the four spaces have no runit service until
+  their first start).
+- `python3 void/spike/m8_check.py`: 84 PASS, 0 FAIL (package 29, enter each distro 6, host-PAM sudo bridge and
+  login-scoped mounts through m3's throwaway user 10, GUI on niri/audio/clipboard/notification/portal through m4,
+  NVIDIA nodes and `nvidia-smi` in the guest through m5, autostart smoke through m7 15, install-flavor dry run 1,
+  orphaned broker 4, final state 4). `--lifecycle-only` (builds revision 2): 21 PASS: `xbps-install -u` while ubuntu runs
+  keeps the same lxc-start, the profile stays loaded, `nvidia-smi` and `ubuntu id` still work; `xbps-remove` with a space
+  running stops it, removes the services/links/profile/config.json and keeps `/var/lib/spaces` and `.host` (the message
+  "Your spaces are kept in /var/lib/spaces" is printed; xbps printed no warning about the non-empty `make_dirs`);
+  reinstall, then `spaces enter ubuntu` works. The machine was then returned to revision 1 (remove + install of a clean
+  rebuild).
+- Unit tests: 644 passed, 17 skipped (642 + 2 for the system broker match and the runsv shutdown).
+
+### Open items for M9
+
+- Monitor socket isolation (G2), hardening review of the AppArmor profile now that it ships as a package file.
+- Signing, a release process and tag (`v0.0.1`: the template needs the real checksum), a public or CI-built repository,
+  `xbps-src` CI, a script that checks upstream rebases against `native/`, `data/` and the wheel's data-files list (the
+  `diff -r` in `post_install` already trips on portal/system-bridge changes).
+- aarch64 (not built; guest helpers assume glibc x86_64 for the guests), musl hosts, pycompile on Python bumps (the package
+  pins `python3>=3.14<3.15`), `spaces-broker` (session broker) PDEATHSIG, a runit `check`/`finish` for per-space services,
+  `.desktop` entries and icons, tests that need a terminal in the build chroot.
