@@ -19,6 +19,11 @@
 #                      come from --from (default: hostdir/binpkgs of the void-packages
 #                      checkout of xbps-build.sh). The passphrase of an encrypted key is
 #                      asked by xbps-rindex, or taken from XBPS_PASSPHRASE.
+#   cut [--yes]        the whole release in one command: verify, tag (or use the existing local
+#                      tag, which must point at HEAD), push the branch and the tag, wait for
+#                      GitHub's tarball, pin its checksum, commit and push that, and build the
+#                      packages from the committed template. Without --yes it only prints the
+#                      plan and changes nothing. The one command that pushes a tag.
 #   -h, --help
 #
 # The order matters, and is spelled out in void/docs/release.md: the checksum of GitHub's
@@ -222,6 +227,46 @@ cmd_repo() {
     echo "(xbps asks to trust the key on first use; compare the fingerprint with the one you published)"
 }
 
+cmd_cut() {
+    local yes=0 version tag head tries=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes) yes=1 ;;
+            *) die "unknown option: $1" ;;
+        esac
+        shift
+    done
+    version=$(template_version)
+    tag=$PREFIX$version
+    [ "$(git rev-parse --abbrev-ref HEAD)" = void ] || die "not on the void branch"
+    [ -z "$(git status --porcelain)" ] || die "the working tree is not clean"
+    [ "$(template_checksum)" = "$PLACEHOLDER" ] || die "the template already has a real checksum: this release was cut"
+    head=$(git rev-parse HEAD)
+    if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+        [ "$(git rev-parse "$tag^{commit}")" = "$head" ] || die "the local tag $tag does not point at HEAD (git tag -fa $tag, or delete it)"
+    fi
+    echo "release $tag of $REPO from $(git rev-parse --short HEAD):"
+    echo "  1. verify the pinned upstream distfiles"
+    echo "  2. create the annotated tag $tag if it does not exist"
+    echo "  3. git push origin void $tag            <- publishes the branch and the tag"
+    echo "  4. download GitHub's tarball of the tag and pin its sha256 in $TEMPLATE"
+    echo "  5. commit that and git push origin void"
+    echo "  6. void/tools/xbps-build.sh --release   (builds from the committed template)"
+    [ "$yes" -eq 1 ] || { echo "nothing done; run again with --yes to do all of it"; return 0; }
+    cmd_verify
+    git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null || cmd_tag
+    git push origin void "$tag"
+    until (cmd_checksum --write); do
+        tries=$((tries + 1))
+        [ "$tries" -lt 12 ] || die "GitHub did not serve the tarball of $tag; run: release.sh checksum --write"
+        sleep 5
+    done
+    git commit -q -am "Pin the $tag source checksum"
+    git push origin void
+    "$ROOT/void/tools/xbps-build.sh" --release
+    echo "released $tag; packages are in the void-packages hostdir/binpkgs; sign a repository with: release.sh repo"
+}
+
 case "${1:-}" in
     check) shift; cmd_check "$@" ;;
     tag) shift; cmd_tag "$@" ;;
@@ -229,6 +274,7 @@ case "${1:-}" in
     verify) shift; cmd_verify "$@" ;;
     dist) shift; cmd_dist "$@" ;;
     repo) shift; cmd_repo "$@" ;;
+    cut) shift; cmd_cut "$@" ;;
     -h|--help|help) usage ;;
     *) usage >&2; exit 2 ;;
 esac

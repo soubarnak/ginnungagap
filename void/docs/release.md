@@ -5,6 +5,18 @@ tag with its sha256, and the packages built from it. The packages are built loca
 `void/tools/xbps-build.sh`; a signed repository can be assembled locally with `release.sh repo` (below). Nothing
 is published or uploaded by any script here.
 
+## One command
+
+```
+void/tools/release.sh cut            # prints the plan and changes nothing
+void/tools/release.sh cut --yes      # does all of it
+```
+
+`cut --yes` verifies the pinned distfiles, uses the local tag `v0.0.1` (which must point at HEAD; it makes the tag
+when there is none), pushes `void` and the tag, waits for GitHub's tarball, pins its checksum, commits and pushes that
+and builds the packages from the committed template (`xbps-build.sh --release`). It is the only thing in the tree
+that pushes a tag, and it has not been run: the tag exists only locally. The steps below are the same thing by hand.
+
 ## The order, and why
 
 The checksum of GitHub's tarball of a tag can only be known once the tag is on GitHub, and the tag's own tree
@@ -58,12 +70,24 @@ which is reproducible; attach it to a GitHub release and point `distfiles` at th
 ## Signed repository
 
 `xbps` verifies repositories and packages with an RSA signature; a local repository needs none, a repository
-that other people use does. The key is made once, kept offline, and never committed:
+that other people use does. The key is made once, kept offline, and never committed (`*.pem` and `*.key` are in `.gitignore`):
 
 ```
 openssl genrsa -aes256 -out ~/.config/ginnungagap/spaces-repo.pem 4096    # asks for a passphrase
 chmod 600 ~/.config/ginnungagap/spaces-repo.pem
 ```
+
+The key that exists on the maintainer's machine was made without a passphrase (`openssl genrsa -out ... 4096`, mode
+0600 in a 0700 directory) so that the first end-to-end run could be unattended:
+
+* location: `~/.config/ginnungagap/spaces-repo.pem` (outside the repository)
+* signed by: `Spaces Void port <soubarnakarmakar@gmail.com>`
+* xbps fingerprint: `f4:55:72:f9:ac:23:eb:b3:c3:e3:f8:b3:a9:24:97:39`
+
+Before publishing anything, either keep it (nothing is published yet) or make a new, passphrase-protected key and
+publish its fingerprint instead: a key that was used only for the local run costs nothing to replace. It was used for
+`release.sh repo` once: all ten packages (five templates, x86_64 and aarch64) were signed into `dist/repo` (not
+committed, not served), and `xbps-install -S` into a scratch root showed the signer and the fingerprint above.
 
 xbps shows its own fingerprint of the key (not an `openssl` hash) when a client first syncs the repository; read it
 from a scratch root once the repository exists and publish it next to the repository URL:
@@ -106,7 +130,10 @@ root after the key is trusted, and a package that was changed by one byte is ref
 
 The aarch64 build is the only coverage of that architecture: nothing runs on it, the Arch and Fedora bootstraps
 are x86_64 only, and the NVIDIA and desktop paths were never looked at. The `m*_check.py` scripts need LXC, root and a
-desktop session and stay with the maintainer. The workflow was checked for syntax only; it has not run on GitHub.
+desktop session and stay with the maintainer. The first runs on GitHub: both package builds passed; the unit tests failed because the `void-glibc-full` image has
+no `/tmp` (every `tempfile` test); the workflow now creates it (see "CI status" in `void/spike/RESULTS.md`). The
+packages are built from the checkout (`xbps-build.sh --committed` makes a `git archive` tarball with its own checksum and
+puts it in xbps-src's source cache), so CI does not need the tag or GitHub's tarball.
 
 ## Architectures
 
@@ -142,4 +169,7 @@ and run `void/spike/m8_check.py`.
 * Publishing: the tag is not pushed by any script, there is no GitHub release and no hosted repository, and the
   repository signing key does not exist yet (the steps above make it).
 * The checks that need a Void host with LXC, root and a desktop session (`m5_check.py` ... `m9_check.py`) are not in CI.
-* aarch64 is cross-built, never run; musl is out of scope (see "Architectures").
+* aarch64 is cross-built, never run, and **cannot be run on the maintainer's x86_64 host**: the ceiling there is the cross
+  build and `check_guest_abi.py --target aarch64`. The only way to run it is an aarch64 Void VM under QEMU TCG (install
+  the package, run the unit tests and `spaces-void doctor`), which takes hours and has not been started; do it only if
+  that is worth it. musl is out of scope (see "Architectures").

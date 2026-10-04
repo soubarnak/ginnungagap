@@ -18,3 +18,7 @@ pkg/
 /native/spaces-broker
 
 /native/spaces-system-broker
+
+# Never commit signing keys
+*.pem
+*.key

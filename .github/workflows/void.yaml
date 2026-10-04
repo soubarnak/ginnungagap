@@ -30,6 +30,8 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
+          # the void-glibc-full image has no /tmp: tempfile-based tests fail without it
+          mkdir -p /tmp && chmod 1777 /tmp
           xbps-install -Syu xbps && xbps-install -yu
           xbps-install -y git gcc make pkg-config glib-devel pam-devel dbus dconf gnupg \
               librsvg-utils adwaita-icon-theme util-linux bash tar \
