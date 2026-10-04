@@ -8,8 +8,9 @@ authorisation and AppArmor instead of SELinux. The CLI (`spaces create`, `enter`
 `delete`) and the guest integration (host PAM for `sudo`, desktop forwarding, shortcuts, portals,
 GPU) are upstream's.
 
-Status: installable as xbps packages built with `xbps-src` (M8). The development install
-(`void/tools/dev-install.sh`) still exists, for hacking on the sources only.
+Status: installable as xbps packages built with `xbps-src` (M8), hardened in M9 (the LXC monitor is out of the
+guest's reach, the AppArmor profile reviewed) and ready to be tagged `v0.0.1` (`void/docs/release.md`). The
+development install (`void/tools/dev-install.sh`) still exists, for hacking on the sources only.
 Tested on Void x86_64 (glibc), runit, elogind 252, kernel 7.x, LXC 6.0, niri.
 
 ## Install
@@ -39,8 +40,9 @@ uncommitted files (`--committed` builds `HEAD`), `--check` runs the unit tests i
 `--revision N` builds revision N (used to test upgrades), `--lint` only runs `xlint`. It renders the
 checksum of that tree into a copy of the `spaces` template inside the void-packages checkout; the
 committed template (`void/srcpkgs/spaces/template`) names the release tarball
-`https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz` with an all-zero
-placeholder checksum, to be filled in when a release is tagged.
+`https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz`; its checksum is the all-zero
+placeholder until the tag is pushed and `void/tools/release.sh checksum --write` has pinned the real one
+(why in that order: `void/docs/release.md`). `xbps-build.sh --release` builds exactly that committed template.
 
 ```
 sudo xbps-remove spaces                        # stops the spaces, removes services and the profile;
@@ -227,11 +229,11 @@ plus an SELinux policy. This port keeps the same layers except SELinux:
 
 | Layer | Void port |
 |---|---|
-| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default), no user namespace (root in a space is host root, as upstream) |
+| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default), no user namespace (root in a space is host root, as upstream). The LXC *monitor* is not in the guest's network namespace, see below |
 | Capabilities | `lxc.cap.keep` = nspawn's default set, widened or narrowed per permission level like upstream |
 | Syscalls | seccomp: LXC's `common.seccomp` base plus the per-permission adjustments |
 | Devices | cgroup2 device controller (eBPF), levels `disabled`, `basic`, `admin`, `full` from the permission settings; at `full` watchdogs and VT/console devices stay denied; hot-plug and NVIDIA nodes follow the level |
-| Mandatory access control | AppArmor profile `spaces-container` (derived from LXC's `lxc-container-default-cgns`: it additionally allows the mounts systemd uses to sandbox units, the rest is denied as in LXC) **instead of** the SELinux policy `spaces-selinux` |
+| Mandatory access control | AppArmor profile `spaces-container` (derived from LXC's `lxc-container-default-cgns`: it additionally allows the mounts systemd uses to sandbox units, but no fresh `proc`, `sysfs` or cgroup v1 mount; the rest is denied as in LXC) **instead of** the SELinux policy `spaces-selinux`. Reviewed in `void/docs/apparmor-review.md`, including what it cannot stop |
 | Authorisation | polkit (`org.anatase.spaces.policy` bound to `/usr/bin/spaces.priv`) and host PAM for guest `sudo`, as upstream |
 | cgroups | each space under `/sys/fs/cgroup/spaces/NAME`, `cgroup.subtree_control` of the root stays empty (elogind); a private mount namespace hides elogind's v1 hierarchy from LXC |
 
@@ -239,8 +241,23 @@ What is lost or different compared with upstream on Fedora/Anatase:
 
 * No SELinux: no relabelling of `/var/lib/spaces` or `~/.ssh/config`, no type enforcement between
   host and guest processes. AppArmor confines the container processes by path; the upstream rule
-  "it is not possible to mount SSH or GPG directories" is enforced by Spaces' own mount policy only,
-  not by a second MAC layer.
+  "it is not possible to mount SSH or GPG directories" is enforced by Spaces' own mount policy only
+  (`launch._prepare_mounts` refuses hidden directories, `core.validate_home_name` allows only `.ssh/config`),
+  not by a second MAC layer: the host makes those binds, so no container profile could see them.
+* AppArmor does not mediate the new mount API (`fsopen`, `open_tree`, `mount_setattr`), so root in a space
+  can mount a fresh `proc` and write host sysctls such as `core_pattern`; a seccomp filter against it broke
+  the guests' systemd. Do not run untrusted code as root in a space (`void/docs/apparmor-review.md`, finding 1).
+* **The LXC monitor's command socket** is an abstract socket, and abstract sockets belong to a network
+  namespace, which the guest shares with the host. `/usr/lib/spaces/spaces-lxc` therefore starts `lxc-start`
+  in a new network namespace that it pins at `/run/spaces/lxc/NAME/netns` (a bind mount of the namespace
+  file, removed when the launcher exits), the container config makes the guest join the host's namespace again
+  (`lxc.namespace.share.net = /proc/1/ns/net`), and every other `lxc-*` call through the wrapper first enters the
+  pinned namespace with `nsenter`. Root in the guest, and anything else outside that namespace, gets
+  `ECONNREFUSED` on `@/run/spaces/lxc/NAME/command`. Consequences: a plain `lxc-ls` or `lxc-info` from a
+  shell sees nothing, use the wrapper (`sudo /usr/lib/spaces/spaces-lxc lxc-info -P /run/spaces/lxc -n NAME`);
+  a container that was started before the upgrade keeps its monitor in the host's namespace (the wrapper
+  falls back to it) until the space restarts. An AppArmor rule could not do this job, see
+  `void/docs/apparmor-review.md`, finding 2.
 * A compromised guest root is host root with a seccomp filter, a capability set, an AppArmor profile and
   a device cgroup between it and the machine; a kernel bug or a mount mistake escapes (as upstream warns).
   Do not give a space the `develop` preset or the `full` device level unless you trust it.
@@ -268,7 +285,8 @@ sudo sv status /var/service/spaces-NAME
 * **kill -9 of the launcher / hard crash**: the container may keep running orphaned (the host system-bus broker
   dies with its launcher; the next start also reaps a stale container, session broker and broker of an older
   launcher). `sudo sv down /var/service/spaces-NAME`; if it refuses: `sudo /usr/lib/spaces/spaces-lxc lxc-stop -P /run/spaces/lxc -n NAME -k`
-  then remove `/sys/fs/cgroup/spaces/NAME` (`rmdir` from the leaves). The next `sv once` cleans the rest.
+  then remove `/sys/fs/cgroup/spaces/NAME` (`rmdir` from the leaves) and unpin the monitor's namespace
+  (`sudo umount /run/spaces/lxc/NAME/netns`). The next `sv once` cleans the rest, including a stale pin.
 * **cgroup base**: LXC needs `cgroup.subtree_control` of `/sys/fs/cgroup` empty and cgroup2 mounted there;
   elogind's v1 `name=elogind` mount is tolerated (hidden by the wrapper). If `lxc-start` fails with
   `Failed to set "devices.deny"`, something ran `lxc-*` without `/usr/lib/spaces/spaces-lxc`.
@@ -277,7 +295,20 @@ sudo sv status /var/service/spaces-NAME
 
 ## Limits and known gaps
 
-* The packages are built locally (no signed repository, release or CI yet); x86_64 glibc only.
+* The packages are built locally (no signed repository or CI); a `v0.0.1` tag is prepared by
+  `void/tools/release.sh` but pushed by hand. x86_64 glibc only; `aarch64` and musl are untried.
+* Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1). The
+  fix would be a user namespace, which this design (shared network, host PAM, device cgroup) does not have.
+* The session broker `spaces-broker` is not tied to its launcher with `PR_SET_PDEATHSIG` (the system-bus
+  broker is). It is started from session threads, and the signal fires when the *thread* that spawned the child
+  exits, which would kill it early. `kill_stale_helpers` reaps a stale one at the next start instead.
+* The distros' own `.desktop` files and icons for the entry commands (`ubuntu`, `arch-linux`, `kali`,
+  `fedora`) are not shipped; the commands are in `/usr/bin`, and applications of a space show up in the host
+  menu only through the desktop forwarding. Add a `.desktop` file for `ubuntu -- ...` yourself if you want a
+  launcher; upstream's files and icons for Anatase's menu are not part of the package.
+* The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
+  cannot run in the build chroot (the Ctrl-C test is deselected).
+* Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.
 * A space that was running when the package is upgraded keeps the old AppArmor profile and old Python code until
   it is restarted.
 * Autostart's reaction to a new login is unit-tested with a fake elogind; the real test covers a service
@@ -289,3 +320,12 @@ sudo sv status /var/service/spaces-NAME
 * Idle shutdown, per-user lingering mounts and the TUI (textual) first-run flow are as upstream or untested.
 * Mirrors: Ubuntu keyring, the Arch keyring and the Fedora image are verified by pinned checksums and
   signatures (see `void/spike/RESULTS.md`, M6).
+
+## Maintaining the port
+
+* `void/tools/xbps-build.sh` builds the packages, `void/tools/release.sh` checks, tags and pins checksums for a
+  release (`void/docs/release.md`), `void/tools/rebase-check.sh` shows what upstream changed and whether
+  `void` still merges or rebases cleanly with passing tests.
+* `python3 -m pytest` tests the checkout's sources, not the installed package (`conftest.py` puts `src` first).
+* The checks that need the real machine are `void/spike/m2_check.py` to `m9_check.py`; the results are in
+  `void/spike/RESULTS.md`. `m9_check.py --regress` also runs `m5_check.py` and `m8_check.py`.
