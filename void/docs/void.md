@@ -65,8 +65,9 @@ The Fedora bootstrap image is not packaged: the `dnf5` shim downloads and verifi
 (`/var/lib/spaces/.host/fedora`). `spaces` depends on `lxc apparmor polkit elogind libelogind
 eudev-libudev runit debootstrap pacman bash coreutils util-linux tar xz gnupg curl sudo dconf
 xdg-dbus-proxy librsvg-utils python3-Pillow python3-rich python3-textual` besides the four packages
-above and the automatic Python and shared-library dependencies. Only `x86_64` glibc is built (the
-guest helpers are checked against glibc 2.17); `aarch64` has not been tried.
+above and the automatic Python and shared-library dependencies. `x86_64` glibc is the supported
+platform (the guest helpers are checked against glibc 2.17, which is also why musl is unsupported); `aarch64` is
+cross-built in CI and has never been run.
 
 What the hooks do (shown once as INSTALL.msg): INSTALL loads the AppArmor profile (`apparmor_parser -r`,
 only when AppArmor is enabled), runs `spaces-void sync-config` and seeds `/etc/pacman.d/mirrorlist` when
@@ -315,13 +316,14 @@ sudo sv status /var/service/spaces-NAME
 
 ## Limits and known gaps
 
-* The packages are built locally (no signed repository or CI); a `v0.0.1` tag is prepared by
-  `void/tools/release.sh` but pushed by hand. x86_64 glibc only; `aarch64` and musl are untried.
-* Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1). The
-  fix would be a user namespace, which this design (shared network, host PAM, device cgroup) does not have.
-* The session broker `spaces-broker` is not tied to its launcher with `PR_SET_PDEATHSIG` (the system-bus
-  broker is). It is started from session threads, and the signal fires when the *thread* that spawned the child
-  exits, which would kill it early. `kill_stale_helpers` reaps a stale one at the next start instead.
+* The packages are built locally; `void/tools/release.sh repo` can sign a repository with a key of yours, but none is
+  published, and a `v0.0.1` tag is prepared by `void/tools/release.sh` but pushed by hand. CI
+  (`.github/workflows/void.yaml`) runs the unit tests and builds the packages for x86_64 and, cross-built only,
+  aarch64 (`void/docs/release.md`). x86_64 glibc is the supported platform; musl is intentionally unsupported (the
+  helpers that run in the guests are pinned to glibc 2.17).
+* Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1). Seccomp
+  cannot take the API away from systemd; the fix is a user namespace with a shifted id map, which this design
+  (shared network, host PAM, device cgroup) does not have yet.
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

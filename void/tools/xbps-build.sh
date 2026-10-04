@@ -14,6 +14,8 @@
 #                      void/docs/release.md
 #   --revision N       override `revision=` of the spaces template (testing upgrades)
 #   --check            run the unit tests during the build (xbps-src -Q)
+#   --arch ARCH        cross-build for ARCH (xbps-src -a, e.g. aarch64); the tests cannot run
+#                      for a foreign architecture, so this cannot be combined with --check
 #   --no-bootstrap     do not clone/bootstrap void-packages when it is missing
 #   --lint             only run xlint on the templates and stop
 #   -h, --help
@@ -41,6 +43,7 @@ COMMITTED=0
 REVISION=
 RELEASE=0
 CHECK=0
+ARCH=
 BOOTSTRAP=1
 LINT_ONLY=0
 PACKAGES=()
@@ -51,6 +54,7 @@ while [ $# -gt 0 ]; do
         --revision) REVISION=${2:?--revision needs a number}; shift ;;
         --release) RELEASE=1 ;;
         --check) CHECK=1 ;;
+        --arch) ARCH=${2:?--arch needs an architecture}; shift ;;
         --no-bootstrap) BOOTSTRAP=0 ;;
         --lint) LINT_ONLY=1 ;;
         -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
@@ -59,6 +63,10 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+if [ -n "$ARCH" ] && [ "$CHECK" -eq 1 ]; then
+    echo "--arch and --check cannot be combined (the tests do not run for a foreign architecture)" >&2
+    exit 2
+fi
 if [ "$(id -u)" -eq 0 ]; then
     echo "xbps-build.sh must not run as root (xbps-src uses the xbuilder group)" >&2
     exit 1
@@ -159,6 +167,7 @@ done
 
 opts=()
 [ "$CHECK" -eq 1 ] && opts+=(-Q)
+[ -n "$ARCH" ] && opts+=(-a "$ARCH")
 for name in "${PACKAGES[@]}"; do
     log "xbps-src pkg $name"
     ./xbps-src "${opts[@]}" pkg "$name"

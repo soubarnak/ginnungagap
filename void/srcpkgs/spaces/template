@@ -7,9 +7,11 @@
 pkgname=spaces
 version=0.0.1
 revision=1
-# The guest helpers are glibc x86_64 binaries checked against glibc 2.17 by
-# native/check_guest_abi.py; aarch64 has not been built or tested.
-archs="x86_64"
+# The guest helpers are glibc binaries checked against glibc 2.17 by native/check_guest_abi.py,
+# which is why musl is not supported (the bare architecture names below exclude the -musl
+# ones). x86_64 is the tested one; aarch64 is only cross-built in CI (void/docs/release.md):
+# it has never been run, and the Arch and Fedora bootstraps are x86_64 only.
+archs="x86_64 aarch64"
 build_style=python3-pep517
 # The Ctrl-C test needs a controlling terminal, which the xbps-src chroot does not have.
 make_check_args="tests -p no:cacheprovider
@@ -68,6 +70,7 @@ post_install() {
 		CPPFLAGS="${CPPFLAGS}" \
 		CFLAGS="${CFLAGS} -std=gnu11 -fPIC -Wall -Wextra" \
 		LDFLAGS="${LDFLAGS}" \
+		TARGET_ARCH=${XBPS_TARGET_MACHINE} \
 		DESTDIR="${DESTDIR}" LIBEXECDIR=/usr/lib/spaces install
 
 	# The wheel's data files carry upstream's systemd units; this port uses none

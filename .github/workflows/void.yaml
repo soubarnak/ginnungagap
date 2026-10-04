@@ -1,0 +1,115 @@
+# CI for the Void port (branch `void`): the unit tests, and the xbps packages built the way
+# void-packages' own CI builds packages. The checks that need LXC, root and a desktop session
+# (void/spike/m*_check.py) cannot run here and stay with the maintainer.
+name: Void port
+
+on:
+  push:
+    branches: [void]
+  pull_request:
+    branches: [void]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The unit tests, in the distribution that the port targets. These are the dependencies that
+  # the tests look for (shutil.which / pkg-config in tests/): a C compiler, pkg-config and
+  # gio-unix-2.0 for the native probes, dbus-daemon, gpg and gpgv, dconf, rsvg-convert, `script`
+  # and `setsid` from util-linux, bash and the Python modules. Without them those tests skip.
+  pytest:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full
+    steps:
+      - name: Install dependencies
+        run: |
+          xbps-install -Syu xbps && xbps-install -yu
+          xbps-install -y git gcc make pkg-config glib-devel pam-devel dbus dconf gnupg \
+              librsvg-utils adwaita-icon-theme util-linux bash tar \
+              python3 python3-pytest python3-Pillow python3-rich python3-textual
+
+      - name: Check out
+        uses: classabbyamp/treeless-checkout-action@v1
+
+      - name: Run the tests
+        # test_terminal_ctrl_c_reaches_application needs a controlling terminal (the same
+        # deselection as the template's make_check_args).
+        run: |
+          python3 -m pytest -q -p no:cacheprovider tests \
+              --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application
+
+  # xbps-src builds. The container, its options, the mirror switch, the builder user and the
+  # `uchroot` chroot style are copied from void-packages' .github/workflows/build.yaml and
+  # common/travis/{prepare,build}.sh. aarch64 is cross-built on an x86_64 host (xbps-src -a
+  # aarch64, no tests): it is the only aarch64 coverage there is, no job runs it.
+  build:
+    name: Build packages (${{ matrix.config.arch }})
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/void-linux/void-glibc-full
+      options: --platform linux/amd64 --privileged
+      volumes:
+        - /dev:/dev
+      env:
+        ARCH: ${{ matrix.config.arch }}
+        TEST: ${{ matrix.config.test }}
+        VOID_PACKAGES: /home/builder/void-packages
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { arch: x86_64,  test: 1 }
+          - { arch: aarch64, test: 0 }
+    steps:
+      - name: Prepare container
+        run: |
+          # switch to repo-ci mirror
+          mkdir -p /etc/xbps.d && cp /usr/share/xbps.d/*-repository-*.conf /etc/xbps.d/
+          sed -i 's|repo-default|repo-ci|g' /etc/xbps.d/*-repository-*.conf
+          # install dependencies
+          xbps-install -Syu xbps && xbps-install -yu && xbps-install -y sudo bash curl git xtools
+          # create non-root user (with a home: git and xbps-src keep state there)
+          useradd -m -G xbuilder builder
+
+      - name: Check out
+        uses: classabbyamp/treeless-checkout-action@v1
+
+      - name: Prepare masterdir
+        run: |
+          chown -R builder:builder .
+          sudo -Hu builder git config --global --add safe.directory "$PWD"
+          sudo -Hu builder git clone --depth 1 https://github.com/void-linux/void-packages "$VOID_PACKAGES"
+          cd "$VOID_PACKAGES"
+          # common/travis/set_mirror.sh
+          for conf in etc/xbps.d/repos-remote*.conf; do
+              sudo -u builder sed -i 's:repo-default\.voidlinux\.org:repo-ci.voidlinux.org:g' "$conf"
+          done
+          # common/travis/prepare.sh
+          sudo -u builder tee -a etc/conf >/dev/null <<'CONF'
+          XBPS_BUILD_ENVIRONMENT=void-packages-ci
+          XBPS_ALLOW_RESTRICTED=yes
+          XBPS_CHROOT_CMD=uchroot
+          CONF
+          sudo -Hu builder ./xbps-src binary-bootstrap
+
+      - name: Lint the templates
+        run: sudo -Eu builder -H void/tools/xbps-build.sh --no-bootstrap --lint
+
+      - name: Build the packages
+        run: |
+          if [ "$ARCH" != x86_64 ]; then
+              sudo -Eu builder -H void/tools/xbps-build.sh --no-bootstrap --committed --arch "$ARCH"
+          else
+              # -Q: the unit tests run inside the build chroot, as `xbps-build.sh --check`
+              sudo -Eu builder -H void/tools/xbps-build.sh --no-bootstrap --committed --check
+          fi
+
+      - name: List what was built
+        run: sudo -Eu builder -H sh -c 'ls -l "$VOID_PACKAGES"/hostdir/binpkgs/*.xbps'
