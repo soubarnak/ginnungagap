@@ -1,0 +1,6 @@
+#!/bin/sh
+
+space=${0##*/}
+# `ubuntu -- id` and `ubuntu id` both work (one leading -- is dropped).
+[ "${1:-}" = -- ] && shift
+exec spaces enter "${space%-linux}" -- "$@"

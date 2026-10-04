@@ -17,6 +17,7 @@ fi
 
 SKIP_KEYRING=0
 SKIP_PACKAGES=0
+SKIP_DISTRO_TOOLS=0
 for argument in "$@"; do
     case "$argument" in
         --skip-keyring) SKIP_KEYRING=1 ;;
@@ -29,6 +30,10 @@ done
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 STATE_DIR=/etc/spaces
 STATE=$STATE_DIR/dev-install.state
+# The xbps packages this installer added survive an uninstall that keeps them
+# (and the state file that recorded them) here, next to the other host data
+# that a plain uninstall keeps; a later install merges them back in.
+PACKAGES_RECORD=/var/lib/spaces/.host/dev-install.packages
 PYTHON=/usr/bin/python3
 BIN_DIR=/usr/bin
 LIBEXEC=/usr/lib/spaces
@@ -51,6 +56,11 @@ if [ -f "$STATE" ]; then
         [ -n "$key" ] && STATE_KV[$key]=$value
     done <"$STATE"
 fi
+if [ -f "$PACKAGES_RECORD" ]; then
+    # shellcheck disable=SC2046
+    STATE_KV[packages]=$(echo "${STATE_KV[packages]:-} $(cat "$PACKAGES_RECORD")" |
+        xargs -n1 | sort -u | xargs)
+fi
 save_state() {
     install -d -m 0755 "$STATE_DIR"
     : >"$STATE.new"
@@ -59,6 +69,11 @@ save_state() {
     done
     chmod 0644 "$STATE.new"
     mv -f "$STATE.new" "$STATE"
+    if [ -n "${STATE_KV[packages]:-}" ]; then
+        install -d -m 0755 "$(dirname "$PACKAGES_RECORD")"
+        echo "${STATE_KV[packages]}" >"$PACKAGES_RECORD"
+        chmod 0644 "$PACKAGES_RECORD"
+    fi
 }
 
 # ---------------------------------------------------------------- packages
@@ -144,6 +159,21 @@ SHEOF
 chown root:root "$BIN_DIR/spaces-session-env"
 chmod 0755 "$BIN_DIR/spaces-session-env"
 
+# Administration CLI: autostart, gc, doctor, sync-config, install-flavor (M7).
+cat >"$BIN_DIR/spaces-void" <<'SHEOF'
+#!/bin/sh
+exec /usr/bin/python3 -I -m spaces.host.cli "$@"
+SHEOF
+chown root:root "$BIN_DIR/spaces-void"
+chmod 0755 "$BIN_DIR/spaces-void"
+
+# Entry commands: /usr/bin/{ubuntu,fedora,kali,arch-linux} run a command in the
+# space of that name. Never /usr/bin/arch (coreutils owns it); see
+# void/shell/spaces.sh for the opt-in `arch` function.
+for entry in ubuntu fedora kali arch-linux; do
+    install -m 0755 -o root -g root "$ROOT/void/entry/enter-space" "$BIN_DIR/$entry"
+done
+
 # -------------------------------------------------------------- data files
 log "installing data files"
 install -d -m 0755 "$SHARE"
@@ -177,6 +207,17 @@ grep -q '"org.freedesktop.policykit.exec.path">/usr/bin/spaces.priv<' \
 install -Dm644 "$ROOT/data/pam/spaces.system-auth" /etc/pam.d/spaces
 
 # ------------------------------------------------------------ void specifics
+# Opt-in shell snippets (not sourced by anything; see void/docs/void.md).
+install -d -m 0755 "$SHARE/void/shell"
+install -m 0644 "$ROOT"/void/shell/spaces.sh "$ROOT"/void/shell/spaces.fish "$SHARE/void/shell/"
+# runit service for autostart: installed (files replaced in place, it may be
+# running), NOT linked into /var/service: `sudo ln -s /etc/sv/spaces-autostart /var/service/`.
+install -d -m 0755 /etc/sv/spaces-autostart/log
+install -m 0755 "$ROOT"/void/runit/spaces-autostart/run "$ROOT"/void/runit/spaces-autostart/finish \
+    /etc/sv/spaces-autostart/
+install -m 0755 "$ROOT"/void/runit/spaces-autostart/log/run /etc/sv/spaces-autostart/log/run
+ln -sfn /run/runit/supervise.spaces-autostart /etc/sv/spaces-autostart/supervise
+ln -sfn /run/runit/supervise.spaces-autostart.log /etc/sv/spaces-autostart/log/supervise
 install -Dm755 "$ROOT/void/bin/spaces-lxc" "$LIBEXEC/spaces-lxc"
 install -Dm644 "$ROOT/void/apparmor/spaces-container" \
     /etc/apparmor.d/spaces-container
@@ -273,7 +314,6 @@ if [ "$SKIP_KEYRING" -eq 0 ]; then
 fi
 
 # ------------------------------------------------------ arch/fedora host tools
-SKIP_DISTRO_TOOLS=${SKIP_DISTRO_TOOLS:-0}
 if [ "$SKIP_DISTRO_TOOLS" -eq 0 ]; then
     # shellcheck source=dev-install-arch.sh
     . "$ROOT/void/tools/dev-install-arch.sh"

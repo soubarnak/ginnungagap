@@ -166,5 +166,19 @@ class OciTests(unittest.TestCase):
                 shim.oci_layers(blobs, {"manifests": []})
 
 
+class TuningTests(unittest.TestCase):
+    def test_defaults_are_added(self) -> None:
+        added = shim.tuning_of(["--installroot=/x", "install", "tmux"])
+        self.assertEqual(
+            sorted(a.partition("=")[2].partition("=")[0] for a in added),
+            ["fastestmirror", "max_parallel_downloads", "retries", "timeout"],
+        )
+
+    def test_caller_options_win(self) -> None:
+        added = shim.tuning_of(["--setopt=timeout=5", "--setopt", "retries=1", "install"])
+        self.assertFalse([a for a in added if "timeout" in a or "retries" in a])
+        self.assertTrue([a for a in added if "max_parallel_downloads" in a])
+
+
 if __name__ == "__main__":
     unittest.main()

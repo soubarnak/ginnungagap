@@ -642,6 +642,24 @@ def _terminate_launch(launch_id: str, uid: int) -> None:
                 os.close(descriptor)
 
 
+def _refresh_host_config() -> None:
+    """Regenerate /etc/spaces/config.json for the creating user (Void port).
+
+    The generated file depends on the creator's desktop (host/flavor.py).
+    Failure is not fatal: the previous file is used.
+    """
+
+    if os.geteuid() != 0:
+        return
+    try:
+        from .host import nvidia
+
+        if nvidia.BASE_PATH.exists():
+            nvidia.sync(desktop_uid=_caller_uid() or None)
+    except Exception as error:  # noqa: BLE001
+        print(f"spaces: could not refresh the host configuration: {error}", file=sys.stderr)
+
+
 def create(request: dict[str, Any]) -> None:
     from . import host_config
     from . import shortcuts
@@ -693,6 +711,7 @@ def create(request: dict[str, Any]) -> None:
                 )
             )
         try:
+            _refresh_host_config()
             configuration = host_config.load()
             additional_packages = configuration.packages_for(
                 distribution["id"]

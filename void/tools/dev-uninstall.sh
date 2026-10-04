@@ -7,8 +7,11 @@
 #                       installed files. Spaces (/var/lib/spaces), caches and
 #                       logs are KEPT, so a later dev-install picks them up.
 #   --purge             also delete /var/lib/spaces (every space and its home
-#                       directories), /var/cache/spaces and /var/log/spaces.
+#                       directories, and /var/lib/spaces/.host: the pacman
+#                       keyring, the Fedora bootstrap root and the NVIDIA
+#                       farm), /var/cache/spaces and /var/log/spaces.
 #                       Refuses to run while anything is mounted below them.
+#                       Without --purge /var/lib/spaces/.host is kept.
 #   --remove-packages   also xbps-remove the packages dev-install installed.
 set -euo pipefail
 
@@ -36,10 +39,19 @@ if [ -f "$STATE" ]; then
     done <"$STATE"
 fi
 log() { printf '==> %s\n' "$*"; }
+# Packages recorded by earlier installs survive an uninstall that keeps them.
+PACKAGES_RECORD=/var/lib/spaces/.host/dev-install.packages
+if [ -f "$PACKAGES_RECORD" ]; then
+    STATE_KV[packages]=$(echo "${STATE_KV[packages]:-} $(cat "$PACKAGES_RECORD")" |
+        xargs -n1 | sort -u | xargs)
+fi
 
 # ---------------------------------------------------------------- services
 # sv down asks spaces.priv launch to stop the guest gracefully (lxc-stop).
 shopt -s nullglob
+# The autostart service first: it must not restart spaces while they stop.
+sv -w 30 down /var/service/spaces-autostart >/dev/null 2>&1 || true
+rm -f /var/service/spaces-autostart
 for service in /var/service/spaces-* /etc/sv/spaces-*; do
     case "$service" in */log) continue ;; esac
     if [ -e "$service/supervise/ok" ] || [ -L "$service" ]; then
@@ -75,7 +87,8 @@ fi
 rm -f /etc/apparmor.d/spaces-container
 SITE=$(/usr/bin/python3 -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 rm -rf "$SITE/spaces"
-rm -f /usr/bin/spaces /usr/bin/spaces.priv /usr/bin/spaces-session-env
+rm -f /usr/bin/spaces /usr/bin/spaces.priv /usr/bin/spaces-session-env \
+    /usr/bin/spaces-void /usr/bin/ubuntu /usr/bin/fedora /usr/bin/kali /usr/bin/arch-linux
 rm -rf /usr/lib/spaces /usr/share/spaces
 rm -f /usr/share/polkit-1/actions/org.anatase.spaces.policy /etc/pam.d/spaces
 # Runtime artifacts: exported application shortcuts and the tmpfs state.
@@ -106,7 +119,7 @@ PYEOF
     fi
 fi
 rm -f /etc/spaces/config.json.generated /etc/spaces/config.json.new
-rm -rf /var/lib/spaces/.host
+# /var/lib/spaces/.host (keyring, Fedora bootstrap, NVIDIA farm) stays unless --purge.
 case "${STATE_KV[keyring]:-}" in
     installed) rm -f "$KEYRING" ;;
     replaced)
@@ -139,6 +152,7 @@ if [ "$REMOVE_PACKAGES" -eq 1 ] && [ -n "${STATE_KV[packages]:-}" ]; then
     log "removing packages: ${STATE_KV[packages]}"
     # shellcheck disable=SC2086
     xbps-remove -y ${STATE_KV[packages]}
+    rm -f "$PACKAGES_RECORD"
 elif [ -n "${STATE_KV[packages]:-}" ]; then
     echo "packages installed by dev-install and kept: ${STATE_KV[packages]} (use --remove-packages)"
 fi

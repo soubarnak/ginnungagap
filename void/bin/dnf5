@@ -50,6 +50,15 @@ RELEASES = {
         "Fedora-Container-Base-Generic-44-1.7.x86_64.oci.tar.xz",
     ),
 }
+# A bootstrap on a flaky or slow link must not hang or give up early. These go
+# on the command line (dnf5 reads the installation root's configuration, not
+# the bootstrap root's) unless the caller already set the same option.
+TUNING = {
+    "retries": "5",
+    "timeout": "30",
+    "max_parallel_downloads": "8",
+    "fastestmirror": "True",
+}
 DEVICES = ("null", "zero", "full", "random", "urandom", "tty")
 MARKER = ".spaces-unpacked"
 
@@ -72,6 +81,19 @@ def release_of(arguments: list[str]) -> str:
     if release not in RELEASES:
         raise ShimError(f"Fedora release {release!r} is not supported (known: {', '.join(RELEASES)})")
     return release
+
+
+def tuning_of(arguments: list[str]) -> list[str]:
+    """--setopt arguments for TUNING options the caller did not give."""
+
+    given = set()
+    for index, argument in enumerate(arguments):
+        value = argument
+        if argument == "--setopt" and index + 1 < len(arguments):
+            value = "--setopt=" + arguments[index + 1]
+        if value.startswith("--setopt="):
+            given.add(value[len("--setopt="):].partition("=")[0].rpartition(".")[2])
+    return [f"--setopt={k}={v}" for k, v in TUNING.items() if k not in given]
 
 
 def installroot_of(arguments: list[str]) -> Path | None:
@@ -331,7 +353,8 @@ def main(argv: list[str]) -> int:
         "unshare",
         ["unshare", "--mount", "--propagation", "private", "--",
          "/bin/sh", "-c", script, "sh", str(root),
-         "/usr/bin/env", "PATH=/usr/sbin:/usr/bin", "/usr/bin/dnf5", *arguments],
+         "/usr/bin/env", "PATH=/usr/sbin:/usr/bin", "/usr/bin/dnf5",
+         *tuning_of(arguments), *arguments],
         environment,
     )
     return 127  # pragma: no cover

@@ -1,5 +1,6 @@
 {
   "version": 1,
+  "desktop_flavor": "auto",
   "distros": {
     "arch": {"packages": ["fastfetch", "screen", "tmux", "zsh"]},
     "fedora": {"packages": ["fastfetch", "screen", "tmux", "zsh"]},

@@ -1,0 +1,5 @@
+#!/bin/sh
+# runsv passes the exit status of ./run; wait a moment after a failure so that
+# a missing libelogind does not spin.
+[ "${1:-0}" = 0 ] || sleep 5
+exit 0

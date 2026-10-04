@@ -229,7 +229,23 @@ def remove_farm(root: Path) -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
-def nvidia_distro_config(farm: Path | None, distro: str) -> dict[str, list[dict[str, str]]]:
+def arch_multilib(rootfs: Path = Path("/var/lib/spaces/arch/rootfs")) -> bool:
+    """True when the Arch guest's pacman.conf enables [multilib].
+
+    Without it /usr/lib32 does not exist in the guest, and the 32-bit overlay
+    would only create empty placeholder files there.
+    """
+
+    try:
+        lines = (rootfs / "etc/pacman.conf").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(line.strip() == "[multilib]" for line in lines)
+
+
+def nvidia_distro_config(
+    farm: Path | None, distro: str, lib32_overlay: bool = True
+) -> dict[str, list[dict[str, str]]]:
     """Return the mounts and overlays that expose farm to one distribution."""
 
     if farm is None or distro not in LIBRARY_DESTINATIONS:
@@ -257,6 +273,8 @@ def nvidia_distro_config(farm: Path | None, distro: str) -> dict[str, list[dict[
         {"source": f"{farm}/lib", "destination": lib64},
         {"source": f"{farm}/lib32", "destination": lib32},
     ]
+    if not lib32_overlay:
+        overlays.pop()
     return {"mounts": mounts, "overlays": overlays}
 
 
@@ -295,8 +313,15 @@ def generate(
     base_path: Path,
     extras_path: Path,
     farm: Path | None,
+    flavor_resolver: Callable[[str], str] | None = None,
+    arch_lib32: bool = True,
 ) -> str:
-    """Return the text of the generated config.json."""
+    """Return the text of the generated config.json.
+
+    flavor_resolver maps the `desktop_flavor` setting ("auto", "kde", "gtk";
+    base config, overridden by void.json) to "kde" or "gtk"; the gtk flavour
+    adds its packages (spaces.host.flavor). Without a resolver nothing is added.
+    """
 
     base = _read_json(base_path, True)
     extras = _read_json(extras_path, False)
@@ -311,15 +336,30 @@ def generate(
             raise ValueError(f"{base_path}: bad entry for {distro}")
         distros[distro] = {}
         _merge_distro(distros[distro], value, f"{base_path}:{distro}")
+    if flavor_resolver is not None:
+        from . import flavor
+
+        setting = extras.get("desktop_flavor", base.get("desktop_flavor", flavor.DEFAULT))
+        if setting not in flavor.FLAVORS:
+            raise ValueError(
+                f"{extras_path}: desktop_flavor must be one of {', '.join(flavor.FLAVORS)}"
+            )
+        chosen = flavor_resolver(str(setting))
+        for distro in distros:
+            added = flavor.packages_for(chosen, distro)
+            if added:
+                _merge_distro(distros[distro], {"packages": list(added)}, f"flavor:{distro}")
     for distro in distros:
         _merge_distro(
-            distros[distro], nvidia_distro_config(farm, distro), f"nvidia:{distro}"
+            distros[distro],
+            nvidia_distro_config(farm, distro, arch_lib32 or distro != "arch"),
+            f"nvidia:{distro}",
         )
     extra_distros = extras.get("distros", {})
     if not isinstance(extra_distros, dict):
         raise ValueError(f"{extras_path}: distros must be an object")
     for key in extras:
-        if key not in ("version", "distros"):
+        if key not in ("version", "distros", "desktop_flavor"):
             raise ValueError(f"{extras_path}: unknown option {key}")
     for distro, value in extra_distros.items():
         if not isinstance(value, dict):
@@ -438,6 +478,7 @@ def sync(
     lister: FileLister = xbps_files,
     version: str | None = None,
     host_root: Path = Path("/"),
+    desktop_uid: int | None = None,
 ) -> dict[str, object]:
     """Rebuild the farm and the generated config; return a status report."""
 
@@ -460,7 +501,15 @@ def sync(
     else:
         remove_farm(farm_root)
         report["farm"] = None
-    text = generate(base_path, extras_path, farm)
+    from . import flavor
+
+    text = generate(
+        base_path,
+        extras_path,
+        farm,
+        lambda setting: flavor.resolve(setting, desktop_uid),
+        arch_lib32=arch_multilib(),
+    )
     problems = validate(text)
     if problems:
         raise ValueError("generated configuration rejected: " + "; ".join(problems))
@@ -487,7 +536,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.print:
             version = xbps_version()
             farm = FARM_ROOT / "current" if version else None
-            sys.stdout.write(generate(BASE_PATH, EXTRAS_PATH, farm))
+            from . import flavor
+
+            sys.stdout.write(
+                generate(
+                    BASE_PATH, EXTRAS_PATH, farm, flavor.resolve, arch_multilib()
+                )
+            )
             return 0
         report = sync()
     except (OSError, ValueError, subprocess.SubprocessError) as error:
