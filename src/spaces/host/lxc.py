@@ -9,7 +9,9 @@ foreground through run_launcher().
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
+import logging
 import os
 import pwd
 import re
@@ -26,7 +28,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import devices_lxc, lxc_config, session_env
+from . import devices_lxc, guest_locale, lxc_config, session_env
 from .base import HostBackend
 
 DEFAULT_LXC_PATH = "/run/spaces/lxc"
@@ -43,6 +45,7 @@ PROC = Path("/proc")
 RUN_USER = Path("/run/user")
 SYSTEMD_RUN = "/usr/bin/systemd-run"
 SERVICE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+NVIDIA_SYNC = "/usr/lib/spaces/spaces-nvidia-sync"
 START_TIMEOUT = 120.0
 STOP_TIMEOUT = 60.0
 SERVICE_TIMEOUT = 15.0
@@ -178,6 +181,9 @@ def ensure_service(name: str) -> Path:
         "#!/bin/sh\n"
         "exec 2>&1\n"
         f"export PATH={shlex.quote(SERVICE_PATH)} HOME=/root LANG=C.UTF-8\n"
+        # Refresh the NVIDIA userspace farm and generated config.json (void
+        # dev install); the launcher reads the configuration right after.
+        f"[ -x {NVIDIA_SYNC} ] && {NVIDIA_SYNC} --quiet || true\n"
         f"exec {shlex.quote(priv)} launch {shlex.quote(name)}\n",
         0o755,
     )
@@ -645,7 +651,9 @@ class LxcBackend(HostBackend):
         os.chmod(runtime, 0o700)
         marker = runtime / "ready"
         marker.unlink(missing_ok=True)
+        launcher_lock = _lock_launcher(runtime)
         kill_stale_helpers(name)
+        self._reap_stale_container(name)
         self._load_apparmor()
 
         cgroup_mode = os.environ.get("SPACES_LXC_CGROUP_MODE", "relative")
@@ -670,7 +678,10 @@ class LxcBackend(HostBackend):
         command = _lxc(
             "lxc-start", name, "-F", "-o", str(runtime / "lxc.log")
         )
-        cleanup: list[Any] = [lambda: marker.unlink(missing_ok=True)]
+        cleanup: list[Any] = [
+            lambda: marker.unlink(missing_ok=True),
+            launcher_lock.close,
+        ]
         if cgroup_base is not None:
             base = self._cgroup_root() / cgroup_base
             base.mkdir(parents=True, exist_ok=True)
@@ -708,6 +719,28 @@ class LxcBackend(HostBackend):
             thread.start()
         return _Launcher(self, name, process, cleanup, stop, threads)
 
+    def _reap_stale_container(self, name: str) -> None:
+        """Stop what a killed launcher left behind.
+
+        The caller holds the launcher lock, so no live launcher exists for this
+        space: a container that is still running, and its cgroup, are orphans of
+        a launcher or spaces.priv that died without cleaning up.
+        """
+
+        if self._state(name) not in (None, "STOPPED"):
+            logging.getLogger(__name__).warning(
+                "Stopping the leftover container of space %s", name
+            )
+            _quiet(_lxc("lxc-stop", name, "-k"), timeout=30)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                if self._state(name) in (None, "STOPPED"):
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError(f"leftover container of {name} would not stop")
+        _remove_cgroup(self._cgroup_root() / "spaces" / name)
+
     def _ready_loop(
         self,
         name: str,
@@ -732,7 +765,11 @@ class LxcBackend(HostBackend):
         env: Mapping[str, str] | None,
         unit: str | None = None,
     ) -> list[str]:
-        settings = sorted((env or {}).items())
+        settings = sorted(
+            guest_locale.adjust(
+                guest_locale.guest_rootfs(name), env or {}
+            ).items()
+        )
         if user_name == "root":
             return _lxc(
                 "lxc-attach",
@@ -1014,6 +1051,20 @@ class LxcBackend(HostBackend):
             if f"spaces-{name}" in path.split("/"):
                 return True
         return False
+
+
+def _lock_launcher(runtime: Path) -> Any:
+    """Take the per-space launcher lock; it is released when the process dies."""
+
+    handle = open(runtime / "launcher.lock", "a", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError(
+            f"another launcher is already running for {runtime.name}"
+        ) from None
+    return handle
 
 
 def _stop_process(process: subprocess.Popen[Any]) -> None:

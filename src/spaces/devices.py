@@ -18,6 +18,7 @@ from .core import SpacesError
 
 
 DEV_ROOT = Path("/dev")
+PROC_DEVICES = Path("/proc/devices")
 NSPAWN_MANAGED_DIRECTORIES = frozenset({"mqueue", "pts", "shm"})
 NSPAWN_MANAGED_DEVICES = frozenset(
     {
@@ -36,8 +37,18 @@ NSPAWN_MANAGED_DEVICES = frozenset(
 # supplies its own console and PTYs; exposing these character majors lets a
 # guest getty operate the host VT that owns a graphical login session.
 HOST_TERMINAL_CHARACTER_MAJORS = frozenset({4, 5, 7})
+# The NVIDIA driver's nodes (/dev/nvidia0, nvidiactl, nvidia-modeset,
+# nvidia-uvm, nvidia-uvm-tools) have no sysfs device, so udev knows nothing
+# about them. They are recognised by the character major /proc/devices lists
+# under these names and get the pseudo subsystem "nvidia". Vulkan device
+# creation opens nvidia-modeset and crashes in the driver without it. MIG
+# capability, NVSwitch, NVLink and IMEX nodes are deliberately left out: they
+# stay available at the admin and full levels.
+NVIDIA_CHARACTER_NAMES = frozenset(
+    {"nvidia", "nvidia-modeset", "nvidia-uvm", "nvidiactl"}
+)
 VIDEO_SUBSYSTEMS = frozenset(
-    {"cec", "drm", "dvb", "graphics", "media", "video4linux"}
+    {"cec", "drm", "dvb", "graphics", "media", "nvidia", "video4linux"}
 )
 SECURITY_SUBSYSTEMS = frozenset(
     {"tee", "tpm", "tpmrm", "vtpm", "vtpm_proxy"}
@@ -159,7 +170,7 @@ class Udev:
             )
         )
         if not pointer:
-            return DeviceMetadata()
+            return _sysfsless_metadata(kind, device_number)
         tags: set[str] = set()
         properties: set[str] = set()
         subsystems: set[str] = set()
@@ -283,6 +294,33 @@ class UdevMonitor:
 
 
 MetadataReader = Callable[[str, int], DeviceMetadata]
+
+
+def _sysfsless_metadata(kind: str, device_number: int) -> DeviceMetadata:
+    """Metadata for nodes without a udev device (see NVIDIA_CHARACTER_NAMES)."""
+
+    if kind != "c":
+        return DeviceMetadata()
+    major = os.major(device_number)
+    try:
+        lines = PROC_DEVICES.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return DeviceMetadata()
+    names: set[str] = set()
+    in_character = False
+    for line in lines:
+        line = line.strip()
+        if line == "Character devices:":
+            in_character = True
+        elif line == "Block devices:":
+            in_character = False
+        elif in_character:
+            number, _separator, name = line.partition(" ")
+            if number == str(major):
+                names.add(name.strip())
+    if not names & NVIDIA_CHARACTER_NAMES:
+        return DeviceMetadata()
+    return DeviceMetadata(subsystems=frozenset({"nvidia"}))
 
 
 def _is_security_device(

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "distros": {
+    "arch": {"packages": ["fastfetch", "screen", "tmux", "zsh"]},
+    "fedora": {"packages": ["fastfetch", "screen", "tmux", "zsh"]},
+    "kali": {"packages": ["fastfetch", "screen", "tmux", "zsh"]},
+    "ubuntu": {"packages": ["fastfetch", "screen", "tmux", "zsh"]}
+  }
+}
