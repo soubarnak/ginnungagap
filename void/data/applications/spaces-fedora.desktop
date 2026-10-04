@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space (Fedora)
+Comment=Open a terminal in the Fedora space
+TryExec=/usr/bin/fedora
+Exec=/usr/bin/fedora
+Icon=spaces-fedora
+Terminal=true
+Categories=Development;

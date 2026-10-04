@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space (Kali Linux)
+Comment=Open a terminal in the Kali Linux space
+TryExec=/usr/bin/kali
+Exec=/usr/bin/kali
+Icon=spaces-kali
+Terminal=true
+Categories=Development;

@@ -55,7 +55,7 @@ sudo xbps-install -u spaces                    # upgrade (after a new build); ru
 
 | Package | What |
 |---|---|
-| `spaces` | the program: Python package, `/usr/bin/{spaces,spaces.priv,spaces-void,spaces-session-env,ubuntu,fedora,kali,arch-linux}`, native helpers and guest helpers in `/usr/lib/spaces`, data in `/usr/share/spaces`, polkit policy, `/etc/pam.d/spaces`, the AppArmor profile, `/etc/spaces/void.json`, the (unlinked) `spaces-autostart` runit service, documentation |
+| `spaces` | the program: Python package, `/usr/bin/{spaces,spaces.priv,spaces-void,spaces-session-env,ubuntu,fedora,kali,arch-linux}`, native helpers and guest helpers in `/usr/lib/spaces`, data in `/usr/share/spaces`, polkit policy, four menu entries `/usr/share/applications/spaces-{ubuntu,arch,fedora,kali}.desktop` with their icons, `/etc/pam.d/spaces`, the AppArmor profile, `/etc/spaces/void.json`, the (unlinked) `spaces-autostart` runit service, documentation |
 | `ubuntu-keyring` | `/usr/share/keyrings/ubuntu-archive-keyring.gpg` (debootstrap's default for Ubuntu); same name and path as a future Void package, which would simply replace it |
 | `spaces-arch-install-scripts` | pacstrap, arch-chroot and genfstab under `/usr/lib/spaces/void/arch-install-scripts` (private path and name) |
 | `spaces-archlinux-keyring` | the Arch keyring files under `/usr/share/spaces/void/archlinux-keyring`; its INSTALL hook creates the host pacman keyring in `/var/lib/spaces/.host/arch/gnupg` |
@@ -96,6 +96,7 @@ tools and `rankmirrors` itself, and does not need the xbps dependencies to be de
 | `/usr/lib/python3.*/site-packages/spaces/` | the Python package |
 | `/usr/bin/spaces`, `spaces.priv`, `spaces-session-env`, `spaces-void` | CLI, the root helper behind polkit, the session publisher, the administration CLI |
 | `/usr/bin/{ubuntu,fedora,kali,arch-linux}` | entry commands (never `/usr/bin/arch`: coreutils owns it) |
+| `/usr/share/applications/spaces-*.desktop`, `/usr/share/icons/hicolor/256x256/apps/spaces-*.png` | one menu entry per distribution (`Terminal=true`, `Exec=` the entry command), see "Menu entries" |
 | `/usr/lib/spaces/` | native helpers, guest helpers, the cgroup wrapper `spaces-lxc`, `spaces-nvidia-sync`, shims for `pacstrap`/`dnf5` |
 | `/usr/share/spaces/` | data, `config.base.json`, `void/shell/spaces.{sh,fish}` (opt-in) |
 | `/etc/sv/spaces-autostart/` | the autostart runit service (installed, not linked) |
@@ -222,6 +223,22 @@ non-interactive install as root through `spaces enter --root`, starting the spac
 prints what it installed). The host exports `QT_QPA_PLATFORMTHEME=gtk3`; without the plugin Qt silently
 falls back to its generic theme, with it Qt applications follow the GTK theme.
 
+## Menu entries
+
+Each of the four distributions has a launcher in the host's application menu (`Space (Ubuntu)`, `Space (Arch
+Linux)`, `Space (Fedora)`, `Space (Kali Linux)`). It runs the entry command in a terminal (`Terminal=true`,
+`Exec=/usr/bin/ubuntu`, ...), which starts the space on first use and gives a login shell in it. They are
+`void/data/applications/spaces-*.desktop`; upstream's own entries (`data/applications`, three distributions, calling
+`spaces enter`) are not installed. The icons are upstream's launcher icons from `data/icons` (the logo of the
+distribution plus the Spaces mark, made by `art/distros/generate.sh` from the logos in `art/distros`; the Kali one
+was added for this port).
+
+The distribution logos are trademarks of their owners (Canonical, the Arch Linux project, Fedora Project / Red Hat,
+OffSec) and are shown only to identify the launcher of that distribution; their presence in this repository is not
+an endorsement by, or affiliation with, those owners, and the repository's licence (AGPL-3.0-or-later) covers
+Spaces' own work, not those marks. The repository itself carries no separate disclaimer, upstream's `readme.md`
+has none, so this paragraph is the one.
+
 ## Security model: what replaces SELinux
 
 Upstream relies on `systemd-nspawn` (namespaces, capability bounding set, seccomp filter, device cgroup)
@@ -305,10 +322,6 @@ sudo sv status /var/service/spaces-NAME
 * The session broker `spaces-broker` is not tied to its launcher with `PR_SET_PDEATHSIG` (the system-bus
   broker is). It is started from session threads, and the signal fires when the *thread* that spawned the child
   exits, which would kill it early. `kill_stale_helpers` reaps a stale one at the next start instead.
-* The distros' own `.desktop` files and icons for the entry commands (`ubuntu`, `arch-linux`, `kali`,
-  `fedora`) are not shipped; the commands are in `/usr/bin`, and applications of a space show up in the host
-  menu only through the desktop forwarding. Add a `.desktop` file for `ubuntu -- ...` yourself if you want a
-  launcher; upstream's files and icons for Anatase's menu are not part of the package.
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

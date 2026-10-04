@@ -102,6 +102,16 @@ post_install() {
 		vbin void/entry/enter-space $d
 	done
 
+	# Menu entries for the entry commands (Terminal=true, Exec is the entry command) with the
+	# launcher icons of data/icons (the distribution logos of art/distros with the Spaces mark;
+	# kali is added by art/distros/generate.sh), see void/docs/void.md for the trademark note.
+	# Upstream's own entries are not installed: they call `spaces enter` directly and exist for
+	# three of the four distributions.
+	for d in ubuntu arch fedora kali; do
+		vinstall void/data/applications/spaces-$d.desktop 644 usr/share/applications
+		vinstall data/icons/hicolor/256x256/apps/spaces-$d.png 644 usr/share/icons/hicolor/256x256/apps
+	done
+
 	# Configuration and data.
 	vinstall data/pam/spaces.system-auth 644 etc/pam.d spaces
 	vinstall void/apparmor/spaces-container 644 etc/apparmor.d

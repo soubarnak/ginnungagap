@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space (Arch Linux)
+Comment=Open a terminal in the Arch Linux space
+TryExec=/usr/bin/arch-linux
+Exec=/usr/bin/arch-linux
+Icon=spaces-arch
+Terminal=true
+Categories=Development;

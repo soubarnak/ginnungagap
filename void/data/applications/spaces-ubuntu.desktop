@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Space (Ubuntu)
+Comment=Open a terminal in the Ubuntu space
+TryExec=/usr/bin/ubuntu
+Exec=/usr/bin/ubuntu
+Icon=spaces-ubuntu
+Terminal=true
+Categories=Development;
