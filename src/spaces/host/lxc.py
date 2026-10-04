@@ -1166,9 +1166,13 @@ def _stop_process(process: subprocess.Popen[Any]) -> None:
 def kill_stale_helpers(name: str) -> list[int]:
     """Stop desktop helpers a killed launcher left behind for this space.
 
-    The portal proxy exits when its control descriptor closes, but the open
-    broker has no such link and would keep the broker bus name of the old
-    session, so the next launcher's broker could never register. The system
+    The portal proxy exits when its control descriptor closes, and the open
+    broker now does too (its lifeline pipe, see `spaces.lifeline`), but one
+    started by an older launcher has no such link and would keep the broker
+    bus name of the old session, so the next launcher's broker could never
+    register. It is found by its command line (`spaces-broker ... --space
+    NAME`), which is also what catches a broker whose lifeline was inherited
+    by a stray process. The system
     bridge broker (`spaces-system-broker --broker /run/spaces/NAME/system-bus/..`)
     asks the kernel to kill it with the launcher (PR_SET_PDEATHSIG), but one
     started by an older launcher has no such link. Callers hold the per-space

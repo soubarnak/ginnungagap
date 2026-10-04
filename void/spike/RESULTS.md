@@ -939,3 +939,24 @@ filter returns ENOSYS and does not fall through to the default action.
   global root. A seccomp user-notification supervisor that inspects the `fsopen` name is the other possibility (not tried).
 - `m9_check.py`: the probe now also tests the fresh proc's `core_pattern` and `sysrq-trigger`; the two SKIP lines per
   space stay while any of the three routes is writable and turn into a PASS when none is.
+
+### 2. spaces-broker orphaning: death pipe
+
+- `PR_SET_PDEATHSIG` is tied to the forking thread, and the launcher starts the broker from session threads, so it is
+  not used. `src/spaces/lifeline.py` (new) makes a close-on-exec pipe; `session._start_open_broker` passes the read end
+  to the broker with `--death-fd N` (`pass_fds`) and keeps the write end for the life of the `Popen` object
+  (`lifeline.hold`, a `weakref.finalize`). The broker (`native/lifeline.h`, new, included by `spaces_broker.c`) adds a
+  GLib poll source for `G_IO_HUP` on that descriptor and quits its main loop. The write end is close-on-exec and
+  `subprocess` closes every other descriptor, so no other child holds it open (tested through `/proc/PID/fd`). The
+  diff in `session.py` is 10 lines.
+- `kill_stale_helpers` already matched `spaces-broker` by command line (program name plus `--space NAME`); it stays as
+  the net for brokers of an older launcher, and a test pins that the new argument form (`--death-fd`) is still found.
+- Proven live with the freshly built `native/spaces-broker` against the real session and system buses, started from a
+  thread that had exited: `kill -9` of the launcher and the broker was gone in under 10 ms. Control, the same start
+  without `--death-fd`: the broker survived the launcher's death.
+- Unit tests (`tests/test_lifeline.py`, 8 tests, `tests/test_host_lxc_backend.py` one more): close-on-exec ends,
+  release stops a helper, a collected finished `Popen` closes the end, no inheritance by other children, SIGKILL of a
+  launcher that forked the helper from an exited thread, `_start_open_broker` passes the descriptor and keeps the write
+  end (and leaks nothing when the spawn fails), and a compiled C probe of `lifeline.h` that checks the event loop quits
+  on `POLLHUP`.
+- Not proven: the installed package's broker (the package is rebuilt and reinstalled at the end of this work, see below).

@@ -47,7 +47,7 @@ spaces-open: spaces_open.c
 		-Wl,--wrap=__libc_start_main \
 		$$(pkg-config --libs gio-unix-2.0)
 
-spaces-broker: spaces_broker.c
+spaces-broker: spaces_broker.c lifeline.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) \
 		$$(pkg-config --cflags gio-unix-2.0) \
 		-o $@ spaces_broker.c $(LDFLAGS) \

@@ -567,6 +567,26 @@ class HostIntegrationTests(Base):
             [(pid, signal.SIGTERM) for pid in (10, 12, 15, 16)],
         )
 
+    def test_kill_stale_helpers_finds_brokers_with_a_lifeline_by_command_line(self) -> None:
+        def cmdline(pid: int, *argv: str) -> None:
+            directory = self.proc / str(pid)
+            directory.mkdir()
+            (directory / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+
+        broker = "/usr/lib/spaces/spaces-broker"
+        common = ("--name", "x", "--app-id", "org.anatase.spaces.work", "--ready-fd", "5", "--death-fd", "6")
+        cmdline(20, broker, *common, "--space", "work", "--map", "/a", "7")
+        cmdline(21, broker, "--space", "other", *common)
+        cmdline(22, "spaces-broker", "--space", "work", *common)  # started through PATH
+        cmdline(23, "/usr/bin/vim", "--space", "work", "spaces-broker")
+        with mock.patch.object(lxc.os, "kill") as kill:
+            killed = lxc.kill_stale_helpers("work")
+        self.assertEqual(sorted(killed), [20, 22])
+        self.assertEqual(
+            sorted(call.args for call in kill.call_args_list),
+            [(pid, signal.SIGTERM) for pid in (20, 22)],
+        )
+
     def test_user_scopes_are_tracked_and_terminated(self) -> None:
         uid, gid = os.getuid(), os.getgid()
         real = subprocess.Popen

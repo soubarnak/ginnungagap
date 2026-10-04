@@ -27,6 +27,7 @@ from typing import Protocol
 from . import _
 from . import core
 from . import host
+from . import lifeline
 
 
 MAX_ENVIRONMENT_VALUE = 4096
@@ -822,6 +823,7 @@ def _start_open_broker(
         core.CACHE_ROOT / space_name,
     )
     ready_read, ready_write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+    lifeline_read, lifeline_write = lifeline.open_lifeline()
     command = [
         INTEGRATION_BROKER,
         "--name",
@@ -832,6 +834,8 @@ def _start_open_broker(
         _portal_app_id(space_name),
         "--ready-fd",
         str(ready_write),
+        "--death-fd",
+        str(lifeline_read),
         *mapping_arguments,
     ]
     try:
@@ -847,17 +851,20 @@ def _start_open_broker(
             },
             user=user.uid,
             group=user.gid,
-            pass_fds=(*descriptors, ready_write),
+            pass_fds=(*descriptors, ready_write, lifeline_read),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     except Exception:
         os.close(ready_read)
         os.close(ready_write)
+        os.close(lifeline_write)
         raise
     finally:
         for descriptor in descriptors:
             os.close(descriptor)
+        os.close(lifeline_read)
+    lifeline.hold(process, lifeline_write)
     os.close(ready_write)
     poller = select.poll()
     poller.register(ready_read, select.POLLIN | select.POLLHUP | select.POLLERR)

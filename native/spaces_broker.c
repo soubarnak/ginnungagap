@@ -15,6 +15,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "lifeline.h"
+
 #define INTEGRATION_PATH "/org/anatase/Spaces/Integration"
 #define INTEGRATION_INTERFACE "org.anatase.Spaces.Integration1"
 /* A lingering Space must not activate the host portal between desktop
@@ -1507,6 +1509,7 @@ int main(int argc, char **argv)
     GError *error = NULL;
     const char *name = NULL;
     int ready_fd = -1;
+    int death_fd = -1;
     guint registration;
     guint request_name_result;
     guint sigterm_source = 0;
@@ -1525,6 +1528,8 @@ int main(int argc, char **argv)
             broker.app_id = g_strdup(argv[++index]);
         else if (g_str_equal(argv[index], "--ready-fd") && index + 1 < argc)
             ready_fd = atoi(argv[++index]);
+        else if (g_str_equal(argv[index], "--death-fd") && index + 1 < argc)
+            death_fd = atoi(argv[++index]);
         else if (g_str_equal(argv[index], "--map") && index + 2 < argc) {
             if (!add_mapping(
                     &broker, argv[index + 1], argv[index + 2]
@@ -1540,6 +1545,9 @@ int main(int argc, char **argv)
     }
     if (name == NULL || ready_fd < 0 || broker.mappings->len == 0
         || broker.space_name == NULL || broker.app_id == NULL)
+        return 2;
+    /* The launcher's lifeline (see lifeline.h); without it the broker only stops on a signal. */
+    if (death_fd >= 0 && !lifeline_valid(death_fd))
         return 2;
     broker.bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &error);
     if (broker.bus == NULL)
@@ -1593,6 +1601,8 @@ int main(int argc, char **argv)
     }
     close(ready_fd);
     broker.loop = g_main_loop_new(NULL, FALSE);
+    if (death_fd >= 0)
+        lifeline_watch(death_fd, broker.loop);
     sigterm_source = g_unix_signal_add(SIGTERM, stop_broker, broker.loop);
     sigint_source = g_unix_signal_add(SIGINT, stop_broker, broker.loop);
     g_main_loop_run(broker.loop);
