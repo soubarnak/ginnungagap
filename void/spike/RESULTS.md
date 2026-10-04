@@ -767,10 +767,7 @@ renamed `spaces-*`), `void/srcpkgs/spaces/{INSTALL,REMOVE,INSTALL.msg}`, `spaces
   `/etc/spaces/config.json{,.generated}` are all owned; modes are root-owned 0755/0644 and no setuid/setgid bit exists
   (same as the dev install); `spaces-void doctor` 18 checks, 0 FAIL, 4 WARN (the four spaces have no runit service until
   their first start).
-- `python3 void/spike/m8_check.py`: 84 PASS, 0 FAIL (package 29, enter each distro 6, host-PAM sudo bridge and
-  login-scoped mounts through m3's throwaway user 10, GUI on niri/audio/clipboard/notification/portal through m4,
-  NVIDIA nodes and `nvidia-smi` in the guest through m5, autostart smoke through m7 15, install-flavor dry run 1,
-  orphaned broker 4, final state 4). `--lifecycle-only` (builds revision 2): 21 PASS: `xbps-install -u` while ubuntu runs
+- `python3 void/spike/m8_check.py`: 84 PASS, 0 FAIL (package 30, enter each distro 6, then 24 from m3's host-PAM sudo bridge and login-scoped mounts (throwaway user), m4's GUI window/audio/clipboard/notification/portal on niri and m5's NVIDIA nodes and `nvidia-smi` in the guest, autostart smoke through m7 15, install-flavor dry run 1, orphaned broker 4, final state 4). `--lifecycle-only` (builds revision 2): 21 PASS: `xbps-install -u` while ubuntu runs
   keeps the same lxc-start, the profile stays loaded, `nvidia-smi` and `ubuntu id` still work; `xbps-remove` with a space
   running stops it, removes the services/links/profile/config.json and keeps `/var/lib/spaces` and `.host` (the message
   "Your spaces are kept in /var/lib/spaces" is printed; xbps printed no warning about the non-empty `make_dirs`);
