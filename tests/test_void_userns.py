@@ -280,6 +280,13 @@ class TranslatorUsernsTests(unittest.TestCase):
         self.assertIn("lxc.namespace.share.net = /proc/1/ns/net", text)
         self.assertLess(text.index("lxc.idmap"), text.index("lxc.net.0.type"))
 
+    def test_on_masks_the_rpc_pipefs_units(self) -> None:
+        on = self.translate(userns.Plan((1000,), (1000,))).config_text
+        off = self.translate(None).config_text
+        for unit in lxc_config.USERNS_MASKED_UNITS:
+            self.assertIn(f"/dev/null etc/systemd/system/{unit} none bind,ro", on)
+            self.assertNotIn(unit, off)
+
     def test_on_binds_sysfs_instead_of_mounting_it(self) -> None:
         text = self.translate(userns.Plan((1000,), (1000,))).config_text
         self.assertIn("lxc.mount.auto = proc:mixed cgroup:rw:force", text)

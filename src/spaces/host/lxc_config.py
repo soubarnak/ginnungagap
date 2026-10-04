@@ -57,6 +57,7 @@ NET_SYSCTL = "/proc/sys/net"
 # persistent rootfs below them is not visible and cannot be inspected.
 FRESH_TMPFS = ("run", "tmp")
 FRESH_OTHER = ("dev", "proc", "sys")
+USERNS_MASKED_UNITS = ("run-rpc_pipefs.mount", "var-lib-nfs-rpc_pipefs.mount")
 OPTIONAL_DEVICE_BINDS = ("/dev/net/tun", "/dev/fuse")
 _CAP_NAME = re.compile(r"^CAP_[A-Z0-9_]+$")
 
@@ -313,6 +314,15 @@ def translate(
     ):
         binds = [b for b in binds if b is not stage[0] and b is not over[0]]
         binds.append(_Bind(NET_SYSCTL, NET_SYSCTL, False))
+
+    if userns is not None:
+        # rpc_pipefs belongs to the network namespace, which the guest's user namespace does not
+        # own: the mount is refused (EPERM) and the unit nfs-utils generates for it fails, which
+        # leaves the guest degraded. Nothing but an NFS client or server in the guest uses it.
+        for unit in USERNS_MASKED_UNITS:
+            path = f"/etc/systemd/system/{unit}"
+            if not any(b.destination == path for b in binds):
+                binds.append(_Bind("/dev/null", path, True))
 
     for device in OPTIONAL_DEVICE_BINDS:
         if not any(b.destination == device for b in binds):
