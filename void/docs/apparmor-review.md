@@ -104,7 +104,7 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
 ## How to repeat the checks
 
 ```
-python3 void/spike/m9_check.py            # isolation, lifecycle, AppArmor (about 8 minutes, starts all four spaces)
+python3 void/spike/m9_check.py            # isolation, lifecycle, AppArmor (a few minutes, starts all four spaces)
 python3 void/spike/m9_check.py --regress  # plus m5_check.py and m8_check.py
 sudo dmesg | grep 'apparmor="DENIED"'      # what the profile refused
 ```

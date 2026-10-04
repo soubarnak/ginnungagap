@@ -784,3 +784,121 @@ renamed `spaces-*`), `void/srcpkgs/spaces/{INSTALL,REMOVE,INSTALL.msg}`, `spaces
 - aarch64 (not built; guest helpers assume glibc x86_64 for the guests), musl hosts, pycompile on Python bumps (the package
   pins `python3>=3.14<3.15`), `spaces-broker` (session broker) PDEATHSIG, a runit `check`/`finish` for per-space services,
   `.desktop` entries and icons, tests that need a terminal in the build chroot.
+
+
+## M9: hardening and release preparation (2026-10-04)
+
+New: `void/tools/{release.sh,rebase-check.sh}`, `void/docs/{apparmor-review.md,release.md}`, `void/spike/m9_check.py`,
+`tests/{test_void_lxc_wrapper.py,test_void_secret_sources.py}`, `conftest.py`. Changed: `void/bin/spaces-lxc`,
+`src/spaces/host/{lxc.py,lxc_config.py}`, `void/apparmor/spaces-container`, `void/srcpkgs/spaces/{template,REMOVE}`,
+`void/tools/xbps-build.sh` (`--release`), `void/docs/void.md`, two existing tests. No upstream hot file was touched.
+
+### G2: the LXC monitor's command socket
+
+- Reproduced first: with all spaces on the shared host network namespace, root in the Ubuntu guest connected to
+  `@/run/spaces/lxc/ubuntu/command` (python `AF_UNIX` connect, `CONNECTED`).
+- AppArmor was tried first and does not work on this stack. `deny unix peer=(addr="@/run/spaces/lxc/**")`,
+  `deny unix (connect)` and `deny unix` all load, but the rule is compiled away: `apparmor_parser -r` answers "same as
+  current profile, skipping", the compiled policy is byte-identical with and without it (3665 bytes) under `abi/3.0`,
+  `abi/4.0` and a hand-made ABI with `network_v9 { af_unix }`, and a connect to a root-owned path socket is never
+  refused. The kernel advertises `network_v9/af_unix`; the 4.1.7 parser does not emit the rules. Only the coarse
+  `deny network unix` bites (socket creation fails), which would kill the guest. Side finding: a profile without an
+  `abi` line compiles without any network mediation (`deny network inet` had no effect until `abi <abi/4.0>,` was
+  added). The profile of the package has no `abi` line and only the allow-all `network,`, so it is unaffected.
+- Chosen design: the monitor moves, not the guest. `spaces-lxc lxc-start` runs `unshare --net=LXCPATH/NAME/netns --
+  unshare --mount --propagation private -- ...` (the pin is a bind mount of the new namespace; the outer `unshare`
+  makes it in the host mount namespace so other processes see it), the container config has
+  `lxc.namespace.share.net = /proc/1/ns/net` so the guest joins the host's network namespace again, and every other
+  `lxc-*` call through the wrapper does `nsenter --net=PIN` first when the pin is an `nsfs` mount (`stat -f -c %T`).
+  `-P` and `-n` are parsed from the words before any `--`; `lxc-start` is recognised anywhere before that, because the
+  launcher puts a `sh -c 'echo $$ >cgroup.procs; exec "$@"'` in front of it (the first version missed this: the
+  config had the share line but no pin was made). Names that do not match `[A-Za-z0-9][A-Za-z0-9._-]*` never reach a
+  path. Cleanup: `_Launcher` cleanup, `_reap_stale_container` and `forget_unit` unmount and delete the pin; the wrapper
+  replaces a stale pin at the next `lxc-start`; the REMOVE hook unmounts pins when no `lxc-start` runs.
+- Proof (`m9_check.py`, 84 checks of its own, all four spaces): the pin is `nsfs` and differs from the host namespace;
+  `lxc-start` is in the pinned namespace; the guest's init is in the host's (same inode); the socket exists in the pinned
+  namespace (`nsenter` connect works); root in the guest gets `ECONNREFUSED`; root and the user on the host outside the
+  namespace get `ECONNREFUSED`; the host's `/proc/net/unix` has no `@/run/spaces/lxc/` name and the guest's has none;
+  the monitor process is not visible in the guest; `/proc/self/ns/net` in the guest equals the host's; name resolution
+  works; `lxc-info` through the wrapper answers `RUNNING`; `spaces enter ubuntu` works. Lifecycle: `sv down` removes the
+  pin and leaves no `nsfs` mount; a restart starts a new monitor in a new pin; after `kill -9` of the launcher the
+  container runs on with its pin and is still controllable through the wrapper, the next start stops it through the pin
+  and starts a new one with a live socket; after stopping everything no `nsfs` mount remains.
+- Normal operation, unchanged: `m2_check.py` 32/32 (own `SPACES_LXC_PATH`), the `m3` sudo bridge and login-scoped
+  mounts, `m4` GUI window, audio, clipboard, notification and portal on niri, `m5` devices, hotplug (uinput gamepad
+  appears and disappears, device cgroup rule live), `m7` autostart, all through `m8_check.py` (84 PASS), `m6_check.py
+  --no-create --no-extras` 54 PASS, and `m8_check.py --lifecycle-only` 21 PASS (upgrade to revision 2 while ubuntu runs,
+  remove with a space running, reinstall; the machine was then returned to revision 1 by a rebuild and `xbps-install -f`).
+- Costs and limits: a plain `lxc-ls`/`lxc-info` from a shell sees nothing (use the wrapper); a container that was
+  started before the upgrade has no pin and keeps its monitor in the host namespace until it restarts (the wrapper falls
+  back to it); the namespace pin is one mount per running space. Any abstract socket that other host software creates in
+  the host namespace stays reachable from guests (X0 is deliberate); documented in the AppArmor review.
+
+### AppArmor profile review
+
+Full text and evidence: `void/docs/apparmor-review.md`.
+
+- Removed `mount fstype=proc -> /run/systemd/**` and `mount fstype=cgroup -> /sys/fs/cgroup/**`. Before: guest root
+  mounted a fresh proc at `/run/systemd/evil` and wrote `/proc/sys/kernel/core_pattern` through it (host root command
+  execution). After: all four guests boot to `running` with no failed unit, a transient unit with `ProtectSystem=strict`,
+  `PrivateTmp`, `ProtectKernelTunables`, `PrivateNetwork`, `ProtectHome` and `NoNewPrivileges` starts, and the only
+  mount denials during the boots are systemd's fresh proc/sysfs (it falls back) and Fedora's `rpc_pipefs`.
+  `mount(2)` of proc, sysfs, binfmt_misc and cgroup v1 is denied on all four.
+- Not fixable here, reported by `m9_check.py` as "known open": the new mount API (`fsopen`/`fsmount` of a fresh proc,
+  `open_tree` plus `mount_setattr` of `/proc/sys`) bypasses the mount rules, and a `mount(2)` bind of `/proc/sys`
+  remounted rw works too. Arch, Fedora and Kali were affected even through plain `mount`, because their util-linux uses
+  the new API. A seccomp `ENOSYS` for `fsopen`, `fsconfig`, `fsmount` and `fspick` stopped the fresh mounts but left all
+  four guests `degraded` (Fedora: `dbus-broker`, `journald`, `logind`, `tmpfiles-setup` failed), so it was reverted.
+  Root in a space is host root; the only fix is a user namespace, which this design does not have.
+- `~/.ssh` and `~/.gnupg`: the risk table assumed AppArmor deny rules for those sources. They cannot exist (the host
+  makes the binds; a path rule in the guest would block the guest's own `~/.ssh`). The gate is the code:
+  `core.validate_home_name` (single component or exactly `.ssh/config`) and `launch._prepare_mounts` (hidden and nested
+  directories, symlinks, sources outside the home are skipped). `tests/test_void_secret_sources.py` pins it.
+- Kept: `ext*`, `xfs`, `btrfs` (only matter when a block device is allowed), `overlay`, `fuse*`, `tmpfs`, the bind and
+  remount rules systemd's sandboxes need.
+
+### Release preparation
+
+- The four upstream templates already carried real checksums; `release.sh verify` downloads each distfile and
+  compares: `spaces-arch-install-scripts`, `spaces-archlinux-keyring`, `spaces-rankmirrors`, `ubuntu-keyring` PASS
+  (the `spaces` template is SKIP: placeholder). `release.sh checksum` fails honestly with the 404 of the unpushed tag.
+  The GitHub URL form is `https://github.com/soubarnak/ginnungagap/archive/refs/tags/v0.0.1.tar.gz`. The order
+  (tag with placeholder, push, `checksum --write`, commit, `xbps-build.sh --release`) is in `void/docs/release.md`; the
+  tag's own tree cannot hold the checksum of its tarball, and xbps-src never reads the template from the tarball.
+- `rebase-check.sh`, tested on scratch clones against synthetic upstream branches: a clean upstream commit (merge applies,
+  644 tests pass), a conflicting edit of `launch.py` (reported with the "hot file" mark, exit 1, tests not run), a rebase
+  dry run, upstream already contained (exit 0). The worktree is removed in every case and no ref is touched. Against the
+  real upstream there is nothing new (0 commits ahead of the merge base `6c44819`).
+- The local tag `v0.0.1` was created last, after everything else passed (`release.sh check`, then `release.sh tag`); it is
+  not pushed.
+
+### Verification
+
+- `python3 -m pytest` 656 passed, 17 skipped (644 before; 8 wrapper tests, 3 secret-source tests, 1 stale-pin test).
+- `m9_check.py --regress`: 85 PASS, 0 FAIL, 9 SKIP (`m8_check.py` counts as one PASS item with its 84; the 9 SKIPs are
+  the eight known-open mount items, two per space, and one for the three known m5 failures below).
+- `m5_check.py`: 40 PASS, 3 FAIL, all in section 4 (Vulkan on the NVIDIA GPU, EGL on `renderD128`, PRIME offload): the
+  Vulkan loader drops the NVIDIA ICD "due to not having any physical devices" while `nvidia-smi` works. They fail
+  identically with the pre-M9 `spaces-lxc` and the original profile put back by hand, so they are not caused by M9; the
+  M8 check never ran this section. `m9_check.py` reports them as a known SKIP and fails on anything else in m5.
+- `xbps-pkgdb` clean, `spaces-void doctor` 18 checks 0 FAIL 0 WARN, no `nsfs` mount and no helper left at the end.
+
+### Traps found
+
+- `lxc-attach` chowns a regular file used as stdout (the check output file became unreadable): always pipe.
+- A failed `xbps-src` build (here: an old tree built from a scratch worktree) leaves `masterdir/destdir/spaces-0.0.1`;
+  the next build fails with `FileExistsError: ... usr/bin/spaces`. Fix: `./xbps-src clean spaces`.
+- `xbps-src` with `--committed` fails when the working tree's template mentions a file that HEAD lacks (the template
+  is the working-tree one, the tarball is HEAD).
+- `git diff REF REF` is ambiguous when a branch and a directory share a name (`void`): the scripts pass `--`.
+
+### Open after M9
+
+- Root in a guest is host root through the new mount API (user namespace needed); AppArmor cannot mediate it here.
+- `spaces-broker` (session broker) has no `PR_SET_PDEATHSIG` (spawned from session threads; the reaping at the next
+  start covers it). Not changed.
+- Pushing the tag, a GitHub release, signing, an xbps repository or CI (checks need a Void host with root and a
+  desktop); `aarch64` and musl; a Python bump needs a new revision (pin `python3>=3.14<3.15`).
+- Distro `.desktop` files and icons are not shipped (documented in `void.md`).
+- The NVIDIA acceleration items of `m5_check.py` section 4 fail on this host independent of M9.
+
