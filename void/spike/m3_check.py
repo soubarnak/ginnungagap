@@ -385,6 +385,9 @@ def check_runit() -> None:
     check("selinux: storage relabel code is inert (no /sys/fs/selinux)", not os.path.exists("/sys/fs/selinux/enforce"))
     modes = sudo("stat", "-c", "%U:%G %a", "/var/lib/spaces", str(STATE), "/var/cache/spaces", "/run/spaces").stdout.split("\n")
     check("state: /var/lib/spaces, space dir, cache and /run/spaces are root-owned 755", all(line.startswith("root:root") for line in modes if line), " | ".join(modes))
+    # The ready marker appears before guest boot finishes; since M4 the desktop
+    # reconcile adds jobs (guest session, portals) to that window.
+    wait_for(lambda: guest_root("systemctl is-system-running").stdout.strip() == "running", 40, 2)
     guest = guest_root("systemctl is-system-running; /usr/bin/test -x /run/spaces-host/bin/pam_spaces.so && echo native-bound; ls /run/spaces-host")
     check("native: guest binaries bound at /run/spaces-host/bin", "native-bound" in guest.stdout, guest.stdout.replace("\n", " ")[:120])
     check("guest: systemd reaches 'running' (no AppArmor mount denials)", guest.stdout.splitlines()[0:1] == ["running"], guest.stdout.splitlines()[0] if guest.stdout else "")
