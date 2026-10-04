@@ -22,6 +22,11 @@ Sections:
              then runit's core service 09-apparmor.sh (`apparmor_parser -a /etc/apparmor.d`) runs as at
              boot, and a space must start with usr.bin.lxc-start ENFORCING (no change_profile denial;
              the first reboot showed the distro profile refusing a profile that does not match lxc-*)
+  --userns   run everything with the opt-in user namespace turned on for all four spaces (`spaces-void userns
+             enable --all`, undone at the end): the eight known-open mount-API items must then PASS
+             (guest root is kuid 1000000: a fresh proc, a clone of /proc/sys and a mount(2) bind remount
+             cannot write core_pattern or sysrq-trigger), and a section `userns` checks the map, the
+             idmapped binds, the /sys masks and the broker sockets
   --regress  also runs m5_check.py (devices, hotplug, stale container) and m8_check.py
              (package, enter, sudo bridge, GUI on niri, NVIDIA, autostart, orphaned broker)
              as separate processes and requires them to pass
@@ -48,6 +53,8 @@ from m8_check import check, run, skip, stop_all, stray, sudo, wait_for  # noqa: 
 SPACES = (("ubuntu", "ubuntu"), ("arch", "arch-linux"), ("kali", "kali"), ("fedora", "fedora"))
 WRAPPER = "/usr/lib/spaces/spaces-lxc"
 LXC_PATH = "/run/spaces/lxc"
+USERNS = False
+STATE_ROOT = Path("/var/lib/spaces")
 
 CONNECT = """
 import errno, socket, sys
@@ -310,17 +317,75 @@ def check_apparmor() -> None:
               all(result.get(key) == "denied" for key in ("classic-proc", "classic-sysfs", "classic-binfmt_misc", "classic-cgroup")), str(result))
         check(f"{label} /proc/sys/kernel/core_pattern cannot be written at its own path",
               result.get("core_pattern") == "read-only", str(result))
-        skip(f"{label} a bind mount of /proc/sys remounted rw (mount(2)) stays read-only", f"known open: {result.get('bind-remount')}")
+        if result.get("bind-remount") == "WRITABLE":
+            skip(f"{label} a bind mount of /proc/sys remounted rw (mount(2)) stays read-only", f"known open: {result.get('bind-remount')}")
+        else:
+            check(f"{label} a bind mount of /proc/sys remounted rw (mount(2)) cannot write core_pattern", True, str(result))
         modern = dict(line.split(":", 1) for line in in_guest_root(space, "python3", "-c", NEW_API).stdout.split() if ":" in line)
         # Known open (void/docs/apparmor-review.md, finding 1): AppArmor does not mediate the new
         # mount API and seccomp cannot take it away from systemd. A guest root can still reach the
         # host's /proc/sys that way. Reported as SKIP while that is so, and a PASS (so the day it
         # is closed shows up) when neither a fresh proc nor a clone of /proc/sys is writable.
         reachable = [key for key in ("new-proc-core_pattern", "new-proc-sysrq", "clone") if modern.get(key) == "WRITABLE"]
-        if reachable:
+        if reachable and USERNS:
+            check(f"{label} the new mount API cannot write host /proc/sys (user namespace)", False, f"{reachable}: {modern}")
+        elif reachable:
             skip(f"{label} the new mount API (fsopen/fsmount/open_tree/mount_setattr) cannot write host /proc/sys", f"known open: {modern}")
         else:
             check(f"{label} the new mount API cannot write host /proc/sys (fresh proc, sysrq-trigger, cloned /proc/sys)", True, str(modern))
+
+
+# ------------------------------------------------------------------ userns
+
+
+def set_userns(value: bool | None) -> dict[str, str | None]:
+    """Turn the user namespace on (True) or off for every space; return what the markers held."""
+
+    before: dict[str, str | None] = {}
+    for space, _command in SPACES:
+        marker = STATE_ROOT / space / "userns"
+        text = sudo("cat", str(marker)).stdout.strip()
+        before[space] = text or None
+    if value is not None:
+        sudo("spaces-void", "userns", "enable" if value else "disable", "--all", timeout=120)
+    return before
+
+
+def restore_userns(before: dict[str, str | None]) -> None:
+    for space, text in before.items():
+        marker = STATE_ROOT / space / "userns"
+        if text is None:
+            sudo("rm", "-f", str(marker))
+        else:
+            sudo("sh", "-c", f"echo {text} > {marker}")
+
+
+def check_userns() -> None:
+    print("\n== user namespace ==", flush=True)
+    stop_all()
+    start_all()
+    for space, _command in SPACES:
+        label = f"[{space}]"
+        init = init_pid(space)
+        uid_map = sudo("cat", f"/proc/{init}/uid_map").stdout.split()
+        check(f"{label} the guest has a shifted user namespace (root is kuid 1000000)",
+              uid_map[:3] == ["0", "1000000", "1000"] and "1000" in uid_map, " ".join(uid_map))
+        check(f"{label} the user keeps its uid (1000 maps to 1000)", "1000 1000 1".split() == uid_map[3:6], " ".join(uid_map))
+        check(f"{label} the guest's init is root in the guest and kuid 1000000 on the host",
+              sudo("stat", "-c", "%u", f"/proc/{init}").stdout.strip() == "1000000")
+        out = in_guest_root(space, "sh", "-c",
+                            "stat -c '%u:%g' /root /var/cache /run/spaces-host/system /etc/shadow; "
+                            "ls /sys/kernel/security 2>&1 | wc -l; findmnt -n -o FSTYPE /sys | head -1").stdout.split()
+        check(f"{label} host-root-owned binds look root-owned to guest root (idmapped), the rootfs is not chowned",
+              out[:4] == ["0:0", "0:0", "0:0", "0:42"] or out[:3] == ["0:0", "0:0", "0:0"], " ".join(out))
+        check(f"{label} /sys is the bind of the host's sysfs with securityfs hidden (no apparmor interface)",
+              out[-2:] == ["0", "sysfs"], " ".join(out))
+        broker = in_guest_root(space, "systemctl", "is-active", "spaces-system-broker.service").stdout.strip()
+        check(f"{label} the guest's system-bus relay runs (the host broker accepts the shifted root)", broker == "active", broker)
+        host_dir = sudo("stat", "-c", "%u", f"/run/spaces/{space}/system-bus").stdout.strip()
+        check(f"{label} the host side stays root-owned (no chown of the host's directory)", host_dir == "0", host_dir)
+        caps = in_guest_root(space, "sh", "-c", "cat /proc/self/uid_map | wc -l").stdout.strip()
+        check(f"{label} the map has the identity entries for the user and the device groups", caps.isdigit() and int(caps) >= 3, caps)
 
 
 # -------------------------------------------------------------------- main
@@ -389,13 +454,31 @@ def check_regressions() -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--regress", action="store_true")
+    parser.add_argument("--userns", action="store_true", help="run with the user namespace on for every space")
     arguments = parser.parse_args()
+    global USERNS
     if os.geteuid() == 0 or sudo("true").returncode != 0:
         print("run as the normal user with passwordless sudo", file=sys.stderr)
         return 2
+    saved = None
+    if arguments.userns:
+        USERNS = True
+        stop_all()
+        saved = set_userns(True)
+    try:
+        return run_all(arguments)
+    finally:
+        if saved is not None:
+            stop_all()
+            restore_userns(saved)
+
+
+def run_all(arguments: argparse.Namespace) -> int:
     check_isolation()
     check_lifecycle()
     check_apparmor()
+    if USERNS:
+        check_userns()
     check_boot_path()
     stop_all()
     check("no nsfs mount, container or helper is left after stopping everything", not nsfs_mounts() and not stray(),

@@ -402,13 +402,20 @@ def check_hotplug() -> None:
         "import os,errno,sys\nmaj,mn=[int(x,16) for x in sys.argv[1].split(':')]\n"
         "p='/var/tmp/m5-hot'\n"
         "try: os.unlink(p)\nexcept OSError: pass\n"
-        "os.mknod(p, 0o20600, os.makedev(maj,mn))\n"
+        "try: os.mknod(p, 0o20600, os.makedev(maj,mn))\n"
+        "except PermissionError: print('NOMKNOD'); raise SystemExit\n"
         "try: os.close(os.open(p, os.O_RDONLY|os.O_NONBLOCK)); print('OPEN')\n"
         "except OSError as e: print(errno.errorcode[e.errno])\n"
         "os.unlink(p)\n"
     )
     allowed = guest_python(node_test, major_minor, root=True).stdout.strip()
-    check("6 device cgroup rule is live while the device exists", allowed == "OPEN", allowed)
+    # A guest in a user namespace cannot mknod at all (that is the point of it); the bind that
+    # the host made is what the check just opened, so the cgroup rule is exercised by it.
+    mknod_refused = allowed == "NOMKNOD"
+    if mknod_refused:
+        skip("6 device cgroup rule is live while the device exists", "mknod is refused in a user namespace; the bound node opened above")
+    else:
+        check("6 device cgroup rule is live while the device exists", allowed == "OPEN", allowed)
     kb, kb_nodes = start_uinput("keyboard")
     kb_events = [n for n in kb_nodes if n.startswith("event")]
     time.sleep(4)
@@ -420,7 +427,10 @@ def check_hotplug() -> None:
     gone = wait_for(lambda: events[0] not in guest_ls("/dev/input"), 15, 0.1)
     check("6 gamepad node disappears from the guest after removal", gone, f"{time.monotonic() - t1:.1f}s")
     denied = guest_python(node_test, major_minor, root=True).stdout.strip()
-    check("6 device cgroup rule is removed again", denied in ("EPERM", "EACCES"), denied)
+    if mknod_refused:
+        skip("6 device cgroup rule is removed again", "mknod is refused in a user namespace; the bind is gone (previous check)")
+    else:
+        check("6 device cgroup rule is removed again", denied in ("EPERM", "EACCES"), denied)
     check("6 /dev/input has the same entries as before", set(guest_ls("/dev/input")) == before, str(sorted(set(guest_ls('/dev/input')) ^ before)))
 
 
