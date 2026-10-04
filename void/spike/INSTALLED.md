@@ -14,7 +14,7 @@ checkout). Reverted by `sudo void/tools/dev-uninstall.sh` (see the end of this f
 | `/usr/lib/spaces/spaces-pam`, `spaces-broker`, `spaces-system-broker` | host native helpers, built by `make -C native` |
 | `/usr/lib/spaces/guest/{pam_spaces.so,spaces,spaces-portal,spaces-secret-helper,spaces-open,spaces-system-broker}` | guest native helpers (glibc <= 2.17 checked by `check_guest_abi.py`) |
 | `/usr/lib/spaces/spaces-lxc` | cgroup wrapper from `void/bin/spaces-lxc` |
-| `/usr/lib/spaces/void/bin/` | empty shim directory (first on `spaces.priv`'s PATH) |
+| `/usr/lib/spaces/void/bin/` | shim directory, first on `spaces.priv`'s PATH: `pacstrap` and `arch-chroot` (Arch), `dnf5` (Fedora, M6) |
 | `/usr/share/spaces/{pam,keys,repos,portal,system-bridge,systemd}` | data files (31 files); `systemd/run-spaces-proc.mount` has `ConditionVirtualization=container` |
 | `/usr/share/polkit-1/actions/org.anatase.spaces.policy` | polkit actions (unmodified upstream file) |
 | `/etc/pam.d/spaces` | `data/pam/spaces.system-auth` (includes Void's `system-auth`, pam_unix) |
@@ -100,6 +100,27 @@ from the userspace version makes `spaces-nvidia-sync` warn until the next reboot
 Extra per-distro packages, mounts or overlays go into `/etc/spaces/void.json`
 (`{"distros": {"ubuntu": {"packages": ["htop"]}}}`), then run `sudo /usr/lib/spaces/spaces-nvidia-sync`
 or just restart the space.
+
+## Arch, Kali and Fedora host tooling (M6)
+
+Installed by `dev-install.sh` (`void/tools/dev-install-arch.sh`, `dev-install-fedora.sh`; skip with
+`--skip-distro-tools`). Kali needs nothing (Void's debootstrap has `kali-rolling`).
+
+| Path | What |
+|---|---|
+| xbps `pacman` 7.1, `m4` | recorded in `dev-install.state` when the installer adds them (`pacman` and `m4` were added by hand in M6 and are listed there) |
+| `/usr/lib/spaces/void/arch-install-scripts/{bin/{pacstrap,arch-chroot,genfstab},COPYING,VERSION}` | arch-install-scripts 31, sha256 `ef22eae93b5cc78c7e7982acc160428cced9f96cb95090aeb77d55bc844a988e` (gitlab archive of tag v31) |
+| `/usr/lib/spaces/void/bin/{pacstrap,arch-chroot,dnf5}` | shims (`void/bin/*`); `dnf5` is the Fedora bootstrap shim |
+| `/usr/lib/spaces/rankmirrors` | pacman-contrib 1.13.1 script, commit 75d4a705, source sha256 `b67902d26a8b193cc096421c8d780f795a253d0742cd31d592254059af15cc27` |
+| `/usr/share/spaces/void/arch-pacman.conf` | core + extra, own GPGDir, `SigLevel = Required DatabaseOptional` |
+| `/usr/share/spaces/void/archlinux-keyring/{archlinux.gpg,archlinux-trusted,archlinux-revoked,VERSION}` | archlinux-keyring 20260909, tarball sha256 `935ad345a7700358367ca9a2f70220f30869492c31b24e9e4e4e89f05bf5528a` |
+| `/var/lib/spaces/.host/arch/gnupg` | pacman keyring for the host-side pacstrap, root 0700 |
+| `/var/lib/spaces/.host/fedora/44/` | created on the first `dnf5` call: `Fedora-Container-44-1.7-x86_64-CHECKSUM`, the Container Base `.oci.tar.xz` (sha256 `75200f5752a74a21a616ca9a75e25beb594e2e117a0195c54f87c0b3e3974d1b`), `root/` (unpacked bootstrap, 260 MB), `lock` |
+| `/etc/pacman.d/mirrorlist` | default list, only when absent (state `arch_mirrorlist=installed`); rewritten by the `rankmirrors` option; removed by the uninstaller |
+
+Spaces created in M6: `/var/lib/spaces/{kali,arch,fedora}` with their caches and runit services
+(`/etc/sv/spaces-NAME`), like `ubuntu`. Guest packages added by hand (kept): `gnome-calculator`,
+vulkan and GL tools and Mesa drivers in each (arch: `strace`).
 
 ## Symlinks
 

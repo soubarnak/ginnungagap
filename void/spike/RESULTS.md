@@ -437,3 +437,138 @@ Open items for M6 (bootstrap Arch, Fedora, Kali):
   that launch has no GPU userspace; the next launch restores it. Binds of an already running space
   are unaffected (they point at the real `/usr/lib` inodes). The uninstall, install, enter cycle
   was re-run after the last installer change and the log service came up.
+
+## M6: Arch, Kali and Fedora spaces (2026-10-04)
+
+`void/spike/m6_check.py` (as the user, from the niri session; `--watchdog` adds the full-level test):
+85 PASS, 0 FAIL, 6 SKIP (the SKIPs are "space already exists" and "extras already installed").
+Unit tests: 582 passed, 17 skipped. Created with `sudo spaces create D --preset basic`; the three
+spaces stay installed.
+
+| Space | Create | State + cache | Guest glibc | Notes |
+|---|---|---|---|---|
+| kali (kali-rolling, kali-linux-default) | 49.5 min (about 3000 packages, network bound) | 14 G + 3.4 G | 2.43 | debootstrap already had `kali-rolling`; no shim |
+| arch (rolling, defaults `rankmirrors`, `yay`) | 6.2 min | 3.5 G + 1.1 G | 2.44 | yay built from the AUR in the guest chroot works |
+| fedora 44 | 6.3 min (a first attempt failed on mirror downloads, retry fine) | 1.5 G + 104 M | 2.43 | bootstrap image cache 260 M in `/var/lib/spaces/.host/fedora/44` |
+
+Per distro (all PASS): boots to `running`, `spaces enter` as uid 1000 without launcher warnings, host-PAM
+sudo bridge (right password accepted, wrong one rejected, throwaway user and guest files restored),
+`gnome-calculator` shows a window in `niri msg --json windows` (app id `org.gnome.Calculator`) and
+closes, `nvidia-smi` lists the RTX 2050, NVIDIA libraries and ICD files in the distro's farm
+destination (`/usr/lib/x86_64-linux-gnu`, `/usr/lib`, `/usr/lib64`) resolve all dependencies (`ldd`),
+`vulkaninfo` lists radv and NVIDIA, EGL on renderD129 (radeonsi) and renderD128 (NVIDIA) renders in
+hardware, `glxinfo` is direct and not llvmpipe, PRIME offload selects NVIDIA, stop leaves no mounts,
+cgroup or container. Guest glibc 2.43 and 2.44 are above the 2.38 that `libnvidia-egl-wayland2` needs.
+
+### Item 0: the `full` device level no longer reaches watchdogs
+
+At `full` the LXC policy was "no rules", so guest root could mknod and open 10:130 and arm the host
+watchdog. `devices_lxc.config_text(None)` now writes `lxc.cgroup2.devices.allow = a` followed by
+`deny` rules for `c 4:*` (tty, VT, serial), `c 7:*` (vcs), `c 5:3` (ttyprintk), `c 10:130`
+(`/dev/watchdog`), every device listed in `/sys/class/watchdog/*/dev` and every major `/proc/devices`
+names `watchdog` (here 246). Major 5 stays open for `/dev/tty`, `/dev/console` and `/dev/ptmx` (the base
+rules). The same rules are applied by `lxc-cgroup` after `allow a` when a running space is switched
+to `full`. Evidence (guest root, `m6_check.py --watchdog` and the earlier manual runs): at `full`, boot
+and live, `mknod` of 10:130, 246:0, 246:1, 4:0, 4:64, 7:0 and 5:3 fails with EPERM (the deny rule
+includes `m`), `/dev/kmsg` still opens; at `admin` the nodes can be made but `open` is EPERM; the
+sysfs `state` of watchdog0 was read every 0.1 s by a guard (never an open of the node on the host) and
+stayed `inactive`; `basic` was restored and `info.json` says so. Nothing was ever armed.
+Unit tests: `test_full_level_keeps_watchdog_and_console_denied`,
+`test_live_update_to_full_denies_after_allow_all`. A watchdog that appears after the policy was
+written and has a new major is only covered at the next policy write (start or `configure`).
+
+### Kali
+
+`/usr/share/debootstrap/scripts/kali-rolling` ships with Void's debootstrap 1.0.145, so
+`kali.py` runs unchanged, with the in-tree key (`kali-archive-key.gpg.base64`) as `--keyring`.
+`apt` prints `Can not write log (Is /dev/pts mounted?)` during the chroot phase (upstream behaviour,
+harmless).
+
+### Arch
+
+Host side (`void/tools/dev-install-arch.sh`, called by `dev-install.sh`, `--skip-distro-tools` skips it):
+
+- xbps `pacman` 7.1 (has no repositories in `/etc/pacman.conf`, owned by the `pacman` package) and `m4`.
+  `/etc/pacman.d/mirrorlist` is owned by no Void package; the install writes a default one (geo.mirror.pkgbuild.com,
+  rackspace, kernel.org) only when it is absent, records `arch_mirrorlist=installed`, and the
+  uninstaller removes it. `rankmirrors` (`arch.py`) rewrites it with five ranked mirrors ("# Ranked by
+  Spaces"); pacstrap copies it into the guest.
+- arch-install-scripts v31 in `/usr/lib/spaces/void/arch-install-scripts/bin` (built with `make arch-chroot genfstab
+  pacstrap`, no man pages); `/usr/lib/spaces/void/bin/{pacstrap,arch-chroot}` are the shims (first on
+  `spaces.priv`'s PATH). The pacstrap shim adds `-C /usr/share/spaces/void/arch-pacman.conf`: core and extra,
+  `Include = /etc/pacman.d/mirrorlist`, `SigLevel = Required DatabaseOptional`, `GPGDir =
+  /var/lib/spaces/.host/arch/gnupg` (root 0700, 183 keys, initialised once with `pacman-key --init` and
+  `--populate-from /usr/share/spaces/void/archlinux-keyring --populate archlinux`).
+- pacstrap passes `--disable-sandbox`, so pacman 7's landlock/DownloadUser sandbox is not an issue as root on
+  this kernel; arch-chroot needs only `unshare` and `mount`, no systemd. Packages and the guest are verified
+  by pacman (checking keyring, package integrity).
+- `/usr/lib/spaces/rankmirrors` from pacman-contrib commit 75d4a705 (as `spaces.spec` does), `sed`-expanded.
+- Templates `void/srcpkgs/arch-install-scripts/template` and `void/srcpkgs/archlinux-keyring/template`
+  (not built with xbps-src). A future Void package of the same name would install into `/usr/bin` without
+  colliding; the shim would then be replaced by a plain `-C` wrapper.
+
+Bug found and fixed: `native/spaces.c` waited for polkit-kde to print "Authentication agent result: true"
+on stderr and printed "polkit agent did not become ready" after 2 s on every `spaces enter` in Arch (and Fedora).
+Qt built with journald support logs to the journal when `JOURNAL_STREAM` is set, as it is under a guest
+systemd unit (the message was in `journalctl`). `execute_agent` now also sets `QT_FORCE_STDERR_LOGGING=1`.
+
+AUR/yay works in the guest (`makepkg` in the chroot). `pacman -S nvidia-utils` in the guest fails with
+"exists in filesystem" for every placeholder (see below): the guest does not need its own NVIDIA userspace.
+
+### Fedora
+
+Fedora has no host `dnf5`. `void/bin/dnf5` (python, installed to `/usr/lib/spaces/void/bin/dnf5`) keeps the exact
+command line of `fedora.py` and runs the real dnf5 in a bootstrap root:
+
+1. downloads `Fedora-Container-44-1.7-x86_64-CHECKSUM` and `Fedora-Container-Base-Generic-44-1.7.x86_64.oci.tar.xz`
+   from `dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/x86_64/images/`, verifies the clearsigned CHECKSUM with
+   `gpgv` against `/usr/share/spaces/keys/RPM-GPG-KEY-fedora-44-primary` (the VALIDSIG fingerprint must be that key,
+   `36F612DC...F90A6`) and the image sha256 against it (`75200f57...3974d1b`);
+2. unpacks the OCI layer (blob digest checked, GNU tar with `--numeric-owner --xattrs`, whiteouts applied) to
+   `/var/lib/spaces/.host/fedora/44/root`, atomically (`root.tmp`, then rename; flock);
+3. `unshare --mount` and chroot into it with /proc, a tmpfs /dev with six bound device nodes, /sys read-only,
+   resolv.conf, `/usr/share/spaces` (read-only: repos and keys) and the installation root `--rbind`-mounted at the same path
+   (so the API filesystems `fedora.py` mounted in it are visible). The mounts exist only in that private
+   namespace; nothing is left to clean up. RPM checks stay on (`gpgcheck=1`, key from `fedora.repo`).
+
+The rpm database lands in `ROOT/usr/lib/sysimage/rpm` (sqlite) as on a Fedora host and `chroot ROOT authselect`
+works, so no change to `fedora.py` was needed. Cold start of the shim: 39 s (download + unpack). 8 unit tests
+(`tests/test_void_dnf5_shim.py`: arguments, a throwaway key for signature/tampering/wrong signer, digests, whiteouts, manifest).
+Bug found and fixed in `lxc.py`: runit gives the service `/dev/console` as stdin, so `lxc-attach` ran every launcher
+command with a tty and the Fedora guest's short `install -d` exited 129 (SIGHUP, about 70 % of the time; reproduced with `script`),
+which made "Could not enable host session forwarding" repeat every five seconds and left GUI apps without a
+display. The run script now starts with `exec </dev/null`.
+
+### Trust: verified against trust on first use
+
+| What | Verified | Trust on first use |
+|---|---|---|
+| arch-install-scripts v31 archive (sha256 `ef22eae9...a988e`) | identical (`diff -r`) to `git archive` of tag v31; the tag verifies with `C100346676634E80C940FB9E9C02FF419FECBE16` (Morten Linderud), the only `validpgpkeys` entry of Arch's PKGBUILD | the key itself came from keys.openpgp.org and is matched only to Arch's PKGBUILD (same project, gitlab); the installer pins the archive sha256, not the signature |
+| archlinux-keyring 20260909 (sha256 `935ad345...5528a`) | the release's inline signature verifies with `02FD1C7A934E614545849F19A6234074498E9CEE` (Christian Hesse, fetched over WKD, listed in the keyring PKGBUILD); the five master keys in `archlinux-trusted` all appear on archlinux.org/master-keys (a different host than gitlab; the installer re-checks this and fails on a mismatch, warns when the page is unreachable) | the signer key, and that page, are not anchored in anything already on the machine |
+| rankmirrors (commit 75d4a705, sha256 `b67902d2...cc27`) | pinned hash only | whole file: a bash script, GPL-3.0, from gitlab |
+| Fedora 44 base image | CHECKSUM signature (gpgv) against the in-tree key, whose fingerprint also appears on fedoraproject.org/security; sha256 of the image from CHECKSUM; layer digests | nothing besides the in-tree key (upstream data) |
+| Kali | debootstrap `--force-check-gpg` with the in-tree key, Release signature valid (`827C8569...E4C5`) | the in-tree key |
+| Arch packages, Fedora RPMs | pacman `Required DatabaseOptional` (core.db.sig is not published on the chosen mirror), `gpgcheck=1` | |
+
+Pinned sources go stale: a newer keyring or arch-install-scripts needs new hashes in `dev-install-arch.sh` and the templates.
+
+### NVIDIA farm destinations (M5 open items)
+
+Exercised for real now: arch `/usr/lib` + `/usr/lib32` (the launcher creates placeholders in `/usr/lib32`
+although Arch has no multilib), fedora `/usr/lib64` + `/usr/lib` (26 and 40 placeholder files), kali
+`/usr/lib/x86_64-linux-gnu` (`/usr/lib/i386-linux-gnu` is absent and skipped). The overlay of Arch's `/usr/lib` works;
+no `nvidia.py` change was needed. Guest-installed NVIDIA packages collide with the placeholders ("exists in
+filesystem", pacman refuses; apt and dnf would too): expected, nothing to fix. If the farm goes away the
+empty placeholder files stay (unchanged M5 behaviour). Guest glibc: kali 2.43, arch 2.44, fedora 2.43.
+
+### Open items for M7
+
+- Autostart (`autostart-users` is written, nothing starts spaces at login), entry wrappers or aliases
+  (`spaces enter arch` etc.), shortcut export for the new spaces, default desktop flavour: the packages are KDE
+  libraries and the agent only; there is no panel or menu.
+- `dev-uninstall` deletes `/var/lib/spaces/.host` (Arch keyring, 260 MB Fedora bootstrap, NVIDIA farm); they come back on the next
+  install or first `dnf5` use. It also forgets the xbps packages it installed (state file removed); pacman and m4 were
+  re-added to the state by hand after the uninstall/install cycle.
+- Mirrors: the Fedora metalink handed out stale or unreachable mirrors once (retry passed); `rankmirrors` is only for Arch.
+  A default `/etc/dnf/libdnf5.conf.d` in the bootstrap root with retries and `fastestmirror` could be added.
+- A future Void `arch-install-scripts`, `archlinux-keyring` or `dnf5` package would let the shims call `/usr/bin` directly.
