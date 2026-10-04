@@ -174,8 +174,18 @@ def check_orphans() -> None:
     if pid is None:
         return
     sudo("kill", "-9", str(pid))
+    open_brokers = run(["pgrep", "-f", "^/usr/lib/spaces/spaces-broker .*--space ubuntu "]).stdout.split()
+    started = time.monotonic()
     gone = wait_for(lambda: run(["pgrep", "-f", "spaces-system-broker --broker /run/spaces/ubuntu/"]).returncode != 0, 3, 0.1)
     check("the system broker dies with the launcher (PR_SET_PDEATHSIG)", gone)
+    # The session (open) broker has no PDEATHSIG: it holds the read end of a pipe whose write end the
+    # launcher keeps (spaces.lifeline), so it quits on POLLHUP when the launcher dies, SIGKILL included.
+    if open_brokers:
+        open_gone = wait_for(lambda: run(["pgrep", "-f", "^/usr/lib/spaces/spaces-broker .*--space ubuntu "]).returncode != 0, 3, 0.1)
+        check("the session broker dies with the launcher too (death pipe), within 3 s", open_gone,
+              f"{open_brokers} after {time.monotonic() - started:.1f} s")
+    else:
+        skip("the session broker dies with the launcher (death pipe)", "no session broker was running (no desktop session?)")
     run(["ubuntu", "--", "true"], timeout=150)
     brokers = run(["pgrep", "-f", "spaces-system-broker --broker /run/spaces/ubuntu/"]).stdout.split()
     lxc = run(["pgrep", "-x", "lxc-start"]).stdout.split()

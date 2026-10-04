@@ -874,7 +874,8 @@ Full text and evidence: `void/docs/apparmor-review.md`.
 
 ### Verification
 
-- `python3 -m pytest` 656 passed, 17 skipped (644 before; 8 wrapper tests, 3 secret-source tests, 1 stale-pin test).
+- `python3 -m pytest` 656 passed, 17 skipped at the time of M9 (644 before; 8 wrapper tests, 3 secret-source tests, 1 stale-pin test).
+  That count is stale: the count after the post-M9 work is in "Post-M9 gaps", section 4 (684 passed, 17 skipped).
 - `m9_check.py --regress`: 85 PASS, 0 FAIL, 9 SKIP (`m8_check.py` counts as one PASS item with its 84; the 9 SKIPs are
   the eight known-open mount items, two per space, and one for the three known m5 failures below).
 - `m5_check.py`: 40 PASS, 3 FAIL, all in section 4 (Vulkan on the NVIDIA GPU, EGL on `renderD128`, PRIME offload): the
@@ -960,3 +961,103 @@ filter returns ENOSYS and does not fall through to the default action.
   end (and leaks nothing when the spawn fails), and a compiled C probe of `lifeline.h` that checks the event loop quits
   on `POLLHUP`.
 - Not proven: the installed package's broker (the package is rebuilt and reinstalled at the end of this work, see below).
+
+### 3. Menu entries and icons
+
+- Four launchers, `void/data/applications/spaces-{ubuntu,arch,fedora,kali}.desktop` (`Terminal=true`, `Exec=` and `TryExec=`
+  the entry command `/usr/bin/{ubuntu,arch-linux,fedora,kali}`), installed by the `spaces` template with `vinstall`. They
+  pass `desktop-file-validate` without hints. Icons: upstream's in-tree launcher icons for Ubuntu, Arch and Fedora
+  (`data/icons/hicolor/256x256/apps`, the distribution logo with the Spaces mark); there was none for Kali, so
+  `spaces-kali.png` is made with the same recipe (logo from `art/distros/kali.png`, Spaces mark 110 px south-east) and
+  `art/distros/generate.sh` now loops over `arch fedora kali ubuntu`. No ImageMagick on this host: the Kali icon was
+  composed with Pillow and `rsvg-convert`, and looked right; regenerating it with `generate.sh` was not run.
+- Trademark: the readme has no disclaimer (only the AGPL text mentions the word); `void.md` has a new "Menu entries" section
+  saying that the logos are the owners' marks, shown only to identify the launcher.
+- Tests (`tests/test_void_desktop_entries.py`, 6): file set, `Terminal`/`Exec`/`Icon`, entry commands exist in the
+  template, the template installs entries and icons, icons are 256 px PNGs. The plain entry command opens a login shell in the
+  space (`ubuntu` in a pty: `soubarna@xserve:~$`).
+- Not proven: a menu entry shown by a real launcher (none was started); the entries were checked in the built packages
+  (see "Package check" below).
+
+### 5. CI, aarch64 and signing
+
+- `.github/workflows/void.yaml` (new): `pytest` and `build` jobs in `ghcr.io/void-linux/void-glibc-full`. The container
+  options, mirror switch, builder user, `XBPS_CHROOT_CMD=uchroot`, `XBPS_BUILD_ENVIRONMENT=void-packages-ci` and
+  `binary-bootstrap` were copied from void-packages' `.github/workflows/build.yaml` and `common/travis/{prepare,build}.sh`
+  (fetched, not written from memory). The matrix has `x86_64` (tests in the chroot, `-Q`) and `aarch64` (cross, no tests,
+  the only aarch64 coverage). The `pytest` job installs what the tests look for (`shutil.which`/`pkg-config` greps:
+  `cc`, `pkg-config` with gio-unix-2.0, `dbus-daemon`, `gpg`/`gpgv`, `dconf`, `rsvg-convert`, `script`, `setsid`,
+  bash, `unshare` for the root-only test) so that no test skips for want of a tool. The workflow parses as YAML; it has
+  **not run on GitHub**, so the container steps (`sudo -Eu builder -H`, the heredoc into `etc/conf`) are unverified there.
+- The aarch64 build needed two template changes: `archs="x86_64 aarch64"` and `TARGET_ARCH=${XBPS_TARGET_MACHINE}` for
+  `make install` (the guest ABI check took `uname -m`, the host, as the target). `xbps-build.sh` gained `--arch`
+  (`xbps-src -a`; refused together with `--check`). Proven locally: `xbps-build.sh --arch aarch64` cross-built all five packages;
+  `check_guest_abi.py --target aarch64 --glibc-max 2.17` passed in the build and the binaries in the `spaces` package are
+  `ELF 64-bit ... ARM aarch64`. Nothing was run on aarch64.
+- Signing: `void/tools/release.sh repo --key PATH --signedby "NAME <MAIL>" [--from] [--out] [--replace]` copies the newest package
+  per template and architecture, `xbps-rindex -a`, `--sign`, `--sign-pkg`; nothing is published. Proven with a throw-away
+  4096 bit key: the repository index and every package got a `.sig2`, `xbps-install` into a scratch root asked to trust the key
+  (signer and fingerprint shown), installed `ubuntu-keyring` from it, and refused a package changed by one byte at the hash check.
+  The documented fingerprint step (xbps' own fingerprint, not an `openssl` hash) was run. `tests/test_void_release_repo.py` (5)
+  uses a stand-in `xbps-rindex`; `tests/test_void_ci.py` (5) pins the workflow's container setup and the template.
+- musl: stated in `release.md`, `void.md` and the template comment: unsupported on purpose (glibc-pinned guest binaries; the
+  bare architecture names in `archs` exclude `-musl`); the CI has no musl entry.
+- Not done: no key exists, no repository is hosted, no tag pushed.
+
+### 4. `spaces configure` and `spaces delete` for real
+
+Both were listed as "not exercised". Fedora was the throw-away: it is the cheapest to recreate (6 min against 50 min for Kali,
+which is also 14 G). It was already installed; the state of a started space was snapshotted with a small script (runit service
+directory and link, rootfs, home, cache, netns pin, LXC run directory, cgroup, shortcut files, nsfs mounts, processes).
+
+- `sudo spaces configure fedora --user`: the TUI was driven through a pty (Enter on every page to Confirm, values unchanged).
+  `info.json` was rewritten with identical content, the running space was restarted (new `lxc-start`, started 5 s after the
+  write), came back to `running`, `fedora -- id -un` works, shortcuts reconciled (7 desktop files, 7 icons, as before), the
+  autostart entry stayed. No bug found.
+- `sudo spaces delete fedora --noconfirm` (no `--purge`), run with the code that was installed at the time: `/etc/sv/spaces-fedora`
+  and `/var/service/spaces-fedora` gone, rootfs gone, `/var/cache/spaces/fedora` gone, `/run/spaces/lxc/fedora` (config, netns
+  pin) gone, no nsfs mount, `/sys/fs/cgroup/spaces/fedora` gone, 0 shortcut desktop files and icons, no process; the state
+  directory held only `home` (`autostart-users`, `info.json`, `env` gone with the rootfs). **Bug found:** `/run/spaces/fedora`
+  (the portal and system-bus runtime directories and the generated open-data of the desktop integration) stayed. Nothing removes
+  it when a space stops (upstream's systemd unit had a `RuntimeDirectory=`), so for a deleted space it lives until the next boot.
+  Fixed in `LxcBackend.forget_unit` (`_forget_session_runtime`: reap stray helpers of that space with `kill_stale_helpers`, then
+  remove `/run/spaces/NAME`, never `/run/spaces/lxc`); unit tests for it and for the `lxc` name guard. A merely stopped
+  space keeps its `/run/spaces/NAME` too (seen after the orphaned Ubuntu container was stopped); that is unchanged, harmless and gone at reboot.
+- Package rebuilt and force-reinstalled (`xbps-install -fy -R <repo> spaces-0.0.1_1`) to carry the fix, the death pipe and
+  the menu entries: 4 `.desktop` files and 4 icons installed, `spaces-broker` contains `--death-fd`, `xbps-pkgdb spaces` clean,
+  `desktop-file-validate` clean. The forced reinstall runs the REMOVE hook, which stopped the running Ubuntu space and
+  removed its runit service (as documented in `void.md`); the next start recreates it.
+- `spaces create fedora --preset basic` recreated Fedora over the preserved home (6 min); it booted, `/run/spaces/fedora` held
+  the integration directories. Then `sudo spaces delete fedora --noconfirm --purge` on the **fixed** installed code: service,
+  rootfs, cache, **home and the whole `/var/lib/spaces/fedora`**, netns pin, cgroup, shortcuts and **`/run/spaces/fedora`** all
+  gone, `/run/spaces` kept only `lxc`, the other spaces untouched. Fedora was created once more at the end so that all four guests
+  exist for the post-reboot regression (its home is therefore new, the old Fedora home was the purge victim).
+- Not checked: the log directory `/var/log/spaces/NAME` (svlogd) stays after a delete, purge or not; it is root-owned text, left
+  alone on purpose. `spaces configure` without `--user` (the system-wide pages) was not driven.
+
+### 2 (continued): the installed broker
+
+With the reinstalled package: `kill -9` of the real launcher of Ubuntu (`spaces.priv launch ubuntu`, pid 31028) and the
+installed `/usr/lib/spaces/spaces-broker` (started with `--death-fd`) was gone after 40 ms. `m8_check.py` now asserts the same
+for the session broker next to its system-broker check (it was not run yet: the user runs it after the reboot). The orphaned
+Ubuntu container of that test was stopped with `spaces-lxc lxc-stop -k`.
+
+### Verification
+
+- `python3 -m pytest`: **684 passed, 17 skipped** (656 passed at M9, 27 new tests: lifeline 8, reaper 1, forget 2, menu entries 6,
+  signed repository 5, CI 5). One earlier run failed `test_terminal_ctrl_c_reaches_application` with a `TimeoutExpired` while an
+  `xbps-src` build and `xbps-pkgdb` were running; the test passes alone (0.5 s) and in a quiet full run, so it is load sensitive.
+  It needs a controlling terminal in the build chroot and is deselected in the template.
+- Not run, by instruction: `m9_check.py --regress` (all-guest regression) and the NVIDIA items of `m5_check.py` section 4.
+
+### 6. Tag
+
+Local `v0.0.1` is re-created with `git tag -fa` at the final commit of this work (it had pointed at the M9 commit). Nothing but
+the `void` branch is pushed.
+
+### Open after the post-M9 work
+
+- Root in a guest is host root through the new mount API (accepted risk; user namespace with a shifted map is the way out).
+- Never published: no tag pushed, no GitHub release, no key, no hosted repository; the workflow has not run on GitHub.
+- aarch64 is only cross-built; musl is unsupported on purpose.
+- The NVIDIA acceleration items of `m5_check.py` section 4 (the user's, after the kernel update and reboot).
