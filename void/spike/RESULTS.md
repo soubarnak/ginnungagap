@@ -1148,3 +1148,64 @@ exemption of `m9_check.py --regress` is gone: it listed three items that now pas
   `m5_check.py`: 44 passed, 0 failed, 0 skipped (the last run, with the new "/dev/uinput is not created in the guest" item).
 - Machine at the end: all four spaces stopped, `spaces-autostart` not linked, no `autostart-users`, both profiles loaded
   (`lxc-start` enforcing). No reboot was done.
+
+## M10 and release readiness (2026-10-04)
+
+Two tasks: close the new-mount-API hole with a user namespace (task 1), and run the never-run release items (task 2).
+Task 1 started with a gated spike (`void/spike/m10_userns.py`) on the stopped Ubuntu rootfs with a scratch LXC config under
+`/run/spaces-m10` (never `/run/spaces/lxc`), same host, kernel 7.2.9_1, LXC 6.0.3, shadow's `newuidmap`, ext4 root.
+
+### Task 1 spike: facts
+
+Design tested: `lxc.idmap` that keeps uid 1000 identical and shifts every other id, `lxc.rootfs.options = idmap=container`
+(the 21 GB rootfs is not chowned), `lxc.namespace.share.net = /proc/1/ns/net` through the pinned-monitor wrapper unchanged.
+
+- **Range choice.** The task text suggested 100000-165535. `/etc/subuid` gives that range to the user (`soubarna:100000:65536`), the
+  range of rootless podman; a guest root there would have been the same kuid as the user's podman root. Root owns
+  `root:1000000:65536`, so the shift base is **1000000** (`u 0 1000000 1000`, `u 1000 1000 1`, `u 1001 1001001 64535`; for gids the
+  same with 1:1 entries for audio 12, video 13, kvm 24, input 25 and 1000).
+- **Filesystem.** `/` is ext4 on kernel 7.2.9_1: idmapped mounts work (LXC mounted the rootfs idmapped, nothing was chowned;
+  files appear as `0:0`, `0:42` for `/etc/shadow`). `lxc.mount.entry` accepts `idmap=container` as well (the man page documents it
+  only for `lxc.rootfs.options`): a root-owned directory bound with `rbind,idmap=container` is `0:0` and writable for guest root, the
+  same bind without it is `65534:65534`, mode 700, and unusable.
+- **Blocker 0 (subuid).** LXC 6.0.3 run as root still goes through `newuidmap` when the map has an entry outside root's own subuid
+  range, and it refuses: `newuidmap failed to write mapping "newuidmap: uid range [1000-1001) -> [1000-1001) not allowed"`. So the
+  1:1 ids must be listed for root in `/etc/subuid` and `/etc/subgid` (`root:1000:1`, `root:12:2`, `root:24:2`, ...). They are
+  required, not optional. (The experiment appended them to the two files and restored them afterwards from copies.)
+- **Gate (b), `lxc.namespace.share.net = /proc/1/ns/net` from the new user namespace: passes.** No EPERM. The monitor stays in the
+  pinned namespace, the guest's init is in the host's network namespace (same inode) and in its own user namespace. The M9
+  netns-pin design needs no rework.
+- **Gate (a), sysfs: fails as predicted, and the fallback needs more than the suggested line.**
+  `Failed to mount "sysfs" onto "/var/lxc/containers/proc/sys"` / `Failed to mount "sysfs" on ... with flags 14`, EPERM (sysfs is
+  tagged with the network namespace, which the guest's user namespace does not own). Dropping `sys:` from `lxc.mount.auto` and
+  adding a bind of `/sys`:
+  * `bind,ro,nosuid,nodev,noexec` fails with `Failed to mount "/sys" onto ".../sys"`, EINVAL, and so does a plain non-recursive
+    `bind,ro,nosuid,nodev,noexec,relatime`: the kernel refuses a non-recursive bind of a mount that has locked children
+    (the host's sysfs has `/sys/kernel/security`, `/sys/firmware/efi/efivars` and the cgroup2 mount below it).
+  * `rbind,ro,nosuid,nodev,noexec,relatime` works (the flags a child user namespace inherits are locked, so they must repeat the
+    host's: `findmnt /sys -no OPTIONS` is `rw,nosuid,nodev,noexec,relatime`).
+  * That brings the host's submounts in: `securityfs` and `efivarfs` writable by mount flag, and the host's cgroup2 root *under*
+    LXC's own cgroup mount (LXC mounts `cgroup:rw:force` after the mount entries). Guest root cannot write them (DAC: the owner is
+    host root, not mapped), but they are exposed. Fix used in the spike and in the translator: hide each host submount of `/sys`
+    under an empty `ro` tmpfs (`lxc.mount.entry = tmpfs sys/kernel/security tmpfs ro,nosuid,nodev,noexec,size=4k 0 0`, same for
+    `sys/firmware/efi/efivars` and `sys/fs/cgroup`; mounts nested below another one are skipped, because their parent hides them).
+    With the masks the guest sees only sysfs plus LXC's cgroup2, and `/sys/kernel/security/apparmor/.load` does not exist.
+- **Guest udev.** With a bind of `/sys` the guest's udev stays off (`systemd-udevd` has `ConditionPathIsReadWrite=/sys`), the same
+  as under nspawn; the hotplug path is the host's (device policy plus `mountns.py`), not the guest's udev. The real check is in
+  the per-distro regression below.
+- **Boot.** First boots: `degraded`, only `systemd-resolved` (+ its two Varlink sockets) failed: `status=226/NAMESPACE`,
+  `Failed to set up mount namespacing: /run/credentials/systemd-resolved.service: Permission denied`. The cause was the AppArmor
+  profile: `apparmor="DENIED" operation="mount" info="failed flags match" name="/run/systemd/mount-rootfs/run/credentials/..."
+  flags="ro, nosuid, nodev, noexec, remount, nosymfollow, bind"`. systemd adds `nosymfollow` to that remount in a user namespace.
+  One added rule (`mount options=(remount, bind, nosuid, nodev, noexec, ro, nosymfollow) -> /**,`) fixes it; after it the scratch
+  guest was `running` with no failed unit. Side effect, a real behaviour change: the guest holds no capabilities over the host's
+  network namespace (`systemd-resolved: Missing CAP_NET_BIND_SERVICE capability, not creating stub listener on port 53`): no
+  privileged ports, no raw sockets or interface configuration from inside a space. The sandboxes that matter still work.
+- **The mount-API items flip.** In the scratch guest (shifted map): `mount(2)` of proc/sysfs/binfmt_misc/cgroup `denied`,
+  `core_pattern` `read-only`, `bind-remount` `read-only` (was WRITABLE), new API: fresh `proc` mounts but `core_pattern`
+  `read-only` and `sysrq-trigger` `read-only` (was WRITABLE), cloned `/proc/sys` `read-only`, `new-sysfs: EPERM`. Sysctl and
+  `/proc/sysrq-trigger` permission compare the kuid with the global root, and guest root is kuid 1000000.
+- **Peer credentials (found by reading the sources, fixed in the implementation).** The host side of the guest's system-bus relay
+  (`native/spaces_system_broker.c`, `auth_peer`) accepts only peers whose uid is 0, as seen from the host: guest root is
+  kuid 1000000 there. The host-PAM authentication socket (`src/spaces/auth.py`) checks the peer *pid* against the space's cgroup
+  and takes the uid from the request, so it works unchanged, and its socket is mode 0666.

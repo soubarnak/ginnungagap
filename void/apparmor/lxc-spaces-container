@@ -38,6 +38,7 @@ profile lxc-spaces-container flags=(attach_disconnected,mediate_deleted) {
   mount options=(rw, remount, bind) -> /**,
   mount options=(rw, remount, bind, nosuid, nodev, noexec) -> /**,
   mount options=(remount, bind, nosuid, nodev, noexec, ro) -> /**,
+  mount options=(remount, bind, nosuid, nodev, noexec, ro, nosymfollow) -> /**,
   mount options=(rw, rslave) -> /**,
   mount options=(rw, rprivate) -> /**,
   mount options=(rw, rshared) -> /**,
