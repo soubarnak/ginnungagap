@@ -83,6 +83,7 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("lxc.rootfs.path = dir:" + str(self.rootfs), text)
         self.assertIn("lxc.init.cmd = /usr/lib/systemd/systemd", text)
         self.assertIn("lxc.net.0.type = none", text)
+        self.assertIn("lxc.namespace.share.net = /proc/1/ns/net", text)
         self.assertIn("lxc.tty.max = 0", text)
         self.assertIn("lxc.environment = SYSTEMD_GETTY_AUTO=no", text)
         self.assertIn("lxc.mount.auto = proc:mixed sys:mixed cgroup:rw:force", text)

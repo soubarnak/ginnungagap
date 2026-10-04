@@ -1,10 +1,55 @@
 #!/bin/sh
-# Run an lxc-* tool with elogind's named cgroup v1 hierarchy hidden.
+# Run an lxc-* tool with elogind's named cgroup v1 hierarchy hidden, and keep each
+# container's LXC monitor out of the host network namespace.
 #
 # Void's elogind mounts a named v1 hierarchy at /sys/fs/cgroup/elogind next to
 # the unified cgroup2 mount. LXC then classifies the host as a legacy/hybrid
-# layout and fails with: Failed to set "devices.deny" to "a". Hiding that one
+# layout and fails with: Failed to set "devices.deny". Hiding that one
 # mount in a private mount namespace gives LXC (and the guest) a pure cgroup2
-# view without touching the host's elogind. Usage: spaces-lxc lxc-start ...
-exec unshare --mount --propagation private -- \
-    sh -c 'umount /sys/fs/cgroup/elogind 2>/dev/null; exec "$@"' sh "$@"
+# view without touching the host's elogind.
+#
+# Spaces share the host network namespace, and LXC's monitor command socket is an
+# abstract AF_UNIX socket, which belongs to the network namespace of the monitor. So
+# lxc-start runs in a fresh network namespace that is pinned at LXCPATH/NAME/netns (the
+# container config joins the host's again with lxc.namespace.share.net), and every other
+# tool enters that namespace before it talks to the monitor. The guest, which lives in
+# the host's network namespace, cannot reach the socket. Without a pinned namespace
+# (a container started before this wrapper did that) the tools run in the host's.
+#
+# Usage: spaces-lxc lxc-start -P LXCPATH -n NAME ...
+set -u
+
+# lxc-start may follow a shell that moves it into its cgroup first, so look for it
+# among the words before any "--" instead of taking the first word.
+lxcpath= name= prev= start=
+for arg in "$@"; do
+    [ "$arg" = -- ] && break
+    case ${arg##*/} in lxc-start) start=1 ;; esac
+    case $prev in
+        -P) lxcpath=$arg ;;
+        -n) name=$arg ;;
+    esac
+    prev=$arg
+done
+
+netns=
+case $name in
+    ''|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*) ;;
+    *) [ -n "$lxcpath" ] && netns=$lxcpath/$name/netns ;;
+esac
+
+inner='umount /sys/fs/cgroup/elogind 2>/dev/null; exec "$@"'
+
+if [ -n "$netns" ] && [ -n "$start" ]; then
+    # A pin left by a launcher that died is replaced: the caller holds the launcher
+    # lock, so nothing owns the old namespace any more.
+    [ "$(stat -f -c %T "$netns" 2>/dev/null)" = nsfs ] && umount "$netns" 2>/dev/null
+    : >>"$netns" || exit 1
+    exec unshare --net="$netns" -- \
+        unshare --mount --propagation private -- sh -c "$inner" sh "$@"
+fi
+if [ -n "$netns" ] && [ "$(stat -f -c %T "$netns" 2>/dev/null)" = nsfs ]; then
+    exec unshare --mount --propagation private -- \
+        nsenter --net="$netns" -- sh -c "$inner" sh "$@"
+fi
+exec unshare --mount --propagation private -- sh -c "$inner" sh "$@"

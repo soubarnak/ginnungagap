@@ -184,6 +184,19 @@ class StaleContainerTests(unittest.TestCase):
         quiet.assert_not_called()
         self.assertFalse(self.base.exists())
 
+    def test_stale_netns_pin_is_unmounted_and_removed(self) -> None:
+        runtime = self.root / "lxc" / "work"
+        runtime.mkdir(parents=True)
+        pin = runtime / "netns"
+        pin.touch()
+        with (
+            mock.patch.object(self.backend, "_state", lambda name: None),
+            mock.patch.object(lxc, "_quiet") as quiet,
+        ):
+            self.backend._reap_stale_container("work")
+        quiet.assert_called_once_with(["umount", str(pin)], timeout=10)
+        self.assertFalse(pin.exists())
+
     def test_unstoppable_container_raises(self) -> None:
         ticks = iter(range(0, 1000, 5))
         with (

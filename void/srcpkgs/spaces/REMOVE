@@ -29,7 +29,13 @@ pre)
 	if [ -f /etc/pacman.d/mirrorlist ] && cmp -s /etc/pacman.d/mirrorlist /usr/share/spaces/void/arch-mirrorlist; then
 		rm -f /etc/pacman.d/mirrorlist
 	fi
-	pgrep -x lxc-start >/dev/null 2>&1 || rm -rf /run/spaces
+	if ! pgrep -x lxc-start >/dev/null 2>&1; then
+		# A launcher that died leaves the pinned network namespace of its monitor mounted.
+		for pin in /run/spaces/lxc/*/netns; do
+			[ -e "$pin" ] && { umount "$pin" 2>/dev/null || :; }
+		done
+		rm -rf /run/spaces
+	fi
 	echo "spaces: services stopped. Your spaces are kept in /var/lib/spaces"
 	echo "        (also /var/cache/spaces, /var/log/spaces); delete them by hand if wanted."
 	;;

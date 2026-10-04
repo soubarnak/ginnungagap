@@ -104,6 +104,19 @@ def _runtime_dir(name: str) -> Path:
     return lxc_path() / _check_name(name)
 
 
+def _release_netns(name: str) -> None:
+    """Unpin the private network namespace that spaces-lxc made for lxc-start."""
+
+    pin = _runtime_dir(name) / "netns"
+    if not pin.exists():
+        return
+    _quiet(["umount", str(pin)], timeout=10)
+    try:
+        pin.unlink()
+    except OSError:
+        pass
+
+
 def _atomic_write(path: Path, text: str, mode: int) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(text, encoding="utf-8")
@@ -624,6 +637,7 @@ class LxcBackend(HostBackend):
                 Path(RUNIT_SUPERVISE) / f"supervise.{service}{suffix}",
                 ignore_errors=True,
             )
+        _release_netns(name)
         shutil.rmtree(_runtime_dir(name), ignore_errors=True)
 
     def enable_user_autostart(self, user_name: str, name: str) -> None:
@@ -728,6 +742,7 @@ class LxcBackend(HostBackend):
             "lxc-start", name, "-F", "-o", str(runtime / "lxc.log")
         )
         cleanup: list[Any] = [
+            lambda: _release_netns(name),
             lambda: marker.unlink(missing_ok=True),
             launcher_lock.close,
         ]
@@ -788,6 +803,7 @@ class LxcBackend(HostBackend):
                 time.sleep(0.2)
             else:
                 raise RuntimeError(f"leftover container of {name} would not stop")
+        _release_netns(name)
         _remove_cgroup(self._cgroup_root() / "spaces" / name)
 
     def _ready_loop(

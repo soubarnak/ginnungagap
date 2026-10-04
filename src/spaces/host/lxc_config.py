@@ -397,6 +397,10 @@ def translate(
         f"lxc.uts.name = {_config_value(hostname or machine)}",
         f"lxc.rootfs.path = dir:{_config_value(str(rootfs))}",
         "lxc.net.0.type = none",
+        # The wrapper starts lxc-start in a private network namespace (so the
+        # abstract command socket stays out of the guest's reach); the container
+        # joins the host's.
+        "lxc.namespace.share.net = /proc/1/ns/net",
         "lxc.autodev = 1",
         "lxc.tty.max = 0",
         "lxc.pty.max = 1024",
