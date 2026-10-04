@@ -934,8 +934,11 @@ class LxcBackend(HostBackend):
             )
 
         if new is None:
+            # Allow-all clears the rule list, so the deny rules go after it.
             if old is not None:
                 cgroup("allow", "a")
+            for rule in devices_lxc.full_deny_rules():
+                cgroup("deny", rule)
         elif old is None:
             cgroup("deny", "a")
             for rule in new:

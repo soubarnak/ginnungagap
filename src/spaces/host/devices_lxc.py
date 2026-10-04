@@ -8,6 +8,21 @@ from collections.abc import Sequence
 from pathlib import Path
 
 PROC_DEVICES = Path("/proc/devices")
+SYS_WATCHDOG = Path("/sys/class/watchdog")
+
+# Level "full" allows every device, but some must stay out of a guest's
+# reach: opening a watchdog node arms a host-wide reset timer, and the VT and
+# console majors operate the host's virtual terminals (see
+# devices.HOST_TERMINAL_CHARACTER_MAJORS, which discover() filters at every
+# level). Major 5 holds /dev/tty, /dev/console and /dev/ptmx, which BASE_RULES
+# must keep, so only its remaining minor (ttyprintk, writes to the kernel
+# log) is denied. misc 10:130 is /dev/watchdog.
+FULL_DENY_RULES = (
+    "c 4:* rwm",
+    "c 5:3 rwm",
+    "c 7:* rwm",
+    "c 10:130 rwm",
+)
 
 # Same defaults as LXC's common.conf: pseudo devices, pty slaves and fuse.
 BASE_RULES = (
@@ -101,6 +116,39 @@ def translate(allow: Sequence[tuple[str, str]]) -> list[str]:
     return rules
 
 
+def full_deny_rules() -> list[str]:
+    """Return the deny rules that stay in force at level full.
+
+    Besides FULL_DENY_RULES this lists every character device registered under
+    /sys/class/watchdog and every major /proc/devices names "watchdog".
+    Nothing here ever opens a device.
+    """
+
+    rules = list(FULL_DENY_RULES)
+
+    def add(rule: str) -> None:
+        if rule not in rules:
+            rules.append(rule)
+
+    try:
+        for entry in sorted(SYS_WATCHDOG.iterdir()):
+            try:
+                text = (entry / "dev").read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            major, _, minor = text.partition(":")
+            if major.isdigit() and minor.isdigit():
+                add(f"c {int(major)}:{int(minor)} rwm")
+    except OSError:
+        pass
+    try:
+        for major in _majors("char", "watchdog"):
+            add(f"c {major}:* rwm")
+    except OSError:
+        pass
+    return rules
+
+
 def closed_rules(rules: Sequence[str]) -> list[str]:
     """Return the full allow list of a closed policy: base plus extras."""
 
@@ -110,10 +158,17 @@ def closed_rules(rules: Sequence[str]) -> list[str]:
 
 
 def config_text(rules: Sequence[str] | None) -> str:
-    """Return the devices include file; None means unrestricted."""
+    """Return the devices include file.
+
+    None means level full: everything is allowed except full_deny_rules().
+    """
 
     if rules is None:
-        return "# devices: full\n"
+        lines = ["lxc.cgroup2.devices.allow = a"]
+        lines.extend(
+            f"lxc.cgroup2.devices.deny = {rule}" for rule in full_deny_rules()
+        )
+        return "\n".join(lines) + "\n"
     lines = ["lxc.cgroup2.devices.deny = a"]
     lines.extend(
         f"lxc.cgroup2.devices.allow = {rule}" for rule in closed_rules(rules)

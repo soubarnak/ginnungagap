@@ -285,10 +285,43 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("lxc.cgroup2.devices.allow = c 226:0 rw", spec.devices_text)
         self.assertIn("lxc.cgroup2.devices.allow = c 1:3 rwm", spec.devices_text)
         full = self.run_translate(self.command(), device_rules=None)
-        self.assertNotIn("deny", full.devices_text)
+        self.assertNotIn("deny = a", full.devices_text)
         self.assertIn(
             f"lxc.include = {self.runtime / 'devices.conf'}", spec.config_text
         )
+
+    def test_full_level_keeps_watchdog_and_console_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            sysfs = Path(tmp) / "watchdog"
+            (sysfs / "watchdog0").mkdir(parents=True)
+            (sysfs / "watchdog0" / "dev").write_text("246:0\n")
+            (sysfs / "watchdog1").mkdir()
+            (sysfs / "watchdog1" / "dev").write_text("247:3\n")
+            (sysfs / "broken").mkdir()
+            proc = Path(tmp) / "devices"
+            proc.write_text("Character devices:\n  4 tty\n246 watchdog\n\nBlock devices:\n")
+            with (
+                mock.patch.object(devices_lxc, "SYS_WATCHDOG", sysfs),
+                mock.patch.object(devices_lxc, "PROC_DEVICES", proc),
+            ):
+                text = devices_lxc.config_text(None)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "lxc.cgroup2.devices.allow = a")
+        for rule in (
+            "c 10:130 rwm", "c 4:* rwm", "c 7:* rwm", "c 5:3 rwm",
+            "c 246:0 rwm", "c 247:3 rwm", "c 246:* rwm",
+        ):
+            self.assertIn(f"lxc.cgroup2.devices.deny = {rule}", lines)
+        self.assertNotIn("lxc.cgroup2.devices.deny = c 5:*", text)
+        self.assertEqual(len(lines), len(set(lines)))
+        # Without sysfs or /proc/devices only the fixed rules remain.
+        with (
+            mock.patch.object(devices_lxc, "SYS_WATCHDOG", Path("/nonexistent")),
+            mock.patch.object(devices_lxc, "PROC_DEVICES", Path("/nonexistent")),
+        ):
+            self.assertEqual(
+                devices_lxc.full_deny_rules(), list(devices_lxc.FULL_DENY_RULES)
+            )
 
     def test_hostname_and_machine(self) -> None:
         argv = self.command()

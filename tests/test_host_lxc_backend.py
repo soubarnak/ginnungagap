@@ -340,7 +340,9 @@ class DevicePolicyTests(Base):
             self.assertIn("devices.deny = a", text)
             self.assertIn("devices.allow = c 226:0 rw", text)
             self.backend.set_device_policy("work", "full", ())
-            self.assertNotIn("deny", (runtime / "devices.conf").read_text())
+            full = (runtime / "devices.conf").read_text()
+            self.assertNotIn("deny = a", full)
+            self.assertIn("devices.deny = c 10:130 rwm", full)
             self.assertEqual(json.loads((runtime / "policy.json").read_text())["level"], "full")
 
     def test_bad_permissions_raise_called_process_error(self) -> None:
@@ -364,6 +366,27 @@ class DevicePolicyTests(Base):
         self.assertEqual(
             calls,
             [("devices.allow", "c 8:8 rw"), ("devices.deny", "c 9:9 rw")],
+        )
+
+    def test_live_update_to_full_denies_after_allow_all(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command[command.index("-n") + 2], command[-1]))
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch.object(lxc.LxcBackend, "is_running", return_value=True),
+            mock.patch.object(lxc.subprocess, "run", fake_run),
+            mock.patch.object(
+                lxc.devices_lxc, "full_deny_rules", return_value=["c 10:130 rwm"]
+            ),
+        ):
+            self.backend.set_device_policy("work", "disabled", [("/dev/char/9:9", "rw")])
+            calls.clear()
+            self.backend.set_device_policy("work", "full", ())
+        self.assertEqual(
+            calls, [("devices.allow", "a"), ("devices.deny", "c 10:130 rwm")]
         )
 
 
