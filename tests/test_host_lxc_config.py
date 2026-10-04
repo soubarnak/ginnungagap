@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -371,6 +372,7 @@ class DeviceRuleTests(unittest.TestCase):
             with self.assertRaises(devices_lxc.DeviceSpecError):
                 devices_lxc.translate_spec("/dev/char/1:3", bad)
 
+    @unittest.skipUnless(os.path.exists("/dev/net/tun"), "BASE_DEVICE_ALLOW names /dev/net/tun")
     def test_base_allow_translates(self) -> None:
         rules = devices_lxc.translate(launch_module.BASE_DEVICE_ALLOW)
         self.assertIn("c 136:* rw", rules)

@@ -30,22 +30,28 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          # the void-glibc-full image has no /tmp: tempfile-based tests fail without it
+          # the void-glibc-full image has no /tmp
           mkdir -p /tmp && chmod 1777 /tmp
           xbps-install -Syu xbps && xbps-install -yu
           xbps-install -y git gcc make pkg-config glib-devel pam-devel dbus dconf gnupg \
-              librsvg-utils adwaita-icon-theme util-linux bash tar \
+              librsvg-utils adwaita-icon-theme gsettings-desktop-schemas util-linux bash tar \
               python3 python3-pytest python3-Pillow python3-rich python3-textual
+          # The tests are written for an ordinary user: as root, tests that expect a permission
+          # error pass wrongly, and a Spaces test removes its (here empty) parent directory,
+          # which was /tmp.
+          useradd -m tester
 
       - name: Check out
         uses: classabbyamp/treeless-checkout-action@v1
 
       - name: Run the tests
         # test_terminal_ctrl_c_reaches_application needs a controlling terminal (the same
-        # deselection as the template's make_check_args).
+        # deselection as the template's make_check_args). umask 022: a test checks that a
+        # directory it made is not group-writable.
         run: |
-          python3 -m pytest -q -p no:cacheprovider tests \
-              --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application
+          chown -R tester .
+          su tester -c 'umask 022 && python3 -m pytest -q -p no:cacheprovider tests \
+              --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application'
 
   # xbps-src builds. The container, its options, the mirror switch, the builder user and the
   # `uchroot` chroot style are copied from void-packages' .github/workflows/build.yaml and
