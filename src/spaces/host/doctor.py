@@ -7,7 +7,9 @@ WARN when run unprivileged; run `sudo spaces-void doctor` for the full set.
 
 from __future__ import annotations
 
+import fnmatch
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Iterator
@@ -20,7 +22,9 @@ Result = tuple[str, str, str]
 CGROUP = Path("/sys/fs/cgroup")
 APPARMOR_PROFILES = Path("/sys/kernel/security/apparmor/profiles")
 APPARMOR_ENABLED = Path("/sys/module/apparmor/parameters/enabled")
-PROFILE = "spaces-container"
+PROFILE = "lxc-spaces-container"
+APPARMOR_DIR = Path("/etc/apparmor.d")
+LXC_START = "/usr/bin/lxc-start"
 SVDIR = Path("/etc/sv")
 SERVICE_DIR = Path("/var/service")
 CONFIG = Path("/etc/spaces/config.json")
@@ -48,6 +52,27 @@ def check_lxc() -> Iterator[Result]:
         yield "FAIL", "lxc wrapper", f"{wrapper} is missing: run dev-install.sh"
 
 
+def change_profile_targets(root: Path = APPARMOR_DIR) -> list[str]:
+    """Return the `change_profile -> target` patterns the lxc-start profile allows.
+
+    The profile is /etc/apparmor.d/usr.bin.lxc-start; its rules come from the
+    included abstractions/lxc/start-container (and local/usr.bin.lxc-start when a
+    distribution has one).
+    """
+
+    texts = []
+    for name in ("usr.bin.lxc-start", "abstractions/lxc/start-container", "local/usr.bin.lxc-start"):
+        try:
+            texts.append((root / name).read_text())
+        except OSError:
+            continue
+    return re.findall(r"^\s*change_profile\s+(?:\S+\s+)?->\s*(\S+?),", "\n".join(texts), re.M)
+
+
+def lxc_start_allows(profile: str, root: Path = APPARMOR_DIR) -> bool:
+    return any(fnmatch.fnmatchcase(profile, pattern) for pattern in change_profile_targets(root))
+
+
 def check_apparmor() -> Iterator[Result]:
     try:
         enabled = APPARMOR_ENABLED.read_text().strip() == "Y"
@@ -62,10 +87,8 @@ def check_apparmor() -> Iterator[Result]:
     if not Path(f"/etc/apparmor.d/{PROFILE}").exists():
         yield "FAIL", "apparmor profile file", f"/etc/apparmor.d/{PROFILE} is missing"
     try:
-        loaded = any(
-            line.startswith(f"{PROFILE} ")
-            for line in APPARMOR_PROFILES.read_text().splitlines()
-        )
+        profiles = APPARMOR_PROFILES.read_text()
+        loaded = any(line.startswith(f"{PROFILE} ") for line in profiles.splitlines())
     except PermissionError:
         yield "WARN", "apparmor profile loaded", "cannot read the profile list as this user; use sudo"
     except OSError as error:
@@ -78,6 +101,14 @@ def check_apparmor() -> Iterator[Result]:
                 f"{PROFILE} is not loaded; the launcher loads it on demand, or: "
                 f"sudo apparmor_parser -r /etc/apparmor.d/{PROFILE}"
             )
+        confined = any(line.startswith(f"{LXC_START} ") for line in profiles.splitlines())
+        if confined and not lxc_start_allows(PROFILE):
+            yield "FAIL", "apparmor lxc-start profile", (
+                f"{LXC_START} is confined and does not allow change_profile -> {PROFILE}: "
+                "every launch fails (the profile name has to match lxc-*)"
+            )
+        elif confined:
+            yield "PASS", "apparmor lxc-start profile", f"confined, allows change_profile -> {PROFILE}"
 
 
 def check_cgroups() -> Iterator[Result]:

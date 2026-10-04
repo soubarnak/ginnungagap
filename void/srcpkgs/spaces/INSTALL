@@ -18,10 +18,22 @@ post)
 	fi
 
 	# AppArmor: (re)load the container profile. Running spaces keep the loaded
-	# profile attached until they restart; the launcher also loads it on demand.
+	# profile attached until they restart; the launcher also loads it on demand, and
+	# the runit core service 09-apparmor.sh loads /etc/apparmor.d at every boot (its
+	# name starts with lxc- so that Void's usr.bin.lxc-start allows the change_profile).
 	if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
-		apparmor_parser -r /etc/apparmor.d/spaces-container >/dev/null 2>&1 ||
-			echo "spaces: could not load the AppArmor profile (run: sudo apparmor_parser -r /etc/apparmor.d/spaces-container)"
+		apparmor_parser -r /etc/apparmor.d/lxc-spaces-container >/dev/null 2>&1 ||
+			echo "spaces: could not load the AppArmor profile (run: sudo apparmor_parser -r /etc/apparmor.d/lxc-spaces-container)"
+		# The profile was called spaces-container in earlier builds: its file is
+		# gone with the old package files, drop what is left of it. A profile that running
+		# containers still use stays loaded (it leaves with the next boot).
+		if grep -q '^spaces-container ' /sys/kernel/security/apparmor/profiles 2>/dev/null &&
+			! pgrep -x lxc-start >/dev/null 2>&1; then
+			printf spaces-container >/sys/kernel/security/apparmor/.remove 2>/dev/null || :
+		fi
+	fi
+	if grep -qs '^profile spaces-container ' /etc/apparmor.d/spaces-container; then
+		rm -f /etc/apparmor.d/spaces-container
 	fi
 
 	# Generated /etc/spaces/config.json (and the NVIDIA userspace farm). A config.json

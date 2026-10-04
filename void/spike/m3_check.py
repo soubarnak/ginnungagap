@@ -164,7 +164,7 @@ def check_install() -> None:
                 "spaces-system-broker",
             )
         ),
-        "/etc/apparmor.d/spaces-container",
+        "/etc/apparmor.d/lxc-spaces-container",
         "/etc/pam.d/spaces",
         "/etc/spaces/config.json",
         "/usr/share/polkit-1/actions/org.anatase.spaces.policy",
@@ -221,7 +221,7 @@ def check_install() -> None:
             "/usr/lib/spaces",
             "/usr/share/spaces",
             str(site / "spaces"),
-            "/etc/apparmor.d/spaces-container",
+            "/etc/apparmor.d/lxc-spaces-container",
             "/etc/pam.d/spaces",
             "/etc/spaces",
             *sorted(str(p) for p in Path("/etc/sv").glob("spaces-*")),

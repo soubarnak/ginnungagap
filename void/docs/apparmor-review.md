@@ -1,6 +1,6 @@
-# Review of the `spaces-container` AppArmor profile (M9)
+# Review of the `lxc-spaces-container` AppArmor profile (M9)
 
-Subject: `void/apparmor/spaces-container`, installed as `/etc/apparmor.d/spaces-container`. It is LXC's
+Subject: `void/apparmor/lxc-spaces-container`, installed as `/etc/apparmor.d/lxc-spaces-container`. It is LXC's
 `lxc-container-default-cgns` (via `abstractions/lxc/container-base`) plus the mounts that systemd needs to build
 unit sandboxes in a guest. Reviewed on kernel 7.2.8, AppArmor 4.1.7 (parser and kernel `network_v9`), LXC 6.0.3,
 with the four guests Ubuntu, Arch, Kali and Fedora. The tests are in `void/spike/m9_check.py`; what they did
@@ -121,9 +121,18 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
 6. **Signal denials from `tail`** (`signal=exists`, peer `unconfined` or `lxc-attach`) in `dmesg` are
    `kill -0` existence probes from a `tail` in the guest towards a process outside the profile. Harmless.
 
-7. **Nothing loads the profile at boot except the launcher.** It is loaded by the package INSTALL hook and
-   again by the launcher before `lxc-start` (`LxcBackend._load_apparmor`); `spaces-void doctor` checks it. An
-   upgrade reloads it, and a reload applies to running containers.
+7. **The profile is loaded at boot with the rest of `/etc/apparmor.d`, and that confines `lxc-start`.** Void's
+   `/etc/runit/core-services/09-apparmor.sh` runs `apparmor_parser -a /etc/apparmor.d` at every boot, which loads
+   the distribution's `usr.bin.lxc-start` and so confines `/usr/bin/lxc-start` (enforcing). That profile allows
+   `change_profile -> lxc-*` and `unconfined` only, and has no `local/` include to extend. The profile used to be
+   called `spaces-container`: it worked in every test, none of which had booted with the distro profile loaded,
+   and the first launch after a reboot failed (`apparmor="DENIED" operation="change_profile"
+   profile="/usr/bin/lxc-start"`). It is now `lxc-spaces-container`, which matches the existing rule and leaves
+   the distribution's file untouched. The package INSTALL hook loads it (and drops the old name on an upgrade),
+   REMOVE unloads it, the launcher loads it on demand, `spaces-void doctor` fails when `lxc-start` is confined
+   by a profile that would refuse it, `tests/test_void_apparmor.py` pins the name against the installed rule,
+   and the `bootpath` section of `m9_check.py` unloads both profiles, runs the real boot service and starts a
+   space. A reload applies to running containers.
 
 ## How to repeat the checks
 

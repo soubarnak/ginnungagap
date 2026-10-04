@@ -14,10 +14,14 @@ Sections:
   lifecycle  stop removes the pin and leaves no nsfs mount, restart makes a new one,
              kill -9 of the launcher is recovered through the pin
   apparmor   every distro boots to `running` with no failed unit under the tightened
-             spaces-container profile, systemd unit sandboxes still work, and mount(2) of a
+             lxc-spaces-container profile, systemd unit sandboxes still work, and mount(2) of a
              fresh proc, sysfs, binfmt_misc or cgroup v1 is denied (it would give the guest's
              root the host's writable /proc/sys). The new mount API is not mediated by
              AppArmor; the check reports what it can do as a known open item
+  bootpath   the profile set a boot produces: both lxc-start's own profile and ours are unloaded,
+             then runit's core service 09-apparmor.sh (`apparmor_parser -a /etc/apparmor.d`) runs as at
+             boot, and a space must start with usr.bin.lxc-start ENFORCING (no change_profile denial;
+             the first reboot showed the distro profile refusing a profile that does not match lxc-*)
   --regress  also runs m5_check.py (devices, hotplug, stale container) and m8_check.py
              (package, enter, sudo bridge, GUI on niri, NVIDIA, autostart, orphaned broker)
              as separate processes and requires them to pass
@@ -263,12 +267,12 @@ os.rmdir(t)
 
 
 def check_apparmor() -> None:
-    print("\n== AppArmor profile (spaces-container) ==", flush=True)
-    text = Path("/etc/apparmor.d/spaces-container").read_text()
+    print("\n== AppArmor profile (lxc-spaces-container) ==", flush=True)
+    text = Path("/etc/apparmor.d/lxc-spaces-container").read_text()
     rules = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
     check("the installed profile has no fresh-proc or cgroup v1 mount rule",
           not any(rule.startswith("mount fstype=proc") or rule.startswith("mount fstype=cgroup ") for rule in rules))
-    check("the profile is loaded", "spaces-container" in sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout)
+    check("the profile is loaded", "lxc-spaces-container" in sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout)
     stop_all()
     sudo("dmesg", "-C")
     start_all()
@@ -322,15 +326,54 @@ def check_apparmor() -> None:
 # -------------------------------------------------------------------- main
 
 
-# NVIDIA acceleration items of m5 that fail on this machine whatever the wrapper and profile are
-# (the Vulkan loader drops the NVIDIA ICD for having no physical device and EGL cannot initialise on
-# the dGPU's render node, while nvidia-smi works). Observed identically with the pre-M9 spaces-lxc
-# and profile; they predate M9 and are not what it changes.
-KNOWN_M5 = (
-    "4 vulkaninfo lists the NVIDIA GPU",
-    "4 EGL on /dev/dri/renderD128 renders in hardware",
-    "4 PRIME offload selects the NVIDIA GL driver",
-)
+BOOT_SERVICE = "/etc/runit/core-services/09-apparmor.sh"
+LXC_START_PROFILE = "/usr/bin/lxc-start"
+
+
+def profile_modes() -> dict[str, str]:
+    modes = {}
+    for line in sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout.splitlines():
+        name, _, mode = line.rpartition(" ")
+        modes[name] = mode.strip("()")
+    return modes
+
+
+def check_boot_path() -> None:
+    print("\n== boot-path profile set (what 09-apparmor.sh loads at boot) ==", flush=True)
+    stop_all()
+    boot_text = Path(BOOT_SERVICE).read_text()
+    check("the boot service exists and loads /etc/apparmor.d as a whole",
+          "apparmor_parser -a" in boot_text and "/etc/apparmor.d" in boot_text)
+    sudo("apparmor_parser", "-R", "/etc/apparmor.d/usr.bin.lxc-start")
+    sudo("apparmor_parser", "-R", "/etc/apparmor.d/lxc-spaces-container")
+    modes = profile_modes()
+    check("both profiles are unloaded before the simulated boot",
+          LXC_START_PROFILE not in modes and "lxc-spaces-container" not in modes)
+    # The real service file, with runit's msg() stubbed.
+    boot = sudo("sh", "-c", f"msg() {{ echo \"$@\"; }}; . {BOOT_SERVICE}")
+    # Only the two profiles are unloaded (tearing down every profile of a running desktop is not
+    # worth it), so `apparmor_parser -a` reports "Profile already exists" for the others and exits
+    # non-zero; at a real boot it starts from an empty kernel. What matters is that the profiles we
+    # unloaded were added without an error.
+    complaints = [line for line in boot.stdout.splitlines()
+                  if ("lxc-start" in line or "lxc-spaces-container" in line) and "already exists" not in line]
+    check("the boot service ran and added the two profiles without an error",
+          "Loading AppArmor profiles" in boot.stdout and not complaints, "; ".join(complaints)[-300:])
+    modes = profile_modes()
+    check("usr.bin.lxc-start is loaded and ENFORCING after the boot load", modes.get(LXC_START_PROFILE) == "enforce",
+          str(modes.get(LXC_START_PROFILE)))
+    check("lxc-spaces-container is loaded by the boot load, not only by the launcher",
+          "lxc-spaces-container" in modes, str(modes.get("lxc-spaces-container")))
+    sudo("dmesg", "-C")
+    started = run(["ubuntu", "--", "true"], timeout=200)
+    check("a space starts under the boot-loaded profile set", started.returncode == 0, (started.stdout + started.stderr)[-300:])
+    denied = [line for line in sudo("dmesg").stdout.splitlines()
+              if 'apparmor="DENIED"' in line and 'operation="change_profile"' in line]
+    check("no change_profile denial", not denied, "; ".join(denied)[-400:])
+    pid = sudo(WRAPPER, "/usr/bin/lxc-info", "-P", LXC_PATH, "-n", "ubuntu", "-p", "-H").stdout.strip()
+    attr = sudo("cat", f"/proc/{pid}/attr/current").stdout.strip() if pid.isdigit() else "?"
+    check("the guest init runs confined by lxc-spaces-container", attr == "lxc-spaces-container (enforce)", attr)
+    stop_all()
 
 
 def check_regressions() -> None:
@@ -340,9 +383,6 @@ def check_regressions() -> None:
                               text=True, timeout=3600, check=False)
         summary = (re.findall(r"^\d+ passed.*$", done.stdout, re.M) or ["no summary"])[-1]
         failed = re.findall(r"^FAILED: (.*)$", done.stdout, re.M)
-        if script == "m5_check.py" and failed and all(label in KNOWN_M5 for label in failed):
-            skip(f"{script}: {len(failed)} known NVIDIA acceleration failures, nothing else", f"{summary}; {failed}")
-            continue
         check(f"{script} passes ({summary})", done.returncode == 0, "; ".join(failed)[-600:])
 
 
@@ -356,6 +396,7 @@ def main() -> int:
     check_isolation()
     check_lifecycle()
     check_apparmor()
+    check_boot_path()
     stop_all()
     check("no nsfs mount, container or helper is left after stopping everything", not nsfs_mounts() and not stray(),
           f"{nsfs_mounts()} {stray()}")

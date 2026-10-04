@@ -4,10 +4,15 @@
 # the guest root and remount it. Stock LXC profiles deny that, and
 # systemd-logind then fails to start. Load with: apparmor_parser -r <file>
 # Replaces the SELinux confinement used by upstream on Fedora.
+#
+# The name starts with "lxc-" on purpose. Void's /etc/apparmor.d/usr.bin.lxc-start is loaded at boot
+# (runit core service 09-apparmor.sh) and confines /usr/bin/lxc-start; it only allows
+# `change_profile -> lxc-*` (and unconfined), and it has no local include to extend. A profile with
+# any other name makes the launch fail with "Failed to write AppArmor profile". Keep the prefix.
 
 #include <tunables/global>
 
-profile spaces-container flags=(attach_disconnected,mediate_deleted) {
+profile lxc-spaces-container flags=(attach_disconnected,mediate_deleted) {
   #include <abstractions/lxc/container-base>
 
   deny mount fstype=devpts,

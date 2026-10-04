@@ -408,7 +408,7 @@ def translate(
         f"lxc.init.cmd = {init}",
         "lxc.signal.halt = SIGRTMIN+3",
         f"lxc.mount.auto = {mount_auto}",
-        "lxc.apparmor.profile = spaces-container",
+        "lxc.apparmor.profile = lxc-spaces-container",
         *cgroup_lines,
         f"lxc.cap.keep = {cap_keep}",
         f"lxc.seccomp.profile = {runtime_dir / 'seccomp.profile'}",

@@ -107,7 +107,7 @@ def check_package() -> None:
     pkgdb = sudo("xbps-pkgdb", *PACKAGES, timeout=300)
     check("xbps-pkgdb reports nothing for the five packages", pkgdb.returncode == 0 and not pkgdb.stdout.strip(), pkgdb.stdout + pkgdb.stderr)
     for path in ("/usr/bin/spaces.priv", "/usr/lib/spaces/spaces-pam", "/usr/lib/spaces/spaces-broker",
-                 "/usr/lib/spaces/spaces-system-broker", "/etc/pam.d/spaces", "/etc/apparmor.d/spaces-container",
+                 "/usr/lib/spaces/spaces-system-broker", "/etc/pam.d/spaces", "/etc/apparmor.d/lxc-spaces-container",
                  "/usr/share/polkit-1/actions/org.anatase.spaces.policy", "/var/lib/spaces", "/var/cache/spaces", "/var/log/spaces"):
         info = os.stat(path)
         check(f"{path}: root-owned, not group/world writable, no setuid/setgid",
@@ -211,7 +211,7 @@ def check_lifecycle() -> None:
     check("the running space kept running (same lxc-start)", run(["pgrep", "-x", "lxc-start"]).stdout.split() == container, str(container))
     check("ubuntu still answers", run(["ubuntu", "--", "id", "-un"]).stdout.strip() != "")
     profiles = sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout
-    check("the AppArmor profile is loaded after the upgrade", "spaces-container" in profiles)
+    check("the AppArmor profile is loaded after the upgrade", "lxc-spaces-container" in profiles)
     if Path("/dev/nvidiactl").exists():
         smi = run(["ubuntu", "--", "nvidia-smi", "-L"])
         check("nvidia-smi still works in the running space", "GPU 0" in smi.stdout, smi.stdout + smi.stderr)
@@ -229,7 +229,7 @@ def check_lifecycle() -> None:
           and run(["pgrep", "-f", r"^runsv spaces-|^svlogd -tt /var/log/spaces"]).returncode != 0, str(stray()))
     check("no spaces service links or directories are left",
           not list(Path("/var/service").glob("spaces-*")) and not list(Path("/etc/sv").glob("spaces-*")))
-    check("the AppArmor profile is unloaded", "spaces-container" not in sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout)
+    check("the AppArmor profile is unloaded", "lxc-spaces-container" not in sudo("cat", "/sys/kernel/security/apparmor/profiles").stdout)
     check("the files are gone (spaces, spaces.priv, config.json, python package)",
           not Path("/usr/bin/spaces").exists() and not Path("/usr/bin/spaces.priv").exists()
           and not Path("/etc/spaces/config.json").exists() and not list(Path("/usr/lib").glob("python3*/site-packages/spaces")))

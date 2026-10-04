@@ -87,7 +87,7 @@ class TranslatorTests(unittest.TestCase):
         self.assertIn("lxc.tty.max = 0", text)
         self.assertIn("lxc.environment = SYSTEMD_GETTY_AUTO=no", text)
         self.assertIn("lxc.mount.auto = proc:mixed sys:mixed cgroup:rw:force", text)
-        self.assertIn("lxc.apparmor.profile = spaces-container", text)
+        self.assertIn("lxc.apparmor.profile = lxc-spaces-container", text)
         self.assertIn("lxc.cgroup.dir.container = spaces-work", text)
         self.assertNotIn("common.conf", text)
         self.assertEqual(spec.resolv_target, "etc/resolv.conf")

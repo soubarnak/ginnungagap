@@ -14,9 +14,9 @@ pre)
 	if [ -x /usr/lib/spaces/spaces-stop-services ]; then
 		/usr/lib/spaces/spaces-stop-services --remove
 	fi
-	if [ -d /sys/kernel/security/apparmor ] && [ -e /etc/apparmor.d/spaces-container ] &&
+	if [ -d /sys/kernel/security/apparmor ] && [ -e /etc/apparmor.d/lxc-spaces-container ] &&
 		command -v apparmor_parser >/dev/null 2>&1; then
-		apparmor_parser -R /etc/apparmor.d/spaces-container >/dev/null 2>&1 || :
+		apparmor_parser -R /etc/apparmor.d/lxc-spaces-container >/dev/null 2>&1 || :
 	fi
 	# Generated files: config.json only while it still matches the recorded hash.
 	if [ -f /etc/spaces/config.json.generated ] && [ -f /etc/spaces/config.json ] &&

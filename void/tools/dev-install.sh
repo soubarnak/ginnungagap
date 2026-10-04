@@ -206,11 +206,11 @@ install -m 0755 "$ROOT"/void/runit/spaces-autostart/log/run /etc/sv/spaces-autos
 ln -sfn /run/runit/supervise.spaces-autostart /etc/sv/spaces-autostart/supervise
 ln -sfn /run/runit/supervise.spaces-autostart.log /etc/sv/spaces-autostart/log/supervise
 install -Dm755 "$ROOT/void/bin/spaces-lxc" "$LIBEXEC/spaces-lxc"
-install -Dm644 "$ROOT/void/apparmor/spaces-container" \
-    /etc/apparmor.d/spaces-container
+install -Dm644 "$ROOT/void/apparmor/lxc-spaces-container" \
+    /etc/apparmor.d/lxc-spaces-container
 if command -v apparmor_parser >/dev/null && [ -d /sys/kernel/security/apparmor ]; then
-    apparmor_parser -r /etc/apparmor.d/spaces-container 2>/dev/null ||
-        echo "warning: apparmor_parser could not load spaces-container" >&2
+    apparmor_parser -r /etc/apparmor.d/lxc-spaces-container 2>/dev/null ||
+        echo "warning: apparmor_parser could not load lxc-spaces-container" >&2
 fi
 
 install -d -m 0755 "$STATE_DIR" /var/lib/spaces /var/cache/spaces /var/log/spaces
