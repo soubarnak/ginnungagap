@@ -265,6 +265,28 @@ def check_config() -> Iterator[Result]:
         yield "WARN", "config.json.new", "a newer generated file exists (config.json was edited by hand)"
 
 
+def check_userns() -> Iterator[Result]:
+    from . import userns
+
+    names = [n for n in autostart.space_names() if userns.enabled(n)]
+    if not names:
+        yield "PASS", "user namespace", "off for every space (opt-in: sudo spaces-void userns enable NAME)"
+        return
+    for name in names:
+        try:
+            lost_u, lost_g = userns.subid_status(userns.plan_for(name))
+        except userns.UsernsError as error:
+            yield "FAIL", f"user namespace {name}", str(error)
+            continue
+        if lost_u or lost_g:
+            lines = "; ".join(
+                part for part in (userns.describe(lost_u, userns.SUBUID), userns.describe(lost_g, userns.SUBGID)) if part
+            )
+            yield "FAIL", f"user namespace {name}", f"root lacks {lines}: sudo spaces-void userns setup {name}"
+        else:
+            yield "PASS", f"user namespace {name}", "on, /etc/subuid and /etc/subgid cover the id map"
+
+
 CHECKS: tuple[Callable[[], Iterator[Result]], ...] = (
     check_lxc,
     check_apparmor,
@@ -274,6 +296,7 @@ CHECKS: tuple[Callable[[], Iterator[Result]], ...] = (
     check_services,
     check_config,
     check_nvidia,
+    check_userns,
 )
 
 

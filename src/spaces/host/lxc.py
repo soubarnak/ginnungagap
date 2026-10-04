@@ -28,7 +28,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import devices_lxc, guest_locale, lxc_config, session_env
+from . import devices_lxc, guest_locale, lxc_config, session_env, userns
 from .base import HostBackend
 
 DEFAULT_LXC_PATH = "/run/spaces/lxc"
@@ -710,6 +710,29 @@ class LxcBackend(HostBackend):
             stderr=subprocess.DEVNULL,
         )
 
+    def guest_root_uid(self, name: str) -> int | None:
+        return userns.SHIFT_BASE if userns.enabled(name) else None
+
+    def _userns_plan(self, name: str, argv: Sequence[str]) -> userns.Plan | None:
+        """The id map of the space when it runs in a user namespace, else None."""
+
+        if not userns.enabled(name):
+            return None
+        sources = [s for s in _bind_sources(argv) if s.startswith("/dev/")]
+        try:
+            plan, notes = userns.fit(
+                userns.plan_for(name, sources),
+                userns.parse_subids(userns.SUBUID.read_text(encoding="utf-8")),
+                userns.parse_subids(userns.SUBGID.read_text(encoding="utf-8")),
+            )
+        except (OSError, userns.UsernsError) as error:
+            raise lxc_config.UnsupportedLaunchOption(
+                f"space {name} wants a user namespace but {error}; run: sudo spaces-void userns setup {name}"
+            ) from error
+        for note in notes:
+            logging.getLogger(__name__).warning("user namespace of %s: %s", name, note)
+        return plan
+
     def _load_policy(self, runtime: Path) -> list[str] | None:
         try:
             data = json.loads((runtime / "policy.json").read_text())
@@ -740,12 +763,16 @@ class LxcBackend(HostBackend):
 
         cgroup_mode = os.environ.get("SPACES_LXC_CGROUP_MODE", "relative")
         cgroup_base = f"spaces/{name}" if cgroup_mode == "relative" else None
+        plan = self._userns_plan(name, argv)
+        if plan is not None:
+            userns.allow_traversal([*_bind_sources(argv), str(runtime / "resolv.conf")])
         spec = lxc_config.translate(
             argv,
             environment,
             runtime_dir=runtime,
             device_rules=self._load_policy(runtime),
             cgroup_base=cgroup_base,
+            userns=plan,
         )
         for relative, kind in spec.precreate:
             _precreate(spec.rootfs, relative, kind)
@@ -951,6 +978,7 @@ class LxcBackend(HostBackend):
                 "spaces.host.mountns",
                 arguments[0],
                 str(pid),
+                *(("--as-owner",) if userns.enabled(name) else ()),
                 *arguments[1:],
             ],
             check=True,
@@ -1138,6 +1166,17 @@ class LxcBackend(HostBackend):
             if f"spaces-{name}" in path.split("/"):
                 return True
         return False
+
+
+def _bind_sources(argv: Sequence[str]) -> list[str]:
+    """The host paths that the nspawn --bind and --bind-ro arguments name."""
+
+    sources = []
+    for arg in argv:
+        option, _equals, value = arg.partition("=")
+        if option in ("--bind", "--bind-ro"):
+            sources.append(lxc_config._unescape(value)[0])
+    return sources
 
 
 def _lock_launcher(runtime: Path) -> Any:

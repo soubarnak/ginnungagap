@@ -157,3 +157,8 @@ class HostBackend(ABC):
     @abstractmethod
     def peer_in_space(self, pid: int, name: str) -> bool:
         """Return whether a host process belongs to the space."""
+
+    def guest_root_uid(self, name: str) -> int | None:
+        """What root in the space is on the host when it has a user namespace, else None."""
+
+        return None

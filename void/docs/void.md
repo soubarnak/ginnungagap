@@ -249,7 +249,7 @@ plus an SELinux policy. This port keeps the same layers except SELinux:
 
 | Layer | Void port |
 |---|---|
-| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default), no user namespace (root in a space is host root, as upstream). The LXC *monitor* is not in the guest's network namespace, see below |
+| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default); no user namespace by default (root in a space is host root, as upstream), **an opt-in user namespace** where guest root is an unprivileged kuid, see "User namespace" below. The LXC *monitor* is not in the guest's network namespace, see below |
 | Capabilities | `lxc.cap.keep` = nspawn's default set, widened or narrowed per permission level like upstream |
 | Syscalls | seccomp: LXC's `common.seccomp` base plus the per-permission adjustments |
 | Devices | cgroup2 device controller (eBPF), levels `disabled`, `basic`, `admin`, `full` from the permission settings; at `full` watchdogs and VT/console devices stay denied; `/dev/uinput` and `/dev/uhid` (input injection into the host) are only given at `full`, whatever udev tags them; hot-plug and NVIDIA nodes follow the level |
@@ -267,9 +267,10 @@ What is lost or different compared with upstream on Fedora/Anatase:
 * AppArmor does not mediate the new mount API (`fsopen`, `open_tree`, `mount_setattr`), so root in a space
   can mount a fresh `proc` and write host sysctls such as `core_pattern` and `sysrq-trigger`. Seccomp cannot
   close it: systemd 259 needs `fsopen`/`fsmount` for its unit credentials and fails (journald, tmpfiles) without them,
-  and `mount_setattr` cannot be taken away either. This is an accepted risk with upstream parity (`systemd-nspawn`
-  without SELinux has it too); the real fix is a user namespace with a shifted id map and idmapped home binds.
-  Do not run untrusted code as root in a space (`void/docs/apparmor-review.md`, finding 1).
+  and `mount_setattr` cannot be taken away either. By default this is an accepted risk with upstream parity
+  (`systemd-nspawn` without SELinux has it too). The fix is the opt-in **user namespace** (next section): with
+  it guest root is not host root and the kernel refuses those writes. Without it do not run untrusted code as root
+  in a space (`void/docs/apparmor-review.md`, finding 1).
 * **The LXC monitor's command socket** is an abstract socket, and abstract sockets belong to a network
   namespace, which the guest shares with the host. `/usr/lib/spaces/spaces-lxc` therefore starts `lxc-start`
   in a new network namespace that it pins at `/run/spaces/lxc/NAME/netns` (a bind mount of the namespace
@@ -288,6 +289,54 @@ What is lost or different compared with upstream on Fedora/Anatase:
   saver lock/inhibit, notifications, clipboard, USB, screencast, ...). Review: `void/docs/portal-filter-review.md`.
 * Processes started by `spaces enter` run in a transient service of the guest's own systemd (inside the
   container), not in a host scope.
+
+## User namespace (opt-in)
+
+`void/docs/apparmor-review.md` (finding 1) explains why the default design cannot stop guest root from reaching
+the host's `/proc/sys` through the new mount API. A space can instead run in a user namespace whose id map shifts
+every id except the ones that must mean the same on both sides, so guest root is the unprivileged host uid
+1000000 and the kernel's permission checks (sysctl and `/proc/sysrq-trigger` compare with the global root)
+refuse the writes. It is **off by default**.
+
+```
+spaces-void userns status                     # which spaces use one, and whether /etc/subuid and /etc/subgid cover the map
+sudo spaces-void userns enable ubuntu         # add the missing subuid/subgid lines, switch the space to a user namespace
+sudo spaces-void userns enable --all
+sudo spaces-void userns disable ubuntu
+sudo sv down /var/service/spaces-ubuntu       # it takes effect at the next start
+```
+
+The choice is the file `/var/lib/spaces/NAME/userns` (`on` or `off`); a space without one follows `"userns": true`
+in `/etc/spaces/void.json` (default `false`). `spaces-void doctor` fails when an enabled space lacks subuid/subgid ranges.
+
+The map (`lxc.idmap`) is `0..65535` shifted by 1000000 (root's own range in `/etc/subuid`, not the user's
+`100000`, which rootless podman uses), except for the ids of the users of the space (so the home directory, the
+`XDG_RUNTIME_DIR` sockets, PipeWire and the D-Bus proxy need no idmapped binds for them) and the host groups that
+own device nodes (audio, video, input, render, kvm, plugdev) and the nodes the space is handed. Those ids are listed for root in `/etc/subuid` and `/etc/subgid`
+(LXC 6.0 run as root still goes through `newuidmap`, which refuses ids that are not listed); `userns enable` and
+`userns setup` add them as `root:ID:COUNT` lines, nothing else edits the files.
+
+What changes, and why:
+
+* The root file system and the host-root-owned Spaces directories that are bound into the guest (`home/root`, the
+  package cache, `/run/spaces/NAME/system-bus`, `auth.sock`, `resolv.conf`) are **idmapped mounts**
+  (`idmap=container`): nothing is chowned, and guest root sees them as root-owned. The launcher gives the 0700 runtime
+  directories above the sources `o+x` (search, not listing) because the binds are set up by an unprivileged helper.
+* `/sys` cannot be mounted fresh (sysfs belongs to the shared network namespace), so it is a read-only recursive
+  bind of the host's, repeating the host's locked mount flags, and every host mount below it (securityfs, efivarfs,
+  the host's cgroup2 root) is hidden under an empty read-only tmpfs. The guest's udev stays off (as under nspawn);
+  hot-plug is the host's job.
+* The host side of the system-bus relay accepts the mapped root as a peer (`SPACES_GUEST_ROOT_UID`, set by the
+  launcher); the host-PAM socket checks the process's cgroup, not its uid, and is unchanged.
+* The AppArmor profile has one more remount rule (`nosymfollow`, which systemd adds in a user namespace).
+* Behaviour changes inside the space: guest root has no capabilities over the host's network namespace (no
+  privileged ports, no raw sockets, no interface configuration, `systemd-resolved` logs that it has no stub
+  listener) and cannot write the network sysctls it could before; there is no `sysfs` or `proc` mount of its own.
+
+What it does not do: guest root keeps host uid 1000 and the device groups' ids (it can `setuid(1000)` to the host
+user inside the guest), it still shares the host's network namespace and abstract sockets, and kernel bugs still
+escape. `void/spike/m9_check.py --userns [--regress]` runs the whole check set with it on; the results per distro are
+in `void/spike/RESULTS.md` ("M10 and release readiness").
 
 ## Troubleshooting
 
@@ -323,9 +372,8 @@ sudo sv status /var/service/spaces-NAME
   (`.github/workflows/void.yaml`) runs the unit tests and builds the packages for x86_64 and, cross-built only,
   aarch64 (`void/docs/release.md`). x86_64 glibc is the supported platform; musl is intentionally unsupported (the
   helpers that run in the guests are pinned to glibc 2.17).
-* Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1). Seccomp
-  cannot take the API away from systemd; the fix is a user namespace with a shifted id map, which this design
-  (shared network, host PAM, device cgroup) does not have yet.
+* Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1) unless the
+  space uses the opt-in user namespace ("User namespace" above). Seccomp cannot take the API away from systemd.
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

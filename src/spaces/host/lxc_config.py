@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import devices_lxc
+from . import devices_lxc, userns as userns_mod
 
 SECCOMP_BASE = Path("/usr/share/lxc/config/common.seccomp")
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
@@ -202,12 +202,16 @@ def translate(
     device_rules: Sequence[str] | None = (),
     cgroup_base: str | None = None,
     seccomp_base: str | None = None,
+    userns: userns_mod.Plan | None = None,
+    mountinfo: Sequence[tuple[str, str]] | None = None,
 ) -> LxcSpec:
     """Translate nspawn arguments into an LXC configuration.
 
     device_rules are extra cgroup2 allow rules; None means unrestricted.
     cgroup_base is the host cgroup (relative to the cgroup2 root) lxc-start
     runs in, e.g. "spaces/NAME"; None selects the absolute spaces-NAME dirs.
+    userns, when given, runs the guest in a user namespace with that id map
+    (see userns.py); mountinfo is the host's mount table for the /sys bind.
     """
 
     args = list(argv)
@@ -347,6 +351,8 @@ def translate(
         options = ["rbind" if kind == "dir" else "bind"]
         if read_only:
             options.append("ro")
+        if userns is not None and userns_mod.needs_idmap(source):
+            options.append("idmap=container")
         if top in (*FRESH_TMPFS, *FRESH_OTHER):
             options.append(f"create={kind}")
         elif relative != resolv_target:
@@ -378,6 +384,22 @@ def translate(
         mount_auto = "proc:rw sys:rw cgroup:rw:force"
     else:
         mount_auto = "proc:mixed sys:mixed cgroup:rw:force"
+    userns_lines: list[str] = []
+    sys_lines: list[str] = []
+    if userns is not None:
+        # A fresh sysfs is refused in a user namespace that shares the host's network namespace
+        # (EPERM), so /sys is a read-only bind of the host's and each host mount below it is hidden
+        # under an empty tmpfs (LXC mounts its own cgroup2 on the last of them afterwards).
+        mount_auto = mount_auto.replace("sys:rw ", "").replace("sys:mixed ", "")
+        table = list(mountinfo) if mountinfo is not None else userns_mod.read_mountinfo()
+        userns_lines = ["lxc.rootfs.options = idmap=container", *userns.idmap_lines()]
+        sys_lines = [
+            f"lxc.mount.entry = /sys sys none {userns_mod.sys_bind_options(table)} 0 0",
+            *(
+                f"lxc.mount.entry = tmpfs {point.lstrip('/')} tmpfs ro,nosuid,nodev,noexec,size=4k 0 0"
+                for point in userns_mod.sys_submounts(table)
+            ),
+        ]
 
     if cgroup_base is None:
         cgroup_lines = [
@@ -396,6 +418,7 @@ def translate(
     lines = [
         f"lxc.uts.name = {_config_value(hostname or machine)}",
         f"lxc.rootfs.path = dir:{_config_value(str(rootfs))}",
+        *userns_lines,
         "lxc.net.0.type = none",
         # The wrapper starts lxc-start in a private network namespace (so the
         # abstract command socket stays out of the guest's reach); the container
@@ -416,6 +439,7 @@ def translate(
         f"lxc.include = {runtime_dir / 'devices.conf'}",
         "lxc.mount.entry = tmpfs run tmpfs rw,nosuid,nodev,mode=755 0 0",
         "lxc.mount.entry = tmpfs tmp tmpfs rw,nosuid,nodev 0 0",
+        *sys_lines,
         *(text for _depth, text in entries),
     ]
 

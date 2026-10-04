@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import stat
 import subprocess
 import threading
 import time
 from pathlib import Path
 
-from . import _, core
+from . import _, core, host
 
 logger = logging.getLogger(__name__)
 RUNTIME_ROOT = Path("/run/spaces")
@@ -78,7 +79,12 @@ class SystemBusService:
         command = [str(BROKER), "--broker", str(self.socket)]
         if self.network == "admin":
             command.append("--admin")
-        self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL)
+        environment = dict(os.environ)
+        # Root of a guest with a user namespace is not uid 0 to the broker (host/userns.py).
+        guest_root = host.get_backend().guest_root_uid(self.directory.parent.name)
+        if guest_root is not None:
+            environment["SPACES_GUEST_ROOT_UID"] = str(guest_root)
+        self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL, env=environment)
 
     def start(self) -> None:
         for path in (self.directory.parent, self.directory):

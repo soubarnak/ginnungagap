@@ -9,6 +9,7 @@ The source is cloned as a detached mount tree on the host side first, so a
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import os
 import stat
@@ -55,7 +56,48 @@ def _enter(pid: int) -> None:
         os.close(descriptor)
 
 
-def bind(pid: int, source: str, destination: str, read_only: bool, mkdir: bool) -> None:
+@contextlib.contextmanager
+def _as_owner_of(directory: str, enabled: bool):
+    """Create or remove entries in `directory` with the file system ids of its owner.
+
+    A guest with a user namespace has file systems (its tmpfs mounts, the idmapped rootfs and
+    binds) that cannot map the host's root: creating or removing an entry there as host root fails
+    with EOVERFLOW. Taking the owner's ids works for every directory the guest has (guest root's
+    tmpfs, the user's home); only the file system ids change, the capabilities for the mount calls
+    stay and the ids go back to root afterwards.
+    """
+
+    if not enabled:
+        yield
+        return
+    status = os.stat(directory)
+    _libc.setfsuid(status.st_uid)
+    _libc.setfsgid(status.st_gid)
+    try:
+        yield
+    finally:
+        _libc.setfsuid(0)
+        _libc.setfsgid(0)
+
+
+def _makedirs(path: str, owner: bool) -> None:
+    missing = []
+    while path and not os.path.isdir(path):
+        missing.append(path)
+        path = os.path.dirname(path)
+    for directory in reversed(missing):
+        with _as_owner_of(os.path.dirname(directory) or "/", owner):
+            os.mkdir(directory)
+
+
+def bind(
+    pid: int,
+    source: str,
+    destination: str,
+    read_only: bool,
+    mkdir: bool,
+    owner: bool = False,
+) -> None:
     mode = os.stat(source).st_mode
     tree = _check(
         _libc.syscall(
@@ -80,11 +122,12 @@ def bind(pid: int, source: str, destination: str, read_only: bool, mkdir: bool) 
     _enter(pid)
     if mkdir:
         if stat.S_ISDIR(mode):
-            os.makedirs(destination, exist_ok=True)
+            _makedirs(destination, owner)
         else:
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            _makedirs(os.path.dirname(destination), owner)
             if not os.path.exists(destination):
-                os.close(os.open(destination, os.O_CREAT | os.O_WRONLY, 0o644))
+                with _as_owner_of(os.path.dirname(destination), owner):
+                    os.close(os.open(destination, os.O_CREAT | os.O_WRONLY, 0o644))
     _check(
         _libc.syscall(
             SYS_MOVE_MOUNT,
@@ -97,7 +140,7 @@ def bind(pid: int, source: str, destination: str, read_only: bool, mkdir: bool) 
     )
 
 
-def _prune_device_placeholder(destination: str, root: str = "") -> None:
+def _prune_device_placeholder(destination: str, root: str = "", owner: bool = False) -> None:
     """Remove what bind() created for a device node once it is unmounted.
 
     The empty file left in the guest's /dev (and directories that became
@@ -110,21 +153,23 @@ def _prune_device_placeholder(destination: str, root: str = "") -> None:
     try:
         status = os.lstat(root + destination)
         if stat.S_ISREG(status.st_mode) and status.st_size == 0:
-            os.unlink(root + destination)
+            with _as_owner_of(os.path.dirname(root + destination), owner):
+                os.unlink(root + destination)
     except OSError:
         return
     while len(parts) > 3:
         parts.pop()
         try:
-            os.rmdir(root + "/".join(parts))
+            with _as_owner_of(os.path.dirname(root + "/".join(parts)), owner):
+                os.rmdir(root + "/".join(parts))
         except OSError:
             break
 
 
-def unbind(pid: int, destination: str) -> None:
+def unbind(pid: int, destination: str, owner: bool = False) -> None:
     _enter(pid)
     _check(_libc.umount2(os.fsencode(destination), MNT_DETACH))
-    _prune_device_placeholder(destination)
+    _prune_device_placeholder(destination, owner=owner)
 
 
 def main(argv: list[str]) -> int:
@@ -136,9 +181,11 @@ def main(argv: list[str]) -> int:
     bind_parser.add_argument("destination")
     bind_parser.add_argument("--read-only", action="store_true")
     bind_parser.add_argument("--no-mkdir", action="store_true")
+    bind_parser.add_argument("--as-owner", action="store_true", help="guest with a user namespace")
     unbind_parser = commands.add_parser("unbind")
     unbind_parser.add_argument("pid", type=int)
     unbind_parser.add_argument("destination")
+    unbind_parser.add_argument("--as-owner", action="store_true", help="guest with a user namespace")
     arguments = parser.parse_args(argv)
     if not arguments.destination.startswith("/"):
         print("destination must be absolute", file=sys.stderr)
@@ -151,9 +198,10 @@ def main(argv: list[str]) -> int:
                 arguments.destination,
                 arguments.read_only,
                 not arguments.no_mkdir,
+                arguments.as_owner,
             )
         else:
-            unbind(arguments.pid, arguments.destination)
+            unbind(arguments.pid, arguments.destination, arguments.as_owner)
     except OSError as error:
         print(f"{arguments.command}: {error}", file=sys.stderr)
         return 1

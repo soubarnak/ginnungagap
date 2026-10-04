@@ -359,8 +359,10 @@ def generate(
     if not isinstance(extra_distros, dict):
         raise ValueError(f"{extras_path}: distros must be an object")
     for key in extras:
-        if key not in ("version", "distros", "desktop_flavor"):
+        if key not in ("version", "distros", "desktop_flavor", "userns"):
             raise ValueError(f"{extras_path}: unknown option {key}")
+    if not isinstance(extras.get("userns", False), bool):
+        raise ValueError(f"{extras_path}: userns must be true or false")
     for distro, value in extra_distros.items():
         if not isinstance(value, dict):
             raise ValueError(f"{extras_path}: bad entry for {distro}")

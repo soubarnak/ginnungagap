@@ -689,13 +689,21 @@ static void guest_names(GDBusConnection *bus, const gchar *sender, const gchar *
 
 /* Broker authentication and startup */
 
+/* Root in a guest with a user namespace is not uid 0 here: the launcher passes the uid that it
+ * has on the host (SPACES_GUEST_ROOT_UID); 0 means that the guest has no user namespace. */
+static uid_t guest_root_uid;
+
 static gboolean auth_peer(
     GDBusAuthObserver *observer, GIOStream *stream, GCredentials *credentials, gpointer data)
 {
     (void)observer;
     (void)stream;
     (void)data;
-    return credentials && g_credentials_get_unix_user(credentials, NULL) == 0;
+    if (!credentials) {
+        return FALSE;
+    }
+    uid_t uid = g_credentials_get_unix_user(credentials, NULL);
+    return uid == 0 || (guest_root_uid != 0 && uid == guest_root_uid);
 }
 
 static gboolean auth_mechanism(GDBusAuthObserver *observer, const char *mechanism, gpointer data)
@@ -750,6 +758,11 @@ int main(int argc, char **argv)
     }
     app.broker = g_str_equal(argv[1], "--broker");
     app.admin = argc == 4;
+    const char *mapped = g_getenv("SPACES_GUEST_ROOT_UID");
+    if (mapped) {
+        guint64 value = g_ascii_strtoull(mapped, NULL, 10);
+        guest_root_uid = value > 0 && value < G_MAXINT32 ? (uid_t)value : 0;
+    }
     if (app.broker) {
         /* The host broker must not outlive the launcher that started it
          * (kill -9, crash): the kernel kills it with its parent. */

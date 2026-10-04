@@ -6,6 +6,8 @@
     spaces-void doctor
     spaces-void sync-config
     spaces-void install-flavor NAME [--flavor auto|kde|gtk]
+    spaces-void userns status
+    spaces-void userns setup|enable|disable [NAME ... | --all]
 
 Commands that change the system re-run themselves through sudo when started
 as a normal user. Installed as /usr/bin/spaces-void (dev-install.sh).
@@ -23,7 +25,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import autostart, flavor
+from . import autostart, flavor, userns
 
 NEEDS_ROOT = ("enable", "disable", "gc", "sync-config", "install-flavor")
 
@@ -106,6 +108,72 @@ def cmd_autostart_change(
             "note: nothing happens until the service is linked: "
             "sudo ln -s /etc/sv/spaces-autostart /var/service/"
         )
+    return 0
+
+
+# -------------------------------------------------------------------- userns
+
+
+def _userns_names(names: Sequence[str], every: bool, root: Path) -> list[str] | None:
+    if every:
+        return autostart.space_names(root)
+    if not names:
+        print("spaces-void: name a space or pass --all", file=sys.stderr)
+        return None
+    return list(names)
+
+
+def cmd_userns_status(root: Path = userns.STATE_ROOT) -> int:
+    names = autostart.space_names(root)
+    print(f"{'SPACE':<16}{'USERNS':<8}SUBUID/SUBGID")
+    for name in names:
+        state = "on" if userns.enabled(name, root) else "off"
+        try:
+            lost_u, lost_g = userns.subid_status(userns.plan_for(name, root=root))
+        except userns.UsernsError as error:
+            note = str(error)
+        else:
+            note = "ready" if not (lost_u or lost_g) else "missing: " + "; ".join(
+                part for part in (userns.describe(lost_u, userns.SUBUID), userns.describe(lost_g, userns.SUBGID)) if part
+            )
+        print(f"{name:<16}{state:<8}{note}")
+    default = "on" if userns.configured_default() else "off"
+    print(f"default for spaces without a choice (/etc/spaces/void.json, \"userns\"): {default}")
+    return 0
+
+
+def cmd_userns_setup(names: Sequence[str], every: bool, root: Path = userns.STATE_ROOT) -> int:
+    chosen = _userns_names(names, every, root)
+    if chosen is None:
+        return 2
+    code = 0
+    for name in chosen:
+        try:
+            plan = userns.plan_for(name, root=root)
+            added_u, added_g = userns.setup_subids(plan)
+        except (userns.UsernsError, OSError) as error:
+            print(f"spaces-void: {name}: {error}", file=sys.stderr)
+            code = 1
+            continue
+        added = [part for part in (userns.describe(added_u, userns.SUBUID), userns.describe(added_g, userns.SUBGID)) if part]
+        print(f"{name}: " + ("added " + "; ".join(added) if added else "subuid and subgid already cover the map"))
+    return code
+
+
+def cmd_userns_enable(names: Sequence[str], every: bool, enable: bool, root: Path = userns.STATE_ROOT) -> int:
+    chosen = _userns_names(names, every, root)
+    if chosen is None:
+        return 2
+    if enable and cmd_userns_setup(chosen, False, root):
+        return 1
+    for name in chosen:
+        try:
+            changed = userns.set_enabled(name, enable, root)
+        except (userns.UsernsError, OSError) as error:
+            print(f"spaces-void: {name}: {error}", file=sys.stderr)
+            return 1
+        print(f"user namespace of {name}: {'on' if enable else 'off'}" + ("" if changed else " (unchanged)"))
+    print("takes effect when the space starts again: sudo sv down /var/service/spaces-NAME")
     return 0
 
 
@@ -194,6 +262,17 @@ def build_parser() -> argparse.ArgumentParser:
     gc.add_argument("--dry-run", "-n", action="store_true")
     sub.add_parser("doctor", help="check the installation")
     sub.add_parser("sync-config", help="regenerate /etc/spaces/config.json")
+    ns = sub.add_parser("userns", help="run spaces in a user namespace (guest root is not host root)")
+    ns_sub = ns.add_subparsers(dest="action", required=True)
+    ns_sub.add_parser("status", help="show which spaces use one and whether subuid/subgid cover it")
+    for action, text in (
+        ("setup", "add the ids the map needs to /etc/subuid and /etc/subgid"),
+        ("enable", "turn the user namespace on (runs setup first)"),
+        ("disable", "turn the user namespace off"),
+    ):
+        p = ns_sub.add_parser(action, help=text)
+        p.add_argument("name", nargs="*")
+        p.add_argument("--all", action="store_true", help="every space")
     flavor_parser = sub.add_parser("install-flavor", help="install the desktop flavour packages into a space")
     flavor_parser.add_argument("name")
     flavor_parser.add_argument("--flavor", choices=flavor.FLAVORS)
@@ -206,6 +285,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = arguments.command
     action = getattr(arguments, "action", None)
     changing = command in NEEDS_ROOT or (command == "autostart" and action in NEEDS_ROOT)
+    changing = changing or (command == "userns" and action != "status")
     if command == "gc" and arguments.dry_run:
         changing = False
     if changing and os.geteuid() != 0:
@@ -219,6 +299,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             user=arguments.user,
             boot=arguments.boot,
         )
+    if command == "userns":
+        if action == "status":
+            return cmd_userns_status()
+        if action == "setup":
+            return cmd_userns_setup(arguments.name, arguments.all)
+        return cmd_userns_enable(arguments.name, arguments.all, action == "enable")
     if command == "gc":
         return cmd_gc(arguments.dry_run)
     if command == "doctor":

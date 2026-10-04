@@ -16,6 +16,7 @@ is as trustworthy as its root user; `docs/void.md` says so, and this review give
 |---|---|---|
 | `mount fstype=proc -> /run/systemd/**` | **removed** | With it, root in a guest could mount a fresh `proc` below `/run/systemd/` and write the host's `/proc/sys/kernel/core_pattern` (a command that the host kernel runs as root). Demonstrated on Ubuntu before the change. systemd asks for a private proc only for `ProtectProc=`, `ProcSubset=`, `PrivatePIDs=` and `PrivateNetwork=`, and carries on with the existing mounts when it is refused. |
 | `mount fstype=cgroup -> /sys/fs/cgroup/**` | **removed** | The legacy cgroup v1 filesystem. The guests only use cgroup2 (`cgroup:rw:force` is done by LXC before the profile applies), and nothing mounted v1. |
+| `mount options=(remount, bind, nosuid, nodev, noexec, ro, nosymfollow)` | **added (M10)** | Only a guest in the opt-in user namespace needs it: there systemd adds `nosymfollow` to the remount of a unit's credentials directory, and `systemd-resolved` (status 226/NAMESPACE) and every unit with `LoadCredential=` and a sandbox failed without it. It allows a read-only bind remount, which the neighbouring rules already allow without the extra flag. |
 | `mount fstype=sysfs` | stays denied (it never was allowed) | Same reasoning as proc; the denial is visible in `dmesg` for `polkitd`, `systemd-logind` and `systemd-userd` (`PrivateNetwork=yes` units) and is harmless. |
 
 After the change every distro boots to `systemctl is-system-running` = `running` with no failed unit, and a
@@ -67,7 +68,7 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
    Other ways that were ruled out: a path rule for `core_pattern` and friends (the fresh proc can be mounted
    anywhere and any directory of it can be cloned again, so the path is the attacker's choice), restricting
    `move_mount` (a detached `tmpfs` of the credential setup and a detached `proc` look the same to the profile).
-   What would fix it: a user namespace for the guest with a *shifted* id map (`lxc.idmap = u 0 100000 65536`) and
+   What fixes it (built in M10 as an opt-in, see below): a user namespace for the guest with a *shifted* id map (`lxc.idmap = u 0 100000 65536`) and
    idmapped binds of the home entries, so that guest root is not host root; sysctl permission compares the kuid with
    the global root, so an identity-mapped namespace (`lxc.idmap = u 0 0 N`) changes nothing. That is a future
    milestone (the shared host network, host PAM and the device model have to be reworked for it). Alternatives are a
@@ -75,7 +76,13 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
    (large, and the guest-visible semantics must be exact), or an LSM that mediates the new mount API (Landlock,
    AppArmor with complete mount hooks). Upstream parity: `systemd-nspawn` without SELinux has the same hole (on
    Fedora the container domain may not write `sysctl_t`, which is what upstream relies on).
-   **Accepted risk until the user namespace exists.** `m9_check.py` probes it on every guest (a fresh proc
+   **Closed, opt-in (M10): the user namespace.** A guest that runs in a user namespace with a shifted id map
+   (`sudo spaces-void userns enable NAME`, `void/docs/void.md` "User namespace") has guest root = kuid 1000000: the
+   sysctl and `sysrq-trigger` permission checks compare with the global root, so the fresh proc, the `open_tree`
+   clone and the `mount(2)` bind remount can all be set up and none of them can write (`m9_check.py --userns`
+   reports the eight items as PASS, on all four guests). It is off by default; the facts of the spike and what it
+   changes (no privileged ports, no network sysctls, `/sys` as a masked bind) are in `void/spike/RESULTS.md`.
+   **Accepted risk for a space that does not use it.** `m9_check.py` probes it on every guest (a fresh proc
    writable at `sys/kernel/core_pattern` and `sysrq-trigger`, a writable clone of `/proc/sys`) and reports SKIP
    "known open" while any of them works; it turns into a PASS when they stop working.
    Until then: do not run an untrusted workload as a guest root. Every distro's `sudo` in a space is host-PAM
