@@ -20,14 +20,15 @@
 set -u
 
 # lxc-start may follow a shell that moves it into its cgroup first, so look for it
-# among the words before any "--" instead of taking the first word.
+# among the words before any "--" instead of taking the first word (option values of
+# -P and -n are not tool names, even in a space that is called lxc-start).
 lxcpath= name= prev= start=
 for arg in "$@"; do
     [ "$arg" = -- ] && break
-    case ${arg##*/} in lxc-start) start=1 ;; esac
     case $prev in
         -P) lxcpath=$arg ;;
         -n) name=$arg ;;
+        *) case ${arg##*/} in lxc-start) start=1 ;; esac ;;
     esac
     prev=$arg
 done

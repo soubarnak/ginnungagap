@@ -98,6 +98,18 @@ class WrapperTests(unittest.TestCase):
         self.assertTrue((self.lxc / "work" / "netns").exists())
         self.assertEqual(sum(line.startswith("unshare") for line in lines), 2)
 
+    def test_option_values_named_lxc_start_are_not_the_tool(self) -> None:
+        (self.lxc / "lxc-start").mkdir()
+        (self.lxc / "lxc-start" / "netns").write_text("pinned\n")
+        stub = self.bin / "lxc-info"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
+        lines = self.run_wrapper(str(stub), "-P", str(self.lxc), "-n", "lxc-start")
+        pin = self.lxc / "lxc-start" / "netns"
+        self.assertTrue(any(line.startswith(f"nsenter --net={pin} --") for line in lines))
+        self.assertFalse(any(line.startswith("umount") and "netns" in line for line in lines))
+        self.assertEqual(pin.read_text(), "pinned\n")
+
     def test_other_tools_enter_the_pinned_namespace(self) -> None:
         (self.lxc / "work" / "netns").write_text("pinned\n")
         lines = self.run_wrapper_as("lxc-info", "-s")
