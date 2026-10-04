@@ -155,6 +155,43 @@ def _sv(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _shutdown_runsv(link: Path, timeout: float = 10.0) -> bool:
+    """Make the runsv of a service exit and wait until it is gone.
+
+    `sv force-shutdown` stops the service, makes runsv exit (and its log
+    service with it) and kills what has not stopped after its wait. Returns
+    False if the supervisor was still alive at the deadline.
+    """
+
+    if not (link / "supervise" / "ok").exists():
+        return True
+    _sv("-w", str(int(timeout)), "force-shutdown", str(link))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _runsv_alive(link) and not _runsv_alive(link / "log"):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def _runsv_alive(directory: Path) -> bool:
+    """runsv holds an exclusive flock on supervise/lock for as long as it lives."""
+
+    try:
+        descriptor = os.open(directory / "supervise" / "lock", os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+    return False
+
+
 def _service_state(name: str) -> str | None:
     """Return "run", "down" or None when runsv does not supervise it."""
 
@@ -574,6 +611,12 @@ class LxcBackend(HostBackend):
             self.stop_unit(name)
         link = service_dir / service
         if link.is_symlink():
+            # Ask runsv (and with it the svlogd of the log service) to exit
+            # while its directories still exist. Deleting them under a live
+            # runsv leaves it and svlogd complaining forever ("unable to lock
+            # directory", "no functional log directories") and holding the log
+            # lock that the next incarnation of the service needs.
+            _shutdown_runsv(link)
             link.unlink()
         shutil.rmtree(svdir / service, ignore_errors=True)
         for suffix in ("", ".log"):
@@ -1109,10 +1152,15 @@ def kill_stale_helpers(name: str) -> list[int]:
 
     The portal proxy exits when its control descriptor closes, but the open
     broker has no such link and would keep the broker bus name of the old
-    session, so the next launcher's broker could never register.
+    session, so the next launcher's broker could never register. The system
+    bridge broker (`spaces-system-broker --broker /run/spaces/NAME/system-bus/..`)
+    asks the kernel to kill it with the launcher (PR_SET_PDEATHSIG), but one
+    started by an older launcher has no such link. Callers hold the per-space
+    launcher lock, so none of these belongs to a live launcher.
     """
 
     desktop = f"/run/spaces/{name}/desktop/"
+    system_bus = f"/run/spaces/{name}/system-bus/"
     killed = []
     try:
         entries = [e for e in PROC.iterdir() if e.name.isdigit()]
@@ -1132,7 +1180,13 @@ def kill_stale_helpers(name: str) -> list[int]:
         proxy = program == "xdg-dbus-proxy" and any(
             item.startswith(desktop) for item in argv
         )
-        if broker or proxy:
+        system_broker = (
+            program == "spaces-system-broker"
+            and argv[1:2] == ["--broker"]
+            and len(argv) > 2
+            and argv[2].startswith(system_bus)
+        )
+        if broker or proxy or system_broker:
             try:
                 os.kill(int(entry.name), signal.SIGTERM)
                 killed.append(int(entry.name))

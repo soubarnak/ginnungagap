@@ -1,0 +1,39 @@
+# Template file for 'spaces-arch-install-scripts'
+# Private copy of arch-install-scripts for Spaces (void/bin/pacstrap runs it). It lives under
+# /usr/lib/spaces/void and has its own package name, so it can neither collide with the files
+# of a future Void package of that name nor be replaced by one.
+pkgname=spaces-arch-install-scripts
+version=31
+revision=1
+hostmakedepends="m4"
+depends="bash gawk coreutils grep pacman util-linux"
+short_desc="Arch Linux install scripts (pacstrap, arch-chroot) private to Spaces"
+maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
+license="GPL-2.0-only"
+homepage="https://gitlab.archlinux.org/archlinux/arch-install-scripts"
+distfiles="https://gitlab.archlinux.org/archlinux/arch-install-scripts/-/archive/v${version}/arch-install-scripts-v${version}.tar.gz"
+# The archive is identical (diff -r) to `git archive v31`; the tag v31 is signed
+# by C100346676634E80C940FB9E9C02FF419FECBE16 (Morten Linderud), which is the
+# validpgpkeys entry of Arch's own PKGBUILD. GitLab does not publish a checksum
+# for generated archives: if its archive format changes, re-verify against the
+# signed tag before updating the checksum.
+checksum=ef22eae93b5cc78c7e7982acc160428cced9f96cb95090aeb77d55bc844a988e
+
+do_build() {
+	# Only the three scripts (m4 expands the includes); the man pages need asciidoc.
+	make arch-chroot genfstab pacstrap
+	local script
+	for script in arch-chroot genfstab pacstrap; do
+		bash -O extglob -n "$script"
+	done
+}
+
+do_install() {
+	local dir=usr/lib/spaces/void/arch-install-scripts
+	vmkdir ${dir}/bin
+	vinstall arch-chroot 755 ${dir}/bin
+	vinstall genfstab 755 ${dir}/bin
+	vinstall pacstrap 755 ${dir}/bin
+	vinstall COPYING 644 ${dir}
+	echo "${version}" >"${DESTDIR}/${dir}/VERSION"
+}

@@ -1,0 +1,42 @@
+#!/bin/sh
+# xbps INSTALL hook of spaces-archlinux-keyring: $1 ACTION $2 PKGNAME $3 VERSION $4 UPDATE
+# Initialises the host pacman keyring that the Arch bootstrap (pacstrap) of Spaces uses:
+# a private GPG directory, master keys signed locally, owner root, mode 0700.
+# Nothing here may fail the transaction. The directory is data and is never removed.
+ACTION="$1"
+PKGNAME="$2"
+VERSION="$3"
+UPDATE="$4"
+GPGDIR=/var/lib/spaces/.host/arch/gnupg
+MARK=/var/lib/spaces/.host/arch/keyring-version
+KEYS=/usr/share/spaces/void/archlinux-keyring
+
+case "${ACTION}" in
+post)
+	if ! command -v pacman-key >/dev/null 2>&1; then
+		echo "spaces-archlinux-keyring: pacman-key is missing, keyring not initialised"
+		exit 0
+	fi
+	if [ -f "${GPGDIR}/trustdb.gpg" ] && { [ ! -f "${MARK}" ] || [ "$(cat "${MARK}")" = "${VERSION%_*}" ]; }; then
+		# Same keyring (a dev install created it without a marker): keep it.
+		echo "${VERSION%_*}" >"${MARK}"
+		exit 0
+	fi
+	log=$(mktemp /tmp/spaces-keyring.XXXXXX) || exit 0
+	install -d -m 0755 /var/lib/spaces/.host /var/lib/spaces/.host/arch
+	rm -rf "${GPGDIR}"
+	install -d -m 0700 -o root -g root "${GPGDIR}"
+	if pacman-key --gpgdir "${GPGDIR}" --init >"${log}" 2>&1 &&
+		pacman-key --gpgdir "${GPGDIR}" --populate-from "${KEYS}" --populate archlinux >>"${log}" 2>&1; then
+		echo "${VERSION%_*}" >"${MARK}"
+	else
+		echo "spaces-archlinux-keyring: pacman keyring setup failed, see ${log}"
+		cat "${log}"
+		exit 0
+	fi
+	gpgconf --homedir "${GPGDIR}" --kill all >/dev/null 2>&1 || :
+	chmod 0700 "${GPGDIR}"
+	rm -f "${log}"
+	;;
+esac
+exit 0

@@ -1,0 +1,129 @@
+# Template file for 'spaces'
+# Spaces on Void: LXC containers supervised by runit (fork of anatase-org/spaces).
+# Built from the repository tarball: `void/tools/xbps-build.sh` renders the checksum of the
+# current working tree into a copy of this template; a release uses the URL below and the
+# checksum of the tagged tarball (the all-zero value is a placeholder, see void/docs/void.md).
+pkgname=spaces
+version=0.0.1
+revision=1
+# The guest helpers are glibc x86_64 binaries checked against glibc 2.17 by
+# native/check_guest_abi.py; aarch64 has not been built or tested.
+archs="x86_64"
+build_style=python3-pep517
+hostmakedepends="python3-setuptools python3-wheel python3-build python3-installer
+ pkg-config"
+makedepends="glib-devel pam-devel"
+# Verified against what the code executes:
+#  lxc: lxc-start/-attach/-stop/-info, apparmor: apparmor_parser, polkit: pkexec,
+#  runit: sv and svlogd, elogind + libelogind (ctypes: libelogind.so.0, autostart and
+#  session lookup), eudev-libudev (ctypes: libudev.so.1), debootstrap (Ubuntu, Kali),
+#  pacman (host keyring and pacman-key for the Arch bootstrap) with the private
+#  spaces-arch-install-scripts, spaces-archlinux-keyring and spaces-rankmirrors,
+#  ubuntu-keyring (debootstrap's default path for Ubuntu), gnupg (gpg, gpgv: dnf5 shim,
+#  keyring checks), tar and xz (dnf5 shim unpacks the Fedora image), curl, util-linux
+#  (unshare, mount), bash, coreutils, sudo (spaces-void re-runs itself), dconf,
+#  xdg-dbus-proxy (portal proxy), librsvg-utils (rsvg-convert for shortcut icons).
+#  The Python modules, libpam, glib and the other shared libraries come from the
+#  automatic python and shlib dependencies plus the explicit python3-* below.
+depends="lxc apparmor polkit elogind libelogind eudev-libudev runit debootstrap pacman
+ spaces-arch-install-scripts spaces-archlinux-keyring spaces-rankmirrors ubuntu-keyring
+ bash coreutils util-linux tar xz gnupg curl sudo dconf xdg-dbus-proxy librsvg-utils
+ python3-Pillow python3-rich python3-textual"
+checkdepends="python3-pytest python3-Pillow python3-rich python3-textual dbus tar
+ librsvg-utils adwaita-icon-theme gnupg"
+short_desc="Develop on the distribution of your choice, securely (LXC and runit)"
+maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
+license="AGPL-3.0-or-later"
+homepage="https://github.com/soubarnak/ginnungagap"
+distfiles="https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz>spaces-${version}.tar.gz"
+checksum=0000000000000000000000000000000000000000000000000000000000000000
+conf_files="/etc/pam.d/spaces
+ /etc/spaces/void.json"
+# Spaces, their package caches and logs: owned by root, kept when the package is removed.
+make_dirs="/var/lib/spaces 0755 root root
+ /var/cache/spaces 0755 root root
+ /var/log/spaces 0755 root root"
+# The Ctrl-C test needs a controlling terminal, which the xbps-src chroot does not have.
+make_check_args="tests -p no:cacheprovider
+ --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application"
+python_version=3
+
+post_build() {
+	# xbps-src's CFLAGS replace the Makefile defaults: keep what the code needs
+	# (-std=gnu11, -fPIC for pam_spaces.so, the warnings) and the distribution's
+	# hardening flags; native/check_guest_abi.py (make install) still enforces the
+	# glibc 2.17 ceiling for the guest helpers.
+	make -C native CC="${CC}" PYTHON=python3 \
+		CPPFLAGS="${CPPFLAGS}" \
+		CFLAGS="${CFLAGS} -std=gnu11 -fPIC -Wall -Wextra" \
+		LDFLAGS="${LDFLAGS}"
+}
+
+post_install() {
+	local share=${DESTDIR}/usr/share/spaces d
+
+	# Native helpers, host and guest (check_guest_abi.py runs first).
+	make -C native CC="${CC}" PYTHON=python3 \
+		CPPFLAGS="${CPPFLAGS}" \
+		CFLAGS="${CFLAGS} -std=gnu11 -fPIC -Wall -Wextra" \
+		LDFLAGS="${LDFLAGS}" \
+		DESTDIR="${DESTDIR}" LIBEXECDIR=/usr/lib/spaces install
+
+	# The wheel's data files carry upstream's systemd units; this port uses none
+	# of them (runit). Only the two units that are bind-mounted into the guests stay,
+	# under /usr/share/spaces/systemd. An LXC guest reports "lxc", which the generic
+	# "container" condition matches (upstream's is conditional on systemd-nspawn).
+	rm -rf ${DESTDIR}/usr/lib/systemd
+	vsed -i ${share}/systemd/run-spaces-proc.mount \
+		-e 's/^ConditionVirtualization=.*/ConditionVirtualization=container/'
+	grep -q '^ConditionVirtualization=container$' ${share}/systemd/run-spaces-proc.mount
+	# The wheel must carry every data directory that the dev install copies.
+	for d in portal system-bridge; do
+		diff -r data/$d ${share}/$d >/dev/null ||
+			vdie "the wheel's data files for $d differ from data/$d"
+	done
+
+	# Root-side wrappers. spaces.priv replaces the console script of the wheel:
+	# the polkit policy binds to this exact path, and the shim directory has to
+	# come first on its PATH.
+	vbin void/wrappers/spaces.priv
+	vbin void/wrappers/spaces-session-env
+	vbin void/wrappers/spaces-void
+	vinstall void/wrappers/spaces-nvidia-sync 755 usr/lib/spaces
+	vinstall void/wrappers/spaces-stop-services 755 usr/lib/spaces
+	vinstall void/bin/spaces-lxc 755 usr/lib/spaces
+	vinstall void/bin/pacstrap 755 usr/lib/spaces/void/bin
+	vinstall void/bin/arch-chroot 755 usr/lib/spaces/void/bin
+	vinstall void/bin/dnf5 755 usr/lib/spaces/void/bin
+
+	# Entry commands; never /usr/bin/arch (coreutils owns it).
+	for d in ubuntu fedora kali arch-linux; do
+		vbin void/entry/enter-space $d
+	done
+
+	# Configuration and data.
+	vinstall data/pam/spaces.system-auth 644 etc/pam.d spaces
+	vinstall void/apparmor/spaces-container 644 etc/apparmor.d
+	vinstall void/data/void.json 644 etc/spaces
+	vinstall void/data/config.base.json 644 usr/share/spaces
+	vinstall void/data/arch-pacman.conf 644 usr/share/spaces/void
+	vinstall void/data/arch-mirrorlist 644 usr/share/spaces/void
+	vinstall void/shell/spaces.sh 644 usr/share/spaces/void/shell
+	vinstall void/shell/spaces.fish 644 usr/share/spaces/void/shell
+
+	# runit service for autostart: installed, NOT linked into /var/service.
+	# Same layout as `vsv` (supervise links in /run/runit); the log service is
+	# svlogd into /var/log/spaces/autostart.
+	d=${DESTDIR}/etc/sv/spaces-autostart
+	vmkdir etc/sv/spaces-autostart/log
+	vinstall void/runit/spaces-autostart/run 755 etc/sv/spaces-autostart
+	vinstall void/runit/spaces-autostart/finish 755 etc/sv/spaces-autostart
+	vinstall void/runit/spaces-autostart/log/run 755 etc/sv/spaces-autostart/log
+	ln -s /run/runit/supervise.spaces-autostart ${d}/supervise
+	ln -s /run/runit/supervise.spaces-autostart-log ${d}/log/supervise
+
+	vdoc void/docs/void.md
+	vdoc void/docs/portal-filter-review.md
+	vdoc readme.md
+	vlicense LICENSE
+}

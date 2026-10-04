@@ -1,5 +1,6 @@
 #!/bin/bash
-# Revert void/tools/dev-install.sh.
+# Revert void/tools/dev-install.sh (development only; a package install is removed with
+# `xbps-remove spaces`).
 #
 # Usage: sudo void/tools/dev-uninstall.sh [--purge] [--remove-packages]
 #
@@ -47,32 +48,14 @@ if [ -f "$PACKAGES_RECORD" ]; then
 fi
 
 # ---------------------------------------------------------------- services
-# sv down asks spaces.priv launch to stop the guest gracefully (lxc-stop).
-shopt -s nullglob
-# The autostart service first: it must not restart spaces while they stop.
-sv -w 30 down /var/service/spaces-autostart >/dev/null 2>&1 || true
-rm -f /var/service/spaces-autostart
-for service in /var/service/spaces-* /etc/sv/spaces-*; do
-    case "$service" in */log) continue ;; esac
-    if [ -e "$service/supervise/ok" ] || [ -L "$service" ]; then
-        log "stopping $(basename "$service")"
-        sv -w 90 down "$service" >/dev/null 2>&1 || true
-    fi
-done
-for link in /var/service/spaces-*; do
-    [ -L "$link" ] && rm -f "$link"
-done
-# runsvdir reaps the now-unlinked runsv; give it its five second scan.
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    pgrep -f '^runsv spaces-' >/dev/null || break
-    sleep 1
-done
-# A runsv that survives the scan would keep its svlogd (and the log lock) and
-# make the next install's log service fail; stop what is left.
-pkill -TERM -f '^runsv spaces-' 2>/dev/null || true
-pkill -TERM -f '^svlogd -tt /var/log/spaces/' 2>/dev/null || true
+# Stop every spaces service cleanly: sv down (the launcher stops the guest
+# gracefully), unlink, and make runsv and its svlogd exit BEFORE the service
+# directories are deleted (a runsv that outlives them keeps the log lock and
+# complains forever). The same script is used by the package's REMOVE hook.
+STOP_SERVICES=/usr/lib/spaces/spaces-stop-services
+[ -x "$STOP_SERVICES" ] || STOP_SERVICES=$(cd "$(dirname "${BASH_SOURCE[0]}")/../wrappers" && pwd)/spaces-stop-services
+"$STOP_SERVICES" --remove
 rm -rf /etc/sv/spaces-* /run/runit/supervise.spaces-*
-shopt -u nullglob
 
 if pgrep -x lxc-start >/dev/null; then
     echo "an lxc-start process is still running; stop it first" >&2

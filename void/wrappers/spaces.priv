@@ -1,0 +1,4 @@
+#!/bin/sh
+PATH=/usr/lib/spaces/void/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+export PATH
+exec /usr/bin/python3 -I -c 'import sys; from spaces.priv import main; sys.exit(main())' "$@"

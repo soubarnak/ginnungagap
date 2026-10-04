@@ -128,6 +128,42 @@ class ServiceTests(Base):
         self.assertFalse(link.is_symlink())
         self.assertFalse((self.root / "sv/spaces-work").exists())
 
+    def test_forget_shuts_runsv_down_before_deleting_its_directories(self) -> None:
+        self.adopt("work")
+        link = lxc.ensure_service("work")
+        calls = []
+
+        def fake_sv(*args: str):
+            # runsv is still supervising: the service directory must exist.
+            calls.append((args, (self.root / "sv/spaces-work/run").exists()))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with (
+            mock.patch.object(lxc, "_sv", fake_sv),
+            mock.patch.object(lxc.LxcBackend, "_state", return_value=None),
+            mock.patch.object(lxc, "_runsv_alive", return_value=False),
+        ):
+            self.backend.forget_unit("work")
+        shutdown = [c for c in calls if "force-shutdown" in c[0]]
+        self.assertEqual(len(shutdown), 1)
+        self.assertEqual(shutdown[0][0][-1], str(link))
+        self.assertTrue(shutdown[0][1])
+        self.assertFalse((self.root / "sv/spaces-work").exists())
+
+    def test_runsv_alive_follows_the_supervise_lock(self) -> None:
+        import fcntl
+
+        directory = self.root / "svc"
+        (directory / "supervise").mkdir(parents=True)
+        self.assertFalse(lxc._runsv_alive(directory))
+        lock = directory / "supervise" / "lock"
+        lock.touch()
+        self.assertFalse(lxc._runsv_alive(directory))
+        with open(lock, "w") as holder:
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            self.assertTrue(lxc._runsv_alive(directory))
+        self.assertFalse(lxc._runsv_alive(directory))
+
     def test_start_unit_waits_for_marker(self) -> None:
         marker = self.root / "lxc" / "work" / "ready"
         marker.parent.mkdir(parents=True)
@@ -517,12 +553,18 @@ class HostIntegrationTests(Base):
         cmdline(12, "/usr/bin/xdg-dbus-proxy", "unix:path=/b", "/run/spaces/work/desktop/1/portal/bus")
         cmdline(13, "/usr/bin/xdg-dbus-proxy", "unix:path=/b", "/run/spaces/other/desktop/1/portal/bus")
         cmdline(14, "/usr/bin/python3", "--space", "work")
+        broker = "/usr/lib/spaces/spaces-system-broker"
+        cmdline(15, broker, "--broker", "/run/spaces/work/system-bus/bus.sock")
+        cmdline(16, broker, "--broker", "/run/spaces/work/system-bus/bus.sock", "--admin")
+        cmdline(17, broker, "--broker", "/run/spaces/other/system-bus/bus.sock")
+        cmdline(18, broker, "--broker", "/run/spaces/work2/system-bus/bus.sock")
+        cmdline(19, broker, "--relay", "/run/spaces/work/system-bus/bus.sock")
         with mock.patch.object(lxc.os, "kill") as kill:
             killed = lxc.kill_stale_helpers("work")
-        self.assertEqual(sorted(killed), [10, 12])
+        self.assertEqual(sorted(killed), [10, 12, 15, 16])
         self.assertEqual(
             sorted(call.args for call in kill.call_args_list),
-            [(10, signal.SIGTERM), (12, signal.SIGTERM)],
+            [(pid, signal.SIGTERM) for pid in (10, 12, 15, 16)],
         )
 
     def test_user_scopes_are_tracked_and_terminated(self) -> None:

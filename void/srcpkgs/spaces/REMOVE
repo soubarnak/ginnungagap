@@ -1,0 +1,37 @@
+#!/bin/sh
+# xbps REMOVE hook of spaces: $1 ACTION (pre|post) $2 PKGNAME $3 VERSION $4 UPDATE (yes|no)
+# On an upgrade xbps runs this too (UPDATE=yes); then nothing is stopped.
+# Spaces and their data (/var/lib/spaces, /var/cache/spaces, /var/log/spaces) are never deleted.
+ACTION="$1"
+PKGNAME="$2"
+VERSION="$3"
+UPDATE="$4"
+
+case "${ACTION}" in
+pre)
+	[ "${UPDATE}" = yes ] && exit 0
+	# Stop the spaces and retire their runit services while the tools still exist.
+	if [ -x /usr/lib/spaces/spaces-stop-services ]; then
+		/usr/lib/spaces/spaces-stop-services --remove
+	fi
+	if [ -d /sys/kernel/security/apparmor ] && [ -e /etc/apparmor.d/spaces-container ] &&
+		command -v apparmor_parser >/dev/null 2>&1; then
+		apparmor_parser -R /etc/apparmor.d/spaces-container >/dev/null 2>&1 || :
+	fi
+	# Generated files: config.json only while it still matches the recorded hash.
+	if [ -f /etc/spaces/config.json.generated ] && [ -f /etc/spaces/config.json ] &&
+		[ "$(sha256sum /etc/spaces/config.json | cut -d' ' -f1)" = "$(cat /etc/spaces/config.json.generated)" ]; then
+		rm -f /etc/spaces/config.json
+	elif [ -f /etc/spaces/config.json ]; then
+		echo "spaces: keeping /etc/spaces/config.json (edited by hand)"
+	fi
+	rm -f /etc/spaces/config.json.generated /etc/spaces/config.json.new
+	if [ -f /etc/pacman.d/mirrorlist ] && cmp -s /etc/pacman.d/mirrorlist /usr/share/spaces/void/arch-mirrorlist; then
+		rm -f /etc/pacman.d/mirrorlist
+	fi
+	pgrep -x lxc-start >/dev/null 2>&1 || rm -rf /run/spaces
+	echo "spaces: services stopped. Your spaces are kept in /var/lib/spaces"
+	echo "        (also /var/cache/spaces, /var/log/spaces); delete them by hand if wanted."
+	;;
+esac
+exit 0

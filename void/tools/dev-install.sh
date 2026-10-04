@@ -1,5 +1,8 @@
 #!/bin/bash
-# Development install of Spaces on Void Linux (runit + LXC backend).
+# DEVELOPMENT-ONLY install of Spaces on Void Linux (runit + LXC backend). The supported
+# install is the xbps package: void/tools/xbps-build.sh, see void/docs/void.md. Do not run
+# this over a package install (it replaces files the package owns); remove the package or use
+# dev-uninstall.sh first.
 #
 # Usage: sudo void/tools/dev-install.sh [--skip-keyring] [--skip-packages]
 #                                       [--skip-distro-tools]
@@ -141,31 +144,15 @@ chmod 0755 "$BIN_DIR/spaces"
 # PYTHON* variables, the working directory and user site-packages out of
 # sys.path. The shim directory comes first on PATH so that later milestones can
 # provide pacstrap/dnf5 wrappers.
-cat >"$BIN_DIR/spaces.priv" <<'SHEOF'
-#!/bin/sh
-PATH=/usr/lib/spaces/void/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-export PATH
-exec /usr/bin/python3 -I -c 'import sys; from spaces.priv import main; sys.exit(main())' "$@"
-SHEOF
-chown root:root "$BIN_DIR/spaces" "$BIN_DIR/spaces.priv"
-chmod 0755 "$BIN_DIR/spaces.priv"
+install -m 0755 -o root -g root "$ROOT/void/wrappers/spaces.priv" "$BIN_DIR/spaces.priv"
+chown root:root "$BIN_DIR/spaces"
 
 # Run by the user from the graphical session (niri spawn-at-startup) to publish
 # the session environment for the root-side launcher; see spaces.host.session_env.
-cat >"$BIN_DIR/spaces-session-env" <<'SHEOF'
-#!/bin/sh
-exec /usr/bin/python3 -I -m spaces.host.session_env "$@"
-SHEOF
-chown root:root "$BIN_DIR/spaces-session-env"
-chmod 0755 "$BIN_DIR/spaces-session-env"
+install -m 0755 -o root -g root "$ROOT/void/wrappers/spaces-session-env" "$BIN_DIR/spaces-session-env"
 
 # Administration CLI: autostart, gc, doctor, sync-config, install-flavor (M7).
-cat >"$BIN_DIR/spaces-void" <<'SHEOF'
-#!/bin/sh
-exec /usr/bin/python3 -I -m spaces.host.cli "$@"
-SHEOF
-chown root:root "$BIN_DIR/spaces-void"
-chmod 0755 "$BIN_DIR/spaces-void"
+install -m 0755 -o root -g root "$ROOT/void/wrappers/spaces-void" "$BIN_DIR/spaces-void"
 
 # Entry commands: /usr/bin/{ubuntu,fedora,kali,arch-linux} run a command in the
 # space of that name. Never /usr/bin/arch (coreutils owns it); see
@@ -232,12 +219,8 @@ chown root:root /var/lib/spaces /var/cache/spaces /var/log/spaces
 # base configuration and the optional /etc/spaces/void.json. A config.json
 # that was edited by hand is never replaced (config.json.new is written).
 install -Dm644 "$ROOT/void/data/config.base.json" "$SHARE/config.base.json"
-cat >"$LIBEXEC/spaces-nvidia-sync" <<'SHEOF'
-#!/bin/sh
-exec /usr/bin/python3 -I -m spaces.host.nvidia "$@"
-SHEOF
-chown root:root "$LIBEXEC/spaces-nvidia-sync"
-chmod 0755 "$LIBEXEC/spaces-nvidia-sync"
+install -m 0755 -o root -g root "$ROOT/void/wrappers/spaces-nvidia-sync" "$LIBEXEC/spaces-nvidia-sync"
+install -m 0755 -o root -g root "$ROOT/void/wrappers/spaces-stop-services" "$LIBEXEC/spaces-stop-services"
 config_existed=0
 [ -e /etc/spaces/config.json ] && config_existed=1
 log "generating /etc/spaces/config.json and the NVIDIA userspace farm"

@@ -1,0 +1,25 @@
+# Template file for 'spaces-rankmirrors'
+# pacman-contrib's rankmirrors script (GPL-3.0-or-later), pinned to a commit; Spaces runs
+# /usr/lib/spaces/rankmirrors for the Arch mirror list. Same pin as upstream's spaces.spec.
+pkgname=spaces-rankmirrors
+version=1.13.1
+revision=1
+_commit=75d4a70517c649155959d28260198630fcb8fe51
+depends="bash curl coreutils gawk"
+short_desc="Rankmirrors script of pacman-contrib, private to Spaces"
+maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
+license="GPL-3.0-or-later"
+homepage="https://gitlab.archlinux.org/pacman/pacman-contrib"
+distfiles="https://gitlab.archlinux.org/pacman/pacman-contrib/-/raw/${_commit}/src/rankmirrors.sh.in"
+checksum=b67902d26a8b193cc096421c8d780f795a253d0742cd31d592254059af15cc27
+skip_extraction="rankmirrors.sh.in"
+
+do_build() {
+	sed -e "s/@PACKAGE_VERSION@/${version}/g" -e 's|@sysconfdir@|/etc|g' \
+		"${XBPS_SRCDISTDIR}/${pkgname}-${version}/rankmirrors.sh.in" >rankmirrors
+	bash -n rankmirrors
+}
+
+do_install() {
+	vinstall rankmirrors 755 usr/lib/spaces
+}

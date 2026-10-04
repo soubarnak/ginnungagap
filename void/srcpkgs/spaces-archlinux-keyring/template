@@ -1,10 +1,13 @@
-# Template file for 'archlinux-keyring'
-pkgname=archlinux-keyring
+# Template file for 'spaces-archlinux-keyring'
+# The Arch keyring as plain files for the host-side pacstrap of Spaces (void/data/arch-pacman.conf
+# points pacman at it). Private path and package name: it does not collide with, and is not
+# replaced by, any future Void package. INSTALL initialises the host pacman keyring.
+pkgname=spaces-archlinux-keyring
 version=20260909
 revision=1
 depends="pacman"
-short_desc="Arch Linux PGP keyring (files only, for pacman-key --populate)"
-maintainer="Spaces on Void <spaces@localhost>"
+short_desc="Arch Linux PGP keyring (files for the host pacman keyring of Spaces)"
+maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
 license="GPL-3.0-or-later"
 homepage="https://gitlab.archlinux.org/archlinux/archlinux-keyring"
 # The release tarball already holds the built keyring. Its inline signature
@@ -14,7 +17,6 @@ homepage="https://gitlab.archlinux.org/archlinux/archlinux-keyring"
 # below pins the verified tarball.
 distfiles="https://gitlab.archlinux.org/archlinux/archlinux-keyring/-/releases/${version}/downloads/archlinux-keyring-${version}.tar.gz"
 checksum=935ad345a7700358367ca9a2f70220f30869492c31b24e9e4e4e89f05bf5528a
-wrksrc="archlinux-keyring-${version}"
 
 # The master keys in archlinux-trusted are the trust anchors. Require exactly
 # the five fingerprints that https://archlinux.org/master-keys/ lists.
@@ -33,8 +35,9 @@ post_extract() {
 }
 
 do_install() {
-	# Same paths as Arch's package: `pacman-key --populate archlinux` finds them.
-	vinstall archlinux.gpg 644 usr/share/pacman/keyrings
-	vinstall archlinux-trusted 644 usr/share/pacman/keyrings
-	vinstall archlinux-revoked 644 usr/share/pacman/keyrings
+	local dir=usr/share/spaces/void/archlinux-keyring
+	vinstall archlinux.gpg 644 ${dir}
+	vinstall archlinux-trusted 644 ${dir}
+	vinstall archlinux-revoked 644 ${dir}
+	echo "${version}" >"${DESTDIR}/${dir}/VERSION"
 }

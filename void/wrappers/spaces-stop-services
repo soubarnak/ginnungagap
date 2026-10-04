@@ -1,0 +1,70 @@
+#!/bin/sh
+# Stop and retire the runit services of Spaces cleanly.
+#
+#   spaces-stop-services [--remove]
+#
+# For the autostart service first (it must not restart spaces while they stop),
+# then for every spaces-NAME service: `sv down` (the launcher stops the guest
+# gracefully), take the service out of /var/service, make its runsv (and with it
+# the svlogd of the log service) exit while its directories still exist, and
+# wait until the processes are gone. Deleting /etc/sv/spaces-* or /var/log/spaces
+# under a live runsv leaves runsv and svlogd complaining forever ("unable to lock
+# directory", "no functional log directories") and holding the log lock that the
+# next incarnation of the service needs.
+#
+# With --remove the per-space service directories (not the packaged
+# spaces-autostart one) and their supervise links in /run/runit are deleted too.
+# Never touches /var/lib/spaces, /var/cache/spaces or /var/log/spaces.
+SVDIR=${SPACES_SVDIR:-/etc/sv}
+SERVICE_LINKS=${SPACES_SERVICE_DIR:-/var/service}
+REMOVE=0
+[ "${1:-}" = --remove ] && REMOVE=1
+
+command -v sv >/dev/null 2>&1 || exit 0
+SERVICE_LINKS=$(readlink -f "$SERVICE_LINKS" 2>/dev/null || echo "$SERVICE_LINKS")
+
+gone() { # no runsv/svlogd of this service left
+    ! pgrep -f "^runsv $1\$" >/dev/null 2>&1 &&
+        ! pgrep -f "^svlogd -tt /var/log/spaces/${1#spaces-}\$" >/dev/null 2>&1
+}
+
+retire() {
+    name=$1
+    service=$SVDIR/$name
+    link=$SERVICE_LINKS/$name
+    [ -e "$service" ] || [ -L "$link" ] || return 0
+    if [ -e "$service/supervise/ok" ]; then
+        sv -w 90 down "$service" >/dev/null 2>&1
+    fi
+    [ -L "$link" ] && rm -f "$link"
+    if [ -e "$service/supervise/ok" ]; then
+        sv -w 10 force-shutdown "$service" >/dev/null 2>&1
+    fi
+    n=0
+    while [ "$n" -lt 20 ] && ! gone "$name"; do
+        sleep 1
+        n=$((n + 1))
+    done
+    if ! gone "$name"; then
+        pkill -TERM -f "^runsv $name\$" 2>/dev/null
+        pkill -TERM -f "^svlogd -tt /var/log/spaces/${name#spaces-}\$" 2>/dev/null
+        sleep 1
+    fi
+    if [ "$REMOVE" -eq 1 ] && [ "$name" != spaces-autostart ]; then
+        rm -rf "$service"
+        rm -rf "/run/runit/supervise.$name" "/run/runit/supervise.$name.log" \
+            "/run/runit/supervise.$name-log"
+    fi
+}
+
+retire spaces-autostart
+names=
+for path in "$SERVICE_LINKS"/spaces-* "$SVDIR"/spaces-*; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    names="$names ${path##*/}"
+done
+for name in $(printf '%s\n' $names | sort -u); do
+    [ "$name" = spaces-autostart ] && continue
+    retire "$name"
+done
+exit 0

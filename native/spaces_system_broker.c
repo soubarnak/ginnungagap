@@ -3,6 +3,7 @@
 #include <gio/gunixfdlist.h>
 #include <glib-unix.h>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include "system_bus_policy.h"
@@ -749,6 +750,14 @@ int main(int argc, char **argv)
     }
     app.broker = g_str_equal(argv[1], "--broker");
     app.admin = argc == 4;
+    if (app.broker) {
+        /* The host broker must not outlive the launcher that started it
+         * (kill -9, crash): the kernel kills it with its parent. */
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() == 1) {
+            return 1;
+        }
+    }
     char *escaped = g_dbus_address_escape_value(argv[2]);
     app.address = g_strconcat("unix:path=", escaped, NULL);
     g_free(escaped);

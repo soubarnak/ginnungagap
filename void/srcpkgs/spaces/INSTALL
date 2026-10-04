@@ -1,0 +1,39 @@
+#!/bin/sh
+# xbps INSTALL hook of spaces: $1 ACTION (pre|post) $2 PKGNAME $3 VERSION $4 UPDATE (yes|no)
+# Nothing here may fail the transaction.
+ACTION="$1"
+PKGNAME="$2"
+VERSION="$3"
+UPDATE="$4"
+
+case "${ACTION}" in
+post)
+	chmod 0755 /var/lib/spaces /var/cache/spaces /var/log/spaces 2>/dev/null
+
+	# Arch bootstrap: pacman reads /etc/pacman.d/mirrorlist, which no Void package
+	# provides. Seed it only when absent; REMOVE deletes it only while unchanged.
+	if [ ! -e /etc/pacman.d/mirrorlist ] && [ -r /usr/share/spaces/void/arch-mirrorlist ]; then
+		install -Dm644 /usr/share/spaces/void/arch-mirrorlist /etc/pacman.d/mirrorlist ||
+			echo "spaces: could not create /etc/pacman.d/mirrorlist"
+	fi
+
+	# AppArmor: (re)load the container profile. Running spaces keep the loaded
+	# profile attached until they restart; the launcher also loads it on demand.
+	if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+		apparmor_parser -r /etc/apparmor.d/spaces-container >/dev/null 2>&1 ||
+			echo "spaces: could not load the AppArmor profile (run: sudo apparmor_parser -r /etc/apparmor.d/spaces-container)"
+	fi
+
+	# Generated /etc/spaces/config.json (and the NVIDIA userspace farm). A config.json
+	# that was edited by hand is kept, config.json.new is written instead.
+	/usr/bin/spaces-void sync-config >/dev/null 2>&1 ||
+		echo "spaces: config generation failed (run: sudo spaces-void sync-config)"
+
+	# The autostart daemon (only when the user linked it) runs the old code until
+	# restarted; its state lives in tmpfs and no space is started or stopped by this.
+	if [ "${UPDATE}" = yes ] && [ -e /var/service/spaces-autostart/supervise/ok ]; then
+		sv restart /var/service/spaces-autostart >/dev/null 2>&1 || :
+	fi
+	;;
+esac
+exit 0
