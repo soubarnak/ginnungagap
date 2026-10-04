@@ -325,6 +325,28 @@ class DeviceDiscoveryTests(unittest.TestCase):
                 }
                 self.assertEqual(found, {"/dev/safe"})
 
+    def test_input_injection_nodes_stay_out_below_full(self) -> None:
+        # steam-udev-rules tags /dev/uinput uaccess, and Void loads the module at every boot.
+        tagged = metadata(tags=("uaccess",), subsystems=("misc",))
+        definitions = {
+            "uinput": ("c", 10, 223, 107, tagged),
+            "uhid": ("c", 10, 239, 0, tagged),
+            "safe": ("c", 240, 0, 100, tagged),
+        }
+
+        for level in ("basic", "admin"):
+            with self.subTest(level=level):
+                found = {
+                    str(item.destination)
+                    for item in self._discover(level, definitions)
+                }
+                self.assertEqual(found, {"/dev/safe"})
+        found = {
+            str(item.destination)
+            for item in self._discover("full", definitions)
+        }
+        self.assertEqual(found, {"/dev/safe", "/dev/uinput", "/dev/uhid"})
+
     def test_full_includes_security_and_storage_but_leaves_api_dev_managed(
         self,
     ) -> None:

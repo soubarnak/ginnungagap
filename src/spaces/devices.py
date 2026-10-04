@@ -37,6 +37,16 @@ NSPAWN_MANAGED_DEVICES = frozenset(
 # supplies its own console and PTYs; exposing these character majors lets a
 # guest getty operate the host VT that owns a graphical login session.
 HOST_TERMINAL_CHARACTER_MAJORS = frozenset({4, 5, 7})
+# Nodes that let their opener inject input events into the host (uinput: a virtual keyboard
+# is typed into the focused window of the host's compositor) or forge devices (uhid). They
+# can carry the uaccess tag (steam-udev-rules does that for uinput) and then pass the basic
+# level whenever the host module is loaded, which happens at every boot on Void (runit's
+# 01-static-devnodes.sh loads every module `kmod static-nodes` lists). Only the full level,
+# which is documented as unrestricted, hands them to a guest. No udev property marks them,
+# hence the names.
+INPUT_INJECTION_DEVICES = frozenset(
+    {PurePosixPath("/dev/uinput"), PurePosixPath("/dev/uhid")}
+)
 # The NVIDIA driver's nodes (/dev/nvidia0, nvidiactl, nvidia-modeset,
 # nvidia-uvm, nvidia-uvm-tools) have no sysfs device, so udev knows nothing
 # about them. They are recognised by the character major /proc/devices lists
@@ -432,7 +442,10 @@ def discover(
                 ):
                     continue
                 if level != "full":
-                    if _is_security_device(destination, metadata):
+                    if (
+                        destination in INPUT_INJECTION_DEVICES
+                        or _is_security_device(destination, metadata)
+                    ):
                         continue
                     if level == "basic" and (
                         _is_capture_device(metadata)
