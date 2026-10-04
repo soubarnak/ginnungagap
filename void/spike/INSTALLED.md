@@ -6,7 +6,7 @@ Since M8 the machine runs the **xbps packages** built by `void/tools/xbps-build.
 
 ## Package install (current)
 
-`xbps-query -f spaces` lists 120 files (python package 42 modules + dist-info, 8 commands in `/usr/bin`, 11 native
+`xbps-query -f spaces` lists 120 files (python package 42 modules + dist-info, 8 commands in `/usr/bin`, 9 native
 binaries, the data tree, docs), all root:root, no setuid or setgid bit anywhere (checked by `m8_check.py`).
 Differences from the dev install are listed at the end of this section.
 
