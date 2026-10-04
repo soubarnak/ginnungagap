@@ -32,6 +32,8 @@ from . import devices_lxc, guest_locale, lxc_config, session_env
 from .base import HostBackend
 
 DEFAULT_LXC_PATH = "/run/spaces/lxc"
+DESKTOP_RUNTIME_ROOT = Path("/run/spaces")
+LXC_RUNTIME_NAME = "lxc"
 DEFAULT_WRAPPER = "/usr/lib/spaces/spaces-lxc"
 DEFAULT_SVDIR = "/etc/sv"
 DEFAULT_SERVICE_DIR = "/var/service"
@@ -102,6 +104,22 @@ def _quiet(command: Sequence[str], *, timeout: float = 30) -> subprocess.Complet
 
 def _runtime_dir(name: str) -> Path:
     return lxc_path() / _check_name(name)
+
+
+def _forget_session_runtime(name: str) -> None:
+    """Drop what the launcher's desktop integration left under /run/spaces/NAME.
+
+    Nothing removes it when a space stops (upstream's systemd unit had a RuntimeDirectory for it),
+    and for a deleted space it would stay until the next boot: the portal and system bus
+    directories, the generated open-data and any socket of a helper that outlived its launcher.
+    Called only once the space is stopped and its service gone.
+    """
+
+    _check_name(name)
+    if name == LXC_RUNTIME_NAME:  # /run/spaces/lxc is the LXC path, whatever the space is called
+        return
+    kill_stale_helpers(name)
+    shutil.rmtree(DESKTOP_RUNTIME_ROOT / name, ignore_errors=True)
 
 
 def _release_netns(name: str) -> None:
@@ -639,6 +657,7 @@ class LxcBackend(HostBackend):
             )
         _release_netns(name)
         shutil.rmtree(_runtime_dir(name), ignore_errors=True)
+        _forget_session_runtime(name)
 
     def enable_user_autostart(self, user_name: str, name: str) -> None:
         from .. import core

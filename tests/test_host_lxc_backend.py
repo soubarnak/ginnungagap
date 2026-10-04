@@ -34,6 +34,14 @@ class Base(unittest.TestCase):
         )
         self.env.start()
         self.addCleanup(self.env.stop)
+        # forget_unit also clears /run/spaces/NAME and reaps helpers: never the real ones.
+        for attribute, value in (
+            ("DESKTOP_RUNTIME_ROOT", self.root / "run-spaces"),
+            ("PROC", self.root / "no-proc"),
+        ):
+            patcher = mock.patch.object(lxc, attribute, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         (self.root / "service").mkdir()
         (self.root / "sv").mkdir()
         self.backend = lxc.LxcBackend()
@@ -127,6 +135,35 @@ class ServiceTests(Base):
             self.backend.forget_unit("work")
         self.assertFalse(link.is_symlink())
         self.assertFalse((self.root / "sv/spaces-work").exists())
+
+    def test_forget_removes_the_desktop_runtime_directory_of_that_space_only(self) -> None:
+        run = self.root / "run-spaces"
+        for path in ("work/desktop/1000/portal", "work/system-bus", "other/desktop", "lxc/work"):
+            (run / path).mkdir(parents=True)
+        self.adopt("work")
+        lxc.ensure_service("work")
+        with (
+            mock.patch.object(lxc, "_sv"),
+            mock.patch.object(lxc, "DESKTOP_RUNTIME_ROOT", run),
+            mock.patch.object(lxc, "kill_stale_helpers") as reaper,
+            mock.patch.object(lxc.LxcBackend, "_state", return_value=None),
+        ):
+            self.backend.forget_unit("work")
+        self.assertFalse((run / "work").exists())
+        self.assertTrue((run / "other/desktop").is_dir())
+        self.assertTrue((run / "lxc/work").is_dir())
+        reaper.assert_called_once_with("work")
+
+    def test_forgetting_a_space_called_lxc_keeps_the_lxc_directory(self) -> None:
+        run = self.root / "run-spaces"
+        (run / "lxc").mkdir(parents=True)
+        with (
+            mock.patch.object(lxc, "DESKTOP_RUNTIME_ROOT", run),
+            mock.patch.object(lxc, "kill_stale_helpers") as reaper,
+        ):
+            lxc._forget_session_runtime("lxc")
+        self.assertTrue((run / "lxc").is_dir())
+        reaper.assert_not_called()
 
     def test_forget_shuts_runsv_down_before_deleting_its_directories(self) -> None:
         self.adopt("work")
