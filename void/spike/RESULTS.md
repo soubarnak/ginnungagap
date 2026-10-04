@@ -650,3 +650,35 @@ Arch multilib probe), `priv.py` (refresh of the generated config before `create`
 - Arch `/usr/lib32`: the NVIDIA lib32 overlay for arch is only generated when the guest's `/etc/pacman.conf` has `[multilib]`
   (the generator reads `/var/lib/spaces/arch/rootfs/etc/pacman.conf` at every start). Placeholder files already created by M6 stay.
 - `spaces-void gc` and `doctor` (see `void/docs/void.md`).
+
+### Check results
+
+`python3 void/spike/m7_check.py --reinstall`: 77 PASS, 0 FAIL, 0 SKIP (entry commands 16, shell snippet 6, autostart 15, flavour
+17 including install-flavor on ubuntu, arch and fedora, the GTK window and the Qt theme, housekeeping 12 including the
+uninstall/reinstall cycle, doctor and gc 5, clean machine 6). Unit tests: 640 passed, 17 skipped. A first full run found one
+bug in the check itself (the state-file restore wrote a literal `\n`; repaired from a backup, the check now restores through
+`tee`) and two ordering problems after the reinstall, which removes `/etc/sv/spaces-*` until the next start of each space
+(the check now runs doctor and gc before the reinstall and treats a missing service as stopped).
+Machine at the end: all spaces stopped, `spaces-autostart` unlinked and its daemon gone, `autostart-users` as before (all four
+spaces for soubarna), no space mounts or cgroups, `cgroup.subtree_control` empty, watchdog inactive. Left behind on purpose:
+`python3-pyqt6` and the GTK flavour packages in ubuntu, the flavour packages in arch and fedora, `/var/lib/spaces/.host/{dev-install.packages,desktop-flavor}`.
+
+### Open items for M8 (xbps-src packaging)
+
+- Templates: `spaces` (python3 module + native build with `make -C native`, glibc/x86_64 only for the guest helpers: `archs=x86_64`,
+  `hostmakedepends="gcc make pkg-config"`, `makedepends="glib-devel pam-devel"`), depends on `lxc apparmor polkit elogind runit
+  debootstrap python3-Pillow python3-rich python3-textual xdg-dbus-proxy librsvg-utils gnupg curl dconf util-linux gawk` and, per
+  distro, `pacman`/`m4` for the Arch bootstrap (or the already written `arch-install-scripts` and `archlinux-keyring` templates in
+  `void/srcpkgs`); a `dnf5` shim package or the shim inside `spaces`. Run `xlint` and `xbps-src check`; the tests need
+  `PYTHONPATH=src` and a fake `/usr/bin`.
+- Replace in the package what `dev-install.sh` does by hand: the file copies (python package, `/usr/bin/*`, `/usr/lib/spaces`,
+  `/usr/share/spaces`, polkit policy, `/etc/pam.d/spaces`, `/etc/apparmor.d/spaces-container`), the AppArmor load (INSTALL hook:
+  `apparmor_parser -r`; REMOVE hook: `-R`), `/etc/spaces/config.json` generation (INSTALL hook: `spaces-nvidia-sync`; the file is not
+  a package file, only `config.base.json` is), keyring/mirror setup of the Arch tooling, `conf_files=/etc/pam.d/spaces` (and the
+  mirrorlist if shipped), `/var/lib/spaces`, `/var/cache/spaces`, `/var/log/spaces` directories (`make_dirs`), the runit service
+  `/etc/sv/spaces-autostart` (not linked; a `vsv`-compatible `run`/`finish`/`log/run`), and removal of the per-space services in
+  REMOVE (`spaces-void gc` after the last space is gone).
+- Decide: Python version independence (the dev install writes into `python3.14/site-packages`; use `vmove`/`${py3_sitelib}`),
+  SELinux files and the rpm specs stay out, the ubuntu keyring (currently fetched by the installer, needs a template or the
+  `debootstrap` package's keyring), the pinned Fedora key and image URL (runtime download, not in the package),
+  `spaces.priv` as a root-owned file the polkit policy binds to.
