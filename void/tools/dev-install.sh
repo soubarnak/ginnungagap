@@ -2,6 +2,7 @@
 # Development install of Spaces on Void Linux (runit + LXC backend).
 #
 # Usage: sudo void/tools/dev-install.sh [--skip-keyring] [--skip-packages]
+#                                       [--skip-distro-tools]
 #
 # Idempotent. Every file is COPIED to its system location: nothing installed
 # here refers back to this (user-writable) checkout, so root never executes
@@ -20,6 +21,7 @@ for argument in "$@"; do
     case "$argument" in
         --skip-keyring) SKIP_KEYRING=1 ;;
         --skip-packages) SKIP_PACKAGES=1 ;;
+        --skip-distro-tools) SKIP_DISTRO_TOOLS=1 ;;
         *) echo "unknown option: $argument" >&2; exit 2 ;;
     esac
 done
@@ -268,6 +270,17 @@ if [ "$SKIP_KEYRING" -eq 0 ]; then
         install -m 0644 -o root -g root "$candidate" "$KEYRING"
         log "installed $KEYRING (from $tarball, sha256 $actual)"
     fi
+fi
+
+# ------------------------------------------------------ arch/fedora host tools
+SKIP_DISTRO_TOOLS=${SKIP_DISTRO_TOOLS:-0}
+if [ "$SKIP_DISTRO_TOOLS" -eq 0 ]; then
+    # shellcheck source=dev-install-arch.sh
+    . "$ROOT/void/tools/dev-install-arch.sh"
+    install_arch_host
+    # shellcheck source=dev-install-fedora.sh
+    . "$ROOT/void/tools/dev-install-fedora.sh"
+    install_fedora_host
 fi
 
 save_state

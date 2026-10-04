@@ -113,6 +113,12 @@ case "${STATE_KV[keyring]:-}" in
         [ -f "$KEYRING.dev-install-backup" ] && mv -f "$KEYRING.dev-install-backup" "$KEYRING"
         ;;
 esac
+# Arch: a mirror list this install created ("installed") or that rankmirrors
+# rewrote since; a file that existed before the install is never touched.
+if [ "${STATE_KV[arch_mirrorlist]:-}" = installed ]; then
+    rm -f /etc/pacman.d/mirrorlist
+    rmdir /etc/pacman.d 2>/dev/null || true
+fi
 rm -f "$STATE"
 rmdir /etc/spaces 2>/dev/null || true
 

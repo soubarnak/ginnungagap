@@ -180,6 +180,10 @@ def ensure_service(name: str) -> Path:
         directory / "run",
         "#!/bin/sh\n"
         "exec 2>&1\n"
+        # runit hands the service the console as stdin. lxc-attach then treats
+        # every launcher command as interactive and a Fedora guest's short
+        # `install -d` exits 129 (SIGHUP), which broke session forwarding.
+        "exec </dev/null\n"
         f"export PATH={shlex.quote(SERVICE_PATH)} HOME=/root LANG=C.UTF-8\n"
         # Refresh the NVIDIA userspace farm and generated config.json (void
         # dev install); the launcher reads the configuration right after.

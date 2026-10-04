@@ -1,0 +1,3 @@
+#!/bin/sh
+# Spaces on Void: arch-chroot from arch-install-scripts (works without systemd).
+exec /usr/lib/spaces/void/arch-install-scripts/bin/arch-chroot "$@"

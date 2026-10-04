@@ -59,6 +59,7 @@ class ServiceTests(Base):
         self.assertEqual(
             run.splitlines()[:2], ["#!/bin/sh", "exec 2>&1"]
         )
+        self.assertIn("exec </dev/null\n", run)
         self.assertIn("exec /opt/spaces.priv launch work", run)
         self.assertIn(
             f"rm -f {self.root}/lxc/work/ready", (directory / "finish").read_text()

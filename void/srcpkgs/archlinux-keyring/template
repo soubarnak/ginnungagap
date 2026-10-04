@@ -1,0 +1,40 @@
+# Template file for 'archlinux-keyring'
+pkgname=archlinux-keyring
+version=20260909
+revision=1
+depends="pacman"
+short_desc="Arch Linux PGP keyring (files only, for pacman-key --populate)"
+maintainer="Spaces on Void <spaces@localhost>"
+license="GPL-3.0-or-later"
+homepage="https://gitlab.archlinux.org/archlinux/archlinux-keyring"
+# The release tarball already holds the built keyring. Its inline signature
+# (archlinux-keyring-${version}.tar.gz.sig, not a detached one) was verified
+# with Christian Hesse's key 02FD1C7A934E614545849F19A6234074498E9CEE, one of
+# the validpgpkeys of Arch's PKGBUILD; xbps-src cannot check it, the checksum
+# below pins the verified tarball.
+distfiles="https://gitlab.archlinux.org/archlinux/archlinux-keyring/-/releases/${version}/downloads/archlinux-keyring-${version}.tar.gz"
+checksum=935ad345a7700358367ca9a2f70220f30869492c31b24e9e4e4e89f05bf5528a
+wrksrc="archlinux-keyring-${version}"
+
+# The master keys in archlinux-trusted are the trust anchors. Require exactly
+# the five fingerprints that https://archlinux.org/master-keys/ lists.
+post_extract() {
+	local fpr
+	for fpr in 2AC0A42EFB0B5CBC7A0402ED4DC95B6D7BE9892E \
+		3572FA2A1B067F22C58AF155F8B821B42A6FDCD7 \
+		69E6471E3AE065297529832E6BA0F5A2037F4F41 \
+		99B6618472A3B3B814185BAED7D3D823B88BDB9B \
+		D8AFDDA07A5B6EDFA7D8CCDAD6D055F927843F1C; do
+		grep -q "^${fpr}:4:" archlinux-trusted ||
+			vdie "master key ${fpr} missing from archlinux-trusted"
+	done
+	[ "$(wc -l <archlinux-trusted)" -eq 5 ] ||
+		vdie "archlinux-trusted does not list exactly five master keys"
+}
+
+do_install() {
+	# Same paths as Arch's package: `pacman-key --populate archlinux` finds them.
+	vinstall archlinux.gpg 644 usr/share/pacman/keyrings
+	vinstall archlinux-trusted 644 usr/share/pacman/keyrings
+	vinstall archlinux-revoked 644 usr/share/pacman/keyrings
+}

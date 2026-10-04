@@ -828,7 +828,13 @@ static void execute_agent(
      * child. The supervisor consumes the output and uses the registration
      * message as its readiness signal.
      */
-    if (setenv("QT_LOGGING_RULES", "default.debug=true", 1) < 0) {
+    /*
+     * Qt built with journald support (Arch, Fedora) sends messages to the
+     * journal when the process has JOURNAL_STREAM, as it has under a guest
+     * systemd unit, so the pipe would stay empty.
+     */
+    if (setenv("QT_FORCE_STDERR_LOGGING", "1", 1) < 0
+        || setenv("QT_LOGGING_RULES", "default.debug=true", 1) < 0) {
         child_errno = errno;
         report_status(error_descriptor, child_errno);
         _exit(127);

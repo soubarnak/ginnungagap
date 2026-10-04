@@ -1,0 +1,341 @@
+#!/usr/bin/python3 -I
+"""dnf5 for hosts without it (Void Linux): runs dnf5 inside a bootstrap Fedora.
+
+fedora.py runs `dnf5 --installroot=ROOT --releasever=N ... install ...` on the
+host. This shim keeps that command line unchanged and executes the real dnf5
+from the official Fedora Container Base image instead:
+
+1. The image, its CHECKSUM file and nothing else are downloaded from Fedora's
+   master mirror into /var/lib/spaces/.host/fedora/RELEASE/. The CHECKSUM
+   signature is verified with gpgv against the release key shipped with Spaces
+   (/usr/share/spaces/keys/RPM-GPG-KEY-fedora-RELEASE-primary; the signer's
+   fingerprint must be that key's), then the image's sha256 against it.
+2. The OCI layers are unpacked (digests checked, ownership, modes and xattrs
+   kept by GNU tar, whiteouts applied) to .../RELEASE/root.
+3. `unshare --mount` + chroot into that root, with the installation root
+   bind-mounted at the same path, /proc, a minimal /dev, /sys read-only,
+   resolv.conf and /usr/share/spaces visible. The mounts live only in that
+   private mount namespace and vanish with the process. RPM signature checks
+   (gpgcheck in fedora.repo) stay enforced inside.
+
+Not part of Spaces upstream; installed to /usr/lib/spaces/void/bin/dnf5.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+from pathlib import Path
+
+HOST_DIR = Path(os.environ.get("SPACES_FEDORA_HOST_DIR", "/var/lib/spaces/.host/fedora"))
+KEY_DIR = Path(os.environ.get("SPACES_KEY_DIR", "/usr/share/spaces/keys"))
+SPACES_SHARE = Path("/usr/share/spaces")
+IMAGES_URL = (
+    "https://dl.fedoraproject.org/pub/fedora/linux/releases/{release}"
+    "/Container/x86_64/images"
+)
+# release -> (CHECKSUM file name, image file name)
+RELEASES = {
+    "44": (
+        "Fedora-Container-44-1.7-x86_64-CHECKSUM",
+        "Fedora-Container-Base-Generic-44-1.7.x86_64.oci.tar.xz",
+    ),
+}
+DEVICES = ("null", "zero", "full", "random", "urandom", "tty")
+MARKER = ".spaces-unpacked"
+
+
+class ShimError(Exception):
+    pass
+
+
+def log(message: str) -> None:
+    print(f"dnf5 shim: {message}", file=sys.stderr, flush=True)
+
+
+def release_of(arguments: list[str]) -> str:
+    release = "44"
+    for index, argument in enumerate(arguments):
+        if argument.startswith("--releasever="):
+            release = argument.partition("=")[2]
+        elif argument == "--releasever" and index + 1 < len(arguments):
+            release = arguments[index + 1]
+    if release not in RELEASES:
+        raise ShimError(f"Fedora release {release!r} is not supported (known: {', '.join(RELEASES)})")
+    return release
+
+
+def installroot_of(arguments: list[str]) -> Path | None:
+    for index, argument in enumerate(arguments):
+        value = None
+        if argument.startswith("--installroot="):
+            value = argument.partition("=")[2]
+        elif argument == "--installroot" and index + 1 < len(arguments):
+            value = arguments[index + 1]
+        if value:
+            return Path(os.path.realpath(value))
+    return None
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download(url: str, destination: Path) -> None:
+    request = urllib.request.Request(url, headers={"User-Agent": "spaces-dnf5-shim"})
+    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as out:
+        shutil.copyfileobj(response, out, 1 << 20)
+
+
+def verify_checksum_file(checksum: Path, release: str) -> dict[str, str]:
+    """Verify the clearsigned CHECKSUM with gpgv; return {file name: sha256}."""
+
+    key = KEY_DIR / f"RPM-GPG-KEY-fedora-{release}-primary"
+    if not key.is_file():
+        raise ShimError(f"Fedora signing key missing: {key}")
+    with tempfile.TemporaryDirectory(prefix="spaces-gpg.") as scratch:
+        keyring = Path(scratch) / "keyring.gpg"
+        dearmored = subprocess.run(
+            ["gpg", "--batch", "--no-default-keyring", "--dearmor"],
+            input=key.read_bytes(), stdout=subprocess.PIPE, check=True,
+            env={"GNUPGHOME": scratch, "PATH": os.environ.get("PATH", "")},
+        ).stdout
+        keyring.write_bytes(dearmored)
+        shown = subprocess.run(
+            ["gpg", "--batch", "--show-keys", "--with-colons", str(key)],
+            stdout=subprocess.PIPE, text=True, check=True,
+            env={"GNUPGHOME": scratch, "PATH": os.environ.get("PATH", "")},
+        ).stdout
+        wanted = {
+            line.split(":")[9]
+            for line in shown.splitlines()
+            if line.startswith("fpr:")
+        }
+        done = subprocess.run(
+            ["gpgv", "--status-fd", "1", "--keyring", str(keyring), str(checksum)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        valid = [
+            line.split()
+            for line in done.stdout.splitlines()
+            if line.startswith("[GNUPG:] VALIDSIG")
+        ]
+        if done.returncode != 0 or not valid:
+            raise ShimError(f"CHECKSUM signature is not valid: {done.stderr.strip()}")
+        # VALIDSIG <signing fpr> ... <primary fpr>
+        if not ({valid[0][2], valid[0][-1]} & wanted):
+            raise ShimError("CHECKSUM was signed by a key other than the Fedora release key")
+    sums: dict[str, str] = {}
+    for line in checksum.read_text(encoding="utf-8").splitlines():
+        match = re.fullmatch(r"SHA256 \((.+)\) = ([0-9a-f]{64})", line)
+        if match:
+            sums[match[1]] = match[2]
+    return sums
+
+
+def fetch_image(release: str, directory: Path) -> Path:
+    checksum_name, image_name = RELEASES[release]
+    image = directory / image_name
+    checksum = directory / checksum_name
+    base = IMAGES_URL.format(release=release)
+    if not checksum.is_file():
+        log(f"downloading {checksum_name}")
+        download(f"{base}/{checksum_name}", checksum)
+    sums = verify_checksum_file(checksum, release)
+    expected = sums.get(image_name)
+    if not expected:
+        raise ShimError(f"{image_name} is not listed in the signed CHECKSUM file")
+    if not image.is_file() or sha256_of(image) != expected:
+        log(f"downloading {image_name} (about 70 MB)")
+        part = image.with_suffix(".part")
+        download(f"{base}/{image_name}", part)
+        if sha256_of(part) != expected:
+            part.unlink()
+            raise ShimError(f"sha256 mismatch for {image_name}")
+        part.replace(image)
+    return image
+
+
+def oci_layers(blobs: Path, index: dict) -> list[Path]:
+    manifests = index.get("manifests") or []
+    if len(manifests) != 1:
+        raise ShimError("expected exactly one image in the OCI archive")
+    manifest = json.loads(blob_path(blobs, manifests[0]["digest"]).read_text())
+    return [blob_path(blobs, layer["digest"]) for layer in manifest["layers"]]
+
+
+def blob_path(blobs: Path, digest: str) -> Path:
+    algorithm, _, value = digest.partition(":")
+    if algorithm != "sha256" or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ShimError(f"unsupported digest {digest!r}")
+    path = blobs / value
+    if sha256_of(path) != value:
+        raise ShimError(f"blob {value} does not match its digest")
+    return path
+
+
+def apply_layer(layer: Path, root: Path) -> None:
+    """Extract one layer with GNU tar after applying its whiteouts."""
+
+    whiteouts: list[str] = []
+    with tarfile.open(layer) as archive:
+        for member in archive:
+            name = member.name.lstrip("./")
+            base = os.path.basename(name)
+            if base == ".wh..wh..opq":
+                whiteouts.append("opaque:" + os.path.dirname(name))
+            elif base.startswith(".wh."):
+                whiteouts.append("file:" + os.path.join(os.path.dirname(name), base[4:]))
+    for entry in whiteouts:
+        kind, _, relative = entry.partition(":")
+        target = root / relative
+        if root not in target.parents and target != root:
+            raise ShimError(f"unsafe whiteout {relative!r}")
+        if kind == "opaque" and target.is_dir():
+            for child in target.iterdir():
+                remove_path(child)
+        elif kind == "file":
+            remove_path(target)
+    subprocess.run(
+        [
+            "tar", "--extract", "--file", str(layer), "--directory", str(root),
+            "--numeric-owner", "--preserve-permissions",
+            "--same-owner" if os.geteuid() == 0 else "--no-same-owner",
+            "--xattrs", "--xattrs-include=*", "--exclude=*.wh.*",
+            "--no-overwrite-dir",
+        ],
+        check=True,
+    )
+
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def unpack(release: str, directory: Path) -> Path:
+    root = directory / "root"
+    if (root / MARKER).is_file():
+        return root
+    image = fetch_image(release, directory)
+    scratch = directory / "root.tmp"
+    for stale in (scratch, directory / "oci.tmp"):
+        remove_path(stale)
+    oci = directory / "oci.tmp"
+    oci.mkdir(mode=0o700)
+    log("unpacking the Fedora base image")
+    try:
+        with tarfile.open(image, "r:xz") as archive:
+            archive.extractall(oci, filter="data")
+        index = json.loads((oci / "index.json").read_text())
+        layers = oci_layers(oci / "blobs" / "sha256", index)
+        scratch.mkdir(mode=0o755)
+        for layer in layers:
+            apply_layer(layer, scratch)
+        resolv = scratch / "etc" / "resolv.conf"
+        if resolv.is_symlink() or resolv.exists():
+            resolv.unlink()
+        resolv.parent.mkdir(parents=True, exist_ok=True)
+        resolv.touch(mode=0o644)
+        (scratch / MARKER).write_text(f"{release}\n")
+        scratch.rename(root)
+    finally:
+        shutil.rmtree(oci, ignore_errors=True)
+        if scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
+    return root
+
+
+def mount_script(root: Path, installroot: Path | None) -> str:
+    """Shell run in the private mount namespace before chroot."""
+
+    def q(path: object) -> str:
+        return "'" + str(path).replace("'", "'\\''") + "'"
+
+    lines = [
+        "set -e",
+        "mount --make-rprivate /",
+        f"mount --bind {q(root)} {q(root)}",
+        f"mount -t proc proc {q(root / 'proc')}",
+        f"mount --rbind /sys {q(root / 'sys')}",
+        f"mount -o remount,bind,ro {q(root / 'sys')} || true",
+        f"mount -t tmpfs -o mode=0755,nosuid tmpfs {q(root / 'dev')}",
+    ]
+    for device in DEVICES:
+        node = root / "dev" / device
+        lines += [f": > {q(node)}", f"mount --bind /dev/{device} {q(node)}"]
+    lines += [
+        f"mkdir -p {q(root / 'dev' / 'shm')} {q(root / 'dev' / 'pts')}",
+        f"mount -t tmpfs tmpfs {q(root / 'dev' / 'shm')}",
+        f"ln -sf /proc/self/fd {q(root / 'dev' / 'fd')}",
+        f"ln -sf /proc/self/fd/0 {q(root / 'dev' / 'stdin')}",
+        f"ln -sf /proc/self/fd/1 {q(root / 'dev' / 'stdout')}",
+        f"ln -sf /proc/self/fd/2 {q(root / 'dev' / 'stderr')}",
+        f"mount -t tmpfs tmpfs {q(root / 'run')}",
+        f"mount -t tmpfs tmpfs {q(root / 'tmp')}",
+        'resolv=$(readlink -f /etc/resolv.conf || true)',
+        f"if [ -f \"$resolv\" ]; then mount --bind \"$resolv\" {q(root / 'etc' / 'resolv.conf')}; fi",
+        f"mkdir -p {q(root / SPACES_SHARE.relative_to('/'))}",
+        f"mount --bind {q(SPACES_SHARE)} {q(root / SPACES_SHARE.relative_to('/'))}",
+        f"mount -o remount,bind,ro {q(root / SPACES_SHARE.relative_to('/'))}",
+    ]
+    if installroot is not None:
+        target = root / installroot.relative_to("/")
+        lines += [
+            f"mkdir -p {q(target)}",
+            f"mount --rbind {q(installroot)} {q(target)}",
+        ]
+    lines.append('exec chroot "$@"')
+    return "\n".join(lines)
+
+
+def main(argv: list[str]) -> int:
+    arguments = argv[1:]
+    try:
+        release = release_of(arguments)
+        installroot = installroot_of(arguments)
+        if installroot is not None and not installroot.is_dir():
+            raise ShimError(f"installation root {installroot} does not exist")
+        directory = HOST_DIR / release
+        directory.mkdir(mode=0o755, parents=True, exist_ok=True)
+        with (directory / "lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            root = unpack(release, directory)
+        if not (root / "usr" / "bin" / "dnf5").exists():
+            raise ShimError("the bootstrap image has no /usr/bin/dnf5")
+        script = mount_script(root, installroot)
+    except (ShimError, OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        print(f"dnf5 shim: {error}", file=sys.stderr)
+        return 1
+    allowed = ("PATH", "TERM", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "HOME",
+               "http_proxy", "https_proxy", "no_proxy")
+    environment = {k: v for k, v in os.environ.items() if k in allowed}
+    environment.setdefault("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+    environment.setdefault("HOME", "/root")
+    os.execvpe(
+        "unshare",
+        ["unshare", "--mount", "--propagation", "private", "--",
+         "/bin/sh", "-c", script, "sh", str(root),
+         "/usr/bin/env", "PATH=/usr/sbin:/usr/bin", "/usr/bin/dnf5", *arguments],
+        environment,
+    )
+    return 127  # pragma: no cover
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

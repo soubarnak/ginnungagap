@@ -1,0 +1,5 @@
+#!/bin/sh
+# Spaces on Void: pacstrap (from arch-install-scripts) with a pacman.conf that
+# has the Arch repositories and the Arch keyring in a private GPG directory.
+exec /usr/lib/spaces/void/arch-install-scripts/bin/pacstrap \
+    -C /usr/share/spaces/void/arch-pacman.conf "$@"
