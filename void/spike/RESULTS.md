@@ -421,7 +421,7 @@ device, auth or portal workers. Real test: `kill -9` of the launcher leaves `lxc
 and runs the command. A second launcher for the same name is refused. (c) Portal filter review:
 `void/docs/portal-filter-review.md` (documentation only).
 
-Dead ends and surprises: the 15 s hang I first blamed on removal was the placeholder file, not the
+Dead ends and surprises: the 15 s removal wait first blamed on the mount was the leftover placeholder file, not the
 mount; a first stale test killed `svlogd` because `sv status` prints two pids.
 
 Open items for M6 (bootstrap Arch, Fedora, Kali):
@@ -432,3 +432,8 @@ Open items for M6 (bootstrap Arch, Fedora, Kali):
 - Guests that install their own NVIDIA packages meet the empty placeholder files.
 - `kali`/`arch` guest glibc versus the 2.38 requirement of `libnvidia-egl-wayland2`.
 - A `devices` level of `disabled` does not stop `portal.Usb`/`Camera` (see the review).
+- If `xbps-query` fails transiently (for example `xbps-install -u` holds the lock while a space
+  starts), `spaces-nvidia-sync` removes the farm and regenerates `config.json` without NVIDIA, so
+  that launch has no GPU userspace; the next launch restores it. Binds of an already running space
+  are unaffected (they point at the real `/usr/lib` inodes). The uninstall, install, enter cycle
+  was re-run after the last installer change and the log service came up.
