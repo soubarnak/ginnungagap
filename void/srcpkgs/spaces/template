@@ -10,6 +10,9 @@ revision=1
 # native/check_guest_abi.py; aarch64 has not been built or tested.
 archs="x86_64"
 build_style=python3-pep517
+# The Ctrl-C test needs a controlling terminal, which the xbps-src chroot does not have.
+make_check_args="tests -p no:cacheprovider
+ --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application"
 hostmakedepends="python3-setuptools python3-wheel python3-build python3-installer
  pkg-config"
 makedepends="glib-devel pam-devel"
@@ -43,9 +46,6 @@ conf_files="/etc/pam.d/spaces
 make_dirs="/var/lib/spaces 0755 root root
  /var/cache/spaces 0755 root root
  /var/log/spaces 0755 root root"
-# The Ctrl-C test needs a controlling terminal, which the xbps-src chroot does not have.
-make_check_args="tests -p no:cacheprovider
- --deselect tests/test_session.py::NativeLauncherTests::test_terminal_ctrl_c_reaches_application"
 python_version=3
 
 post_build() {
