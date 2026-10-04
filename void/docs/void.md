@@ -70,7 +70,7 @@ platform (the guest helpers are checked against glibc 2.17, which is also why mu
 cross-built in CI and has never been run.
 
 What the hooks do (shown once as INSTALL.msg): INSTALL loads the AppArmor profile (`apparmor_parser -r`,
-only when AppArmor is enabled), runs `spaces-void sync-config` and seeds `/etc/pacman.d/mirrorlist` when
+only when AppArmor is enabled; an older `spaces-container` profile and its file are dropped), runs `spaces-void sync-config` and seeds `/etc/pacman.d/mirrorlist` when
 it is absent; none of it can fail the transaction. On an upgrade the profile is reloaded, the generated
 configuration refreshed and a linked `spaces-autostart` restarted; running spaces are not touched
 (they keep their loaded profile until they restart). REMOVE (not on upgrades) stops every space,
@@ -101,7 +101,7 @@ tools and `rankmirrors` itself, and does not need the xbps dependencies to be de
 | `/usr/lib/spaces/` | native helpers, guest helpers, the cgroup wrapper `spaces-lxc`, `spaces-nvidia-sync`, shims for `pacstrap`/`dnf5` |
 | `/usr/share/spaces/` | data, `config.base.json`, `void/shell/spaces.{sh,fish}` (opt-in) |
 | `/etc/sv/spaces-autostart/` | the autostart runit service (installed, not linked) |
-| `/etc/apparmor.d/spaces-container`, `/etc/pam.d/spaces`, the polkit policy | security glue |
+| `/etc/apparmor.d/lxc-spaces-container`, `/etc/pam.d/spaces`, the polkit policy | security glue |
 | `/etc/spaces/config.json` | generated, see "Configuration" |
 | `/var/lib/spaces/NAME/`, `/var/cache/spaces/NAME/`, `/var/log/spaces/NAME/` | a space, its package cache, its log |
 | `/etc/sv/spaces-NAME`, `/var/service/spaces-NAME` | one runit service per space, created on first start, always `down` until started |
@@ -129,7 +129,9 @@ Once started it runs until stopped or until shutdown.
 By default `create` and `configure` enable "autostart at login" for your user (upstream's
 `spaces@NAME` user unit). On Void this only records your user name in
 `/var/lib/spaces/NAME/autostart-users`; it does nothing until you link the autostart service
-(next section). `--no-enable` skips the recording.
+(next section). `--no-enable` skips the recording. To opt in for real: `sudo ln -s /etc/sv/spaces-autostart /var/service/`
+and `sudo spaces-void autostart enable NAME` (add `--boot` to start at boot rather than at login); to opt out of a
+space: `sudo spaces-void autostart disable NAME`. Every `spaces configure` records your user again.
 
 ### Entry commands
 
@@ -250,8 +252,8 @@ plus an SELinux policy. This port keeps the same layers except SELinux:
 | Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default), no user namespace (root in a space is host root, as upstream). The LXC *monitor* is not in the guest's network namespace, see below |
 | Capabilities | `lxc.cap.keep` = nspawn's default set, widened or narrowed per permission level like upstream |
 | Syscalls | seccomp: LXC's `common.seccomp` base plus the per-permission adjustments |
-| Devices | cgroup2 device controller (eBPF), levels `disabled`, `basic`, `admin`, `full` from the permission settings; at `full` watchdogs and VT/console devices stay denied; hot-plug and NVIDIA nodes follow the level |
-| Mandatory access control | AppArmor profile `spaces-container` (derived from LXC's `lxc-container-default-cgns`: it additionally allows the mounts systemd uses to sandbox units, but no fresh `proc`, `sysfs` or cgroup v1 mount; the rest is denied as in LXC) **instead of** the SELinux policy `spaces-selinux`. Reviewed in `void/docs/apparmor-review.md`, including what it cannot stop |
+| Devices | cgroup2 device controller (eBPF), levels `disabled`, `basic`, `admin`, `full` from the permission settings; at `full` watchdogs and VT/console devices stay denied; `/dev/uinput` and `/dev/uhid` (input injection into the host) are only given at `full`, whatever udev tags them; hot-plug and NVIDIA nodes follow the level |
+| Mandatory access control | AppArmor profile `lxc-spaces-container` (derived from LXC's `lxc-container-default-cgns`: it additionally allows the mounts systemd uses to sandbox units, but no fresh `proc`, `sysfs` or cgroup v1 mount; the rest is denied as in LXC) **instead of** the SELinux policy `spaces-selinux`. The name starts with `lxc-` because Void loads `/etc/apparmor.d` at every boot (`/etc/runit/core-services/09-apparmor.sh`), which confines `/usr/bin/lxc-start` with the distribution's `usr.bin.lxc-start`; that profile only allows `change_profile -> lxc-*` and has no local include, so a differently named profile makes every launch fail after a reboot with `Failed to write AppArmor profile`. `m9_check.py` simulates that boot. Reviewed in `void/docs/apparmor-review.md`, including what it cannot stop |
 | Authorisation | polkit (`org.anatase.spaces.policy` bound to `/usr/bin/spaces.priv`) and host PAM for guest `sudo`, as upstream |
 | cgroups | each space under `/sys/fs/cgroup/spaces/NAME`, `cgroup.subtree_control` of the root stays empty (elogind); a private mount namespace hides elogind's v1 hierarchy from LXC |
 
@@ -299,7 +301,7 @@ sudo sv status /var/service/spaces-NAME
 
 * Space will not start: `sudo sv once /var/service/spaces-NAME` and read `/var/log/spaces/NAME/current`;
   `lxc-info -P /run/spaces/lxc -n NAME` (through `/usr/lib/spaces/spaces-lxc`) shows LXC's view.
-* AppArmor denials: `dmesg | grep DENIED`; `sudo apparmor_parser -r /etc/apparmor.d/spaces-container`
+* AppArmor denials: `dmesg | grep DENIED`; `sudo apparmor_parser -r /etc/apparmor.d/lxc-spaces-container`
   reloads the profile (the launcher also loads it on demand).
 * Guest sees no GPU after an NVIDIA update: `sudo spaces-void sync-config`, restart the space. After a driver
   update the kernel module and the userspace differ until reboot (doctor warns).

@@ -1060,4 +1060,91 @@ the `void` branch is pushed.
 - Root in a guest is host root through the new mount API (accepted risk; user namespace with a shifted map is the way out).
 - Never published: no tag pushed, no GitHub release, no key, no hosted repository; the workflow has not run on GitHub.
 - aarch64 is only cross-built; musl is unsupported on purpose.
-- The NVIDIA acceleration items of `m5_check.py` section 4 (the user's, after the kernel update and reboot).
+- The NVIDIA acceleration items of `m5_check.py` section 4: resolved, see "Post-reboot fixes" (D).
+
+## Post-reboot fixes (kernel 7.2.9_1, 2026-10-04)
+
+The first real reboot found four things. Everything below ran on the rebuilt and force-reinstalled package
+(`xbps-build.sh spaces`, `xbps-install -fy -R <repo> spaces-0.0.1_1`), without a reboot.
+
+### A. Boot regression: lxc-start's own AppArmor profile refused ours
+
+Cause: Void's `/etc/runit/core-services/09-apparmor.sh` runs `apparmor_parser -a -- /etc/apparmor.d` at boot, which loads
+the distribution's `/etc/apparmor.d/usr.bin.lxc-start` and confines `/usr/bin/lxc-start` (enforcing). That profile
+includes only `abstractions/lxc/start-container` (no `local/usr.bin.lxc-start`, so a local override is not possible) and
+allows `change_profile -> lxc-*`, `lxc-**`, `unconfined` and `:lxc-*:unconfined`. Our profile was called
+`spaces-container`; the first launch failed with `Failed to write AppArmor profile "spaces-container"`
+(`apparmor="DENIED" operation="change_profile" profile="/usr/bin/lxc-start" target="spaces-container"`). Every earlier test
+ran without a boot, with `lxc-start` unconfined.
+
+Fix (the option the distro profile leaves): the profile is renamed `lxc-spaces-container`, which matches the existing rule;
+the distribution's files stay untouched. Renamed in the profile (file `void/apparmor/lxc-spaces-container`, installed as
+`/etc/apparmor.d/lxc-spaces-container`), the LXC config generator (`lxc.apparmor.profile`), the launcher's on-demand load,
+`spaces-void doctor`, the template, the INSTALL and REMOVE hooks, `dev-install.sh`, `dev-uninstall.sh`, `m3/m8/m9_check.py`,
+the unit test and the docs. The INSTALL hook drops the old name on an upgrade (deletes `/etc/apparmor.d/spaces-container`
+when it is ours and unloads the old profile when no `lxc-start` runs; the transaction itself also removes the old file).
+Tested by hand: with the old file and profile put back, the hook removed both.
+
+Added: `spaces-void doctor` check "apparmor lxc-start profile" (FAIL when `lxc-start` is confined and no `change_profile`
+rule of its profile files matches ours); `tests/test_void_apparmor.py` (the profile name agrees everywhere, matches the
+`change_profile` globs of a stand-in `start-container` and of the installed distro profile, the template and hooks use it);
+`m9_check.py` section "boot-path profile set". `apparmor-review.md` finding 7 and `void.md` are updated.
+
+Proof (installed package, kernel 7.2.9_1): the `bootpath` section unloads `usr.bin.lxc-start` and `lxc-spaces-container`
+(`apparmor_parser -R`), sources the real `/etc/runit/core-services/09-apparmor.sh` (it runs `apparmor_parser -a -- /etc/apparmor.d`;
+the other 178 profiles stay loaded, so the parser reports "already exists" for them and exits non-zero, which the check
+accepts, nothing else), and then: `aa-status` / `/sys/kernel/security/apparmor/profiles` show `/usr/bin/lxc-start (enforce)`
+and `lxc-spaces-container (enforce)`; `ubuntu -- true` starts; no `operation="change_profile"` line in `dmesg` (`dmesg -C`
+before the start); the guest init's `/proc/PID/attr/current` is `lxc-spaces-container (enforce)`. 8 PASS. The only DENIED
+lines of the whole session are the known fresh `proc`/`sysfs` mounts of systemd units (the fallback case of the review).
+
+### B. `/dev/uinput` reachable from guests
+
+Source of the node: not a package that loads it. Void's runit core service `/etc/runit/core-services/01-static-devnodes.sh`
+modprobes every module listed by `kmod static-nodes -f devname`, and `uinput` is in `modules.devname` (`uinput uinput c10:223`),
+so it is loaded at every boot (there is nothing in `/etc/modules-load.d`, `/etc/modprobe.d`; `modules-load.d` has
+`dm-raid`, `v4l2loopback`, `cdrtools`, `claude-desktop` (vhost_vsock), `msi-ec` (sg)). The package `steam-udev-rules`
+(`/usr/lib/udev/rules.d/60-steam-input.rules`: `KERNEL=="uinput" ... GROUP="input", TAG+="uaccess"`) gives the node the
+`uaccess` ACL for the logged-in user, which is what let the basic level hand it to a guest (basic = uaccess-tagged nodes).
+Before the reboot the module was not loaded, so the node did not exist.
+
+Fix: `devices.discover` never returns `/dev/uinput` and `/dev/uhid` (same class: input injection into the host, forged
+devices) at the basic and admin levels, by name since no udev property marks them; at `full`, which is unrestricted by definition, they
+stay (the user's explicit grant). Because the device cgroup allow list of a closed policy is built from the discovered nodes, the
+guest gets neither the bind nor an allow rule, whether the module is loaded or not. Hot-plug of virtual input devices (m5
+section 6, uinput used on the host) is unchanged. `tests/test_devices.py::test_input_injection_nodes_stay_out_below_full`.
+`m5_check.py` section 5 gained "/dev/uinput is not created in the guest".
+
+Proof: `m5_check.py` before the fix failed "5 basic: sensitive nodes unreachable ... open: /dev/uinput"; after: all of
+sections 1-3 and 5 PASS, as do 6 (hot-plug), 7 and 9: 44 passed, 0 failed.
+
+### C. Autostart leftovers
+
+The files are `/var/lib/spaces/NAME/autostart-users` (not `info.json`), each containing `soubarna`. They are not an artifact
+of the m7/m8 scripts: `spaces create` and `spaces configure` call `LxcBackend.enable_user_autostart` for the user (upstream's
+default; `priv.py`), and `m7_check.py` saves and restores the files byte for byte. Their mtimes (16:30:54, four files in 40 ms)
+are m7's restore after this boot. Nothing consumes them while `spaces-autostart` is not linked into `/var/service`, which it is
+not. They were removed with the supported command, `sudo spaces-void autostart disable NAME` for the four spaces
+(`spaces-void autostart list` shows `-` for every user, no `autostart-boot` flags). Every later `spaces configure` records the
+user again (use `--no-enable` to avoid it). Opt-in: `sudo ln -s /etc/sv/spaces-autostart /var/service/` plus
+`sudo spaces-void autostart enable NAME` (`--boot` for boot instead of login); documented in `void.md`.
+
+### D. EGL on renderD128
+
+The check was wrong, not the stack. Render node numbers follow probe order, which changed with the new kernel/boot:
+`/dev/dri/by-path` shows `pci-0000:05:00.0-render -> renderD128` (the AMD Radeon 660M iGPU) and `pci-0000:01:00.0-render -> renderD129`
+(the RTX 2050). `m5_check.py` hard-coded "renderD128 is NVIDIA" and failed on what it printed: `AMD Radeon 660M (radeonsi ...)`,
+a hardware EGL context on the right GPU; renderD129 gave `NVIDIA GeForce RTX 2050/PCIe/SSE2`. The ICD and EGL vendor files in the farm
+(`10_nvidia.json`, `nvidia_icd.json`) were visible in the guest and need no `__EGL_VENDOR_LIBRARY_FILENAMES`; Vulkan and PRIME offload also pass.
+The check now picks the expected driver from `/sys/class/drm/renderD*/device/vendor` (0x10de NVIDIA, 0x1002 AMD). The `KNOWN_M5`
+exemption of `m9_check.py --regress` is gone: it listed three items that now pass.
+
+### Verification
+
+- `python3 -m pytest -q`: 690 passed, 17 skipped (684 + 6 new).
+- `sudo xbps-pkgdb spaces`: clean. `sudo spaces-void doctor`: 19 checks, 0 FAIL, 4 WARN (the per-space runit services are created
+  at the first start, as after any reinstall); includes "apparmor lxc-start profile: confined, allows change_profile -> lxc-spaces-container".
+- `m9_check.py`: 92 passed, 0 failed, 8 skipped (the known new-mount-API items), including the boot-path section.
+  `m5_check.py`: 44 passed, 0 failed, 0 skipped (the last run, with the new "/dev/uinput is not created in the guest" item).
+- Machine at the end: all four spaces stopped, `spaces-autostart` not linked, no `autostart-users`, both profiles loaded
+  (`lxc-start` enforcing). No reboot was done.

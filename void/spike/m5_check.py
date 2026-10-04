@@ -267,14 +267,19 @@ def check_acceleration() -> None:
     check("4 vulkaninfo lists the AMD (radv) GPU", "radv" in out, "")
     if Path("/dev/nvidiactl").exists():
         check("4 vulkaninfo lists the NVIDIA GPU", "driverName         = NVIDIA" in out)
-    for node, expected in (("/dev/dri/renderD129", None), ("/dev/dri/renderD128", "NVIDIA")):
-        if not Path(node).exists():
-            continue
-        done = guest_python(GBM_EGL, node)
+    # The render node numbers follow probe order and changed between boots (renderD128 was the
+    # NVIDIA GPU once and is the AMD iGPU now), so the expected driver comes from the PCI vendor.
+    expected_by_vendor = {"0x10de": ("NVIDIA", "NVIDIA"), "0x1002": ("AMD", "AMD")}
+    for node in sorted(Path("/dev/dri").glob("renderD*")):
+        try:
+            vendor = (Path("/sys/class/drm") / node.name / "device/vendor").read_text().strip()
+        except OSError:
+            vendor = ""
+        kind, expected = expected_by_vendor.get(vendor, ("other", None))
+        done = guest_python(GBM_EGL, str(node))
         text = done.stdout.strip().splitlines()[-1] if done.stdout.strip() else done.stdout
         hardware = done.returncode == 0 and "llvmpipe" not in text and "softpipe" not in text
-        label = f"4 EGL on {node} renders in hardware"
-        check(label, hardware and (expected is None or expected in text), text[:80])
+        check(f"4 EGL on {node} ({kind} GPU) renders in hardware", hardware and (expected is None or expected in text), text[:80])
     if graphical():
         out = guest_graphical("glxinfo -B 2>&1").stdout
         check("4 glxinfo (XWayland :0) direct rendering, not llvmpipe",
@@ -312,6 +317,8 @@ def check_blocked() -> None:
         parsed = parse_blocked(guest_python(BLOCKED, root=root).stdout)
         opened = sorted(k for k, v in parsed.items() if v == "OPEN")
         check(f"5 basic: sensitive nodes unreachable for guest {who}", parsed and not opened, f"open: {opened}")
+    check("5 basic: /dev/uinput is not created in the guest (the host module is loaded at every boot)",
+          "uinput" not in guest_ls("/dev") and "uhid" not in guest_ls("/dev"), str(Path("/dev/uinput").exists()))
     parsed = parse_blocked(guest_python(BLOCKED, root=True).stdout)
     mknod = {k: v for k, v in parsed.items() if k.startswith("mknod")}
     check("5 basic: mknod'd host disk/tpm/tty/kmsg nodes are refused by the device cgroup",
