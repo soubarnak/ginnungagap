@@ -8,6 +8,10 @@
 #   --committed        build HEAD instead of the working tree (default: the working
 #                      tree, including uncommitted and untracked files, honouring
 #                      .gitignore: nothing is stashed or modified)
+#   --release          build the released source: the `spaces` template is used as it is
+#                      committed (tarball downloaded from GitHub, checksum verified by
+#                      xbps-src); needs a pushed tag and the real checksum, see
+#                      void/docs/release.md
 #   --revision N       override `revision=` of the spaces template (testing upgrades)
 #   --check            run the unit tests during the build (xbps-src -Q)
 #   --no-bootstrap     do not clone/bootstrap void-packages when it is missing
@@ -35,6 +39,7 @@ VP=${VOID_PACKAGES:-$HOME/.local/share/ginnungagap/void-packages}
 VP_URL=https://github.com/void-linux/void-packages
 COMMITTED=0
 REVISION=
+RELEASE=0
 CHECK=0
 BOOTSTRAP=1
 LINT_ONLY=0
@@ -44,6 +49,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --committed) COMMITTED=1 ;;
         --revision) REVISION=${2:?--revision needs a number}; shift ;;
+        --release) RELEASE=1 ;;
         --check) CHECK=1 ;;
         --no-bootstrap) BOOTSTRAP=0 ;;
         --lint) LINT_ONLY=1 ;;
@@ -128,7 +134,14 @@ render_spaces() {
         "$ROOT/void/srcpkgs/spaces/template" >"$out/template"
     SPACES_SHA=$sha
 }
-render_spaces
+if [ "$RELEASE" -eq 1 ]; then
+    [ -z "$REVISION" ] || { echo "--release and --revision cannot be combined" >&2; exit 2; }
+    rm -rf "$VP/srcpkgs/spaces"
+    cp -a "$ROOT/void/srcpkgs/spaces" "$VP/srcpkgs/spaces"
+    log "spaces: building the released tarball from the committed template"
+else
+    render_spaces
+fi
 
 cd "$VP"
 log "xlint"

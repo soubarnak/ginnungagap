@@ -2,7 +2,8 @@
 # Spaces on Void: LXC containers supervised by runit (fork of anatase-org/spaces).
 # Built from the repository tarball: `void/tools/xbps-build.sh` renders the checksum of the
 # current working tree into a copy of this template; a release uses the URL below and the
-# checksum of the tagged tarball (the all-zero value is a placeholder, see void/docs/void.md).
+# checksum of the tagged tarball (the all-zero value is a placeholder until the tag is pushed,
+# see void/docs/release.md).
 pkgname=spaces
 version=0.0.1
 revision=1
