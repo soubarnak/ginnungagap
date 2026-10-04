@@ -273,7 +273,7 @@ Security observations:
 - `spaces enter --graphical` argument order: the flag must precede the space name
   (`spaces enter --graphical ubuntu -- cmd`); after the space name argparse treats it as the command.
 
-Open items for M5 and later:
+Open items for M5 and later (M5 is done, see the next section):
 
 - M5: device policy and hotplug. The guest sees `/dev/dri/card1` only (base rules); apps render in
   software; render nodes, the NVIDIA stack and `/dev/input` rules are not configured.
@@ -288,3 +288,147 @@ Open items for M5 and later:
   guest helper.
 - Secrets: `org.freedesktop.impl.portal.Secret` is only bus-activatable on this host (gnome-keyring is
   running); guest secret flows (M6) are untested.
+
+## M5: devices, GPU and hotplug (2026-10-04)
+
+`void/spike/m5_check.py` (run as the user from the niri session): 43 PASS, 0 FAIL, 0 SKIP.
+Unit tests: 572 passed, 17 skipped. Host: RTX 2050 (card0, renderD128, nvidia driver, headless)
+and Radeon 680M (card1, renderD129, amdgpu, drives eDP-1 and niri); NVIDIA 595.104.02.
+
+Discovery and tagging (item 1). The M4 note "the guest sees only card1" does not reproduce:
+`devices.discover("basic")` returns card0, card1, renderD128, renderD129 on this host and the guest
+sees all four. Why it works without any udev rule: eudev ships `70-uaccess.rules`
+(`SUBSYSTEM=="drm", KERNEL=="card*", TAG+="uaccess"`) and elogind applies the ACL, so
+`getfacl /dev/dri/card0` shows `user:soubarna:rw-` on a `root:video 0660` node; render nodes are
+`0666`, and `discover` also accepts the `drm` subsystem and the host `video` gid. No udev rule or
+code change was needed for the GPU nodes. Access in the guest rests on the ACL (uid 1000 equals
+the host uid) and on `0666`, not on groups: host `video` is gid 13, which is `proxy` in the Ubuntu
+guest (`video` is 44, `render` 990). Group-only nodes without ACL stay unreachable for the guest
+user (`/dev/fb0` EACCES, `/dev/snd/hwC*` EACCES); upstream has the same limit, and the GPU, camera,
+audio, controller nodes all carry an ACL or 0666, so no `_reconcile_accounts` change was made.
+Also visible at `basic` (upstream rules, unchanged): `/dev/kfd`, `/dev/media0`, `/dev/fb0`,
+`/dev/drm_dp_aux*`, `/dev/rfkill`, `/dev/snd/*`, `/dev/video*`. The `drm_dp_aux*` nodes are root 0600
+and cannot be opened by the guest user (root in the guest can).
+
+NVIDIA nodes (item 2). `/dev/nvidia0`, `nvidiactl`, `nvidia-uvm`, `nvidia-uvm-tools`,
+`nvidia-modeset` have no sysfs device (nvidia-modprobe creates them with mknod), so udev cannot tag
+them and a udev rule cannot help. `devices.Udev.metadata` now falls back, only when
+`udev_device_new_from_devnum` finds nothing, to the `/proc/devices` name of the character major
+(`nvidia`, `nvidiactl`, `nvidia-uvm`, `nvidia-modeset`) and reports the pseudo subsystem `nvidia`,
+which is added to `VIDEO_SUBSYSTEMS`. Sysfs-backed devices never reach that path, so systemd hosts
+behave as before. MIG caps (`nvidia-caps`), NVSwitch, NVLink and IMEX nodes stay out of `basic`.
+`nvidia-modeset` is included on purpose: without it `vkCreateDevice` segfaults inside
+`libnvidia-glcore` (it opens the node, `mknod` fails with EACCES, the error path crashes; seen as
+`vulkaninfo` SIGSEGV, backtrace in `/tmp/ggm5/gdb_vk.txt`). A permanent alternative would be
+`options nvidia NVreg_DeviceFileGID=... NVreg_DeviceFileMode=...`, but it needs a module reload or
+reboot (`/proc/driver/nvidia/params` shows mode 438 = 0666, uid/gid 0), and a group-restricted mode
+would break the guest: the nodes have no uaccess ACL and the host `video` gid is not the guest's.
+Keep 0666; nothing was changed in the driver or modprobe.
+
+NVIDIA userspace (item 3). `spaces-nvidia-sync` (`/usr/lib/spaces/spaces-nvidia-sync`, module
+`spaces.host.nvidia`) runs from the runit `run` script before `spaces.priv launch` (tolerant:
+`[ -x ... ] && ... || true`, 0.4 s) and by hand. From the xbps file lists of `nvidia-libs`,
+`nvidia-libs-32bit`, `egl-wayland2`, `nvidia` (and `nvidia-opencl*`, absent on this driver series)
+it creates symlinks to the final files under `/var/lib/spaces/.host/nvidia/<pkgver>/{lib,lib32,share,bin,opencl}`
+(`current` points at the live version, other versions are removed): 96 entries (64-bit and 32-bit
+vendor libraries including soname aliases, `lib/gbm/nvidia-drm_gbm.so`, `lib/vdpau/`, the glvnd EGL
+vendor file, the three EGL external platform files, the Vulkan ICD and implicit layer, `nvoptix.bin`,
+`nvidia-smi`, `nvidia-debugdump`, `nvidia-cuda-mps-*`, `nvidia-ngx-updater`). Not exposed: Xorg
+and wine modules, `libnvidia-gtk*`, `nvidia-settings`, `libGLX_indirect` (owned by the guest's
+libglvnd), unversioned `.so` dev links, anything that does not resolve below `/usr`. It then writes
+`/etc/spaces/config.json` from `/usr/share/spaces/config.base.json` (packages per distro), the
+optional extras in `/etc/spaces/void.json` and per-distro NVIDIA overlays/mounts: arch
+`/usr/lib` + `/usr/lib32`, fedora `/usr/lib64` + `/usr/lib`, ubuntu and kali
+`/usr/lib/x86_64-linux-gnu` + `/usr/lib/i386-linux-gnu`, plus `/usr/share` and the binaries. The
+result is validated with `host_config.load` (any warning aborts the write). A `sha256` sidecar
+`/etc/spaces/config.json.generated` marks the file as generated; a file whose hash does not match
+(hand edit) is never replaced, the new text goes to `config.json.new` and a warning is printed
+(the M3 install file is recognised and adopted). Upstream's overlay walker handles the farm: a
+symlinked file source passes `exists()`/`os.stat` and the kernel binds the target, a dangling one is
+skipped silently, an existing symlink in the guest (here libglvnd's `libGLX_indirect.so.0`) is left
+alone with a warning. Each alias becomes its own bind onto an empty placeholder file that the
+launcher precreates in the guest rootfs and leaves there. If the farm is later removed, those empty
+files stay in the guest `/usr/lib/...` until deleted by hand.
+
+glibc and symbols. Host glibc 2.41, guest glibc 2.43 (Ubuntu 26.04). The highest `GLIBC_` symbol
+version required by any exposed file is 2.38 (`libnvidia-egl-wayland2`, built by Void); the NVIDIA
+blobs need at most 2.17 and `nvidia-smi` 2.7. They need `libX11`, `libXext`, `libdrm`, `libgbm`,
+`libwayland-client/server` and `libgcc_s` from the guest (present with Mesa). Nothing of the host's
+libc, libstdc++ or system libraries is exposed. A guest with glibc older than 2.38 (Debian 12,
+Ubuntu 22.04) could not load `libnvidia-egl-wayland2` (EGL then skips that platform); everything
+else needs 2.17. `/tmp/ggm5/nvidia_abi.txt` has the full list. `nvidia_layers.json` names
+`libnvidia-present`, which Void does not ship (opt-in layer, harmless).
+
+Acceleration in the guest (item 4), packages installed in the guest: `mesa-utils`,
+`mesa-utils-bin`, `vulkan-tools`, `mesa-vulkan-drivers`, `libgl1-mesa-dri`, `libegl1`, `libgbm1`,
+`libvulkan1` (kept), `gdb`, `strace` (debugging; kept).
+
+- `nvidia-smi` lists GPU 0 NVIDIA GeForce RTX 2050, driver 595.104.02, CUDA 13.2.
+- `vulkaninfo --summary`: radv AMD Radeon 660M (Mesa 26.0.8), NVIDIA RTX 2050 (595.104.02,
+  Vulkan 1.4.329), llvmpipe.
+- EGL through GBM on `/dev/dri/renderD129` is Mesa radeonsi (not llvmpipe); on `renderD128` it is the
+  NVIDIA GBM backend and EGL, GL 4.6.0 NVIDIA 595.104.02. eglinfo's own default GBM probe opens the
+  first render node (NVIDIA) with Mesa and falls back to llvmpipe, which is eglinfo's choice of
+  device, not a space problem; its Wayland, X11 and surfaceless platforms report radeonsi.
+- `glxinfo -B` (XWayland `DISPLAY=:0`): direct rendering, AMD radeonsi; with
+  `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia` NVIDIA; `DRI_PRIME=1` selects zink on
+  NVIDIA. `glxgears` runs at the 144 Hz refresh rate on both.
+- `vkcube --gpu_number 0` (AMD) and `--gpu_number 1` (NVIDIA, presenting on the AMD-driven niri
+  session) both create a window (`niri msg --json windows`, title `vkcube`, app id unset) that
+  disappears when the program exits.
+
+Blocked stays blocked (item 5). At `basic`, in the guest as root and as uid 1000: `/dev/mem`,
+`kmsg`, `tpm*`, `tty0`, `vcs`, `nvme*`, `sd*`, `loop-control`, `hidraw*`, `uinput`, `input/event*`,
+`bus/usb`, `kvm`, `cpu_dma_latency` do not exist (ENOENT), no block device exists, and `mknod` of
+`259:0`, `8:0`, tpm `10:224`, tty0 `4:0`, kmsg `1:11` (root only, on a filesystem without `nodev`,
+`/var/tmp`) succeeds but `open` fails with EPERM from the device cgroup. (`/tmp` is a `nodev` tmpfs,
+which would give EACCES for any node and prove nothing.) Levels, via `priv.configure` with
+`preset: custom` (the effective level comes from the preset unless it is `custom`; `spaces
+configure` is a TUI):
+`admin` adds raw disks (`nvme0n1` opens read-write for guest root), loop, hidraw, uinput, input
+event nodes, USB, kvm, gpio, rtc; TPM, tty, watchdog, kmsg stay absent and a mknod of them is still
+refused. `full` removes the device cgroup restriction: mknod'd `tpm0`, `tty0`, disk nodes then open;
+`/dev/mem` and `/dev/port` keep EPERM only because CAP_SYS_RAWIO is dropped. Incident: opening a
+mknod'd `10:130` at `full` armed the host SP5100 TCO watchdog ("watchdog did not stop", 60 s
+timeout, `nowayout=0`); it was disarmed by writing `V` to `/dev/watchdog` within seconds and the
+check never opens watchdog nodes. `discover` filters watchdogs at every level, but `full` lets the
+guest create them itself. `basic` was restored (`info.json` equals the original).
+
+Hotplug (item 6). `UdevMonitor` works against eudev (netlink group `udev`). A uinput gamepad
+(`ID_INPUT_JOYSTICK`, `uaccess` from `70-uaccess.rules`, ACL from elogind) appears in the guest as
+`/dev/input/event22` and `js0` 0.3-0.4 s after creation, uid 1000 opens it, and the device cgroup
+rule is live (a mknod of the same major:minor opens in the guest while the device exists and gets
+EPERM after removal). `bind_into` creates the missing `/dev/input` in the guest's tmpfs. A virtual
+keyboard (`ID_INPUT_KEYBOARD`) stays hidden at `basic`. Bug found and fixed: after removal the lazy
+unmount left an empty regular file `/dev/input/event22` in the guest (upstream behaviour);
+`mountns.unbind` now removes the empty placeholder and parent directories under `/dev` that became
+empty, so removal is clean (0.2-0.3 s) and `/dev/input` is gone again.
+
+M4 leftovers (item 7). (a) Locale: `LxcBackend._attach` runs the environment through
+`host.guest_locale.adjust`, which reads the guest's `locale-archive` (name table parsed directly,
+cached by mtime) and `usr/lib/locale/*` and replaces an unavailable `LANG` by `C.UTF-8`, dropping
+unavailable `LC_*`/`LC_ALL` and then `LANGUAGE`; C/POSIX/C.* are always accepted; unreadable
+archives change nothing. Real test: with the archive moved aside `LANG` in the guest is `C.UTF-8`
+and perl is silent; restored it is `en_US.UTF-8`. Note: the forwarded locale comes from the desktop
+session, not from the shell that runs `spaces enter`. (b) Stale container: `run_launcher` takes a
+per-space `flock` (`/run/spaces/lxc/NAME/launcher.lock`, released when the process dies, not
+inherited by `lxc-start`); having it proves no live launcher exists, so a container still `RUNNING`
+and `/sys/fs/cgroup/spaces/NAME` are orphans and are stopped with `lxc-stop -k` and removed. Also
+`is_running()` now requires the lock to be held: before this, `spaces enter` after a launcher
+`kill -9` found `RUNNING`, skipped `sv once` and attached to a headless container with no mount,
+device, auth or portal workers. Real test: `kill -9` of the launcher leaves `lxc-start`; the next
+`spaces enter` logs "Stopping the leftover container", starts a new launcher and container (4 s)
+and runs the command. A second launcher for the same name is refused. (c) Portal filter review:
+`void/docs/portal-filter-review.md` (documentation only).
+
+Dead ends and surprises: the 15 s hang I first blamed on removal was the placeholder file, not the
+mount; a first stale test killed `svlogd` because `sv status` prints two pids.
+
+Open items for M6 (bootstrap Arch, Fedora, Kali):
+
+- The farm destinations for Arch (`/usr/lib`, `/usr/lib32`), Fedora (`/usr/lib64`, `/usr/lib`) and
+  Kali are generated and unit-tested but unexercised; Arch's `/usr/lib` overlay will bind every farm
+  entry over a directory with thousands of files.
+- Guests that install their own NVIDIA packages meet the empty placeholder files.
+- `kali`/`arch` guest glibc versus the 2.38 requirement of `libnvidia-egl-wayland2`.
+- A `devices` level of `disabled` does not stop `portal.Usb`/`Camera` (see the review).

@@ -55,6 +55,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
     pgrep -f '^runsv spaces-' >/dev/null || break
     sleep 1
 done
+# A runsv that survives the scan would keep its svlogd (and the log lock) and
+# make the next install's log service fail; stop what is left.
+pkill -TERM -f '^runsv spaces-' 2>/dev/null || true
+pkill -TERM -f '^svlogd -tt /var/log/spaces/' 2>/dev/null || true
 rm -rf /etc/sv/spaces-* /run/runit/supervise.spaces-*
 shopt -u nullglob
 

@@ -488,7 +488,9 @@ class LxcBackend(HostBackend):
         return int(completed.stdout.strip())
 
     def is_running(self, name: str) -> bool:
-        return self._state(name) == "RUNNING"
+        # A container whose launcher died is an orphan: it has no device,
+        # mount or authentication workers, so it does not count as running.
+        return self._state(name) == "RUNNING" and _launcher_alive(name)
 
     def probe_registered(self, name: str) -> bool:
         return self.is_running(name)
@@ -1065,6 +1067,24 @@ def _lock_launcher(runtime: Path) -> Any:
             f"another launcher is already running for {runtime.name}"
         ) from None
     return handle
+
+
+def _launcher_alive(name: str) -> bool:
+    """True unless the launcher lock exists and nobody holds it."""
+
+    try:
+        descriptor = os.open(_runtime_dir(name) / "launcher.lock", os.O_RDONLY)
+    except OSError:
+        return True  # no lock file: started by a launcher that predates it
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
 
 
 def _stop_process(process: subprocess.Popen[Any]) -> None:

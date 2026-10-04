@@ -108,6 +108,35 @@ class GuestLocaleTests(unittest.TestCase):
         self.assertNotIn("--setenv=LANG=de_DE.UTF-8", command)
 
 
+class RunScriptTests(unittest.TestCase):
+    def test_run_script_syncs_nvidia_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "service").mkdir()
+            (root / "sv").mkdir()
+            ok = root / "run" / "supervise.spaces-work" / "ok"
+            ok.parent.mkdir(parents=True)
+            ok.touch()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "SPACES_LXC_PATH": str(root / "lxc"),
+                        "SPACES_RUNIT_SVDIR": str(root / "sv"),
+                        "SPACES_RUNIT_SERVICE_DIR": str(root / "service"),
+                        "SPACES_PRIV": "/opt/spaces.priv",
+                    },
+                ),
+                mock.patch.object(lxc, "RUNIT_SUPERVISE", str(root / "run")),
+            ):
+                lxc.ensure_service("work")
+            lines = (root / "sv/spaces-work/run").read_text().splitlines()
+        sync = next(i for i, l in enumerate(lines) if "spaces-nvidia-sync" in l)
+        launch = next(i for i, l in enumerate(lines) if "launch work" in l)
+        self.assertLess(sync, launch)
+        self.assertTrue(lines[sync].endswith("|| true"))
+
+
 class StaleContainerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -165,6 +194,19 @@ class StaleContainerTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 self.backend._reap_stale_container("work")
+
+    def test_orphaned_container_is_not_running(self) -> None:
+        runtime = self.root / "lxc" / "work"
+        runtime.mkdir(parents=True)
+        with mock.patch.object(self.backend, "_state", lambda name: "RUNNING"):
+            # no lock file: assume a live launcher of an older version
+            self.assertTrue(self.backend.is_running("work"))
+            lock = lxc._lock_launcher(runtime)
+            self.assertTrue(self.backend.is_running("work"))
+            lock.close()
+            self.assertFalse(self.backend.is_running("work"))
+        with mock.patch.object(self.backend, "_state", lambda name: "STOPPED"):
+            self.assertFalse(self.backend.is_running("work"))
 
     def test_second_launcher_cannot_take_the_lock(self) -> None:
         runtime = self.root / "run" / "work"

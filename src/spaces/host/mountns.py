@@ -97,9 +97,34 @@ def bind(pid: int, source: str, destination: str, read_only: bool, mkdir: bool) 
     )
 
 
+def _prune_device_placeholder(destination: str, root: str = "") -> None:
+    """Remove what bind() created for a device node once it is unmounted.
+
+    The empty file left in the guest's /dev (and directories that became
+    empty, e.g. /dev/input) would otherwise outlive the hot-unplugged device.
+    """
+
+    parts = destination.split("/")
+    if len(parts) < 3 or parts[:2] != ["", "dev"]:
+        return
+    try:
+        status = os.lstat(root + destination)
+        if stat.S_ISREG(status.st_mode) and status.st_size == 0:
+            os.unlink(root + destination)
+    except OSError:
+        return
+    while len(parts) > 3:
+        parts.pop()
+        try:
+            os.rmdir(root + "/".join(parts))
+        except OSError:
+            break
+
+
 def unbind(pid: int, destination: str) -> None:
     _enter(pid)
     _check(_libc.umount2(os.fsencode(destination), MNT_DETACH))
+    _prune_device_placeholder(destination)
 
 
 def main(argv: list[str]) -> int:
