@@ -1209,3 +1209,73 @@ Design tested: `lxc.idmap` that keeps uid 1000 identical and shifts every other 
   (`native/spaces_system_broker.c`, `auth_peer`) accepts only peers whose uid is 0, as seen from the host: guest root is
   kuid 1000000 there. The host-PAM authentication socket (`src/spaces/auth.py`) checks the peer *pid* against the space's cgroup
   and takes the uid from the request, so it works unchanged, and its socket is mode 0666.
+
+### Task 1 result: the opt-in user namespace
+
+The spike passed its gates, so it was built (default **off**). Code: `src/spaces/host/userns.py` (map, choice, subuid/subgid, /sys
+helpers), `lxc_config.translate(userns=...)`, `LxcBackend` (plan, `guest_root_uid`), `mountns.py` (`--as-owner`),
+`spaces-void userns status|setup|enable|disable`, a doctor check, `native/spaces_system_broker.c` (`SPACES_GUEST_ROOT_UID`), one more AppArmor
+rule. `tests/test_void_userns.py` (34 tests). Choice: `/var/lib/spaces/NAME/userns` (`on`/`off`), else `"userns"` in `/etc/spaces/void.json`.
+
+Found while making the real launcher work (each was a failure of a real start, fixed, then proven):
+
+1. **Host-root-only directories on the way to a bind source.** `Failed to mount ".../resolv.conf"`, `Permission denied`, then
+   `Failed to create detached recursive mount of 19/run/spaces/ubuntu/system-bus` and `.../authentication/auth.sock`: LXC sets the binds up as
+   root of the user namespace (the idmapped ones in a helper that is not host root either), which cannot walk `/run/spaces/lxc/NAME`,
+   `/run/spaces/NAME` or `/run/spaces/NAME/authentication` (all 0700). `userns.allow_traversal` gives exactly the directories *above* a source `o+x`; the
+   sources themselves (`system-bus`, 0700) keep their mode.
+2. **Binds into the running guest (`mountns.py`).** Desktop forwarding and device hot-plug create mount points from a host-root helper that has
+   joined the guest's mount namespace: `bind: [Errno 75] Value too large for defined data type: '/run/spaces/desktop/1000/data'`
+   (EOVERFLOW: the guest's tmpfs and idmapped mounts cannot map kuid 0), and with fsuid set to guest root,
+   `[Errno 13] Permission denied: '/home/soubarna/.config'` (the user's 0700 home). Fix: create and remove entries with the file system ids of the
+   *owner of the parent directory* (`--as-owner`); the capabilities for `move_mount` are untouched and the ids return to root afterwards.
+3. **rpc_pipefs.** Kali (nfs-common) came up `degraded`: `run-rpc_pipefs.mount` failed, rpc_pipefs belongs to the network namespace the guest's user
+   namespace does not own. The two units are masked with `/dev/null` binds in this mode (NFS client/server in such a space is not supported).
+4. `m5_check.py` section 6 makes a device node with `mknod` as guest root; a user-namespace root cannot (that is the point), so under it the two cgroup-rule
+   items are SKIPs (the bound node was opened by the previous check). Device groups other than the named ones show as nobody-group.
+
+Verification, `m9_check.py --userns --regress` (all four spaces with the namespace on, installed xbps package, kernel 7.2.9_1, the session at that time
+was unlocked or not, see the last bullet): **134 passed, 0 failed, 0 skipped**. The eight items that were SKIP "known open" are PASS on Ubuntu, Arch, Kali and
+Fedora (`mount(2)` bind remount of `/proc/sys` cannot write `core_pattern`; fresh proc through `fsopen`: `core_pattern` and `sysrq-trigger` read-only; cloned `/proc/sys` read-only).
+Every distro boots to `running` with no failed unit; the new section `user namespace` passes for each (`uid_map` `0 1000000 1000`, `1000 1000 1`, ...; init is kuid 1000000 on the
+host; `/root`, `/var/cache`, `/run/spaces-host/system` are 0:0 in the guest and the host side stays root-owned; `/sys` is the masked bind, `ls /sys/kernel/security` is empty; the guest's system-bus relay is
+`active`, so the host broker accepts the mapped root); isolation (pinned monitor namespace, `ECONNREFUSED`), lifecycle (`kill -9` of the launcher) and the boot-path profile set pass as without it.
+Inside it `m5_check.py` is 42 passed, 0 failed, 2 skipped (item 4: GUI on niri with AMD and NVIDIA GL/Vulkan/PRIME, hot-plug of a gamepad that appears and disappears in the guest, stale container) and
+`m8_check.py` 81 passed, 3 failed, 1 skipped: the sudo bridge with the host password of a throw-away user (m3), login/logout home mounts that follow, a GUI app opening on niri, audio and clipboard,
+the system broker and orphan checks all pass. The 3 failures are the autostart section, which needs `ubuntu` to be enabled for `soubarna`; the
+`autostart-users` files were removed after the reboot (post-reboot fix C), so "only ubuntu enabled", "comes up within 30 s" and "login state is kept on tmpfs" cannot pass here with or without the namespace. By hand
+with the namespace on: `spaces-void autostart enable ubuntu --user soubarna`, link the service, Ubuntu `RUNNING` 7 s later, then everything undone.
+(One earlier run failed `6 window: closes` for both modes: the niri session did not deliver `close-window` to any window, host windows included, `focused-window` was `null`; a locked session. It passed in the run above.)
+
+Per distro with the namespace on: Ubuntu, Arch, Kali, Fedora all pass everything above; the only differences from a space without it are the behaviour changes listed in `void.md`
+("User namespace"): no capabilities over the host's network namespace (no privileged ports, `systemd-resolved` has no stub listener, no network sysctl writes), no `mknod`, no NFS.
+
+**Default.** Left **off**. The criterion was a full pass of all four including GUI/audio/hotplug; the result is that except for the autostart precondition above, but the behaviour
+changes are real (privileged ports, raw sockets in a space) and the GUI-close item once depended on the desktop session, so flipping it is the user's decision after
+`m9_check.py --userns --regress` on an unlocked session: `{"userns": true}` in `/etc/spaces/void.json`, or `sudo spaces-void userns enable --all`.
+
+Machine state: `/etc/subuid` and `/etc/subgid` now carry `root:ID:COUNT` lines for ids 1000, 59990 and the device groups (added by `spaces-void userns setup`; harmless while the namespace is off, and they
+are what a package-shipped hook would have to add); all `userns` markers removed, so every space is off.
+
+### Task 2: CI, signing, aarch64, release
+
+- **CI.** `gh run list --repo soubarnak/ginnungagap` (the repository is `soubarnak`, the task text had `soubarna`): the two earlier runs failed in `Unit tests`, the package builds
+  (x86_64 with `-Q`, aarch64 cross) were green: the feared placeholder checksum never mattered, `xbps-build.sh --committed` builds from a `git archive` tarball with its own checksum. The unit-test failures were environment, all reproduced in a
+  local `podman` container of the same image (`ghcr.io/void-linux/void-glibc-full`): (1) the image has no `/tmp`; (2) run as root, `AuthenticationService.stop` removes its empty parent directory, which was `/tmp` (a
+  `rmdir` that fails everywhere else), and tests that expect a permission error pass wrongly or fail; (3) no `gsettings` schemas; (4) `umask 002` makes a "not group-writable" check fail; (5) `/dev/net/tun` does
+  not exist in the runner's container (one test now skips without it). The job installs `gsettings-desktop-schemas`, creates `/tmp`, and runs pytest as an ordinary user with `umask 022`.
+  Result: **run 37211625641 green** (Unit tests, Build x86_64, Build aarch64): https://github.com/soubarnak/ginnungagap/actions/runs/37211625641 . Local suite in the container: 718 passed, 22 skipped.
+- **Signing key.** Made without a passphrase at `~/.config/ginnungagap/spaces-repo.pem` (0600, directory 0700, outside the repository; `*.pem` and `*.key` are now ignored). `void/tools/release.sh repo`
+  ran end to end with it: 10 packages (5 templates x x86_64 and aarch64) indexed and signed into `dist/repo` (ignored, not served), `xbps-install -S` into a scratch root shows the signer
+  `Spaces Void port <soubarnakarmakar@gmail.com>` and the fingerprint **`f4:55:72:f9:ac:23:eb:b3:c3:e3:f8:b3:a9:24:97:39`** (recorded in `void/docs/release.md`). A stale `spaces-0.0.1_2` test build in the
+  void-packages `binpkgs` was picked as "newest" by `repo`; it was deleted and the repository rebuilt. Nothing was published.
+- **aarch64.** Cannot be run on this x86_64 host; the ceiling is the existing cross build plus `check_guest_abi.py --target aarch64` (green in CI). A QEMU TCG aarch64 Void VM smoke test (install the package, pytest, `spaces-void doctor`)
+  takes hours and was not started; it is the user's call. Said so in `void/docs/release.md`.
+- **Release.** Not cut. `void/tools/release.sh cut` (dry run by default) and `cut --yes` do verify, tag, push branch and tag, wait for GitHub's tarball, pin the checksum, commit, push and
+  build from the committed template. Documented in `void/docs/release.md` ("One command"). The local tag `v0.0.1` is moved to the final HEAD with `git tag -fa`; no tag was pushed.
+
+### What the user must check after the next reboot
+
+`sudo spaces-void doctor` (20 checks, 0 FAIL); `sudo apparmor_parser` state of `lxc-spaces-container` (the INSTALL hook loads the new rule; a boot loads it from `/etc/apparmor.d`); `ubuntu -- true` starts a space with no `userns`
+marker (default off); `sudo spaces-void userns status` shows `ready` for all four; then, to try it: `sudo spaces-void userns enable ubuntu`, `ubuntu -- id`, and `python3 void/spike/m9_check.py --userns --regress` from an unlocked niri session (the
+autostart items need `sudo spaces-void autostart enable ubuntu` first).
