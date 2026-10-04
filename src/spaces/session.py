@@ -838,7 +838,9 @@ def _start_open_broker(
         process = subprocess.Popen(
             command,
             env={
-                "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{user.uid}/bus",
+                "DBUS_SESSION_BUS_ADDRESS": host.get_backend().session_bus_address(
+                    user.uid
+                ),
                 "LANG": "C.UTF-8",
                 "PATH": "/usr/bin",
                 "XDG_RUNTIME_DIR": f"/run/user/{user.uid}",

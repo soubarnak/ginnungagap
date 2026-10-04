@@ -316,8 +316,10 @@ class CommandTests(Base):
         kwargs = popen.call_args.kwargs
         self.assertEqual(popen.call_args.args[0], ["/bin/true"])
         self.assertEqual(
-            (kwargs["user"], kwargs["group"], kwargs["extra_groups"]), (7, 8, [])
+            (kwargs["user"], kwargs["group"]), (7, 8)
         )
+        self.assertIn(8, kwargs["extra_groups"])
+        self.assertEqual(kwargs["cwd"], "/")
         self.assertTrue(kwargs["start_new_session"])
         self.assertEqual(kwargs["pass_fds"], (5,))
 
@@ -396,17 +398,43 @@ class HostIntegrationTests(Base):
         self.assertFalse(self.backend.peer_in_space(1, "work"))
         self.assertFalse(self.backend.peer_in_space(999, "work"))
 
+    def login(self, sessions: dict[int, str] | None = None, active=("2",)):
+        outer = self
+
+        class FakeLogin:
+            def pid_session(self, pid: int):
+                return (sessions or {}).get(pid)
+
+            def graphical_session(self, uid: int, session_id: str) -> bool:
+                return session_id in active
+
+        patcher = mock.patch.object(
+            lxc.LxcBackend, "_login_info", lambda backend: FakeLogin()
+        )
+        patcher.start()
+        outer.addCleanup(patcher.stop)
+
+    GRAPHICAL = (
+        b"WAYLAND_DISPLAY=w\0DBUS_SESSION_BUS_ADDRESS=unix:path=/custom\0"
+        b"XDG_RUNTIME_DIR=/run/user/1\0"
+    )
+
     def test_environment_hook_file(self) -> None:
         uid = os.getuid()
+        self.login()
         hook = self.run_user / str(uid) / "spaces" / "environment"
         hook.parent.mkdir(parents=True)
-        hook.write_text("WAYLAND_DISPLAY=wayland-1\n")
-        self.assertEqual(
-            self.backend.host_user_environment(uid, uid), "WAYLAND_DISPLAY=wayland-1\n"
+        hook.write_text(
+            "WAYLAND_DISPLAY=wayland-1\nDBUS_SESSION_BUS_ADDRESS=unix:path=/x\n"
+            "XDG_SESSION_ID=2\n"
+        )
+        self.assertIn(
+            "WAYLAND_DISPLAY=wayland-1\n", self.backend.host_user_environment(uid, uid)
         )
 
     def test_environment_hook_must_be_owned_regular_file(self) -> None:
         uid = os.getuid()
+        self.login()
         hook = self.run_user / str(uid) / "spaces" / "environment"
         hook.parent.mkdir(parents=True)
         target = self.root / "elsewhere"
@@ -418,34 +446,95 @@ class HostIntegrationTests(Base):
         # A file claimed for another uid is not trusted.
         self.assertIsNone(self.backend.host_user_environment(uid + 1, uid))
 
-    def test_environment_scan_picks_lowest_matching_pid(self) -> None:
+    def test_environment_scan_picks_lowest_session_pid(self) -> None:
         uid = os.getuid()
-        self.fake_process(30, b"WAYLAND_DISPLAY=w\0XDG_RUNTIME_DIR=/run/user/1\0A=late\0")
-        self.fake_process(20, b"WAYLAND_DISPLAY=w\0XDG_RUNTIME_DIR=/run/user/1\0A=early\0")
+        self.login({30: "2", 20: "2", 10: "2", 5: "9"})
+        self.fake_process(30, self.GRAPHICAL + b"LANG=late\0")
+        self.fake_process(20, self.GRAPHICAL + b"LANG=early\0")
         self.fake_process(10, b"XDG_RUNTIME_DIR=/run/user/1\0")
+        self.fake_process(5, self.GRAPHICAL + b"LANG=other\0")
         block = self.backend.host_user_environment(uid, uid)
-        self.assertEqual(
-            block.splitlines(),
-            ["WAYLAND_DISPLAY=w", "XDG_RUNTIME_DIR=/run/user/1", "A=early"],
-        )
+        self.assertIn("LANG=early", block.splitlines())
+        self.assertIn("XDG_SESSION_ID=2", block.splitlines())
         self.assertIsNone(self.backend.host_user_environment(uid + 5, uid))
 
     def test_session_bus_address(self) -> None:
         uid = os.getuid()
         default = f"unix:path={self.run_user}/{uid}/bus"
+        self.login({5: "2"})
         self.assertEqual(self.backend.session_bus_address(uid), default)
-        self.fake_process(
-            5,
-            b"WAYLAND_DISPLAY=w\0XDG_RUNTIME_DIR=/x\0DBUS_SESSION_BUS_ADDRESS=unix:path=/custom\0",
-        )
-        self.assertEqual(self.backend.session_bus_address(uid), "unix:path=/custom")
         import socket
 
-        (self.run_user / str(uid)).mkdir()
         server = socket.socket(socket.AF_UNIX)
         self.addCleanup(server.close)
-        server.bind(str(self.run_user / str(uid) / "bus"))
+        sock = self.root / "dbus-test"
+        server.bind(str(sock))
+        self.fake_process(
+            5,
+            b"WAYLAND_DISPLAY=w\0DBUS_SESSION_BUS_ADDRESS=unix:path="
+            + str(sock).encode()
+            + b",guid=1\0",
+        )
+        (self.run_user / str(uid)).mkdir()
         self.assertEqual(self.backend.session_bus_address(uid), default)
+        link = self.run_user / str(uid) / "bus"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), str(sock))
+
+
+    def test_kill_stale_helpers_matches_only_this_space(self) -> None:
+        def cmdline(pid: int, *argv: str) -> None:
+            directory = self.proc / str(pid)
+            directory.mkdir()
+            (directory / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
+
+        cmdline(10, "/usr/lib/spaces/spaces-broker", "--name", "x", "--space", "work")
+        cmdline(11, "/usr/lib/spaces/spaces-broker", "--name", "x", "--space", "other")
+        cmdline(12, "/usr/bin/xdg-dbus-proxy", "unix:path=/b", "/run/spaces/work/desktop/1/portal/bus")
+        cmdline(13, "/usr/bin/xdg-dbus-proxy", "unix:path=/b", "/run/spaces/other/desktop/1/portal/bus")
+        cmdline(14, "/usr/bin/python3", "--space", "work")
+        with mock.patch.object(lxc.os, "kill") as kill:
+            killed = lxc.kill_stale_helpers("work")
+        self.assertEqual(sorted(killed), [10, 12])
+        self.assertEqual(
+            sorted(call.args for call in kill.call_args_list),
+            [(10, signal.SIGTERM), (12, signal.SIGTERM)],
+        )
+
+    def test_user_scopes_are_tracked_and_terminated(self) -> None:
+        uid, gid = os.getuid(), os.getgid()
+        real = subprocess.Popen
+
+        def unprivileged(*args, **kwargs):
+            for name in ("user", "group", "extra_groups"):
+                kwargs.pop(name)
+            return real(*args, **kwargs)
+
+        patcher = mock.patch.object(lxc.subprocess, "Popen", unprivileged)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        first = self.backend.spawn_user_scope(
+            "unit", ["sleep", "30"], {"PATH": "/usr/bin:/bin"},
+            description="d", uid=uid, gid=gid,
+        )
+        second = self.backend.spawn_user_scope(
+            "unit", ["sleep", "30"], {"PATH": "/usr/bin:/bin"},
+            description="d", uid=uid, gid=gid,
+        )
+        # A replacement under the same unit name stops its predecessor.
+        self.assertIsNotNone(first.poll())
+        self.assertIsNone(second.poll())
+        self.backend.terminate_user_scopes()
+        self.assertIsNotNone(second.poll())
+        self.assertEqual(self.backend._scopes, {})
+
+    def test_scan_exposes_only_allowlisted_variables(self) -> None:
+        uid = os.getuid()
+        self.login({5: "2"})
+        self.fake_process(5, self.GRAPHICAL + b"SECRET_TOKEN=abc\0LANG=C\0")
+        block = self.backend.host_user_environment(uid, uid)
+        self.assertNotIn("SECRET_TOKEN", block)
+        self.assertIn("LANG=C", block.splitlines())
 
 
 class LauncherTests(Base):

@@ -71,7 +71,7 @@ fi
 rm -f /etc/apparmor.d/spaces-container
 SITE=$(/usr/bin/python3 -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 rm -rf "$SITE/spaces"
-rm -f /usr/bin/spaces /usr/bin/spaces.priv
+rm -f /usr/bin/spaces /usr/bin/spaces.priv /usr/bin/spaces-session-env
 rm -rf /usr/lib/spaces /usr/share/spaces
 rm -f /usr/share/polkit-1/actions/org.anatase.spaces.policy /etc/pam.d/spaces
 # Runtime artifacts: exported application shortcuts and the tmpfs state.

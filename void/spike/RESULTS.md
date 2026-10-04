@@ -159,7 +159,7 @@ Security observations:
 - lxc-attach chowns regular-file stdio of whoever starts it. The restore in `LxcBackend` runs after
   the command; if `spaces.priv` is killed first, a user's redirect target stays root-owned 0600.
 
-Open items for M4 (desktop):
+Open items for M4 (desktop), all handled in the next section except where noted there:
 
 - The host open broker (`spaces-broker`) times out on every reconcile ("Could not enable host
   portals ... Timed out starting the host open broker"), twice every five seconds, filling the
@@ -175,3 +175,116 @@ Open items for M4 (desktop):
 - `autostart-users` is written but nothing consumes it yet (login autostart).
 - NVIDIA mounts/overlays for `/etc/spaces/config.json` (M8) and the `ubuntu-keyring` srcpkg
   template (`void/srcpkgs/ubuntu-keyring/template`, untested with xbps-src).
+
+## M4: desktop session integration (2026-10-04)
+
+`void/spike/m4_check.py --with-apt` (run as the user from the niri session): 33 PASS, 0 FAIL, 0 SKIP.
+Unit tests: 542 passed, 17 skipped.
+
+Root causes and fixes:
+
+1. Broker timeouts (twice every 5 s). `session._start_open_broker` hardcoded
+   `unix:path=/run/user/UID/bus` and `xdg-dbus-proxy` used `session_bus_address`, which also fell
+   back to it. On this host the session bus is `dbus-run-session`'s `/tmp/dbus-XXXX`, so both
+   failed to connect. Fix: `LxcBackend.session_bus_address` resolves the real address from the
+   session environment and creates the symlink `/run/user/UID/bus` -> socket (see below); the broker
+   line in `session.py` now asks the backend for the address (one-line diff, systemd backend
+   returns what it returned before). `xdg-dbus-proxy` accepts `unix:path=` through the symlink.
+2. Session environment (`src/spaces/host/session_env.py`, new). The old fallback scan in `lxc.py`
+   picked the lowest-pid process of the user with `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`, which can
+   belong to a different login session (tty, ssh) and has no `XDG_SESSION_ID`, which
+   `select_graphical_session` needs. It is replaced by: published file first (accepted only if
+   it is a regular user-owned file with no group/other write, in a user-owned non-writable-by-others
+   directory, and its `XDG_SESSION_ID` is a currently active local graphical session of the uid),
+   else a /proc scan restricted through libelogind (`sd_uid_get_sessions`, `sd_session_is_active`,
+   `sd_session_is_remote`, `sd_session_get_class/type`, `sd_pid_get_session`) to processes of an
+   active wayland/x11 session, which also supplies `XDG_SESSION_ID`. Only allowlisted variables are
+   returned (`DESKTOP_ENVIRONMENT` plus bus address, runtime dir, config/data home, session id).
+   The winner is cached and revalidated, so the 5 s reconcile does not rescan /proc.
+3. `spawn_user_scope` already ran the proxy as the user but dropped supplementary groups, ran in the
+   launcher's cwd and left the handle untracked. Now: user's real groups, `cwd=/`, stdin
+   `/dev/null`, exact environment, handle kept per unit name; a new scope under the same unit stops
+   its predecessor; `terminate_user_scopes()` runs when the launcher finishes. `xdg-dbus-proxy`
+   also exits on its own when its control descriptor closes.
+4. `kill_stale_helpers(name)` runs at launcher start. After `kill -9` of the launcher the proxy
+   exits (control fd) but `spaces-broker` survives, holding the broker bus name of the dead
+   session; the next launcher would time out again. (The M2 leftovers after such a kill, a running
+   `lxc-start` and `/sys/fs/cgroup/spaces/NAME`, are unchanged and need manual cleanup.)
+
+Bus symlink rules (`session_env.ensure_bus_link`): all operations through an `O_PATH|O_NOFOLLOW`
+directory fd of `/run/user/UID` (must be owned by the uid); the target must be an absolute path to
+a socket owned by the uid; an existing non-symlink is never touched; an existing symlink is only
+replaced when it points elsewhere and is owned by the uid or root; replacement is atomic (temp link
++ `rename`); the link is `lchown`ed to the uid. Dangling links are removed when no session bus is
+known. Abstract buses (`unix:abstract=`) cannot be linked: the real address is returned and used
+for the proxy and the broker directly (the guest-facing path stays `/run/user/UID/bus`).
+
+Verified (m4_check): publish writes 0600 user-owned; root reads it; without it the elogind scan finds
+the same environment; a uid without a session gets nothing; symlink created, connects, repointed
+when dangling; proxy and broker run as the user (one each) and the launcher log has no warning for
+16 s after start; guest sees Wayland, PulseAudio (PipeWire 1.6.8 sinks), PipeWire and the filtered
+bus; `gnome-calculator` from `spaces enter --graphical ubuntu -- gnome-calculator` appears in
+`niri msg --json windows` as `org.gnome.Calculator` and closes; clipboard through the primary
+selection (`wl-copy -p` in the guest, `wl-paste -p` on the host); `notify-send` in the guest reaches
+`org.freedesktop.Notifications` on the host bus; `OpenURI.SchemeSupported` through the portal;
+`spaces-open x-unhandled://probe` reached `org.freedesktop.portal.Desktop.OpenURI` on the host bus
+(no browser started; the call then waits for the portal response, which never comes for an unhandled
+scheme). The guest polkit KDE agent starts (`polkit_agent` finds
+`/usr/lib/x86_64-linux-gnu/libexec/polkit-kde-authentication-agent-1`, no warning).
+
+Guest helpers and GLib: the helpers link libglib/libgobject/libgio dynamically, glibc symbols are
+<= 2.14, and GLib exports unversioned symbols. Host glib 2.88.3, guest 2.88.0: every undefined
+`g_*`/`G*` symbol resolves in the guest's three libraries; `libgio-unix` is not a separate library
+(gio-unix-2.0 is headers only), and no guest package had to be added (libglib2.0-0t64 comes in with
+polkitd and xdg-desktop-portal). A host newer than the guest can still break startup with an
+unresolved symbol (`-z now`); `void/tools/check-guest-glib.py [ROOTFS]` detects that and
+`m4_check.py` runs it. Mitigations if it ever happens: build helpers in a container of the oldest
+supported guest, or link GLib statically; not needed today.
+
+Application menu: the launcher writes `/usr/local/share/applications/spaces-ubuntu-v1-*.desktop`
+and `spaces-icons/*.png` (256x256 with the Ubuntu badge) within one reconcile of `apt install`, and
+removes them after `apt remove` (checked with gnome-calculator). The session has no `XDG_DATA_DIRS`,
+so the default `/usr/local/share:/usr/share` applies and `/usr/local/share/applications` is
+scanned (GLib lookup finds the entry). If a launcher is started with a custom `XDG_DATA_DIRS`
+without `/usr/local/share` the entries will not show; no Void-specific location is needed.
+`Exec=/usr/bin/spaces enter --graphical ubuntu -- gnome-calculator` launches correctly.
+
+Log noise: before, two `WARNING: Could not enable host portals ... Timed out starting the host open
+broker` lines every 5 s (about 24 per minute, each reconcile blocking 1 s). After: none; the log
+holds the mount line and the guest's `Running as unit: spaces-session-1000.service` per start.
+
+Security observations:
+
+- The portal proxy policy (upstream, unchanged) lets the guest: call the host portal interfaces
+  Account, Access, Camera, Clipboard, Email, GlobalShortcuts, Inhibit, InputCapture, Location,
+  NetworkMonitor, Notification, PowerProfileMonitor, Print, ProxyResolver, RemoteDesktop, ScreenCast,
+  Settings, Usb, OpenURI.OpenURI/SchemeSupported, Screenshot.PickColor, Background.SetStatus
+  (portal dialogs still ask the user); call `Notifications.Notify/CloseNotification/...`;
+  `ScreenSaver.Lock/Inhibit/SimulateUserActivity`; `PowerManagement` queries; register a
+  StatusNotifierItem and own `org.mpris.MediaPlayer2.spaces.*`. File access goes through the
+  integration broker names, not the host portal. Guest apps can therefore lock the host screen and
+  show host notifications without a prompt.
+- Files and links: the published file and the bus symlink are owned by the user in the user's own
+  runtime directory; root never follows a user-controlled path (`O_NOFOLLOW`, dir fds); the link target
+  must be a socket the user owns. The user can only influence what is already theirs: the environment
+  values still pass `_validated_source` (sockets owned by the uid below the runtime dir) in `session.py`.
+- The scan only reads `/proc/PID/environ` of the uid's own processes in an active local graphical
+  session, and returns only allowlisted names.
+- `spaces enter --graphical` argument order: the flag must precede the space name
+  (`spaces enter --graphical ubuntu -- cmd`); after the space name argparse treats it as the command.
+
+Open items for M5 and later:
+
+- M5: device policy and hotplug. The guest sees `/dev/dri/card1` only (base rules); apps render in
+  software; render nodes, the NVIDIA stack and `/dev/input` rules are not configured.
+- Locales: the host `LANG=en_US.UTF-8` is forwarded but the guest has no such locale (perl and GTK
+  warn); fixed by hand in this space (`locales`, `locale-gen`), the distro setup should generate it.
+- Guest apps launched from the menu run with the same host-environment snapshot as the last
+  reconcile; a changed `WAYLAND_DISPLAY` needs the next reconcile (5 s).
+- Launcher `kill -9` leaves `lxc-start` and `/sys/fs/cgroup/spaces/NAME` behind (M2).
+- `autostart-users` is still unused; `spaces-session-env publish` is optional until the user adds
+  the niri line.
+- Unhandled-scheme `OpenURI` blocks the guest caller until the portal answers; no timeout in the
+  guest helper.
+- Secrets: `org.freedesktop.impl.portal.Secret` is only bus-activatable on this host (gnome-keyring is
+  running); guest secret flows (M6) are untested.

@@ -9,6 +9,7 @@ checkout). Reverted by `sudo void/tools/dev-uninstall.sh` (see the end of this f
 |---|---|
 | `/usr/lib/python3.14/site-packages/spaces/` | copy of `src/spaces` (35 files, byte-compiled) |
 | `/usr/bin/spaces` | console script, `from spaces.__main__ import main` |
+| `/usr/bin/spaces-session-env` | `#!/bin/sh` wrapper, `exec /usr/bin/python3 -I -m spaces.host.session_env "$@"`; run by the user (`publish`, `show`), see "Desktop session" below |
 | `/usr/bin/spaces.priv` | `#!/bin/sh` wrapper: PATH=`/usr/lib/spaces/void/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`, then `exec /usr/bin/python3 -I -c 'import sys; from spaces.priv import main; sys.exit(main())' "$@"`. This is the path the polkit policy binds to. |
 | `/usr/lib/spaces/spaces-pam`, `spaces-broker`, `spaces-system-broker` | host native helpers, built by `make -C native` |
 | `/usr/lib/spaces/guest/{pam_spaces.so,spaces,spaces-portal,spaces-secret-helper,spaces-open,spaces-system-broker}` | guest native helpers (glibc <= 2.17 checked by `check_guest_abi.py`) |
@@ -53,9 +54,34 @@ knows about packages recorded in the state file of that install).
 No service is enabled at boot. `spaces-ubuntu` is supervised by runsvdir but `down` by default;
 `spaces enter`, `spaces start` and `sv once` start it, `sv down` stops it.
 
+## Desktop session (M4)
+
+Nothing is edited in the user's home or in niri/DMS configuration. The root-side launcher finds the
+graphical session by itself: it asks libelogind for the user's active local wayland/x11 session,
+takes the lowest-pid process elogind places in it that has `DBUS_SESSION_BUS_ADDRESS` and a display
+in its environment, and keeps only the allowlisted variables. Optionally the user publishes the
+environment once per login (preferred, exact, no `/proc` scan): add this line to
+`~/.config/niri/config.kdl`:
+
+```
+spawn-at-startup "spaces-session-env" "publish"
+```
+
+| Path | What |
+|---|---|
+| `/run/user/UID/spaces/environment` | published environment, 0600, user-owned, in a 0700 user-owned directory (tmpfs, gone with the login); ignored unless it names a currently active graphical session of that user |
+| `/run/user/UID/bus` | symlink to the real `dbus-run-session` socket (`/tmp/dbus-XXXX`), user-owned, created by the launcher only when `bus` is missing or a stale symlink; never replaces a real socket or file; abstract buses are used directly |
+| `/run/spaces/NAME/desktop/UID/portal/bus` | filtered session bus (`xdg-dbus-proxy`, run as the user), bound into the guest at `/run/user/UID/bus` |
+
+Guest packages added by hand in the `ubuntu` space during M4 (kept): `gnome-calculator`, `locales`
+(with `en_US.UTF-8` generated), `libglib2.0-bin` (gdbus), `pulseaudio-utils` (pactl),
+`libnotify-bin` (notify-send), `wl-clipboard`. The guest-native helpers need only the guest's
+libglib/libgobject/libgio, which the space's base package set already pulls in through polkitd and
+xdg-desktop-portal. `void/tools/check-guest-glib.py` verifies the symbols.
+
 ## Symlinks
 
-`/var/service/spaces-NAME -> /etc/sv/spaces-NAME` (one per created space). No other symlinks.
+`/var/service/spaces-NAME -> /etc/sv/spaces-NAME` (one per created space). `/run/user/UID/bus` (above) is created at run time and lives on tmpfs; uninstalling leaves it alone.
 
 ## Uninstall
 

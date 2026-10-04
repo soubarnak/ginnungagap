@@ -133,6 +133,15 @@ SHEOF
 chown root:root "$BIN_DIR/spaces" "$BIN_DIR/spaces.priv"
 chmod 0755 "$BIN_DIR/spaces.priv"
 
+# Run by the user from the graphical session (niri spawn-at-startup) to publish
+# the session environment for the root-side launcher; see spaces.host.session_env.
+cat >"$BIN_DIR/spaces-session-env" <<'SHEOF'
+#!/bin/sh
+exec /usr/bin/python3 -I -m spaces.host.session_env "$@"
+SHEOF
+chown root:root "$BIN_DIR/spaces-session-env"
+chmod 0755 "$BIN_DIR/spaces-session-env"
+
 # -------------------------------------------------------------- data files
 log "installing data files"
 install -d -m 0755 "$SHARE"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pwd
 import re
 import secrets
 import shlex
@@ -25,7 +26,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from . import devices_lxc, lxc_config
+from . import devices_lxc, lxc_config, session_env
 from .base import HostBackend
 
 DEFAULT_LXC_PATH = "/run/spaces/lxc"
@@ -393,6 +394,7 @@ class _Launcher:
                 return
             self._cleaned = True
         self._stop_event.set()
+        self._backend.terminate_user_scopes()
         for thread in self._threads:
             if thread is not threading.current_thread():
                 thread.join(timeout=10)
@@ -451,6 +453,10 @@ class _Launcher:
 
 
 class LxcBackend(HostBackend):
+    def __init__(self) -> None:
+        self._scopes: dict[str, subprocess.Popen[Any]] = {}
+        self._scope_lock = threading.Lock()
+
     # ------------------------------------------------------------------ state
 
     def _state(self, name: str) -> str | None:
@@ -639,6 +645,7 @@ class LxcBackend(HostBackend):
         os.chmod(runtime, 0o700)
         marker = runtime / "ready"
         marker.unlink(missing_ok=True)
+        kill_stale_helpers(name)
         self._load_apparmor()
 
         cgroup_mode = os.environ.get("SPACES_LXC_CGROUP_MODE", "relative")
@@ -908,31 +915,33 @@ class LxcBackend(HostBackend):
     def login_library_names(self) -> tuple[str, ...]:
         return ("elogind", "libelogind.so.0")
 
+    def _login_info(self) -> session_env.LoginInfo | None:
+        return session_env.open_login()
+
+    def _session_environment(self, uid: int) -> dict[str, str] | None:
+        return session_env.resolve_environment(
+            uid, login=self._login_info(), run_user=RUN_USER, proc=PROC
+        )
+
     def host_user_environment(self, uid: int, gid: int) -> str | None:
-        hook = RUN_USER / str(uid) / "spaces" / "environment"
-        try:
-            descriptor = os.open(hook, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError:
-            descriptor = -1
-        if descriptor >= 0:
-            with os.fdopen(descriptor, "rb") as handle:
-                status = os.fstat(handle.fileno())
-                if stat.S_ISREG(status.st_mode) and status.st_uid == uid:
-                    return handle.read().decode("utf-8", errors="replace")
-        return _scan_user_environment(uid)
+        # The user's published file first, else the environment of a process
+        # in the user's active graphical elogind session (see session_env).
+        return session_env.environment_block(self._session_environment(uid))
 
     def session_bus_address(self, uid: int) -> str:
+        """Return an address for the user's session bus.
+
+        Without a systemd user manager the bus is ephemeral (dbus-run-session).
+        /run/user/UID/bus is pointed at it so the conventional address works;
+        an abstract bus cannot be linked and is returned as it is.
+        """
+
         default = f"unix:path={RUN_USER}/{uid}/bus"
-        try:
-            if stat.S_ISSOCK(os.stat(RUN_USER / str(uid) / "bus").st_mode):
-                return default
-        except OSError:
-            pass
-        block = self.host_user_environment(uid, uid) or ""
-        for line in block.splitlines():
-            key, _, value = line.partition("=")
-            if key == "DBUS_SESSION_BUS_ADDRESS" and value:
-                return value
+        environment = self._session_environment(uid) or {}
+        address = environment.get("DBUS_SESSION_BUS_ADDRESS")
+        if address:
+            return session_env.ensure_bus_link(uid, address, RUN_USER)
+        session_env.remove_stale_bus_link(uid, RUN_USER)
         return default
 
     def spawn_user_scope(
@@ -946,17 +955,50 @@ class LxcBackend(HostBackend):
         gid: int,
         pass_fds: Sequence[int] = (),
     ) -> subprocess.Popen[Any]:
-        return subprocess.Popen(
-            list(argv),
-            env=dict(env),
-            user=uid,
-            group=gid,
-            extra_groups=[],
-            pass_fds=tuple(pass_fds),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        """Run argv as the user with exactly env, tracked under the unit name.
+
+        There is no per-user manager to scope the process; the backend keeps
+        the handle so the launcher can stop it (terminate_user_scopes) and a
+        replacement under the same unit name stops its predecessor.
+        """
+
+        try:
+            groups = os.getgrouplist(pwd.getpwuid(uid).pw_name, gid)
+        except KeyError:
+            groups = [gid]
+        with self._scope_lock:
+            self._reap_scopes()
+            previous = self._scopes.pop(unit, None)
+            if previous is not None:
+                _stop_process(previous)
+            process = subprocess.Popen(
+                list(argv),
+                env=dict(env),
+                user=uid,
+                group=gid,
+                extra_groups=groups,
+                cwd="/",
+                pass_fds=tuple(pass_fds),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self._scopes[unit] = process
+        return process
+
+    def _reap_scopes(self) -> None:
+        for unit, process in tuple(self._scopes.items()):
+            if process.poll() is not None:
+                del self._scopes[unit]
+
+    def terminate_user_scopes(self) -> None:
+        """Stop and reap every process started by spawn_user_scope."""
+
+        with self._scope_lock:
+            scopes = list(self._scopes.values())
+            self._scopes.clear()
+        for process in scopes:
+            _stop_process(process)
 
     def peer_in_space(self, pid: int, name: str) -> bool:
         try:
@@ -974,35 +1016,51 @@ class LxcBackend(HostBackend):
         return False
 
 
-def _scan_user_environment(uid: int) -> str | None:
-    """Return the environment of the user's oldest graphical process."""
-
-    candidates: list[tuple[int, Path]] = []
-    try:
-        entries = list(PROC.iterdir())
-    except OSError:
-        return None
-    for entry in entries:
-        if entry.name.isdigit():
-            try:
-                if entry.stat().st_uid == uid:
-                    candidates.append((int(entry.name), entry))
-            except OSError:
-                continue
-    for _pid, entry in sorted(candidates):
+def _stop_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is None:
+        process.terminate()
         try:
-            raw = (entry / "environ").read_bytes()
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def kill_stale_helpers(name: str) -> list[int]:
+    """Stop desktop helpers a killed launcher left behind for this space.
+
+    The portal proxy exits when its control descriptor closes, but the open
+    broker has no such link and would keep the broker bus name of the old
+    session, so the next launcher's broker could never register.
+    """
+
+    desktop = f"/run/spaces/{name}/desktop/"
+    killed = []
+    try:
+        entries = [e for e in PROC.iterdir() if e.name.isdigit()]
+    except OSError:
+        return killed
+    for entry in entries:
+        try:
+            argv = (entry / "cmdline").read_bytes().decode(errors="replace").split("\0")
         except OSError:
             continue
-        pairs = [
-            item.decode("utf-8", errors="replace")
-            for item in raw.split(b"\0")
-            if b"=" in item
-        ]
-        keys = {item.partition("=")[0] for item in pairs}
-        if {"WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"} <= keys:
-            return "".join(f"{item}\n" for item in pairs)
-    return None
+        program = os.path.basename(argv[0]) if argv else ""
+        broker = (
+            program == "spaces-broker"
+            and "--space" in argv
+            and argv[argv.index("--space") + 1 : argv.index("--space") + 2] == [name]
+        )
+        proxy = program == "xdg-dbus-proxy" and any(
+            item.startswith(desktop) for item in argv
+        )
+        if broker or proxy:
+            try:
+                os.kill(int(entry.name), signal.SIGTERM)
+                killed.append(int(entry.name))
+            except OSError:
+                pass
+    return killed
 
 
 def _sync_resolv(path: Path) -> None:
