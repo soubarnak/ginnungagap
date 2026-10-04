@@ -173,5 +173,20 @@ class MultilibTests(unittest.TestCase):
         )
 
 
+class CreateHookTests(unittest.TestCase):
+    def test_refresh_is_skipped_for_normal_users_and_never_raises(self) -> None:
+        from unittest import mock
+
+        from spaces import priv
+
+        with mock.patch("os.geteuid", return_value=1000), mock.patch.object(nvidia, "sync") as sync:
+            priv._refresh_host_config()
+            sync.assert_not_called()
+        with mock.patch("os.geteuid", return_value=0), mock.patch.object(
+            nvidia, "sync", side_effect=OSError("denied")
+        ), mock.patch.object(nvidia.BASE_PATH.__class__, "exists", return_value=True):
+            priv._refresh_host_config()  # prints a warning, does not raise
+
+
 if __name__ == "__main__":
     unittest.main()

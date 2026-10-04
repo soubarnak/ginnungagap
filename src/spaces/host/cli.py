@@ -206,6 +206,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = arguments.command
     action = getattr(arguments, "action", None)
     changing = command in NEEDS_ROOT or (command == "autostart" and action in NEEDS_ROOT)
+    if command == "gc" and arguments.dry_run:
+        changing = False
     if changing and os.geteuid() != 0:
         return _reexec_with_sudo(argv)
     if command == "autostart":

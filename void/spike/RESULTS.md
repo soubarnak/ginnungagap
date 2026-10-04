@@ -561,7 +561,7 @@ no `nvidia.py` change was needed. Guest-installed NVIDIA packages collide with t
 filesystem", pacman refuses; apt and dnf would too): expected, nothing to fix. If the farm goes away the
 empty placeholder files stay (unchanged M5 behaviour). Guest glibc: kali 2.43, arch 2.44, fedora 2.43.
 
-### Open items for M7
+### Open items for M7 (done in M7, see below)
 
 - Autostart (`autostart-users` is written, nothing starts spaces at login), entry wrappers or aliases
   (`spaces enter arch` etc.), shortcut export for the new spaces, default desktop flavour: the packages are KDE
@@ -572,3 +572,81 @@ empty placeholder files stay (unchanged M5 behaviour). Guest glibc: kali 2.43, a
 - Mirrors: the Fedora metalink handed out stale or unreachable mirrors once (retry passed); `rankmirrors` is only for Arch.
   A default `/etc/dnf/libdnf5.conf.d` in the bootstrap root with retries and `fastestmirror` could be added.
 - A future Void `arch-install-scripts`, `archlinux-keyring` or `dnf5` package would let the shims call `/usr/bin` directly.
+
+## M7: entry commands, autostart, desktop flavour, housekeeping (2026-10-04)
+
+`void/spike/m7_check.py` (`--reinstall` also runs an uninstall and a reinstall) covers the items below;
+final run: see "Check results" at the end of this section. New files: `src/spaces/host/{autostart,cli,doctor,flavor}.py`,
+`void/runit/spaces-autostart/`, `void/shell/spaces.{sh,fish}`, `void/entry/enter-space`, `void/docs/void.md`,
+tests `tests/test_void_{autostart,flavor,cli}.py`. Changed: `nvidia.py` (flavour packages, `desktop_flavor`,
+Arch multilib probe), `priv.py` (refresh of the generated config before `create`), `void/bin/dnf5` (tuning),
+`dev-install.sh`, `dev-uninstall.sh`, `config.base.json`.
+
+### Entry commands
+
+- `/usr/bin/{ubuntu,fedora,kali,arch-linux}` are copies of the anatase `enter-space` wrapper plus one line that
+  drops a leading `--`: upstream's wrapper turns `ubuntu -- id` into `spaces enter ubuntu -- -- id`, which tries to run
+  a program called `--` ("could not start application"). `ubuntu id` and `ubuntu -- id` now both work.
+- Name collisions: none of the four names is on `PATH` (`command -v`), none of the files is owned by an installed
+  package (`xbps-query -o`), and no package is named like them (`xbps-query -Rs`). The per-file remote query
+  `xbps-query -Ro /usr/bin/NAME` downloads every package of the repository (it ran for 2 minutes and was at the
+  letter R), so the file-level check against packages that are not installed was not completed.
+  `/usr/bin/arch` is coreutils' and is never installed over.
+- Shell snippet: `/usr/share/spaces/void/shell/spaces.sh` defines the functions `arch ubuntu fedora kali` and, only
+  when the host lacks the command, hint functions for `apt apt-get dnf` (return 127). `pacman` and `xbps-*` are not touched.
+  Not enabled anywhere. Tested in bash (sourced in a subshell: `ubuntu -- id`, `arch -- ...`, hints, no-hints switch).
+  zsh (same file, plain POSIX functions) and fish (`spaces.fish`) are not tested: neither is installed here.
+
+### Autostart
+
+- `LxcBackend.enable_user_autostart` only appends the user name to `/var/lib/spaces/NAME/autostart-users` (one name per
+  line, root-owned 0644). `spaces create` and `spaces configure` call it by default (`--no-enable` skips), so on this host
+  all four spaces had `soubarna` enabled since M3/M6, and nothing consumed it. That is unchanged: enabling still only writes
+  the file, and nothing starts until `/var/service/spaces-autostart` exists.
+- `spaces-autostart` (runit service, `/etc/sv/spaces-autostart`, run script `python3 -I -m spaces.host.autostart`, log in
+  `/var/log/spaces/autostart`) uses its own ctypes wrapper of `sd_login_monitor_*` and `sd_uid_get_state` in
+  libelogind (no import of `launch`, textual or PIL; a test asserts that). Per evaluation (start, every login-state event, every
+  30 s): boot flag (`autostart-boot`) once per boot; for each user in `autostart-users` with state active, online or lingering,
+  `sv once` of each space that is not running, once per login. A login is a session id the daemon has not acted on (or the start
+  of lingering); the record is `/run/spaces/autostart/state.json` (tmpfs): a daemon restart does not repeat, a reboot starts
+  over, logging out forgets the user.
+- Real test (no logout possible): service linked with only `ubuntu` enabled for soubarna and the others disabled; `ubuntu` was
+  ready 4 s after the link; the three other spaces stayed down; `sudo sv down` was not undone over a 36 s wait (more than one 30 s
+  evaluation) nor by `sv restart spaces-autostart`; then the service was stopped, unlinked and the state files restored.
+  Not tested for real: a second login while the daemon runs (the PAM stack could not open an elogind session from a root script);
+  covered by unit tests with a fake elogind.
+
+### Desktop flavour
+
+- Package names checked in the live spaces (`apt-cache policy`, `pacman -Si`, `dnf5 repoquery`): Ubuntu 26.04 and Kali:
+  `adwaita-icon-theme gnome-themes-extra xdg-desktop-portal-gtk gsettings-desktop-schemas dconf-gsettings-backend
+  qt5-gtk-platformtheme qt6-gtk-platformtheme`; Arch: `adw-gtk-theme gnome-themes-extra adwaita-icon-theme
+  xdg-desktop-portal-gtk gsettings-desktop-schemas dconf gtk3` (there is no `qt6-gtk-platformtheme`; `libqgtk3.so` is part of
+  `qt6-base` and needs gtk3); Fedora 44: `adw-gtk3-theme adwaita-icon-theme xdg-desktop-portal-gtk gsettings-desktop-schemas dconf
+  gtk3` (no `gnome-themes-extra`; `libqgtk3.so` is in `qt6-qtbase-gui`). `adw-gtk3` is not packaged for Ubuntu or Kali.
+- `desktop_flavor` (`auto|kde|gtk`) lives in `config.base.json` (auto) and may be overridden in `/etc/spaces/void.json`; the generator
+  (`nvidia.generate`) adds the packages after the base list, before the NVIDIA and void.json parts. `auto` reads
+  `XDG_CURRENT_DESKTOP` through `session_env.resolve_environment` for the calling uid (`SUDO_UID`/`PKEXEC_UID`), else any user
+  with an active graphical session; KDE/Plasma gives kde, anything else gtk; the last answer is kept in
+  `/var/lib/spaces/.host/desktop-flavor` so that a regeneration without a session does not flip it. `priv.create` regenerates
+  the config for the creating user (as root only, failures are not fatal), so `spaces create` sees the right flavour.
+- `spaces-void install-flavor NAME` ran for real on ubuntu, arch and fedora (idempotent, 2 to 6 s once metadata is fresh).
+  polkit-kde-agent and the KDE portal stay in place. GTK app: `gnome-calculator` from ubuntu and from arch opens a window on niri
+  after the install. Qt: `QT_QPA_PLATFORMTHEME=gtk3` was forwarded all along; before the install Qt silently fell back
+  (`Attempting to create platform theme "gtk3"` with no success line), after it the log says `Successfully created platform
+  theme "gtk3"` (python3-pyqt6 was installed in ubuntu to test; kept).
+
+### Housekeeping
+
+- State file: the loss of `pam-devel` came from the uninstaller, which kept the packages but deleted the state file that recorded
+  them, so the next install found them present and did not record them again. The record now also lives in
+  `/var/lib/spaces/.host/dev-install.packages` (kept by a plain uninstall, merged on install, removed by `--remove-packages`).
+  Current state: `packages=m4 pacman pam-devel`, which agrees with `xbps-query -m` and INSTALLED.md.
+- `dev-uninstall.sh` keeps `/var/lib/spaces/.host` unless `--purge`.
+- dnf5 shim: `--setopt` retries=5, timeout=30, max_parallel_downloads=8, fastestmirror=True are added to every bootstrap dnf5 call
+  unless the caller sets them (dnf5 reads the installation root's config, not the bootstrap root's, so the command line is the
+  place). `dnf5 --version` and `dnf5 makecache --releasever=44` ran with them; dnf5 itself rejects a bad value, which shows the
+  names are real options. The fedora space was not recreated.
+- Arch `/usr/lib32`: the NVIDIA lib32 overlay for arch is only generated when the guest's `/etc/pacman.conf` has `[multilib]`
+  (the generator reads `/var/lib/spaces/arch/rootfs/etc/pacman.conf` at every start). Placeholder files already created by M6 stay.
+- `spaces-void gc` and `doctor` (see `void/docs/void.md`).

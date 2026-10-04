@@ -178,15 +178,19 @@ def check_services(
     for stale in autostart.gc_services(root=root, svdir=svdir, dry_run=True):
         yield "WARN", f"service {stale}", "space is gone, service remains: spaces-void gc"
     auto = service_dir / autostart.SERVICE_NAME
-    wanted = [
-        n for n in names if autostart.boot_enabled(n, root) or autostart.read_users(n, root)
-    ]
+    at_boot = [n for n in names if autostart.boot_enabled(n, root)]
+    at_login = [n for n in names if autostart.read_users(n, root)]
     if auto.exists():
         yield "PASS", "autostart service", f"linked ({_service_status(auto)})"
-    elif wanted:
+    elif at_boot:
         yield "WARN", "autostart service", (
-            "spaces enable autostart (" + ", ".join(wanted) + ") but the service is not linked: "
+            "boot autostart is set for " + ", ".join(at_boot) + " but the service is not linked: "
             "sudo ln -s /etc/sv/spaces-autostart /var/service/"
+        )
+    elif at_login:
+        yield "PASS", "autostart service", (
+            "not linked: login autostart (" + ", ".join(at_login) + ") is inactive; "
+            "to use it: sudo ln -s /etc/sv/spaces-autostart /var/service/"
         )
     else:
         yield "PASS", "autostart service", "not linked, nothing enabled"

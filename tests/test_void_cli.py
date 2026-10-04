@@ -164,7 +164,7 @@ class DoctorTests(unittest.TestCase):
         by_name = {name: (status, detail) for status, name, detail in results}
         self.assertEqual(by_name["service ubuntu"][0], "PASS")
         self.assertEqual(by_name["service gone"][0], "WARN")
-        self.assertEqual(by_name["autostart service"][0], "WARN")
+        self.assertEqual(by_name["autostart service"][0], "PASS")
         self.assertIn("ln -s /etc/sv/spaces-autostart", by_name["autostart service"][1])
 
 

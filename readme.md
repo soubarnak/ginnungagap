@@ -6,15 +6,33 @@
   </picture>
 </p>
 
+## ginnungagap: Spaces on Void Linux
+
+This branch (`void`) runs Spaces on **Void Linux**: runit instead of systemd, elogind for logins, LXC
+instead of `systemd-nspawn`, AppArmor instead of SELinux. You still get Ubuntu, Kali, Arch and Fedora
+spaces with host PAM, desktop and GPU integration:
+
+```bash
+sudo void/tools/dev-install.sh          # development install (no xbps package yet)
+sudo spaces create ubuntu --preset basic
+ubuntu -- id                            # or: spaces enter ubuntu
+```
+
+**Read [void/docs/void.md](void/docs/void.md)** for what gets installed where, entry commands, autostart
+(`sudo ln -s /etc/sv/spaces-autostart /var/service/`), the desktop flavour, the security model compared to
+upstream, troubleshooting (`spaces-void doctor`) and known gaps. Milestone logs: `void/spike/RESULTS.md`,
+`void/spike/INSTALLED.md`. The `master` branch tracks upstream unchanged.
+
 > **Fork notice (AGPL-3.0 section 5a).** ginnungagap is a modified version of
 > [anatase-org/spaces](https://github.com/anatase-org/spaces), changed on 2026-10-04 and later,
 > to run on Void Linux (runit, elogind, LXC, AppArmor) instead of systemd and SELinux.
 > It is not affiliated with or endorsed by the upstream authors. Upstream copyright:
 > Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
 >
-> **Status: early work in progress.** Nothing on this branch runs on Void yet. The upstream
-> text below still describes the systemd-based original until the port lands.
-> The `master` branch tracks upstream unchanged; the Void port lives on the `void` branch.
+> **Status: development install.** The Void port works end to end on one machine (see the docs above);
+> there is no package yet. The upstream text below still describes the systemd-based original: where it
+> mentions `systemctl`, `spaces@NAME` units, SELinux or `machinectl`, read the Void equivalents in
+> `void/docs/void.md`.
 
 # Spaces
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
