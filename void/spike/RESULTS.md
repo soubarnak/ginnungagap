@@ -655,7 +655,7 @@ Arch multilib probe), `priv.py` (refresh of the generated config before `create`
 
 `python3 void/spike/m7_check.py --reinstall`: 77 PASS, 0 FAIL, 0 SKIP (entry commands 16, shell snippet 6, autostart 15, flavour
 17 including install-flavor on ubuntu, arch and fedora, the GTK window and the Qt theme, housekeeping 12 including the
-uninstall/reinstall cycle, doctor and gc 5, clean machine 6). Unit tests: 640 passed, 17 skipped. A first full run found one
+uninstall/reinstall cycle, doctor and gc 5, clean machine 6). Unit tests: 642 passed, 17 skipped (after a robustness change to the autostart login record, see below). A first full run found one
 bug in the check itself (the state-file restore wrote a literal `\n`; repaired from a backup, the check now restores through
 `tee`) and two ordering problems after the reinstall, which removes `/etc/sv/spaces-*` until the next start of each space
 (the check now runs doctor and gc before the reinstall and treats a missing service as stopped).
@@ -682,3 +682,9 @@ spaces for soubarna), no space mounts or cgroups, `cgroup.subtree_control` empty
   SELinux files and the rpm specs stay out, the ubuntu keyring (currently fetched by the installer, needs a template or the
   `debootstrap` package's keyring), the pinned Fedora key and image URL (runtime download, not in the package),
   `spaces.priv` as a root-owned file the polkit policy binds to.
+
+Afterwards (review): the login record only grows while the user is online, so a momentarily empty session list cannot make an old
+session look new (that would have undone a deliberate `sv down`), and the logout of a lingering user does not start spaces; both
+have unit tests. The final `dev-uninstall.sh`/`dev-install.sh` cycle of the check removed `/etc/sv/spaces-*` and
+`/var/service/spaces-*` for the four spaces; each is recreated on the space's next start (`spaces-void doctor` warns until then).
+Not verified: autostart on a second real login, zsh and fish, file-level collision of the entry names with packages that are not installed.

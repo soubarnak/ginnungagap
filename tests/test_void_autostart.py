@@ -184,6 +184,33 @@ class DaemonTests(Base):
         daemon.evaluate()
         self.assertEqual(runner.started, ["arch"])
 
+    def test_empty_session_list_while_active_does_not_look_like_a_new_login(self) -> None:
+        autostart.set_user("ubuntu", "alice", True, self.root)
+        logins, runner = FakeLogins(), FakeRunner()
+        logins.login(1000, "active", "1")
+        daemon = self.daemon(logins, runner)
+        daemon.evaluate()
+        runner.up.clear()  # sv down
+        logins.login(1000, "active")  # transient: sessions not listed
+        daemon.evaluate()
+        logins.login(1000, "active", "1")
+        daemon.evaluate()
+        self.assertEqual(runner.started, ["ubuntu"])
+
+    def test_logout_of_a_lingering_user_does_not_start_spaces(self) -> None:
+        autostart.set_user("ubuntu", "alice", True, self.root)
+        logins, runner = FakeLogins(), FakeRunner()
+        logins.login(1000, "active", "1")
+        daemon = self.daemon(logins, runner)
+        daemon.evaluate()
+        runner.up.clear()
+        logins.login(1000, "lingering")  # logged out, linger keeps the manager
+        daemon.evaluate()
+        self.assertEqual(runner.started, ["ubuntu"])
+        logins.login(1000, "active", "2")
+        daemon.evaluate()
+        self.assertEqual(runner.started, ["ubuntu", "ubuntu"])
+
     def test_unknown_user_is_ignored_and_failures_do_not_stop_the_loop(self) -> None:
         autostart.set_user("ubuntu", "nobody-here", True, self.root)
         autostart.set_user("arch", "alice", True, self.root)

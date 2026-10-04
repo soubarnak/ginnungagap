@@ -343,10 +343,17 @@ class Autostarter:
                 self.seen[key] = set()
                 continue
             tokens = set(self.logins.sessions(uid))
-            if state == "lingering" and not tokens:
+            previous = self.seen.get(key, set())
+            # A lingering user without a session counts as one login, but only
+            # when nothing was seen before: logging out of a lingering user
+            # must not start the spaces again. Session ids are not reused
+            # within a boot, so the record only grows until the user is
+            # offline; a momentarily empty session list cannot make an old
+            # session look new.
+            if state == "lingering" and not tokens and not previous:
                 tokens = {LINGER_TOKEN}
-            fresh = tokens - self.seen.get(key, set())
-            self.seen[key] = tokens
+            fresh = tokens - previous
+            self.seen[key] = previous | tokens
             if not fresh:
                 continue
             for name in spaces:

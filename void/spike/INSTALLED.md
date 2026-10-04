@@ -7,7 +7,7 @@ checkout). Reverted by `sudo void/tools/dev-uninstall.sh` (see the end of this f
 
 | Path | What |
 |---|---|
-| `/usr/lib/python3.14/site-packages/spaces/` | copy of `src/spaces` (35 files, byte-compiled) |
+| `/usr/lib/python3.14/site-packages/spaces/` | copy of `src/spaces` (42 files, byte-compiled) |
 | `/usr/bin/spaces` | console script, `from spaces.__main__ import main` |
 | `/usr/bin/spaces-session-env` | `#!/bin/sh` wrapper, `exec /usr/bin/python3 -I -m spaces.host.session_env "$@"`; run by the user (`publish`, `show`), see "Desktop session" below |
 | `/usr/bin/spaces.priv` | `#!/bin/sh` wrapper: PATH=`/usr/lib/spaces/void/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin`, then `exec /usr/bin/python3 -I -c 'import sys; from spaces.priv import main; sys.exit(main())' "$@"`. This is the path the polkit policy binds to. |
@@ -129,6 +129,12 @@ Installed by `dev-install.sh` (`void/tools/dev-install-arch.sh`, `dev-install-fe
 Spaces created in M6: `/var/lib/spaces/{kali,arch,fedora}` with their caches and runit services
 (`/etc/sv/spaces-NAME`), like `ubuntu`. Guest packages added by hand (kept): `gnome-calculator`,
 vulkan and GL tools and Mesa drivers in each (arch: `strace`).
+
+Guest packages added by hand or by `spaces-void install-flavor` in M7 (kept): ubuntu got
+`python3-pyqt6` (Qt test app) and the gtk flavour set (`adwaita-icon-theme dconf-gsettings-backend gnome-themes-extra
+gsettings-desktop-schemas qt5-gtk-platformtheme qt6-gtk-platformtheme xdg-desktop-portal-gtk` plus their dependencies); arch got
+`adw-gtk-theme gnome-themes-extra` and the rest of its set (`gtk3 dconf xdg-desktop-portal-gtk ...` were present); fedora got
+`adw-gtk3-theme` (the rest was present). Kali was not changed.
 
 ## Symlinks
 

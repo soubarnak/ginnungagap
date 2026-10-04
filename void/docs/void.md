@@ -48,10 +48,13 @@ sudo spaces create ubuntu --preset basic      # also: arch, fedora, kali; --pres
 spaces enter ubuntu                           # login shell in the space (starts it, ~4 s cold)
 spaces enter ubuntu -- id                     # run one command as yourself
 sudo spaces enter ubuntu --root -- apt-get update   # as root (administrator authentication)
-sudo spaces configure ubuntu --user           # grant your user access to an existing space
-sudo spaces delete ubuntu                     # delete it (then: spaces-void gc)
-spaces enter --graphical ubuntu -- app        # --graphical goes before the space name; used by desktop shortcuts
+sudo spaces configure ubuntu --user USER      # give another user (default: the caller) access; interactive
+sudo spaces delete ubuntu                     # delete it; its runit service is removed with it
 ```
+
+Flags verified on this machine: `create --preset basic`, `enter`, `enter -- CMD`, `enter --root -- CMD`, `start`.
+`configure`, `delete` and `enter --graphical SPACE -- CMD` (set by the desktop shortcuts, goes before the space name)
+are listed in `spaces --help` but were not exercised in M7 (`configure` asks questions in a TUI).
 
 `create` and `configure` need an administrator (polkit asks; `sudo` also works). `enter` and `start`
 as yourself need no password. A space is a runit service that is `down` by default and started
@@ -190,7 +193,7 @@ What is lost or different compared with upstream on Fedora/Anatase:
 ```
 sudo spaces-void doctor        # PASS/WARN/FAIL: lxc, apparmor and the profile, cgroup layout, elogind, polkit,
                                # runit service sanity per space, autostart link, config.json, nvidia sync
-spaces-void gc -n              # services of spaces that no longer exist (drop -n to remove them)
+spaces-void gc -n              # orphaned services (a space whose directory was removed by hand); drop -n to remove them
 sudo tail -f /var/log/spaces/NAME/current   # launcher and guest start log of one space (svlogd)
 sudo sv status /var/service/spaces-NAME
 ```
