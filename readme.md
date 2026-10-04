@@ -13,7 +13,8 @@ instead of `systemd-nspawn`, AppArmor instead of SELinux. You still get Ubuntu, 
 spaces with host PAM, desktop and GPU integration:
 
 ```bash
-sudo void/tools/dev-install.sh          # development install (no xbps package yet)
+void/tools/xbps-build.sh                # builds the xbps packages with xbps-src, prints the repository
+sudo xbps-install -S -R ~/.local/share/ginnungagap/void-packages/hostdir/binpkgs spaces
 sudo spaces create ubuntu --preset basic
 ubuntu -- id                            # or: spaces enter ubuntu
 ```
@@ -29,8 +30,9 @@ upstream, troubleshooting (`spaces-void doctor`) and known gaps. Milestone logs:
 > It is not affiliated with or endorsed by the upstream authors. Upstream copyright:
 > Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
 >
-> **Status: development install.** The Void port works end to end on one machine (see the docs above);
-> there is no package yet. The upstream text below still describes the systemd-based original: where it
+> **Status: local xbps packages.** The Void port works end to end on one machine (see the docs above); the
+> packages are built from this checkout with `void/tools/xbps-build.sh`, there is no public repository yet.
+> (`void/tools/dev-install.sh` remains as a development-only install.) The upstream text below still describes the systemd-based original: where it
 > mentions `systemctl`, `spaces@NAME` units, SELinux or `machinectl`, read the Void equivalents in
 > `void/docs/void.md`.
 

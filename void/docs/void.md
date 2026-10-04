@@ -8,25 +8,86 @@ authorisation and AppArmor instead of SELinux. The CLI (`spaces create`, `enter`
 `delete`) and the guest integration (host PAM for `sudo`, desktop forwarding, shortcuts, portals,
 GPU) are upstream's.
 
-Status: development install only (`void/tools/dev-install.sh`); there is no xbps package yet.
+Status: installable as xbps packages built with `xbps-src` (M8). The development install
+(`void/tools/dev-install.sh`) still exists, for hacking on the sources only.
 Tested on Void x86_64 (glibc), runit, elogind 252, kernel 7.x, LXC 6.0, niri.
 
 ## Install
 
+There is no Void repository for Spaces yet: build the packages from this repository with
+[void-packages](https://github.com/void-linux/void-packages)' `xbps-src` and install them from the
+local repository that it produces. You need `git`, membership of the `xbuilder` group (xbps-src
+uses unprivileged user namespaces; `bubblewrap` must be installed) and about 2 GB of space (the void-packages checkout and chroot take under 1 GB, plus downloads).
+
 ```
 git clone <this repo> ginnungagap && cd ginnungagap && git checkout void
-sudo void/tools/dev-install.sh        # idempotent; re-run after changing the sources
+void/tools/xbps-build.sh                       # clones void-packages (shallow) into
+                                               # ~/.local/share/ginnungagap/void-packages, bootstraps it,
+                                               # builds all five packages, prints the repository path
+sudo xbps-install -S -R ~/.local/share/ginnungagap/void-packages/hostdir/binpkgs spaces
+```
+
+To keep the repository for later `xbps-install -u`, add it to xbps' configuration:
+
+```
+echo 'repository=/home/YOU/.local/share/ginnungagap/void-packages/hostdir/binpkgs' |
+    sudo tee /etc/xbps.d/20-spaces-local.conf
+```
+
+(local repositories need no signature). `xbps-build.sh` builds the current working tree, including
+uncommitted files (`--committed` builds `HEAD`), `--check` runs the unit tests in the build chroot,
+`--revision N` builds revision N (used to test upgrades), `--lint` only runs `xlint`. It renders the
+checksum of that tree into a copy of the `spaces` template inside the void-packages checkout; the
+committed template (`void/srcpkgs/spaces/template`) names the release tarball
+`https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz` with an all-zero
+placeholder checksum, to be filled in when a release is tagged.
+
+```
+sudo xbps-remove spaces                        # stops the spaces, removes services and the profile;
+                                               # /var/lib/spaces, /var/cache/spaces, /var/log/spaces stay
+sudo xbps-remove -o                            # then also drop the private helper packages, if wanted
+sudo xbps-install -u spaces                    # upgrade (after a new build); running spaces keep running
+```
+
+### The packages
+
+| Package | What |
+|---|---|
+| `spaces` | the program: Python package, `/usr/bin/{spaces,spaces.priv,spaces-void,spaces-session-env,ubuntu,fedora,kali,arch-linux}`, native helpers and guest helpers in `/usr/lib/spaces`, data in `/usr/share/spaces`, polkit policy, `/etc/pam.d/spaces`, the AppArmor profile, `/etc/spaces/void.json`, the (unlinked) `spaces-autostart` runit service, documentation |
+| `ubuntu-keyring` | `/usr/share/keyrings/ubuntu-archive-keyring.gpg` (debootstrap's default for Ubuntu); same name and path as a future Void package, which would simply replace it |
+| `spaces-arch-install-scripts` | pacstrap, arch-chroot and genfstab under `/usr/lib/spaces/void/arch-install-scripts` (private path and name) |
+| `spaces-archlinux-keyring` | the Arch keyring files under `/usr/share/spaces/void/archlinux-keyring`; its INSTALL hook creates the host pacman keyring in `/var/lib/spaces/.host/arch/gnupg` |
+| `spaces-rankmirrors` | pacman-contrib's `rankmirrors` at `/usr/lib/spaces/rankmirrors` |
+
+The Fedora bootstrap image is not packaged: the `dnf5` shim downloads and verifies it on first use
+(`/var/lib/spaces/.host/fedora`). `spaces` depends on `lxc apparmor polkit elogind libelogind
+eudev-libudev runit debootstrap pacman bash coreutils util-linux tar xz gnupg curl sudo dconf
+xdg-dbus-proxy librsvg-utils python3-Pillow python3-rich python3-textual` besides the four packages
+above and the automatic Python and shared-library dependencies. Only `x86_64` glibc is built (the
+guest helpers are checked against glibc 2.17); `aarch64` has not been tried.
+
+What the hooks do (shown once as INSTALL.msg): INSTALL loads the AppArmor profile (`apparmor_parser -r`,
+only when AppArmor is enabled), runs `spaces-void sync-config` and seeds `/etc/pacman.d/mirrorlist` when
+it is absent; none of it can fail the transaction. On an upgrade the profile is reloaded, the generated
+configuration refreshed and a linked `spaces-autostart` restarted; running spaces are not touched
+(they keep their loaded profile until they restart). REMOVE (not on upgrades) stops every space,
+unlinks and deletes the per-space runit services after making `runsv` and `svlogd` exit, unloads the
+profile, deletes `/etc/spaces/config.json` if it is still the generated one and prints that the spaces
+are kept. `xbps-remove` mentions that `/var/lib/spaces` and friends are not empty: that is intended.
+
+### Development install (not for normal use)
+
+```
+sudo void/tools/dev-install.sh        # copies the working tree to the system paths, idempotent
 sudo void/tools/dev-uninstall.sh      # revert; spaces and /var/lib/spaces/.host are kept
 sudo void/tools/dev-uninstall.sh --purge   # also delete every space, caches, logs and .host
 ```
 
-Everything is copied to its system location, nothing refers back to the checkout (root never
-executes code that a normal user can edit). The installer adds the xbps packages it needs
-(`pam-devel`, `pacman`, `m4` and, if missing, `lxc debootstrap apparmor polkit elogind runit
-xdg-dbus-proxy ...`) and records which ones it added in `/etc/spaces/dev-install.state` and
-`/var/lib/spaces/.host/dev-install.packages`; `--remove-packages` on uninstall removes exactly
-those. `--skip-keyring`, `--skip-packages`, `--skip-distro-tools` skip parts. The full file list
-is in `void/spike/INSTALLED.md`; in short:
+It replaces files the package owns: never run it over the package (remove the package first). The
+installer records what it added in `/etc/spaces/dev-install.state`; the file list is
+`void/spike/INSTALLED.md` (section "Development install"). Differences from the package: it
+installs build tools and `pam-devel`, byte-compiles in place, fetches the Ubuntu keyring, the Arch
+tools and `rankmirrors` itself, and does not need the xbps dependencies to be declared.
 
 | Where | What |
 |---|---|
@@ -204,8 +265,9 @@ sudo sv status /var/service/spaces-NAME
   reloads the profile (the launcher also loads it on demand).
 * Guest sees no GPU after an NVIDIA update: `sudo spaces-void sync-config`, restart the space. After a driver
   update the kernel module and the userspace differ until reboot (doctor warns).
-* **kill -9 of the launcher / hard crash**: the container may keep running orphaned. `sudo sv down /var/service/spaces-NAME`
-  (it reaps stale containers on the next start); if it refuses: `sudo /usr/lib/spaces/spaces-lxc lxc-stop -P /run/spaces/lxc -n NAME -k`
+* **kill -9 of the launcher / hard crash**: the container may keep running orphaned (the host system-bus broker
+  dies with its launcher; the next start also reaps a stale container, session broker and broker of an older
+  launcher). `sudo sv down /var/service/spaces-NAME`; if it refuses: `sudo /usr/lib/spaces/spaces-lxc lxc-stop -P /run/spaces/lxc -n NAME -k`
   then remove `/sys/fs/cgroup/spaces/NAME` (`rmdir` from the leaves). The next `sv once` cleans the rest.
 * **cgroup base**: LXC needs `cgroup.subtree_control` of `/sys/fs/cgroup` empty and cgroup2 mounted there;
   elogind's v1 `name=elogind` mount is tolerated (hidden by the wrapper). If `lxc-start` fails with
@@ -215,7 +277,9 @@ sudo sv status /var/service/spaces-NAME
 
 ## Limits and known gaps
 
-* Development install only; no xbps package, no INSTALL/REMOVE hooks, x86_64 only.
+* The packages are built locally (no signed repository, release or CI yet); x86_64 glibc only.
+* A space that was running when the package is upgraded keeps the old AppArmor profile and old Python code until
+  it is restarted.
 * Autostart's reaction to a new login is unit-tested with a fake elogind; the real test covers a service
   start while a session is active (no second login is possible from a single session).
 * The Arch `/usr/lib32` NVIDIA overlay is only created when the guest's `pacman.conf` enables `[multilib]`.

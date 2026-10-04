@@ -1,4 +1,54 @@
-# What the Void dev install puts on this machine
+# What the Void install puts on this machine
+
+Since M8 the machine runs the **xbps packages** built by `void/tools/xbps-build.sh` (`spaces`, `ubuntu-keyring`,
+`spaces-arch-install-scripts`, `spaces-archlinux-keyring`, `spaces-rankmirrors`). The development install
+(`dev-install.sh`) is described in the second half of this file and is not what is installed now.
+
+## Package install (current)
+
+`xbps-query -f spaces` lists 120 files (python package 42 modules + dist-info, 8 commands in `/usr/bin`, 11 native
+binaries, the data tree, docs), all root:root, no setuid or setgid bit anywhere (checked by `m8_check.py`).
+Differences from the dev install are listed at the end of this section.
+
+| Path | Package | What |
+|---|---|---|
+| `/usr/lib/python3.14/site-packages/spaces/`, `spaces-0.0.1.dist-info/` | spaces | the Python package (byte-compiled by xbps' pycompile trigger at install; the path follows the Python version, `python3>=3.14<3.15` is an automatic dependency) |
+| `/usr/bin/{spaces,spaces.priv,spaces-void,spaces-session-env}` | spaces | `spaces` is the wheel's console script; the others are the sh wrappers of `void/wrappers/` (`spaces.priv` replaces the wheel's script: the polkit policy binds to it and the shim directory is first on its PATH) |
+| `/usr/bin/{ubuntu,fedora,kali,arch-linux}` | spaces | `void/entry/enter-space` |
+| `/usr/lib/spaces/{spaces-pam,spaces-broker,spaces-system-broker}`, `guest/*` | spaces | native helpers (`make -C native`, `check_guest_abi.py --glibc-max 2.17` passes with xbps-src's hardening flags) |
+| `/usr/lib/spaces/{spaces-lxc,spaces-nvidia-sync,spaces-stop-services}` | spaces | cgroup wrapper, config/NVIDIA sync, clean retirement of the runit services (used by REMOVE and `dev-uninstall.sh`) |
+| `/usr/lib/spaces/void/bin/{pacstrap,arch-chroot,dnf5}` | spaces | shims, first on `spaces.priv`'s PATH |
+| `/usr/lib/spaces/rankmirrors` | spaces-rankmirrors | pacman-contrib 1.13.1 script (commit 75d4a705) |
+| `/usr/lib/spaces/void/arch-install-scripts/{bin/*,COPYING,VERSION}` | spaces-arch-install-scripts | arch-install-scripts 31 |
+| `/usr/share/spaces/void/archlinux-keyring/*` | spaces-archlinux-keyring | archlinux-keyring 20260909 (INSTALL creates `/var/lib/spaces/.host/arch/gnupg` and `.host/arch/keyring-version`; an existing keyring of the same version is kept) |
+| `/usr/share/keyrings/ubuntu-archive-keyring.gpg` | ubuntu-keyring | ubuntu-keyring 2026.08.18 (the build refuses a tarball without key F6ECB376...C93C) |
+| `/usr/share/spaces/{pam,keys,repos,portal,system-bridge,systemd}`, `config.base.json`, `void/{arch-pacman.conf,arch-mirrorlist,shell/*}` | spaces | data (`systemd/run-spaces-proc.mount` has `ConditionVirtualization=container`; upstream's units under `/usr/lib/systemd` are dropped) |
+| `/usr/share/polkit-1/actions/org.anatase.spaces.policy`, `/etc/pam.d/spaces` (conf file), `/etc/apparmor.d/spaces-container` | spaces | security glue |
+| `/etc/spaces/void.json` (conf file) | spaces | seed `{"version": 1, "distros": {}}` for the user's extras |
+| `/etc/sv/spaces-autostart/{run,finish,log/run}` + `supervise` links `/run/runit/supervise.spaces-autostart{,-log}` | spaces | not linked into `/var/service` |
+| `/usr/share/doc/spaces/`, `/usr/share/licenses/spaces/LICENSE` | spaces | docs |
+| `/var/lib/spaces`, `/var/cache/spaces`, `/var/log/spaces` | spaces (`make_dirs`) | root 0755; kept on removal |
+
+Not packaged files, created by hooks or at run time: `/etc/spaces/config.json` and `config.json.generated` (INSTALL runs
+`spaces-void sync-config`; REMOVE deletes them while the hash still matches), `/etc/pacman.d/mirrorlist` (seeded by INSTALL only when
+absent, deleted by REMOVE only while it equals the shipped default), the pacman keyring, the NVIDIA farm, the Fedora bootstrap,
+`/etc/sv/spaces-NAME` and `/var/service/spaces-NAME` (created by the first start of a space; REMOVE retires them), everything under
+"Created at run time" below.
+
+Dependencies: see `void/srcpkgs/spaces/template`. Not installed on purpose (as before): `spaces@.service` units, `.desktop` entries
+and icons for the distros, SELinux policy, `/etc/polkit-1/rules.d/*`.
+
+Differences between the package and the dev install: the package does not need `gcc make pkg-config glib-devel pam-devel` on the
+machine, installs `rankmirrors`, the Arch tools and the keyrings through packages (the dev install downloads pinned tarballs),
+ships docs, the license, `/etc/spaces/void.json` and the Python dist-info, lets xbps compile the bytecode, keeps no
+`dev-install.state`, takes the supervise link `-log` for the autostart log service (`.log` in the dev install; per-space services created
+by Python still use `.log`), and loads/unloads the AppArmor profile from hooks. Same files otherwise (the build compares the portal and
+system-bridge trees with `data/`).
+
+Uninstall: `sudo xbps-remove spaces` (stops and removes the services, unloads the profile; spaces and `.host` stay), then
+`sudo xbps-remove -o` for the helper packages. `dev-uninstall.sh` must not be used for a package install.
+
+## Development install (dev-install.sh; not the current state)
 
 Created by `sudo void/tools/dev-install.sh` (idempotent, copies files, never links into the
 checkout). Reverted by `sudo void/tools/dev-uninstall.sh` (see the end of this file).
