@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
+  <a href="#install">Install</a> ·
   <a href="#why-the-name">Why the name</a> ·
   <a href="#why-void-needs-this">Why Void</a> ·
   <a href="#what-changed-from-upstream">What changed</a> ·
@@ -61,13 +61,48 @@ distribution:
 Upstream Spaces is built on `systemd-nspawn`, `machinectl` and SELinux, none of which Void ships. ginnungagap is the
 port that makes it work there, so Void can be a development machine without giving up what makes it Void.
 
-## Quick start
+## Install
+
+There is no Void package repository for Spaces yet. You build the packages from this repository with Void's own
+[`xbps-src`](https://github.com/void-linux/void-packages) and install them from the local repository it produces.
+It is the usual way to install something that is not in the official repositories, and it needs no root until the
+last step.
+
+**You need** Void Linux on x86_64 (glibc), `git`, `bubblewrap`, about 2 GB of free space, and your user in the
+`xbuilder` group (xbps-src builds in an unprivileged user namespace):
 
 ```bash
-void/tools/xbps-build.sh                # builds the xbps packages with xbps-src, prints the repository
+sudo xbps-install -S git bubblewrap
+sudo usermod -aG xbuilder "$USER"       # then log out and in again
+```
+
+**Build and install:**
+
+```bash
+git clone https://github.com/soubarnak/ginnungagap && cd ginnungagap    # the default branch, void, is the port
+void/tools/xbps-build.sh                # clones void-packages, bootstraps it, builds the five packages
 sudo xbps-install -S -R ~/.local/share/ginnungagap/void-packages/hostdir/binpkgs spaces
-sudo spaces create ubuntu --preset basic
-ubuntu -- id                            # or: spaces enter ubuntu
+```
+
+To check out the released tag instead of the latest `void`, run `git checkout v0.0.1` before the build. Do not add
+`--release` to the build: that mode builds the committed template, which names GitHub's tarball and pins its
+checksum in a commit made after the tag.
+
+**Keep the repository for upgrades** (a local repository needs no signature):
+
+```bash
+echo "repository=$HOME/.local/share/ginnungagap/void-packages/hostdir/binpkgs" | sudo tee /etc/xbps.d/20-spaces-local.conf
+```
+
+After a new build, `sudo xbps-install -u spaces` upgrades. Running spaces keep running. `sudo xbps-remove spaces` removes
+the program and stops the spaces; their data in `/var/lib/spaces` stays.
+
+**Create and enter a space:**
+
+```bash
+sudo spaces create ubuntu --preset basic    # or fedora, arch, kali
+ubuntu -- id                                # or: spaces enter ubuntu
+spaces-void doctor                          # checks the host if anything looks wrong
 ```
 
 **Read [void/docs/void.md](void/docs/void.md)** for what gets installed where, entry commands, autostart
