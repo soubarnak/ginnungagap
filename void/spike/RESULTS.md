@@ -1373,3 +1373,22 @@ and leaves the kernel's user-namespace checks. That was not done: it is a weaken
 Reverted (commit `cbaf008` reverts `2b24efd`; neither was pushed or released). Nothing about the release changed: v0.0.2 does
 not contain the second profile. Open if wanted later: the blanket rule with a full `m9_check.py --userns --regress`, or a
 tracing of crun's mount calls to find what the cgroup2 denial needs.
+
+## M14: the sudo audit message, CI cross build, signed repository (2026-10-05)
+
+- **`sudo: unable to send audit message: Operation not permitted`.** Seen in the Fedora space before the user namespace was on:
+  the kernel refuses audit user messages from a task in another pid namespace (EPERM) and sudo reports it. With the user namespace
+  on, the kernel answers ECONNREFUSED to an `AUDIT_USER` message from the guest (checked with a netlink probe as the user and as
+  root in the Fedora and Ubuntu spaces) and sudo says nothing: a real `sudo true` (temporary NOPASSWD drop-in, removed again)
+  printed no audit message in ubuntu, fedora, arch and kali. So the message is gone for every space with a user namespace, which
+  is every space now except one made with `--no-userns`; there it can still appear and is harmless. No seccomp filter was added for
+  it (a rule that fails `socket(AF_NETLINK, NETLINK_AUDIT)` would also change what journald in the guest sees). Kali prints a
+  different harmless line: `unable to resolve host xserve` (the host name is not in the guest's `/etc/hosts`).
+- **CI cross build.** The run of the last push passed all three jobs: unit tests, x86_64 packages and aarch64 packages
+  (cross-built on the x86_64 host, not run). aarch64 `spaces-0.0.2_1` was also cross-built locally with `--release --arch aarch64`.
+- **Signed repository.** A package repository that people can install from needs only `release.sh repo` and somewhere to put the
+  files. Checked with a throw-away key: ten packages (five templates, two architectures) indexed, the repository and every package
+  signed, and an install of `ubuntu-keyring` from a local HTTP server that redirects like GitHub's release downloads, with the key
+  import and the signature check. This found a bug: `repo` indexed only the architecture of the host, so `aarch64-repodata` was
+  never written. It now runs `xbps-rindex` once per architecture. Signing with the real key needs its passphrase, which only the
+  maintainer has; see `void/docs/release.md` ("Serving the signed repository without a server").

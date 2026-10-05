@@ -403,6 +403,9 @@ sudo sv status /var/service/spaces-NAME
   beyond its own path. A seccomp user-notification supervisor was evaluated and rejected: it would have to reimplement
   mount semantics (path resolution in the guest's namespace, flags, propagation, races) to tell a hostile bind from
   systemd's own. The user namespace is the only real closure. `m9_check.py` reports it as SKIP "known open".
+* `sudo` in a space used to print `unable to send audit message: Operation not permitted`. It does not in a space with a user
+  namespace (the default); one made with `--no-userns` can still print it, and it is harmless (the kernel refuses audit
+  messages from another pid namespace).
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

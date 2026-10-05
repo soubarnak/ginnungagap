@@ -118,6 +118,24 @@ Users add it as `repository=URL` in `/etc/xbps.d/` and `xbps-install -S` shows t
 and asks to trust the key. (Checked locally with a throw-away key: the signed repository installs into a scratch
 root after the key is trusted, and a package that was changed by one byte is refused at the hash check.)
 
+## Serving the signed repository without a server
+
+`release.sh repo` writes a flat directory: `x86_64-repodata`, `aarch64-repodata`, the `.xbps` files and their `.xbps.sig2`
+files. xbps only needs those files under one URL, and the assets of a GitHub release are exactly that: upload everything in
+`dist/repo` to the release of the tag and use `https://github.com/soubarnak/ginnungagap/releases/download/v0.0.2` as the
+repository URL. GitHub answers with a redirect to its CDN; xbps follows it (checked against a local server that redirects the
+same way: the index, the signature, the key import and an install into a scratch root all worked).
+
+* `releases/latest/download/` would follow the newest release automatically, but GitHub's "latest" skips pre-releases, so it
+  only works once a release is no longer marked pre-release. Until then each release has its own URL.
+* The set must be the release build of the tag (`xbps-build.sh --release`, and `--release --arch aarch64`): copy those
+  packages into a clean directory and give it to `repo --from`. The default `--from` is the build directory, which also holds
+  the test builds with higher revisions (`--revision N`), and `repo` takes the newest of each.
+* `repo` indexes and signs every architecture on its own (`XBPS_ARCH`): `xbps-rindex -a` skips packages of a foreign
+  architecture, so an earlier version of the script produced only `x86_64-repodata`.
+* Nothing in the tree uploads anything. `gh release upload v0.0.2 dist/repo/* --clobber` is the whole publishing step, and
+  the fingerprint printed by a client's first sync (above) belongs in the README next to the URL.
+
 ## CI
 
 `.github/workflows/void.yaml` runs on pushes and pull requests to `void`:

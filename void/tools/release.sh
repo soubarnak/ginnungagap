@@ -216,12 +216,21 @@ cmd_repo() {
         done
     done
     [ "$found" -gt 0 ] || die "no package of void/srcpkgs found in $from"
-    log "indexing $found packages in $out"
-    xbps-rindex -a "$out"/*.xbps
+    # xbps-rindex only indexes the packages of the architecture it runs for (XBPS_ARCH), so every
+    # architecture is indexed and signed on its own: one NAME-repodata per architecture.
+    archs=$(ls "$out"/*.xbps | sed 's/.*\.\([^.]*\)\.xbps$/\1/' | sort -u)
+    log "indexing $found packages in $out (architectures: $(echo $archs))"
+    for arch in $archs; do
+        XBPS_ARCH=$arch xbps-rindex -a "$out"/*."$arch".xbps
+    done
     log "signing the repository"
-    xbps-rindex --privkey "$key" --signedby "$signedby" -s "$out"
+    for arch in $archs; do
+        XBPS_ARCH=$arch xbps-rindex --privkey "$key" --signedby "$signedby" -s "$out"
+    done
     log "signing the packages"
-    xbps-rindex --privkey "$key" -S "$out"/*.xbps
+    for arch in $archs; do
+        XBPS_ARCH=$arch xbps-rindex --privkey "$key" -S "$out"/*."$arch".xbps
+    done
     echo "signed repository: $out ($found packages)"
     echo "nothing was published; to try it:  sudo xbps-install -S -R $out spaces"
     echo "(xbps asks to trust the key on first use; compare the fingerprint with the one you published)"
