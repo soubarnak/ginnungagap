@@ -18,6 +18,10 @@ from . import devices_lxc, userns as userns_mod
 
 SECCOMP_BASE = Path("/usr/share/lxc/config/common.seccomp")
 API_VFS_WRITABLE = "SYSTEMD_NSPAWN_API_VFS_WRITABLE"
+# The names start with lxc- (void/apparmor/lxc-spaces-container). The second one is for guests in a
+# user namespace and also allows a fresh proc mount (nested containers).
+APPARMOR_PROFILE = "lxc-spaces-container"
+APPARMOR_PROFILE_USERNS = "lxc-spaces-container-userns"
 INIT_CANDIDATES = (
     "/usr/lib/systemd/systemd",
     "/lib/systemd/systemd",
@@ -441,7 +445,7 @@ def translate(
         f"lxc.init.cmd = {init}",
         "lxc.signal.halt = SIGRTMIN+3",
         f"lxc.mount.auto = {mount_auto}",
-        "lxc.apparmor.profile = lxc-spaces-container",
+        f"lxc.apparmor.profile = {APPARMOR_PROFILE_USERNS if userns is not None else APPARMOR_PROFILE}",
         *cgroup_lines,
         f"lxc.cap.keep = {cap_keep}",
         f"lxc.seccomp.profile = {runtime_dir / 'seccomp.profile'}",

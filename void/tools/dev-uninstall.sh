@@ -64,10 +64,12 @@ fi
 
 # ------------------------------------------------------------------- files
 log "removing installed files"
-if [ -e /etc/apparmor.d/lxc-spaces-container ] && command -v apparmor_parser >/dev/null; then
-    apparmor_parser -R /etc/apparmor.d/lxc-spaces-container 2>/dev/null || true
-fi
-rm -f /etc/apparmor.d/lxc-spaces-container
+for profile in lxc-spaces-container lxc-spaces-container-userns; do
+    if [ -e /etc/apparmor.d/$profile ] && command -v apparmor_parser >/dev/null; then
+        apparmor_parser -R /etc/apparmor.d/$profile 2>/dev/null || true
+    fi
+    rm -f /etc/apparmor.d/$profile
+done
 SITE=$(/usr/bin/python3 -I -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 rm -rf "$SITE/spaces"
 rm -f /usr/bin/spaces /usr/bin/spaces.priv /usr/bin/spaces-session-env \

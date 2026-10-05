@@ -118,6 +118,7 @@ post_install() {
 	# Configuration and data.
 	vinstall data/pam/spaces.system-auth 644 etc/pam.d spaces
 	vinstall void/apparmor/lxc-spaces-container 644 etc/apparmor.d
+	vinstall void/apparmor/lxc-spaces-container-userns 644 etc/apparmor.d
 	vinstall void/data/void.json 644 etc/spaces
 	vinstall void/data/config.base.json 644 usr/share/spaces
 	vinstall void/data/arch-pacman.conf 644 usr/share/spaces/void

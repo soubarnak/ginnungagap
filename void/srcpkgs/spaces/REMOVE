@@ -16,7 +16,9 @@ pre)
 	fi
 	if [ -d /sys/kernel/security/apparmor ] && [ -e /etc/apparmor.d/lxc-spaces-container ] &&
 		command -v apparmor_parser >/dev/null 2>&1; then
-		apparmor_parser -R /etc/apparmor.d/lxc-spaces-container >/dev/null 2>&1 || :
+		for profile in lxc-spaces-container lxc-spaces-container-userns; do
+			[ -e /etc/apparmor.d/${profile} ] && { apparmor_parser -R /etc/apparmor.d/${profile} >/dev/null 2>&1 || :; }
+		done
 	fi
 	# Generated files: config.json only while it still matches the recorded hash.
 	if [ -f /etc/spaces/config.json.generated ] && [ -f /etc/spaces/config.json ] &&
