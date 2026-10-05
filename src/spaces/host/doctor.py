@@ -23,8 +23,6 @@ CGROUP = Path("/sys/fs/cgroup")
 APPARMOR_PROFILES = Path("/sys/kernel/security/apparmor/profiles")
 APPARMOR_ENABLED = Path("/sys/module/apparmor/parameters/enabled")
 PROFILE = "lxc-spaces-container"
-# For guests in a user namespace: the same rules plus a fresh proc mount (nested containers).
-PROFILE_USERNS = "lxc-spaces-container-userns"
 APPARMOR_DIR = Path("/etc/apparmor.d")
 LXC_START = "/usr/bin/lxc-start"
 SVDIR = Path("/etc/sv")
@@ -86,33 +84,31 @@ def check_apparmor() -> Iterator[Result]:
     yield "PASS", "apparmor", "enabled"
     if shutil.which("apparmor_parser") is None:
         yield "FAIL", "apparmor_parser", "not installed (xbps-install apparmor)"
-    for profile in (PROFILE, PROFILE_USERNS):
-        if not Path(f"/etc/apparmor.d/{profile}").exists():
-            yield "FAIL", f"apparmor profile file {profile}", f"/etc/apparmor.d/{profile} is missing"
+    if not Path(f"/etc/apparmor.d/{PROFILE}").exists():
+        yield "FAIL", "apparmor profile file", f"/etc/apparmor.d/{PROFILE} is missing"
     try:
         profiles = APPARMOR_PROFILES.read_text()
+        loaded = any(line.startswith(f"{PROFILE} ") for line in profiles.splitlines())
     except PermissionError:
         yield "WARN", "apparmor profile loaded", "cannot read the profile list as this user; use sudo"
-        return
     except OSError as error:
         yield "WARN", "apparmor profile loaded", str(error)
-        return
-    for profile in (PROFILE, PROFILE_USERNS):
-        if any(line.startswith(f"{profile} ") for line in profiles.splitlines()):
-            yield "PASS", f"apparmor profile loaded {profile}", profile
+    else:
+        if loaded:
+            yield "PASS", "apparmor profile loaded", PROFILE
         else:
-            yield "WARN", f"apparmor profile loaded {profile}", (
-                f"{profile} is not loaded; the launcher loads it on demand, or: "
-                f"sudo apparmor_parser -r /etc/apparmor.d/{profile}"
+            yield "WARN", "apparmor profile loaded", (
+                f"{PROFILE} is not loaded; the launcher loads it on demand, or: "
+                f"sudo apparmor_parser -r /etc/apparmor.d/{PROFILE}"
             )
         confined = any(line.startswith(f"{LXC_START} ") for line in profiles.splitlines())
-        if confined and not lxc_start_allows(profile):
-            yield "FAIL", f"apparmor lxc-start profile {profile}", (
-                f"{LXC_START} is confined and does not allow change_profile -> {profile}: "
+        if confined and not lxc_start_allows(PROFILE):
+            yield "FAIL", "apparmor lxc-start profile", (
+                f"{LXC_START} is confined and does not allow change_profile -> {PROFILE}: "
                 "every launch fails (the profile name has to match lxc-*)"
             )
         elif confined:
-            yield "PASS", f"apparmor lxc-start profile {profile}", f"confined, allows change_profile -> {profile}"
+            yield "PASS", "apparmor lxc-start profile", f"confined, allows change_profile -> {PROFILE}"
 
 
 def check_cgroups() -> Iterator[Result]:

@@ -333,27 +333,6 @@ class TranslatorUsernsTests(unittest.TestCase):
         self.assertIn("lxc.mount.auto = proc:mixed sys:mixed cgroup:rw:force", text)
         self.assertNotIn("lxc.idmap", text)
         self.assertNotIn("idmap=container", text)
-        self.assertIn("lxc.apparmor.profile = lxc-spaces-container\n", text + "\n")
-
-    def test_on_uses_the_user_namespace_profile_and_off_the_default(self) -> None:
-        on = self.translate(userns.Plan((1000,), (1000,))).config_text.splitlines()
-        off = self.translate(None).config_text.splitlines()
-        self.assertIn("lxc.apparmor.profile = lxc-spaces-container-userns", on)
-        self.assertNotIn("lxc.apparmor.profile = lxc-spaces-container", on)
-        self.assertIn("lxc.apparmor.profile = lxc-spaces-container", off)
-        self.assertNotIn("lxc.apparmor.profile = lxc-spaces-container-userns", off)
-
-    def test_the_launcher_loads_the_profile_the_space_runs_under(self) -> None:
-        backend = lxc.LxcBackend()
-        for enabled, expected in ((True, "lxc-spaces-container-userns"), (False, "lxc-spaces-container")):
-            with (
-                mock.patch.object(userns, "enabled", return_value=enabled),
-                mock.patch.object(lxc, "APPARMOR_PROFILES", Path(tempfile.mkdtemp()) / "none"),
-                mock.patch.object(lxc.subprocess, "run") as run,
-                mock.patch.object(lxc, "_which", return_value="apparmor_parser"),
-            ):
-                backend._load_apparmor("work")
-            self.assertEqual(expected, Path(run.call_args.args[0][-1]).name)
 
     def test_on_shifts_the_ids_and_idmaps_the_rootfs(self) -> None:
         text = self.translate(userns.Plan((1000,), (1000,))).config_text

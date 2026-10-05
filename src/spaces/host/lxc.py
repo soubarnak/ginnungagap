@@ -39,8 +39,7 @@ DEFAULT_SVDIR = "/etc/sv"
 DEFAULT_SERVICE_DIR = "/var/service"
 DEFAULT_PRIV = "/usr/bin/spaces.priv"
 DEFAULT_CGROUP_ROOT = "/sys/fs/cgroup"
-APPARMOR_PROFILE = lxc_config.APPARMOR_PROFILE
-APPARMOR_PROFILE_USERNS = lxc_config.APPARMOR_PROFILE_USERNS
+APPARMOR_PROFILE = "lxc-spaces-container"
 APPARMOR_PROFILES = Path("/sys/kernel/security/apparmor/profiles")
 RUNIT_SUPERVISE = "/run/runit"
 LOG_ROOT = "/var/log/spaces"
@@ -687,13 +686,10 @@ class LxcBackend(HostBackend):
     def _cgroup_root(self) -> Path:
         return Path(os.environ.get("SPACES_CGROUP_ROOT", DEFAULT_CGROUP_ROOT))
 
-    def _load_apparmor(self, name: str | None = None) -> None:
-        """Load the profile the space runs under (the user namespace one when it has a user namespace)."""
-
-        profile_name = APPARMOR_PROFILE_USERNS if name and userns.enabled(name) else APPARMOR_PROFILE
+    def _load_apparmor(self) -> None:
         try:
             if any(
-                line.startswith(f"{profile_name} ")
+                line.startswith(f"{APPARMOR_PROFILE} ")
                 for line in APPARMOR_PROFILES.read_text().splitlines()
             ):
                 return
@@ -701,12 +697,12 @@ class LxcBackend(HostBackend):
             pass
         candidates = [
             os.environ.get("SPACES_APPARMOR_PROFILE", ""),
-            f"/etc/apparmor.d/{profile_name}",
-            str(Path(__file__).resolve().parents[3] / "void/apparmor" / profile_name),
+            f"/etc/apparmor.d/{APPARMOR_PROFILE}",
+            str(Path(__file__).resolve().parents[3] / "void/apparmor" / APPARMOR_PROFILE),
         ]
         profile = next((c for c in candidates if c and os.path.exists(c)), None)
         if profile is None:
-            raise FileNotFoundError(f"AppArmor profile {profile_name} not found")
+            raise FileNotFoundError(f"AppArmor profile {APPARMOR_PROFILE} not found")
         subprocess.run(
             [_which("apparmor_parser"), "-r", profile],
             check=True,
@@ -770,7 +766,7 @@ class LxcBackend(HostBackend):
         launcher_lock = _lock_launcher(runtime)
         kill_stale_helpers(name)
         self._reap_stale_container(name)
-        self._load_apparmor(name)
+        self._load_apparmor()
 
         cgroup_mode = os.environ.get("SPACES_LXC_CGROUP_MODE", "relative")
         cgroup_base = f"spaces/{name}" if cgroup_mode == "relative" else None

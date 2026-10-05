@@ -22,10 +22,8 @@ post)
 	# the runit core service 09-apparmor.sh loads /etc/apparmor.d at every boot (its
 	# name starts with lxc- so that Void's usr.bin.lxc-start allows the change_profile).
 	if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
-		for profile in lxc-spaces-container lxc-spaces-container-userns; do
-			apparmor_parser -r /etc/apparmor.d/${profile} >/dev/null 2>&1 ||
-				echo "spaces: could not load the AppArmor profile (run: sudo apparmor_parser -r /etc/apparmor.d/${profile})"
-		done
+		apparmor_parser -r /etc/apparmor.d/lxc-spaces-container >/dev/null 2>&1 ||
+			echo "spaces: could not load the AppArmor profile (run: sudo apparmor_parser -r /etc/apparmor.d/lxc-spaces-container)"
 		# The profile was called spaces-container in earlier builds: its file is
 		# gone with the old package files, drop what is left of it. A profile that running
 		# containers still use stays loaded (it leaves with the next boot).
