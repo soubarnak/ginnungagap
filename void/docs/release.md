@@ -126,8 +126,9 @@ files. xbps only needs those files under one URL, and the assets of a GitHub rel
 repository URL. GitHub answers with a redirect to its CDN; xbps follows it (checked against a local server that redirects the
 same way: the index, the signature, the key import and an install into a scratch root all worked).
 
-* `releases/latest/download/` would follow the newest release automatically, but GitHub's "latest" skips pre-releases, so it
-  only works once a release is no longer marked pre-release. Until then each release has its own URL.
+* `releases/latest/download/` follows the newest release automatically, but GitHub's "latest" skips pre-releases, so a
+  release has to be created without `--prerelease` (`gh release create vX --latest`). v0.0.3 is the first one that is; the
+  earlier two are pre-releases and are reachable only by their own tag URL.
 * The set must be the release build of the tag (`xbps-build.sh --release`, and `--release --arch aarch64`): copy those
   packages into a clean directory and give it to `repo --from`. The default `--from` is the build directory, which also holds
   the test builds with higher revisions (`--revision N`), and `repo` takes the newest of each.

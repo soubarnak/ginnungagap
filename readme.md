@@ -67,13 +67,15 @@ yourself with Void's own [`xbps-src`](https://github.com/void-linux/void-package
 
 ### From the signed repository (no build)
 
-Each release carries a signed xbps repository as its assets. The repository for v0.0.2 is
-`https://github.com/soubarnak/ginnungagap/releases/download/v0.0.2`; a later release has its own URL.
+Each release carries a signed xbps repository as its assets, and the URL below always points at the newest
+release, so `sudo xbps-install -Su` keeps ginnungagap up to date:
 
 ```bash
-echo "repository=https://github.com/soubarnak/ginnungagap/releases/download/v0.0.2" | sudo tee /etc/xbps.d/20-spaces.conf
+echo "repository=https://github.com/soubarnak/ginnungagap/releases/latest/download" | sudo tee /etc/xbps.d/20-spaces.conf
 sudo xbps-install -S spaces
 ```
+
+To stay on one release, use `https://github.com/soubarnak/ginnungagap/releases/download/v0.0.3` (or another tag) instead.
 
 On the first sync xbps shows the signer and the key fingerprint and asks whether to trust it. Compare it with this one
 before you answer `y`:
