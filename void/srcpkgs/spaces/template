@@ -42,7 +42,7 @@ maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
 license="AGPL-3.0-or-later"
 homepage="https://github.com/soubarnak/ginnungagap"
 distfiles="https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz>spaces-${version}.tar.gz"
-checksum=0000000000000000000000000000000000000000000000000000000000000000
+checksum=f36d1be625e4e7c9af68fedfd5c652b4010873681577b9cc99177a3e4b740cd0
 conf_files="/etc/pam.d/spaces
  /etc/spaces/void.json"
 # Spaces, their package caches and logs: owned by root, kept when the package is removed.
