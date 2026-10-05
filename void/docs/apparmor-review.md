@@ -88,13 +88,13 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
    (large, and the guest-visible semantics must be exact), or an LSM that mediates the new mount API (Landlock,
    AppArmor with complete mount hooks). Upstream parity: `systemd-nspawn` without SELinux has the same hole (on
    Fedora the container domain may not write `sysctl_t`, which is what upstream relies on).
-   **Closed, opt-in (M10): the user namespace.** A guest that runs in a user namespace with a shifted id map
+   **Closed (M10 as an opt-in, the default for new spaces since M12): the user namespace.** A guest that runs in a user namespace with a shifted id map
    (`sudo spaces-void userns enable NAME`, `void/docs/void.md` "User namespace") has guest root = kuid 1000000: the
    sysctl and `sysrq-trigger` permission checks compare with the global root, so the fresh proc, the `open_tree`
    clone and the `mount(2)` bind remount can all be set up and none of them can write (`m9_check.py --userns`
-   reports the eight items as PASS, on all four guests, and the plain `bind` and `rbind` of `/proc` cannot write either). It is off by default; the facts of the spike and what it
+   reports the eight items as PASS, on all four guests, and the plain `bind` and `rbind` of `/proc` cannot write either). `spaces create` turns it on for every new space (`--no-userns` to refuse); a space made before M12 keeps host root until `sudo spaces-void userns enable NAME`. The facts of the spike and what it
    changes (no privileged ports, no network sysctls, `/sys` as a masked bind) are in `void/spike/RESULTS.md`.
-   **Accepted risk for a space that does not use it.** `m9_check.py` probes it on every guest (a fresh proc
+   **Accepted risk for a space that does not use it** (the four spaces made before M12, until they are moved; or one made with `--no-userns`). `m9_check.py` probes it on every guest (a fresh proc
    writable at `sys/kernel/core_pattern` and `sysrq-trigger`, a writable clone of `/proc/sys`) and reports SKIP
    "known open" while any of them works; it turns into a PASS when they stop working.
    Until then: do not run an untrusted workload as a guest root. Every distro's `sudo` in a space is host-PAM

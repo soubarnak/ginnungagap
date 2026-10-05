@@ -126,9 +126,12 @@ changes stay easy to rebase onto (`void/tools/rebase-check.sh`).
 
 ## Security in plain words
 
-Be clear about what a Space is. By default, root inside a Space is the host's root, and the new Linux mount API
-cannot be mediated by AppArmor, so a Space is a convenience boundary, not a hardened sandbox against a hostile root. The
-opt-in user namespace (`sudo spaces-void userns enable NAME`) closes that hole at the cost of NFS in the guest.
+Be clear about what a Space is. Root inside a Space that has no user namespace is the host's root, and the new Linux
+mount API cannot be mediated by AppArmor, so such a Space is a convenience boundary, not a hardened sandbox against a
+hostile root. Every Space you create gets a user namespace by default, so root in it is an unprivileged user on the
+host. The cost is NFS in the guest, privileged ports, raw sockets and interface changes. `spaces create --no-userns`
+refuses it. A Space made before this default existed keeps host root until you run
+`sudo spaces-void userns enable NAME` on it.
 The details and the evidence are in [void/docs/apparmor-review.md](void/docs/apparmor-review.md).
 
 ## Credits

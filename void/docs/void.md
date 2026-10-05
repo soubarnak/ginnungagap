@@ -259,7 +259,7 @@ plus an SELinux policy. This port keeps the same layers except SELinux:
 
 | Layer | Void port |
 |---|---|
-| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default); no user namespace by default (root in a space is host root, as upstream), **an opt-in user namespace** where guest root is an unprivileged kuid, see "User namespace" below. The LXC *monitor* is not in the guest's network namespace, see below |
+| Namespaces | LXC: mount, pid, uts, ipc and cgroup namespaces; **the network namespace is shared with the host** (as upstream's default); a **user namespace for every space created since M12** (guest root is an unprivileged kuid), see "User namespace" below; a space created earlier has none until `userns enable` (root in it is host root, as upstream). The LXC *monitor* is not in the guest's network namespace, see below |
 | Capabilities | `lxc.cap.keep` = nspawn's default set, widened or narrowed per permission level like upstream |
 | Syscalls | seccomp: LXC's `common.seccomp` base plus the per-permission adjustments |
 | Devices | cgroup2 device controller (eBPF), levels `disabled`, `basic`, `admin`, `full` from the permission settings; at `full` watchdogs and VT/console devices stay denied; `/dev/uinput` and `/dev/uhid` (input injection into the host) are only given at `full`, whatever udev tags them; hot-plug and NVIDIA nodes follow the level |
@@ -278,9 +278,9 @@ What is lost or different compared with upstream on Fedora/Anatase:
   can mount a fresh `proc` and write host sysctls such as `core_pattern` and `sysrq-trigger`. Seccomp cannot
   close it: systemd 259 needs `fsopen`/`fsmount` for its unit credentials and fails (journald, tmpfiles) without them,
   and `mount_setattr` cannot be taken away either. By default this is an accepted risk with upstream parity
-  (`systemd-nspawn` without SELinux has it too). The fix is the opt-in **user namespace** (next section): with
-  it guest root is not host root and the kernel refuses those writes. Without it do not run untrusted code as root
-  in a space (`void/docs/apparmor-review.md`, finding 1).
+  (`systemd-nspawn` without SELinux has it too). The fix is the **user namespace** (next section), which new spaces
+  get by default: with it guest root is not host root and the kernel refuses those writes. A space without one (made
+  before M12, or with `--no-userns`) is still exposed: do not run untrusted code as root in it (`void/docs/apparmor-review.md`, finding 1).
 * **The LXC monitor's command socket** is an abstract socket, and abstract sockets belong to a network
   namespace, which the guest shares with the host. `/usr/lib/spaces/spaces-lxc` therefore starts `lxc-start`
   in a new network namespace that it pins at `/run/spaces/lxc/NAME/netns` (a bind mount of the namespace
@@ -300,13 +300,20 @@ What is lost or different compared with upstream on Fedora/Anatase:
 * Processes started by `spaces enter` run in a transient service of the guest's own systemd (inside the
   container), not in a host scope.
 
-## User namespace (opt-in)
+## User namespace
 
 `void/docs/apparmor-review.md` (finding 1) explains why the default design cannot stop guest root from reaching
 the host's `/proc/sys` through the new mount API. A space can instead run in a user namespace whose id map shifts
 every id except the ones that must mean the same on both sides, so guest root is the unprivileged host uid
 1000000 and the kernel's permission checks (sysctl and `/proc/sysrq-trigger` compare with the global root)
-refuse the writes. It is **off by default**.
+refuse the writes.
+
+**New spaces get one by default.** `spaces create` writes `on` to `/var/lib/spaces/NAME/userns` and adds the missing
+`/etc/subuid` and `/etc/subgid` lines itself (it runs as root). `spaces create --no-userns TYPE` writes `off`. When the
+host cannot do it (kernel older than 5.12, or `/var/lib/spaces` on a filesystem without idmapped mounts such as ZFS or
+NFS, or the subuid files cannot be written) `create` writes `off`, says why on stderr and still creates the space. The
+file is written on every create, so a space that is created again gets a fresh choice. Spaces that exist already have
+no file and stay as they are: move them one at a time or all at once with the commands below, while they are stopped.
 
 ```
 spaces-void userns status                     # which spaces use one, and whether /etc/subuid and /etc/subgid cover the map
@@ -316,8 +323,8 @@ sudo spaces-void userns disable ubuntu
 sudo sv down /var/service/spaces-ubuntu       # it takes effect at the next start
 ```
 
-The choice is the file `/var/lib/spaces/NAME/userns` (`on` or `off`); a space without one follows `"userns": true`
-in `/etc/spaces/void.json` (default `false`). `spaces-void doctor` fails when an enabled space lacks subuid/subgid ranges.
+The choice is the file `/var/lib/spaces/NAME/userns` (`on` or `off`); a space without one (a space from before M12) follows
+`"userns": true` in `/etc/spaces/void.json` (default `false`). `spaces-void doctor` fails when an enabled space lacks subuid/subgid ranges.
 
 The map (`lxc.idmap`) is `0..65535` shifted by 1000000 (root's own range in `/etc/subuid`, not the user's
 `100000`, which rootless podman uses), except for the ids of the users of the space (so the home directory, the
@@ -342,6 +349,12 @@ What changes, and why:
 * Behaviour changes inside the space: guest root has no capabilities over the host's network namespace (no
   privileged ports, no raw sockets, no interface configuration, `systemd-resolved` logs that it has no stub
   listener) and cannot write the network sysctls it could before; there is no `sysfs` or `proc` mount of its own.
+* NFS is masked (`rpc_pipefs`), so there is no NFS client in the guest. Mount shares on the host instead.
+* Nested containers (podman) fail the same way with and without it, so this is not a cost of the user namespace:
+  the AppArmor profile refuses a fresh `proc` mount (`crun: mount proc to proc: Permission denied`), and the host's root
+  `cgroup.subtree_control` lists no `pids` (`cpuset cpu io memory`, which libvirt sets, see M11 in `void/spike/RESULTS.md`),
+  so podman's default pids limit fails (`--pids-limit=0` gets past that one). Checked in M12 on a throwaway
+  Ubuntu space, rootful and rootless, user namespace on and off.
 
 What it does not do: guest root keeps host uid 1000 and the device groups' ids (it can `setuid(1000)` to the host
 user inside the guest), it still shares the host's network namespace and abstract sockets, and kernel bugs still
@@ -383,13 +396,13 @@ sudo sv status /var/service/spaces-NAME
   aarch64 (`void/docs/release.md`). x86_64 glibc is the supported platform; musl is intentionally unsupported (the
   helpers that run in the guests are pinned to glibc 2.17).
 * Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1) unless the
-  space uses the opt-in user namespace ("User namespace" above). Seccomp cannot take the API away from systemd.
+  space uses the user namespace (the default for spaces created since M12, "User namespace" above). Seccomp cannot take the API away from systemd.
   The new API is not even needed: a plain `mount --bind /proc <dir>` followed by a write to
   `<dir>/sys/kernel/core_pattern` works on all four guests (an `rbind` of `/proc` at times on Ubuntu), because the
   AppArmor profile must allow bind, rbind and remount for systemd's unit sandboxes and so cannot protect `/proc/sys`
   beyond its own path. A seccomp user-notification supervisor was evaluated and rejected: it would have to reimplement
   mount semantics (path resolution in the guest's namespace, flags, propagation, races) to tell a hostile bind from
-  systemd's own. The opt-in user namespace is the only real closure. `m9_check.py` reports it as SKIP "known open".
+  systemd's own. The user namespace is the only real closure. `m9_check.py` reports it as SKIP "known open".
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

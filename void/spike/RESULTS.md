@@ -1308,3 +1308,35 @@ Each open item from the end of M10 was checked against the code and the host bef
   `m5_check.py` and `m8_check.py` fail. It is host state, not a regression; the VM was not touched.
 
 Unit tests: 728 passed, 17 skipped. `m9_check.py`: 91 passed, 1 failed (the libvirt cgroup item), 12 skipped.
+
+## M12: every new space gets a user namespace (2026-10-05)
+
+`spaces create` now writes `/var/lib/spaces/NAME/userns` = `on` for the space it creates and seeds `/etc/subuid` and
+`/etc/subgid` itself (`userns.choose_for_new_space`, called through the new `HostBackend.space_created` hook, so the
+systemd backend and the diff in `priv.py` stay small). `--no-userns` writes `off`. A host that cannot do it (kernel
+older than 5.12, a filesystem without idmapped mounts, unwritable subuid files) gets `off` and a message on stderr; the
+creation never fails because of it. The marker is written on every create. The four spaces that existed before are
+untouched (no marker, so they follow `"userns"` in `/etc/spaces/void.json`, default off); moving them is
+`sudo spaces-void userns enable --all` with the spaces stopped, and was not done. The INSTALL hook was not changed:
+`create` seeds subuid/subgid itself, so a hook that edits `/etc/subuid` on every upgrade would add nothing.
+
+Checked on this host (package `0.0.1_2`, installed as an upgrade; the running `fedora` space was not stopped by it):
+
+- `sudo spaces create custom --name userns-test --preset develop --no-enable` printed "userns-test runs in a user
+  namespace", wrote `on` and added `root:1000000:65536`, `root:1000:1` and the group lines.
+- The ubuntu rootfs was copied into it and its `info.json` given the ubuntu distribution. It booted; `id` shows the
+  user, `/proc/self/uid_map` is `0 1000000 1000`, `1000 1000 1`, `1001 1001001 64535`, and a write to
+  `/proc/sys/kernel/core_pattern` fails with "Read-only file system".
+- **Nested containers do not work, with or without the user namespace.** podman 5.7 (rootful and rootless, alpine,
+  `--network=host`) fails with `crun: mount proc to proc: Permission denied`, the AppArmor profile's deliberate refusal
+  of a fresh proc. Its default pids limit also fails (`controller pids is not available`, because the host root's
+  `cgroup.subtree_control` is `cpuset cpu io memory`); `--pids-limit=0` gets past that one only. The result is the same
+  with the user namespace off, so it is not a cost of this change, and it is a limit of the profile for container
+  workloads in a space. Not fixed.
+- The throwaway space was deleted (`spaces delete --purge`); `/var/lib/spaces` holds the four original spaces.
+
+Unit tests: 739 passed, 17 skipped (new: `NewSpaceTests`, two `priv.create` tests, `--no-userns` in `test_cli.py`).
+`m9_check.py --regress`: 91 passed, 3 failed, 12 skipped. All three failures are the item `cgroup.subtree_control is
+empty` (once itself, once inside `m5_check.py` and once inside `m8_check.py`), the libvirt `win11` state from M11 that
+persists after the VM stopped; `m8_check.py` reported 4 failures in total and its summary names only that item, which was
+not looked at line by line. Nothing in the launch path changed in M12, only `create`.
