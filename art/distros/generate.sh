@@ -6,7 +6,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="${script_dir}/../.."
 output_dir="${repository_root}/src/spaces/overlay"
 launcher_icon_dir="${repository_root}/data/icons/hicolor/256x256/apps"
-spaces_logo="${repository_root}/art/spaces.svg"
+spaces_logo="${repository_root}/art/ginnungagap-mark.svg"
 
 if ! command -v magick >/dev/null 2>&1; then
     echo "error: ImageMagick's 'magick' command is required" >&2

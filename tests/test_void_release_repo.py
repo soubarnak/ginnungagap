@@ -14,7 +14,7 @@ SCRIPT = ROOT / "void" / "tools" / "release.sh"
 
 STUB = """#!/bin/sh
 # records the calls; the signature files are made like xbps-rindex does
-echo "$@" >>"$STUB_LOG"
+echo "$XBPS_ARCH: $@" >>"$STUB_LOG"
 case "$1" in
     --privkey) shift 2; [ "$1" = --signedby ] && shift 2 ;;
 esac
@@ -77,12 +77,21 @@ class ReleaseRepoTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout)
         calls = self.log.read_text().splitlines()
-        self.assertEqual(len(calls), 3, calls)
-        self.assertTrue(calls[0].startswith("-a "), calls[0])
-        self.assertEqual(
-            calls[1], f"--privkey {self.key} --signedby Maintainer <m@example.org> -s {self.out}",
-        )
-        self.assertTrue(calls[2].startswith(f"--privkey {self.key} -S "), calls[2])
+        # xbps-rindex only handles the packages of XBPS_ARCH, so every step runs once per architecture
+        self.assertEqual(len(calls), 6, calls)
+        index, sign_repo, sign_packages = calls[0:2], calls[2:4], calls[4:6]
+        self.assertEqual(["aarch64", "x86_64"], [call.partition(": ")[0] for call in index])
+        for call in index:
+            arch, _, arguments = call.partition(": ")
+            self.assertTrue(arguments.startswith("-a "), call)
+            self.assertTrue(all(name.endswith(f".{arch}.xbps") for name in arguments.split()[1:]), call)
+        for arch, call in zip(("aarch64", "x86_64"), sign_repo):
+            self.assertEqual(
+                call, f"{arch}: --privkey {self.key} --signedby Maintainer <m@example.org> -s {self.out}",
+            )
+        for arch, call in zip(("aarch64", "x86_64"), sign_packages):
+            self.assertTrue(call.startswith(f"{arch}: --privkey {self.key} -S "), call)
+            self.assertTrue(all(name.endswith(f".{arch}.xbps") for name in call.split()[4:]), call)
         # the newest version per package and architecture, our packages only
         expected = {
             "spaces-0.0.1_2.x86_64.xbps",

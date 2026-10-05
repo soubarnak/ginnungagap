@@ -1,14 +1,12 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="art/letterhead-ondark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="art/letterhead-onwhite.svg">
-    <img alt="Spaces" src="art/letterhead-onwhite.svg" width="750">
+    <source media="(prefers-color-scheme: dark)" srcset="art/ginnungagap-wordmark-ondark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="art/ginnungagap-wordmark-onwhite.svg">
+    <img alt="ginnungagap: out of the void, worlds." src="art/ginnungagap-wordmark-onwhite.svg" width="750">
   </picture>
 </p>
 
-<h1 align="center">ginnungagap</h1>
-
-<p align="center"><em>Out of the void, worlds.</em><br>
+<p align="center">
 <strong>Spaces for Void Linux</strong>: whole Ubuntu, Arch, Fedora and Kali systems, born from an empty host.</p>
 
 <p align="center">
@@ -161,6 +159,12 @@ refuses it. A Space made before this default existed keeps host root until you r
 The details and the evidence are in [void/docs/apparmor-review.md](void/docs/apparmor-review.md).
 
 ## Credits
+
+**The logo.** The mark keeps the composition of the Spaces logo, overlapping rounded squares, and reads it as the myth
+the project is named after: Niflheim's ice (upper right, with Isa, the rune of ice) and Muspelheim's fire (lower left,
+with Kenaz, the rune of the torch) meet across the gap, and from it comes the B of the Bongbetic
+brand, tinted from ice to flame. The B glyph is Bongbetic's; the overlapping-squares idea is from the Spaces logo by the
+Anatase project. The mark and wordmark are in `art/`.
 
 ginnungagap would not exist without the people who made Spaces.
 

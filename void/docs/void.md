@@ -243,7 +243,7 @@ Linux)`, `Space (Fedora)`, `Space (Kali Linux)`). It runs the entry command in a
 `Exec=/usr/bin/ubuntu`, ...), which starts the space on first use and gives a login shell in it. They are
 `void/data/applications/spaces-*.desktop`; upstream's own entries (`data/applications`, three distributions, calling
 `spaces enter`) are not installed. The icons are upstream's launcher icons from `data/icons` (the logo of the
-distribution plus the Spaces mark, made by `art/distros/generate.sh` from the logos in `art/distros`; the Kali one
+distribution plus the ginnungagap mark, made by `art/distros/generate.sh` from the logos in `art/distros`; the Kali one
 was added for this port).
 
 The distribution logos are trademarks of their owners (Canonical, the Arch Linux project, Fedora Project / Red Hat,
