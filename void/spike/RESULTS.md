@@ -1347,3 +1347,29 @@ With it enabled `m8_check.py` gives 83 passed, 1 failed, 1 skipped; the one fail
 `cgroup.subtree_control is empty` item, which persists after the `win11` VM stopped (a reboot should clear it). Autostart
 was disabled again afterwards. The version is now 0.0.2 (template, `pyproject.toml`, checksum at the placeholder until
 the tag is pushed).
+
+## M13: nested containers in a user-namespace space (2026-10-05, tried and reverted)
+
+Goal: let podman run inside a space. In M12 podman failed in every space, with and without the user namespace, with
+`crun: mount proc to proc: Permission denied` (the profile refuses a fresh proc mount) and a `pids` limit error (the host root
+`cgroup.subtree_control` is `cpuset cpu io memory`, set by libvirt; `--pids-limit=0` avoids it).
+
+Tried: a second profile, `lxc-spaces-container-userns` (same rules plus a fresh proc mount), chosen by `lxc_config.translate()`
+when the space has a user namespace, loaded by the launcher, installed and removed by the package hooks, checked by doctor and
+tests. The idea was that in a user namespace the kernel already refuses the `/proc/sys` writes, so the mount is harmless there.
+It worked mechanically (the space ran under the new profile). It did not get podman running. On a throwaway ubuntu space
+(podman 5.7, alpine, `--network=host --pids-limit=0`, rootful and rootless) AppArmor refused the next mount each time:
+
+- `devpts` (the default profile has an explicit `deny mount fstype=devpts`);
+- remount-bind flag combinations of crun (`rw nosuid remount bind strictatime`, `rw nosuid noexec remount bind`,
+  `rw nosuid nodev remount bind` on `/etc/resolv.conf`): AppArmor matches the flags exactly, so every combination needs a rule;
+- `cgroup2` on the nested container's own `sys/fs/cgroup`: still denied with a rule for every exact flag set tried (with and
+  without `-> /**`, `relatime`, `silent`, and `move` variants). A plain `mount -t cgroup2 -o nosuid,nodev,noexec` inside the same
+  space passed with those rules, so crun's mount reaches AppArmor by another path (probably the new mount API) that was not understood;
+- `sysfs` (the kernel refuses it when the network namespace is shared, and crun's fallback was not reached).
+
+The only way left was a blanket `mount,` in the user-namespace profile, which removes AppArmor's mount filtering for those spaces
+and leaves the kernel's user-namespace checks. That was not done: it is a weakening, and podman already runs on the host.
+Reverted (commit `cbaf008` reverts `2b24efd`; neither was pushed or released). Nothing about the release changed: v0.0.2 does
+not contain the second profile. Open if wanted later: the blanket rule with a full `m9_check.py --userns --regress`, or a
+tracing of crun's mount calls to find what the cgroup2 denial needs.
