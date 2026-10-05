@@ -2,7 +2,7 @@
 """M9 check: monitor socket isolation (G2) and the AppArmor profile review.
 
 Run as the normal user from the niri session (passwordless sudo) with the package
-installed (`void/tools/xbps-build.sh && sudo xbps-install -fy -R <repo> spaces-0.0.1_1`):
+installed (`void/tools/xbps-build.sh && sudo xbps-install -uy -R <repo> spaces`):
 
     python3 void/spike/m9_check.py [--regress]
 

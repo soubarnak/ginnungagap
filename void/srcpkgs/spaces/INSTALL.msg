@@ -3,6 +3,10 @@ Spaces is installed. Check the setup with: sudo spaces-void doctor
   sudo spaces create ubuntu --preset basic   (also arch, fedora, kali)
   spaces enter ubuntu
 
+New spaces get a user namespace (root in them is not host root); spaces made before 0.0.2 keep host root until:
+  sudo spaces-void userns enable NAME   (while it is stopped; --all for every space)
+Opt out for one new space: spaces create --no-userns TYPE
+
 Autostart of spaces at login (optional, off by default):
   sudo ln -s /etc/sv/spaces-autostart /var/service/
 

@@ -13,7 +13,7 @@ autostart smoke (m7), install-flavor dry run, the orphaned-broker fix (kill -9 o
 launcher), and a final cleanliness check. `--lifecycle` also builds revision 2, upgrades
 while a space is RUNNING, removes the package (a space still running), and reinstalls
 (the machine ends with that revision installed; reinstall revision 1 with
-`sudo xbps-install -fy -R <repo> spaces-0.0.1_1`). Prints PASS/FAIL/SKIP, exits non-zero
+`sudo xbps-install -uy -R <repo> spaces`). Prints PASS/FAIL/SKIP, exits non-zero
 on FAIL. All spaces are stopped at the end.
 """
 

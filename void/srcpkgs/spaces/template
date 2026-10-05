@@ -5,7 +5,7 @@
 # checksum of the tagged tarball (the all-zero value is a placeholder until the tag is pushed,
 # see void/docs/release.md).
 pkgname=spaces
-version=0.0.1
+version=0.0.2
 revision=1
 # The guest helpers are glibc binaries checked against glibc 2.17 by native/check_guest_abi.py,
 # which is why musl is not supported (the bare architecture names below exclude the -musl
@@ -42,7 +42,7 @@ maintainer="soubarnak <180899602+soubarnak@users.noreply.github.com>"
 license="AGPL-3.0-or-later"
 homepage="https://github.com/soubarnak/ginnungagap"
 distfiles="https://github.com/soubarnak/ginnungagap/archive/refs/tags/v${version}.tar.gz>spaces-${version}.tar.gz"
-checksum=79b4a39374b781d5e7d7934a39532d2fdd25a6c87b24d3ee0b7fe5da48b68cec
+checksum=0000000000000000000000000000000000000000000000000000000000000000
 conf_files="/etc/pam.d/spaces
  /etc/spaces/void.json"
 # Spaces, their package caches and logs: owned by root, kept when the package is removed.
