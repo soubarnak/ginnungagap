@@ -667,6 +667,9 @@ def create(request: dict[str, Any]) -> None:
 
     request = dict(request)
     enable = _requested_enable(request)
+    isolate = request.pop("userns", True)
+    if not isinstance(isolate, bool):
+        raise core.SpacesError(_("Userns option must be a boolean."))
     info, purge = core.validate_create_request(request)
     _assert_initiating_user(info)
     name = info["name"]
@@ -701,6 +704,7 @@ def create(request: dict[str, Any]) -> None:
         _remove_rootfs(failed_rootfs)
         _root_owned_directory(rootfs)
         _write_info(space, info)
+        host.get_backend().space_created(name, isolate)
 
         driver = get_driver(distribution["id"])
         if driver is None:

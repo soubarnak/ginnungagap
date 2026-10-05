@@ -710,6 +710,13 @@ class LxcBackend(HostBackend):
             stderr=subprocess.DEVNULL,
         )
 
+    def space_created(self, name: str, isolate: bool = True) -> None:
+        enabled, reason = userns.choose_for_new_space(name, isolate)
+        if reason:
+            print(f"spaces: {name} gets no user namespace: {reason}", file=sys.stderr)
+        elif enabled:
+            print(f"spaces: {name} runs in a user namespace (root in it is not host root)", file=sys.stderr)
+
     def guest_root_uid(self, name: str) -> int | None:
         return userns.SHIFT_BASE if userns.enabled(name) else None
 

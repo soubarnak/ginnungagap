@@ -158,6 +158,12 @@ class HostBackend(ABC):
     def peer_in_space(self, pid: int, name: str) -> bool:
         """Return whether a host process belongs to the space."""
 
+    def space_created(self, name: str, isolate: bool = True) -> None:
+        """Called by create once info.json is written, before the rootfs is bootstrapped.
+
+        isolate is False when the user passed --no-userns. Backends with nothing to prepare keep this.
+        """
+
     def guest_root_uid(self, name: str) -> int | None:
         """What root in the space is on the host when it has a user namespace, else None."""
 

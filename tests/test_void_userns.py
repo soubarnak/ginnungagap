@@ -1,4 +1,4 @@
-"""The opt-in user namespace: id map, subuid/subgid, /sys bind, idmapped binds, CLI, broker."""
+"""The user namespace: id map, subuid/subgid, new spaces, /sys bind, idmapped binds, CLI, broker."""
 
 from __future__ import annotations
 
@@ -83,6 +83,68 @@ class IdMapTests(unittest.TestCase):
         self.assertNotEqual(0, plan.root_uid)
         # the shifted range is root's own allocation, not the user's (soubarna:100000:65536)
         self.assertGreaterEqual(plan.base, 1_000_000)
+
+
+class NewSpaceTests(unittest.TestCase):
+    """`spaces create` writes the marker: on by default, off with --no-userns or on a host that cannot."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.subuid = self.root / "subuid"
+        self.subgid = self.root / "subgid"
+        write_space(self.root, "dev", {1000: 1000})
+        self.mountinfo = "26 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw"
+
+    def choose(self, want: bool = True, subuid: Path | None = None, release: str = "7.2.9_1") -> tuple[bool, str | None]:
+        return userns.choose_for_new_space(
+            "dev", want, self.root, subuid or self.subuid, self.subgid, release, self.mountinfo
+        )
+
+    def test_default_is_on_and_seeds_subuid_and_subgid(self) -> None:
+        self.assertEqual((True, None), self.choose())
+        self.assertEqual("on", (self.root / "dev" / "userns").read_text().strip())
+        self.assertTrue(userns.enabled("dev", self.root, self.root / "void.json"))
+        self.assertIn(f"root:{userns.SHIFT_BASE}:{userns.SHIFT_SIZE}", self.subuid.read_text())
+        self.assertIn("root:1000:1", self.subuid.read_text())
+        self.assertIn(f"root:{userns.SHIFT_BASE}:{userns.SHIFT_SIZE}", self.subgid.read_text())
+
+    def test_no_userns_writes_off_without_touching_subuid(self) -> None:
+        self.assertEqual((False, None), self.choose(False))
+        self.assertEqual("off", (self.root / "dev" / "userns").read_text().strip())
+        self.assertFalse(self.subuid.exists())
+
+    def test_an_old_kernel_falls_back_to_off_with_a_reason(self) -> None:
+        enabled, reason = self.choose(release="5.10.0")
+        self.assertFalse(enabled)
+        self.assertIn("5.12", reason or "")
+        self.assertEqual("off", (self.root / "dev" / "userns").read_text().strip())
+
+    def test_a_filesystem_without_idmapped_mounts_falls_back_to_off(self) -> None:
+        self.mountinfo += "\n40 26 0:30 / /var/lib/spaces rw - zfs tank/spaces rw"
+        self.assertEqual("zfs", userns.filesystem_of(Path("/var/lib/spaces/dev"), self.mountinfo))
+        self.assertIn("zfs", userns.unsupported_reason(Path("/var/lib/spaces"), "7.2.9_1", self.mountinfo) or "")
+        self.assertIsNone(userns.unsupported_reason(Path("/home/x"), "7.2.9_1", self.mountinfo))
+
+    def test_subuid_that_cannot_be_written_falls_back_to_off(self) -> None:
+        enabled, reason = self.choose(subuid=self.root / "missing-dir" / "subuid")
+        self.assertFalse(enabled)
+        self.assertIn("subuid", reason or "")
+        self.assertEqual("off", (self.root / "dev" / "userns").read_text().strip())
+
+    def test_creating_again_writes_a_fresh_choice(self) -> None:
+        userns.set_enabled("dev", False, self.root)
+        self.assertEqual((True, None), self.choose())
+        self.assertTrue(userns.enabled("dev", self.root, self.root / "void.json"))
+
+    def test_existing_space_without_a_marker_stays_off(self) -> None:
+        self.assertFalse(userns.enabled("dev", self.root, self.root / "void.json"))
+
+    def test_kernel_version_parsing(self) -> None:
+        self.assertEqual((7, 2), userns.kernel_version("7.2.9_1"))
+        self.assertEqual((6, 1), userns.kernel_version("6.1.0-13-amd64"))
+        self.assertEqual((0, 0), userns.kernel_version("weird"))
 
 
 class ChoiceTests(unittest.TestCase):

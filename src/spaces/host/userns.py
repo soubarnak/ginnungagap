@@ -1,4 +1,4 @@
-"""Opt-in user namespace for LXC guests (root in the guest is not host root).
+"""User namespace for LXC guests (root in the guest is not host root).
 
 Without it root in a space is host root behind a seccomp filter, a capability set and an AppArmor
 profile, and the new mount API (fsopen, open_tree, mount_setattr) gets around the profile's mount
@@ -17,7 +17,10 @@ LXC 6.0 run as root still goes through newuidmap, which only accepts ids that /e
 /etc/subgid list for root: `spaces-void userns setup` adds the missing lines.
 
 The choice is per space: the file /var/lib/spaces/NAME/userns holds ``on`` or ``off``; without it
-the ``userns`` key of /etc/spaces/void.json decides (default off).
+the ``userns`` key of /etc/spaces/void.json decides (default off). `spaces create` writes the file
+for every space it creates: ``on`` (it also seeds subuid and subgid), or ``off`` when the user passed
+--no-userns or the host cannot do it (see choose_for_new_space). Spaces made before that have no
+file and stay as they were, until `spaces-void userns enable NAME`.
 """
 
 from __future__ import annotations
@@ -49,6 +52,9 @@ IDMAP_SOURCES = ("/var/lib/spaces/", "/var/cache/spaces/", "/run/spaces/")
 # The shared NVIDIA userspace farm: read-only files that any user may read, nothing to idmap.
 HOST_FARM = "/var/lib/spaces/.host/"
 SYS = "/sys"
+# Idmapped mounts need kernel 5.12 and a filesystem that supports them.
+IDMAP_KERNEL = (5, 12)
+IDMAP_FILESYSTEMS = frozenset({"ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "f2fs", "overlay", "erofs", "squashfs"})
 
 
 class UsernsError(ValueError):
@@ -139,6 +145,85 @@ def set_enabled(name: str, value: bool | None, root: Path | None = None) -> bool
     path.write_text(text + "\n", encoding="utf-8")
     path.chmod(0o644)
     return True
+
+
+# ------------------------------------------------------------- a new space
+
+
+def kernel_version(release: str | None = None) -> tuple[int, int]:
+    parts = (release or os.uname().release).split(".")
+    try:
+        return int(parts[0]), int("".join(c for c in parts[1] if c.isdigit()) or 0)
+    except (ValueError, IndexError):
+        return 0, 0
+
+
+def filesystem_of(path: Path, mountinfo: str) -> str | None:
+    """The filesystem type of the mount that holds path (the longest mount point that contains it)."""
+
+    best: tuple[int, str] | None = None
+    for line in mountinfo.splitlines():
+        head, separator, tail = line.partition(" - ")
+        fields = head.split()
+        if not separator or len(fields) < 5 or not tail:
+            continue
+        point = Path(_unescape(fields[4]))
+        if point == path or point in path.parents:
+            kind = tail.split()[0]
+            if best is None or len(point.parts) >= best[0]:
+                best = (len(point.parts), kind)
+    return best[1] if best else None
+
+
+def unsupported_reason(
+    root: Path | None = None,
+    release: str | None = None,
+    mountinfo: str | None = None,
+) -> str | None:
+    """Why this host cannot run a space in a user namespace, or None when it can."""
+
+    version = kernel_version(release)
+    if version < IDMAP_KERNEL:
+        return f"the kernel is {version[0]}.{version[1]}, idmapped mounts need {IDMAP_KERNEL[0]}.{IDMAP_KERNEL[1]}"
+    if mountinfo is None:
+        try:
+            mountinfo = MOUNTINFO.read_text(encoding="utf-8")
+        except OSError:
+            mountinfo = ""
+    kind = filesystem_of((root or STATE_ROOT).absolute(), mountinfo)
+    if kind is not None and kind not in IDMAP_FILESYSTEMS:
+        return f"{root or STATE_ROOT} is on {kind}, which has no idmapped mounts"
+    return None
+
+
+def choose_for_new_space(
+    name: str,
+    want: bool = True,
+    root: Path | None = None,
+    subuid: Path | None = None,
+    subgid: Path | None = None,
+    release: str | None = None,
+    mountinfo: str | None = None,
+) -> tuple[bool, str | None]:
+    """Write the marker of a space that was just created; return (enabled, why not).
+
+    On: the host can do it (unsupported_reason) and subuid/subgid cover the map (they are added here;
+    create runs as root). Off with a reason otherwise; this never fails the creation. want=False
+    (--no-userns) writes off without a reason. The marker is always written, so a space that is
+    created again gets a fresh choice.
+    """
+
+    reason = None if not want else unsupported_reason(root, release, mountinfo)
+    if want and reason is None:
+        try:
+            setup_subids(plan_for(name, root=root), subuid, subgid)
+        except (UsernsError, OSError) as error:
+            reason = f"subuid and subgid could not be set up: {error}"
+    try:
+        set_enabled(name, want and reason is None, root)
+    except (UsernsError, OSError) as error:
+        return False, reason or f"the choice could not be saved: {error}"
+    return want and reason is None, reason
 
 
 # --------------------------------------------------------------------- the plan

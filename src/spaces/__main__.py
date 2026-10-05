@@ -81,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=_("do not start the space automatically at desktop login"),
     )
     create_parser.add_argument(
+        "--no-userns",
+        action="store_true",
+        help=_("do not give the space a user namespace (Void host only)"),
+    )
+    create_parser.add_argument(
         "--preset",
         choices=tuple(core.PERMISSION_PRESETS),
         help=_("create without prompts using the selected permission preset"),
@@ -334,6 +339,7 @@ def _create(
     missing: bool = False,
     purge: bool = False,
     enable: bool = True,
+    userns: bool = True,
     preset: str | None = None,
     name: str | None = None,
 ) -> int:
@@ -481,6 +487,7 @@ def _create(
     )
     info["purge"] = purge
     info["enable"] = enable
+    info["userns"] = userns
     configure_logging(rich=True)
     log(
         _(
@@ -804,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.type,
                 purge=arguments.purge,
                 enable=not arguments.no_enable,
+                userns=not arguments.no_userns,
                 preset=arguments.preset,
                 name=arguments.name,
             )

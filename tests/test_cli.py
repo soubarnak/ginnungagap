@@ -235,6 +235,20 @@ class CliTests(unittest.TestCase):
             "ubuntu",
             purge=False,
             enable=False,
+            userns=True,
+            preset=None,
+            name=None,
+        )
+
+    def test_create_no_userns_is_forwarded(self) -> None:
+        with mock.patch.object(cli, "_create", return_value=0) as create:
+            self.assertEqual(cli.main(["create", "ubuntu", "--no-userns"]), 0)
+
+        create.assert_called_once_with(
+            "ubuntu",
+            purge=False,
+            enable=True,
+            userns=False,
             preset=None,
             name=None,
         )
@@ -259,6 +273,7 @@ class CliTests(unittest.TestCase):
             "custom",
             purge=False,
             enable=True,
+            userns=True,
             preset="develop",
             name="work",
         )

@@ -61,6 +61,24 @@ class PrivilegedTests(unittest.TestCase):
             patcher.stop()
         self.temporary.cleanup()
 
+    def test_create_tells_the_backend_about_the_new_space(self) -> None:
+        with (
+            mock.patch.object(ubuntu.subprocess, "run"),
+            mock.patch.object(ubuntu, "print"),
+            mock.patch.object(SystemdBackend, "space_created") as created,
+        ):
+            priv.create(self.info)
+            priv.create({**self.info, "userns": False})
+        self.assertEqual(
+            [mock.call("ubuntu", True), mock.call("ubuntu", False)],
+            created.call_args_list,
+        )
+
+    def test_create_rejects_a_userns_option_that_is_not_a_boolean(self) -> None:
+        with self.assertRaises(core.SpacesError):
+            priv.create({**self.info, "userns": "no"})
+        self.assertFalse((self.state_root / "ubuntu").exists())
+
     def test_create_writes_metadata_and_bootstraps(self) -> None:
         with (
             mock.patch.object(ubuntu.subprocess, "run") as run,
