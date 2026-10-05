@@ -77,16 +77,19 @@ openssl genrsa -aes256 -out ~/.config/ginnungagap/spaces-repo.pem 4096    # asks
 chmod 600 ~/.config/ginnungagap/spaces-repo.pem
 ```
 
-The key that exists on the maintainer's machine was made without a passphrase (`openssl genrsa -out ... 4096`, mode
-0600 in a 0700 directory) so that the first end-to-end run could be unattended:
+The key on the maintainer's machine was first made without a passphrase (`openssl genrsa -out ... 4096`) so that
+the first end-to-end run could be unattended. It has since been encrypted in place with
+`openssl rsa -aes256 -in KEY -out KEY.new`, which keeps the same key and therefore the same fingerprint. It is
+mode 0600 in a 0700 directory:
 
 * location: `~/.config/ginnungagap/spaces-repo.pem` (outside the repository)
 * signed by: `Spaces Void port <soubarnakarmakar@gmail.com>`
 * xbps fingerprint: `f4:55:72:f9:ac:23:eb:b3:c3:e3:f8:b3:a9:24:97:39`
 
-Before publishing anything, either keep it (nothing is published yet) or make a new, passphrase-protected key and
-publish its fingerprint instead: a key that was used only for the local run costs nothing to replace. It was used for
-`release.sh repo` once: all ten packages (five templates, x86_64 and aarch64) were signed into `dist/repo` (not
+`release.sh repo` now needs the passphrase: `xbps-rindex` asks for it, or it is taken from `XBPS_PASSPHRASE`.
+`release.sh cut` does not sign anything and does not need it. Nothing is published yet. Before publishing, check
+that a client's first sync still shows the fingerprint above. It was used for
+`release.sh repo` once, before the key was encrypted: all ten packages (five templates, x86_64 and aarch64) were signed into `dist/repo` (not
 committed, not served), and `xbps-install -S` into a scratch root showed the signer and the fingerprint above.
 
 xbps shows its own fingerprint of the key (not an `openssl` hash) when a client first syncs the repository; read it

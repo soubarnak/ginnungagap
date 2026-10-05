@@ -30,6 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import session_lock  # noqa: E402
 
 SPACE = "ubuntu"
 SERVICE = f"/var/service/spaces-{SPACE}"
@@ -296,6 +299,9 @@ def check_window() -> None:
     if guest("command -v vkcube >/dev/null").returncode != 0:
         skip("4 vkcube window", "vkcube missing in the guest")
         return
+    if session_lock.locked():
+        skip("4 vkcube window", session_lock.SKIP_REASON)
+        return
     proc = subprocess.Popen(
         ["spaces", "enter", "--graphical", SPACE, "--", "sh", "-c", "timeout 12 vkcube --c 100000 --gpu_number 0"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -305,7 +311,11 @@ def check_window() -> None:
         check("4 vkcube (GPU 0) shows a window on niri", shown)
     finally:
         proc.wait(timeout=30)
-    check("4 the window closes", wait_for(lambda: not any((w.get("title") or "") == "vkcube" for w in niri_windows()), 5))
+    closed = wait_for(lambda: not any((w.get("title") or "") == "vkcube" for w in niri_windows()), 5)
+    if not closed and session_lock.locked():  # locked meanwhile: not a product failure
+        skip("4 the window closes", session_lock.SKIP_REASON)
+    else:
+        check("4 the window closes", closed)
 
 
 def parse_blocked(out: str) -> dict[str, str]:

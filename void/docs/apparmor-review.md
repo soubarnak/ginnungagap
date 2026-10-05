@@ -65,6 +65,18 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
      close the `open_tree` clone path (`clone:read-only`), but the `mount(2)` bind of `/proc/sys` remounted
      read-write (`bind-remount:WRITABLE`) stays open, and that rule is the one systemd's own sandboxing needs, so
      blocking `mount_setattr` buys nothing and costs the guests' sandboxes.
+   **The new mount API is not required.** A plain `mount --bind /proc <dir>` (the classic `mount(2)`) followed by a
+   write to `<dir>/sys/kernel/core_pattern` succeeds on Ubuntu, Arch, Kali and Fedora, and an `rbind` of `/proc` was
+   writable on Ubuntu in the first probe (`EROFS` on Arch, Kali and Fedora; the `m9_check.py` probe saw it
+   read-only on all four, so it depends on the mount propagation of the moment). The only protection of `/proc/sys` is
+   the AppArmor path rules, which apply to the path the guest sees and not to the bind mount of it, and the profile
+   has to allow `bind`, `rbind` and `remount` for systemd's unit sandboxes, so the rules cannot be tightened.
+   `m9_check.py` probes both forms (writing back the value it read) and reports SKIP "known open" while one works.
+   A `seccomp` user-notification supervisor was evaluated and **rejected**: to refuse only the dangerous binds it has
+   to resolve the source and target paths in the guest's mount namespace, tell a `/proc` bind from the benign binds
+   of systemd's sandboxes, and carry out the call itself with the same flags, propagation and error semantics, which
+   amounts to reimplementing `mount(2)` (and races on the paths it inspects). It would also have to cover the new
+   mount API with the same logic. It was not built. The opt-in user namespace below is the only real closure.
    Other ways that were ruled out: a path rule for `core_pattern` and friends (the fresh proc can be mounted
    anywhere and any directory of it can be cloned again, so the path is the attacker's choice), restricting
    `move_mount` (a detached `tmpfs` of the credential setup and a detached `proc` look the same to the profile).
@@ -80,7 +92,7 @@ during a boot are the fresh `proc`/`sysfs` that systemd falls back from, plus Fe
    (`sudo spaces-void userns enable NAME`, `void/docs/void.md` "User namespace") has guest root = kuid 1000000: the
    sysctl and `sysrq-trigger` permission checks compare with the global root, so the fresh proc, the `open_tree`
    clone and the `mount(2)` bind remount can all be set up and none of them can write (`m9_check.py --userns`
-   reports the eight items as PASS, on all four guests). It is off by default; the facts of the spike and what it
+   reports the eight items as PASS, on all four guests, and the plain `bind` and `rbind` of `/proc` cannot write either). It is off by default; the facts of the spike and what it
    changes (no privileged ports, no network sysctls, `/sys` as a masked bind) are in `void/spike/RESULTS.md`.
    **Accepted risk for a space that does not use it.** `m9_check.py` probes it on every guest (a fresh proc
    writable at `sys/kernel/core_pattern` and `sysrq-trigger`, a writable clone of `/proc/sys`) and reports SKIP

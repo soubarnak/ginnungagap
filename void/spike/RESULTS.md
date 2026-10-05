@@ -897,7 +897,7 @@ Full text and evidence: `void/docs/apparmor-review.md`.
 
 - Root in a guest is host root through the new mount API (user namespace needed); AppArmor cannot mediate it here.
 - `spaces-broker` (session broker) has no `PR_SET_PDEATHSIG` (spawned from session threads; the reaping at the next
-  start covers it). Not changed.
+  start covers it). Not changed. Closed in M11: the death pipe already covers it, see M11.
 - Pushing the tag, a GitHub release, signing, an xbps repository or CI (checks need a Void host with root and a
   desktop); `aarch64` and musl; a Python bump needs a new revision (pin `python3>=3.14<3.15`).
 - Distro `.desktop` files and icons are not shipped (documented in `void.md`).
@@ -1279,3 +1279,32 @@ are what a package-shipped hook would have to add); all `userns` markers removed
 `sudo spaces-void doctor` (20 checks, 0 FAIL); `sudo apparmor_parser` state of `lxc-spaces-container` (the INSTALL hook loads the new rule; a boot loads it from `/etc/apparmor.d`); `ubuntu -- true` starts a space with no `userns`
 marker (default off); `sudo spaces-void userns status` shows `ready` for all four; then, to try it: `sudo spaces-void userns enable ubuntu`, `ubuntu -- id`, and `python3 void/spike/m9_check.py --userns --regress` from an unlocked niri session (the
 autostart items need `sudo spaces-void autostart enable ubuntu` first).
+
+## M11: closing the remaining gaps (2026-10-05)
+
+Each open item from the end of M10 was checked against the code and the host before anything was changed.
+
+- **`spaces-broker` without `PR_SET_PDEATHSIG`: not a gap.** `PR_SET_PDEATHSIG` fires when the thread that forked the child
+  exits, not the process, and the session broker is spawned from session worker threads (`lifeline.py:5-6`). The death pipe
+  from M10 (`session.py:824-836`, `native/spaces_broker.c:1550-1605`, checked by `m8_check.py:181-189`) makes the broker quit
+  when the launcher dies, including `kill -9`. No change.
+- **Autostart GUI close on a locked session: a test artifact, not a product bug.** Nothing in `autostart.py` drives a window.
+  A locked niri session delivers no `close-window` and has no focused window, so the checks that wait for a window to
+  close cannot pass. `void/spike/session_lock.py` reads `LockedHint`; `m4_check.py` and `m5_check.py` skip those items
+  when the session is locked and still fail on an unlocked one (4 unit tests).
+- **`m5_check.py` section 4 NVIDIA Vulkan and EGL: not reproducible.** Run against the `ubuntu` space on this host every
+  section 4 item passes (AMD and NVIDIA Vulkan, EGL in hardware on both render nodes, PRIME offload, vkcube). The forwarding
+  code is fine. The earlier failures were most likely the vkcube window items on a locked session.
+- **Root in a space is host root through the mount API: not closed by a supervisor.** A seccomp user-notification
+  supervisor was evaluated and not built. A plain `mount --bind /proc DIR` followed by a write to
+  `DIR/sys/kernel/core_pattern` works on all four guests without the new mount API, because only AppArmor path rules
+  protect `/proc/sys` and the profile has to allow bind mounts for systemd's unit sandbox. A supervisor would have to
+  reimplement mount semantics. `m9_check.py` gets a probe for it: SKIP "known open" by default, PASS with `--userns`
+  on all four guests (135 passed). The user namespace stays the only real closure and stays opt-in.
+- **Signing key.** Encrypted in place with a passphrase, same key and fingerprint (`void/docs/release.md`).
+- **aarch64.** Deferred by the user; the CI cross build remains the only proof.
+- **Found on the way:** while a libvirt VM runs (`qemu-2-win11`), libvirt creates `/sys/fs/cgroup/machine` and sets
+  `cgroup.subtree_control` of the root to `cpuset cpu io memory`. `spaces-void doctor` then warns and the cgroup items of
+  `m5_check.py` and `m8_check.py` fail. It is host state, not a regression; the VM was not touched.
+
+Unit tests: 728 passed, 17 skipped. `m9_check.py`: 91 passed, 1 failed (the libvirt cgroup item), 12 skipped.

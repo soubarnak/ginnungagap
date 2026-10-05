@@ -188,6 +188,16 @@ sudo spaces-void autostart disable ubuntu [--boot] [--user bob]
   happens, whatever is enabled. Logs: `/var/log/spaces/autostart/current`.
 * A space must not be called `autostart` (it would collide with the service directory).
 
+### GUI checks on a locked session
+
+The autostart service never closes or drives a window, so locking the screen cannot break it. The only thing a lock
+breaks is the verification scripts: on a locked niri session (elogind `LockedHint` is `yes`) niri delivers no
+`close-window` to any window and `focused-window` is `null`, so "the window closes" in `m4_check.py` and `m5_check.py`
+fails for a reason that has nothing to do with the product. Those checks now ask `loginctl show-session` for
+`LockedHint` (helper `void/spike/session_lock.py`) and report SKIP with the reason instead of FAIL when the session is
+locked. On an unlocked session, or when the lock state cannot be read, they run and fail exactly as before. Unlock the
+screen and rerun to get the real result.
+
 ## Configuration
 
 `/etc/spaces/config.json` (guest packages, extra mounts and overlays per distro) is generated, never
@@ -374,6 +384,12 @@ sudo sv status /var/service/spaces-NAME
   helpers that run in the guests are pinned to glibc 2.17).
 * Root in a space is host root through the new mount API (`void/docs/apparmor-review.md`, finding 1) unless the
   space uses the opt-in user namespace ("User namespace" above). Seccomp cannot take the API away from systemd.
+  The new API is not even needed: a plain `mount --bind /proc <dir>` followed by a write to
+  `<dir>/sys/kernel/core_pattern` works on all four guests (an `rbind` of `/proc` at times on Ubuntu), because the
+  AppArmor profile must allow bind, rbind and remount for systemd's unit sandboxes and so cannot protect `/proc/sys`
+  beyond its own path. A seccomp user-notification supervisor was evaluated and rejected: it would have to reimplement
+  mount semantics (path resolution in the guest's namespace, flags, propagation, races) to tell a hostile bind from
+  systemd's own. The opt-in user namespace is the only real closure. `m9_check.py` reports it as SKIP "known open".
 * The per-space runit services have no `check` or `finish` script, and the tests that need a terminal
   cannot run in the build chroot (the Ctrl-C test is deselected).
 * Python upgrades: the package pins `python3>=3.14<3.15`; a Python bump needs a new revision.

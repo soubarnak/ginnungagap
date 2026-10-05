@@ -29,6 +29,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import session_lock  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 SPACE = "ubuntu"
 SERVICE = f"/var/service/spaces-{SPACE}"
@@ -284,7 +287,11 @@ def check_gui() -> None:
     check("6 window: guest app opens on the host niri desktop", window is not None, f"app_id={window['app_id']} title={window['title']}" if window else "")
     if window:
         run(["niri", "msg", "action", "close-window", "--id", str(window["id"])])
-        check("6 window: closes", wait_for(lambda: process.poll() is not None, 15))
+        closed = wait_for(lambda: process.poll() is not None, 15)
+        if not closed and session_lock.locked():  # a locked niri delivers no close-window
+            skip("6 window: closes", session_lock.SKIP_REASON)
+        else:
+            check("6 window: closes", closed)
     if process.poll() is None:
         process.terminate()
     process.communicate()

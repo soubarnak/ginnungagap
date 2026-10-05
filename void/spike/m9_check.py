@@ -25,7 +25,7 @@ Sections:
   --userns   run everything with the opt-in user namespace turned on for all four spaces (`spaces-void userns
              enable --all`, undone at the end): the eight known-open mount-API items must then PASS
              (guest root is kuid 1000000: a fresh proc, a clone of /proc/sys and a mount(2) bind remount
-             cannot write core_pattern or sysrq-trigger), and a section `userns` checks the map, the
+             cannot write core_pattern or sysrq-trigger; nor can a plain bind or rbind of /proc), and a section `userns` checks the map, the
              idmapped binds, the /sys masks and the broker sockets
   --regress  also runs m5_check.py (devices, hotplug, stale container) and m8_check.py
              (package, enter, sudo bridge, GUI on niri, NVIDIA, autostart, orphaned broker)
@@ -273,6 +273,30 @@ os.rmdir(t)
 """
 
 
+# Plain mount(2) bind and rbind of the whole /proc (no new mount API). The profile has to allow
+# bind, rbind and remount for systemd's unit sandboxes, so this cannot be closed in it; a seccomp
+# supervisor would have to reimplement mount semantics (void/docs/apparmor-review.md, finding 1).
+# The write puts back the value it just read, so core_pattern is never left changed.
+BIND_PROC = r"""
+import ctypes, os
+libc = ctypes.CDLL(None, use_errno=True)
+MS_BIND, MS_REC = 4096, 16384
+t = b"/run/systemd/m9b"
+os.makedirs(t, exist_ok=True)
+def writable(path):
+    try:
+        value = open(path).read(); open(path, "w").write(value); return True
+    except OSError: return False
+for label, flags in (("bind", MS_BIND), ("rbind", MS_BIND | MS_REC)):
+    if libc.mount(b"/proc", t, None, flags, None) == 0:
+        print(label + "-proc:" + ("WRITABLE" if writable("/run/systemd/m9b/sys/kernel/core_pattern") else "read-only"))
+        libc.umount2(t, 2)
+    else:
+        print(label + "-proc:denied")
+os.rmdir(t)
+"""
+
+
 def check_apparmor() -> None:
     print("\n== AppArmor profile (lxc-spaces-container) ==", flush=True)
     text = Path("/etc/apparmor.d/lxc-spaces-container").read_text()
@@ -333,6 +357,16 @@ def check_apparmor() -> None:
             skip(f"{label} the new mount API (fsopen/fsmount/open_tree/mount_setattr) cannot write host /proc/sys", f"known open: {modern}")
         else:
             check(f"{label} the new mount API cannot write host /proc/sys (fresh proc, sysrq-trigger, cloned /proc/sys)", True, str(modern))
+        plain = dict(line.split(":", 1) for line in in_guest_root(space, "python3", "-c", BIND_PROC).stdout.split() if ":" in line)
+        # Known open (finding 1): a plain mount(2) bind of /proc is writable at sys/kernel/core_pattern
+        # (an rbind at times on Ubuntu). Only the user namespace closes it.
+        open_binds = [key for key in ("bind-proc", "rbind-proc") if plain.get(key) == "WRITABLE"]
+        if open_binds and USERNS:
+            check(f"{label} a plain bind or rbind of /proc cannot write core_pattern (user namespace)", False, str(plain))
+        elif open_binds:
+            skip(f"{label} a plain mount(2) bind or rbind of /proc cannot write core_pattern", f"known open: {plain}")
+        else:
+            check(f"{label} a plain mount(2) bind or rbind of /proc cannot write core_pattern", True, str(plain))
 
 
 # ------------------------------------------------------------------ userns
