@@ -84,7 +84,7 @@ void/tools/xbps-build.sh                # clones void-packages, bootstraps it, b
 sudo xbps-install -S -R ~/.local/share/ginnungagap/void-packages/hostdir/binpkgs spaces
 ```
 
-To check out the released tag instead of the latest `void`, run `git checkout v0.0.1` before the build. Do not add
+To check out the released tag instead of the latest `void`, run `git checkout v0.0.2` before the build. Do not add
 `--release` to the build: that mode builds the committed template, which names GitHub's tarball and pins its
 checksum in a commit made after the tag.
 
@@ -154,7 +154,7 @@ address in its own notes below; issues specific to the Void port belong in this 
 > (runit, elogind, LXC, AppArmor) instead of systemd and SELinux. It is not affiliated with or endorsed by the upstream
 > authors. Upstream copyright: Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
 >
-> **Status: v0.0.1.** The Void port works end to end and is tested on four guests; it is an early release. Packages
+> **Status: v0.0.2.** The Void port works end to end and is tested on four guests; it is an early release. Packages
 > are built from this checkout with `void/tools/xbps-build.sh`; there is no public package repository yet.
 > x86_64 glibc is the supported platform.
 
