@@ -390,8 +390,8 @@ sudo sv status /var/service/spaces-NAME
 
 ## Limits and known gaps
 
-* The packages are built locally; `void/tools/release.sh repo` can sign a repository with a key of yours, but none is
-  published, and a `v0.0.1` tag is prepared by `void/tools/release.sh` but pushed by hand. CI
+* The packages are built locally and signed with `void/tools/release.sh repo`; the signed repository of each release is
+  uploaded to the GitHub release as its assets (`void/docs/release.md`). The tag is pushed by `release.sh cut`. CI
   (`.github/workflows/void.yaml`) runs the unit tests and builds the packages for x86_64 and, cross-built only,
   aarch64 (`void/docs/release.md`). x86_64 glibc is the supported platform; musl is intentionally unsupported (the
   helpers that run in the guests are pinned to glibc 2.17).

@@ -180,8 +180,8 @@ address in its own notes below; issues specific to the Void port belong in this 
 > (runit, elogind, LXC, AppArmor) instead of systemd and SELinux. It is not affiliated with or endorsed by the upstream
 > authors. Upstream copyright: Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
 >
-> **Status: v0.0.2.** The Void port works end to end and is tested on four guests; it is an early release. Packages
-> are built from this checkout with `void/tools/xbps-build.sh`; there is no public package repository yet.
+> **Status: v0.0.2.** The Void port works end to end and is tested on four guests; it is an early release. Signed
+> packages are on the GitHub release (see Install), or build them from this checkout with `void/tools/xbps-build.sh`.
 > x86_64 glibc is the supported platform.
 
 ---
