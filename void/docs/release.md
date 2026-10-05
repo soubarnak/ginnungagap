@@ -187,8 +187,8 @@ and run `void/spike/m8_check.py`.
 
 ## Not done
 
-* Publishing: the tag is not pushed by any script, there is no GitHub release and no hosted repository, and the
-  repository signing key does not exist yet (the steps above make it).
+* Publishing: the tag is pushed by `release.sh cut` only, the GitHub release is made by hand, and the signed repository of
+  v0.0.2 is its release assets (`gh release upload`); a later release needs its own `repo` run and upload.
 * The checks that need a Void host with LXC, root and a desktop session (`m5_check.py` ... `m9_check.py`) are not in CI.
 * aarch64 is cross-built, never run, and **cannot be run on the maintainer's x86_64 host**: the ceiling there is the cross
   build and `check_guest_abi.py --target aarch64`. The only way to run it is an aarch64 Void VM under QEMU TCG (install

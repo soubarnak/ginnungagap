@@ -63,10 +63,34 @@ port that makes it work there, so Void can be a development machine without givi
 
 ## Install
 
-There is no Void package repository for Spaces yet. You build the packages from this repository with Void's own
-[`xbps-src`](https://github.com/void-linux/void-packages) and install them from the local repository it produces.
-It is the usual way to install something that is not in the official repositories, and it needs no root until the
-last step.
+Two ways: install the signed packages from the repository on the GitHub release (nothing to build), or build them
+yourself with Void's own [`xbps-src`](https://github.com/void-linux/void-packages). Both need Void Linux on x86_64
+(glibc).
+
+### From the signed repository (no build)
+
+Each release carries a signed xbps repository as its assets. The repository for v0.0.2 is
+`https://github.com/soubarnak/ginnungagap/releases/download/v0.0.2`; a later release has its own URL.
+
+```bash
+echo "repository=https://github.com/soubarnak/ginnungagap/releases/download/v0.0.2" | sudo tee /etc/xbps.d/20-spaces.conf
+sudo xbps-install -S spaces
+```
+
+On the first sync xbps shows the signer and the key fingerprint and asks whether to trust it. Compare it with this one
+before you answer `y`:
+
+```
+Spaces Void port <soubarnakarmakar@gmail.com>
+f4:55:72:f9:ac:23:eb:b3:c3:e3:f8:b3:a9:24:97:39
+```
+
+Packages for aarch64 are in the same repository. They are cross-built and have never been run.
+
+### Build it yourself
+
+You build the packages from this repository and install them from the local repository xbps-src produces. It needs no
+root until the last step.
 
 **You need** Void Linux on x86_64 (glibc), `git`, `bubblewrap`, about 2 GB of free space, and your user in the
 `xbuilder` group (xbps-src builds in an unprivileged user namespace):
@@ -97,7 +121,9 @@ echo "repository=$HOME/.local/share/ginnungagap/void-packages/hostdir/binpkgs" |
 After a new build, `sudo xbps-install -u spaces` upgrades. Running spaces keep running. `sudo xbps-remove spaces` removes
 the program and stops the spaces; their data in `/var/lib/spaces` stays.
 
-**Create and enter a space:**
+### Create and enter a space
+
+With either install:
 
 ```bash
 sudo spaces create ubuntu --preset basic    # or fedora, arch, kali
