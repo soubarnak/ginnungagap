@@ -61,9 +61,10 @@ port that makes it work there, so Void can be a development machine without givi
 
 ## Install
 
-Two ways: install the signed packages from the repository on the GitHub release (nothing to build), or build them
-yourself with Void's own [`xbps-src`](https://github.com/void-linux/void-packages). Both need Void Linux on x86_64
-(glibc).
+**You do not need to build anything from source.** Every release ships ready-made, signed `.xbps` packages, and xbps
+installs them like any other package: add the release as a repository and run `xbps-install`. Building with Void's own
+[`xbps-src`](https://github.com/void-linux/void-packages) is the other way, for when you want to build from a branch or
+change something. Both need Void Linux on x86_64 (glibc).
 
 ### From the signed repository (no build)
 
