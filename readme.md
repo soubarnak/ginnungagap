@@ -6,11 +6,62 @@
   </picture>
 </p>
 
-## ginnungagap: Spaces on Void Linux
+<h1 align="center">ginnungagap</h1>
 
-This branch (`void`) runs Spaces on **Void Linux**: runit instead of systemd, elogind for logins, LXC
-instead of `systemd-nspawn`, AppArmor instead of SELinux. You still get Ubuntu, Kali, Arch and Fedora
-spaces with host PAM, desktop and GPU integration:
+<p align="center"><em>Out of the void, worlds.</em><br>
+<strong>Spaces for Void Linux</strong>: whole Ubuntu, Arch, Fedora and Kali systems, born from an empty host.</p>
+
+<p align="center">
+  <a href="https://github.com/soubarnak/ginnungagap/tags"><img alt="release" src="https://img.shields.io/github/v/tag/soubarnak/ginnungagap?label=release&color=478061&labelColor=1f2328"></a>
+  <a href="LICENSE"><img alt="license AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0--or--later-478061?labelColor=1f2328"></a>
+  <img alt="Void Linux" src="https://img.shields.io/badge/host-Void%20Linux-478061?logo=voidlinux&logoColor=white&labelColor=1f2328">
+  <img alt="runit and LXC" src="https://img.shields.io/badge/runit-LXC-478061?labelColor=1f2328">
+  <img alt="AppArmor" src="https://img.shields.io/badge/AppArmor-enforced-478061?labelColor=1f2328">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#why-the-name">Why the name</a> ·
+  <a href="#why-void-needs-this">Why Void</a> ·
+  <a href="#what-changed-from-upstream">What changed</a> ·
+  <a href="#security-in-plain-words">Security</a> ·
+  <a href="#credits">Credits</a>
+</p>
+
+---
+
+## Why the name
+
+In Norse myth, **Ginnungagap** is the yawning void that existed before anything else: the empty gap between the
+realm of ice and the realm of fire. Everything that exists, the worlds included, took shape out of that emptiness.
+
+This project is built on the same idea. **Void Linux** is a deliberately small, empty-handed base: runit, a
+minimal userland, no more than you ask for. **Spaces** are the worlds you raise inside it: complete Ubuntu, Arch,
+Fedora and Kali systems, each with its own packages and its own services, started from nothing but the host's
+kernel and a package repository. The emptiness is the point. A host with nothing extra on it can hold any world you
+need, and none of those worlds crowds the others or the host. Hence the name: Ginnungagap is the void, and Spaces
+come out of it.
+
+## Why Void needs this
+
+Void is lean, fast and rolling, and many people run it because they want control over what is installed. The cost
+is that the toolchains developers reach for first, such as `apt` with Ubuntu packages, `pacman` and the AUR, Fedora's
+`dnf`, or Kali's security tools, are not in Void's repositories, and wiring them in by hand makes a mess of a
+carefully kept system.
+
+Spaces removes that trade-off. You keep Void as a clean base and open a Space whenever a project wants another
+distribution:
+
+* develop against the exact Ubuntu or Fedora your servers run, with the real package manager and the real libraries;
+* use Arch's rolling toolchains or Kali's tools without installing any of it on the host;
+* run Docker or other services in a Space with their own init, while the host stays as small as it was;
+* get desktop integration anyway: GUI applications from a Space show up on your taskbar, the clipboard, audio, GPU
+  (NVIDIA and AMD, including PRIME offload), portals and theming are forwarded, and `sudo` in a Space uses the host's PAM.
+
+Upstream Spaces is built on `systemd-nspawn`, `machinectl` and SELinux, none of which Void ships. ginnungagap is the
+port that makes it work there, so Void can be a development machine without giving up what makes it Void.
+
+## Quick start
 
 ```bash
 void/tools/xbps-build.sh                # builds the xbps packages with xbps-src, prints the repository
@@ -20,26 +71,65 @@ ubuntu -- id                            # or: spaces enter ubuntu
 ```
 
 **Read [void/docs/void.md](void/docs/void.md)** for what gets installed where, entry commands, autostart
-(`sudo ln -s /etc/sv/spaces-autostart /var/service/`), the desktop flavour, the security model compared to
-upstream, troubleshooting (`spaces-void doctor`) and known gaps. Milestone logs: `void/spike/RESULTS.md`,
-`void/spike/INSTALLED.md`. The `master` branch tracks upstream unchanged.
+(`sudo ln -s /etc/sv/spaces-autostart /var/service/`), the desktop flavour, the security model compared to upstream,
+troubleshooting (`spaces-void doctor`) and known gaps. Milestone logs: `void/spike/RESULTS.md` and
+`void/spike/INSTALLED.md`. Releasing: [void/docs/release.md](void/docs/release.md).
+
+## What changed from upstream
+
+| | Upstream Spaces | ginnungagap (`void` branch) |
+|---|---|---|
+| Host init and services | systemd units (`spaces@NAME`) | runit services |
+| Logins and sessions | systemd-logind | elogind |
+| Container engine | `systemd-nspawn`, `machinectl` | LXC |
+| Mandatory access control | SELinux | AppArmor |
+| Packaging | RPM and Arch packages | xbps packages built with xbps-src |
+| Guests | Arch, Fedora, Kali, Ubuntu | the same four, still booting their own systemd |
+
+Only the host side is replaced. The guests are unchanged. The `master` branch tracks upstream untouched, so upstream
+changes stay easy to rebase onto (`void/tools/rebase-check.sh`).
+
+## Security in plain words
+
+Be clear about what a Space is. By default, root inside a Space is the host's root, and the new Linux mount API
+cannot be mediated by AppArmor, so a Space is a convenience boundary, not a hardened sandbox against a hostile root. The
+opt-in user namespace (`sudo spaces-void userns enable NAME`) closes that hole at the cost of NFS in the guest.
+The details and the evidence are in [void/docs/apparmor-review.md](void/docs/apparmor-review.md).
+
+## Credits
+
+ginnungagap would not exist without the people who made Spaces.
+
+* **[Antheas Kapenekakis](https://github.com/antheas)**, the original author of
+  **[Spaces](https://github.com/anatase-org/spaces)**. The design, the permission model, the desktop integration and
+  nearly every line this port stands on are theirs. Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT`.
+* **[Anatase Linux](https://anatase.org)** and the [anatase-org](https://github.com/anatase-org) project: "a modern
+  immutable distribution for development and play", which publishes Spaces as part of its system and released it
+  under the AGPL so that others can build on it.
+
+Both are the reason this exists. If you find ginnungagap useful, star and support the
+[upstream project](https://github.com/anatase-org/spaces) too. Security issues in the original code go to the upstream
+address in its own notes below; issues specific to the Void port belong in this repository's issue tracker.
 
 > **Fork notice (AGPL-3.0 section 5a).** ginnungagap is a modified version of
-> [anatase-org/spaces](https://github.com/anatase-org/spaces), changed on 2026-10-04 and later,
-> to run on Void Linux (runit, elogind, LXC, AppArmor) instead of systemd and SELinux.
-> It is not affiliated with or endorsed by the upstream authors. Upstream copyright:
-> Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
+> [anatase-org/spaces](https://github.com/anatase-org/spaces), changed on 2026-10-04 and later, to run on Void Linux
+> (runit, elogind, LXC, AppArmor) instead of systemd and SELinux. It is not affiliated with or endorsed by the upstream
+> authors. Upstream copyright: Copyright (C) 2026 Antheas Kapenekakis, see `COPYRIGHT` and `LICENSE`.
 >
-> **Status: local xbps packages.** The Void port works end to end on one machine (see the docs above); the
-> packages are built from this checkout with `void/tools/xbps-build.sh`, there is no public repository yet.
-> (`void/tools/dev-install.sh` remains as a development-only install.) The upstream text below still describes the systemd-based original: where it
-> mentions `systemctl`, `spaces@NAME` units, SELinux or `machinectl`, read the Void equivalents in
-> `void/docs/void.md`.
+> **Status: v0.0.1.** The Void port works end to end and is tested on four guests; it is an early release. Packages
+> are built from this checkout with `void/tools/xbps-build.sh`; there is no public package repository yet.
+> x86_64 glibc is the supported platform.
 
-# Spaces
+---
+
+The text below is the original upstream README. It describes the systemd-based original: where it mentions
+`systemctl`, `spaces@NAME` units, SELinux or `machinectl`, read the Void equivalents in
+[void/docs/void.md](void/docs/void.md).
+
+## Spaces, the original
 Spaces provide a chroot-like sandboxing environment for you to access your favorite distributions: Arch, Fedora, Kali, and Ubuntu. A simple permission system ensures your local files and credentials remain secure, even if your space is compromised. Spaces are constructed directly using packages from your chosen distribution repositories with signature enforcement. No container middleman or surprises.
 
-## About
+### About
 
 Spaces is a "simple" wrapper around `systemd-nspawn` that makes it easier to use and provides host integration with a couple of intuitive permissions, dbus/theming integration, and PAM.
 
@@ -76,7 +166,7 @@ boot without requiring an interactive login. This way, the service starts with i
 loginctl enable-linger
 ```
 
-## Security
+### Security
 For security issues, email: security@anatase.org
 
 Spaces is a small daemon that escalates using polkits. The root inside spaces is powerful depending on granted permissions, and requires the same excalation pattern as the host. This means: to get root in a space, the same authentication that would be performed on the host is required and unpriviledged user processes need a normal bypass. One action is allowed without authentication: a configured user chooses to enter a space as themselves. During this escalation, the service `spaces@<space>` is also started if needed. This is ok, because the permissions and users that have been granted to a space previously used authentication, and all rootful applications added to that space also used PAM authentication for e.g., sudo. Therefore, just turning on a space does not give unpriviledged code an escalation path, regardless of whether that code is inside or outside the space.
@@ -85,7 +175,7 @@ Spaces only mounts users that have executed `spaces configure --user <space>` or
 
 It is not possible to mount SSH or GPG directories from the host into the space, other than `~/.ssh/config` and that is additionally enforced by SELinux.
 
-### SELinux
+#### SELinux
 
 The `spaces-selinux` policy package provides the selinux rules separately to enable moving between images with and without Spaces. Spaces relabel `/var/lib/spaces`, `~/.ssh/config` so users moving between those images would have to relabel those files otherwise. It also allows to runtime replace spaces for development without rebuilding SELinux policy and breaking SELinux on updates (see `./sync.sh`).
 
@@ -94,11 +184,11 @@ sudo restorecon -RF /var/lib/spaces
 restorecon -F ~/.ssh/config
 ```
 
-## Contributing
+### Contributing
 
 Spaces does not currently accept external contributions. You are welcome to post issues in the issue tracker, with suggestions or bug reports.
 
-## License
+### License
 
 A copy of Spaces is provided to you under the terms of [GNU Affero General Public License v3.0 or later](LICENSE).
 
