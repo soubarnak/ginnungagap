@@ -1340,3 +1340,10 @@ Unit tests: 739 passed, 17 skipped (new: `NewSpaceTests`, two `priv.create` test
 empty` (once itself, once inside `m5_check.py` and once inside `m8_check.py`), the libvirt `win11` state from M11 that
 persists after the VM stopped; `m8_check.py` reported 4 failures in total and its summary names only that item, which was
 not looked at line by line. Nothing in the launch path changed in M12, only `create`.
+
+M12 follow-up: the three non-cgroup `m8_check.py` failures from the `m9 --regress` run (autostart: only ubuntu enabled,
+ubuntu up within 30 s, login state on tmpfs) came from the missing precondition `spaces-void autostart enable ubuntu`.
+With it enabled `m8_check.py` gives 83 passed, 1 failed, 1 skipped; the one failure is the libvirt
+`cgroup.subtree_control is empty` item, which persists after the `win11` VM stopped (a reboot should clear it). Autostart
+was disabled again afterwards. The version is now 0.0.2 (template, `pyproject.toml`, checksum at the placeholder until
+the tag is pushed).
