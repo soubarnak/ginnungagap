@@ -41,7 +41,18 @@ PACKAGES = (
     "xdg-desktop-portal",
     "xdg-desktop-portal-kde",
 )
-METAPACKAGE = "kali-linux-default"
+# What to install on top of the base system. The Kali tool sets are large (kali-linux-default is
+# about 2600 packages and 14 GB), so by default none is installed and the user adds tools with apt.
+TOOLSETS = {
+    "none": _("Base system only (install tools with apt)"),
+    "headless": _("Headless tools (kali-linux-headless)"),
+    "default": _("Default tools (kali-linux-default, about 14 GB)"),
+}
+METAPACKAGES = {
+    "none": None,
+    "headless": "kali-linux-headless",
+    "default": "kali-linux-default",
+}
 RELEASE = "kali-rolling"
 MIRROR = "http://http.kali.org/kali"
 HOST_KEYRING = Path(
@@ -74,6 +85,13 @@ def _configure_apt_sources(rootfs: Path) -> None:
 
 
 class KaliDistribution(Distribution):
+    def validate(self, metadata: Mapping[str, Any]) -> None:
+        # A space made before the tool set was a choice has no "toolset": it was made with the default tools.
+        if self.option_key in metadata:
+            super().validate(metadata)
+        else:
+            super().validate({**metadata, self.option_key: "default"})
+
     def describe(self, metadata: Mapping[str, Any]) -> str:
         self.validate(metadata)
         return _("Kali Linux")
@@ -145,23 +163,25 @@ class KaliDistribution(Distribution):
                 ),
                 check=True,
             )
-            print(
-                _(
-                    "Installing Kali default toolset: {package}",
-                    package=METAPACKAGE,
-                ),
-                flush=True,
-            )
-            subprocess.run(
-                _chroot_command(
-                    rootfs,
-                    "apt-get",
-                    "install",
-                    "--yes",
-                    METAPACKAGE,
-                ),
-                check=True,
-            )
+            metapackage = METAPACKAGES[self.selected_option(metadata)]
+            if metapackage is not None:
+                print(
+                    _(
+                        "Installing Kali toolset: {package}",
+                        package=metapackage,
+                    ),
+                    flush=True,
+                )
+                subprocess.run(
+                    _chroot_command(
+                        rootfs,
+                        "apt-get",
+                        "install",
+                        "--yes",
+                        metapackage,
+                    ),
+                    check=True,
+                )
 
     def reconcile_host_authentication(
         self,
@@ -181,4 +201,11 @@ DISTRIBUTION = KaliDistribution(
     id="kali",
     default_name="kali",
     administrator_group="sudo",
+    configuration_title=_("Kali tools"),
+    configuration_description=_(
+        "Choose which Kali tools to install. The base system alone is small; add tools later with apt."
+    ),
+    option_key="toolset",
+    configuration_options=TOOLSETS,
+    default_option="none",
 )

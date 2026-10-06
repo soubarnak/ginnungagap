@@ -658,7 +658,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(wizard.call_args.kwargs["distribution_values"], [])
 
-    def test_create_kali_has_no_distribution_configuration(self) -> None:
+    def test_create_kali_offers_the_tool_set_and_defaults_to_none(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
             home.mkdir()
@@ -669,17 +669,42 @@ class CliTests(unittest.TestCase):
                 mock.patch.object(
                     cli,
                     "run_permission_wizard",
-                    return_value={"network": "basic", "home": []},
+                    return_value={
+                        "network": "basic",
+                        "home": [],
+                        "distribution_option": "headless",
+                    },
                 ) as wizard,
                 mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
             ):
                 self.assertEqual(cli.main(["create", "kali"]), 0)
 
-        self.assertEqual(wizard.call_args.kwargs["distribution_options"], [])
+        self.assertEqual(
+            [value for _label, value in wizard.call_args.kwargs["distribution_options"]],
+            ["none", "headless", "default"],
+        )
+        self.assertEqual(wizard.call_args.kwargs["distribution_value"], "none")
         self.assertFalse(wizard.call_args.kwargs["distribution_multiple"])
         self.assertEqual(
             invoke.call_args.args[1]["distribution"],
-            {"id": "kali"},
+            {"id": "kali", "toolset": "headless"},
+        )
+
+    def test_create_kali_with_a_preset_installs_no_tool_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            home.mkdir()
+            identity = core.Identity(1000, 1000, home)
+            with (
+                mock.patch.object(core, "STATE_ROOT", Path(temporary) / "state"),
+                mock.patch.object(core, "initiating_identity", return_value=identity),
+                mock.patch.object(cli, "_invoke_helper", return_value=0) as invoke,
+            ):
+                self.assertEqual(cli.main(["create", "kali", "--preset", "basic"]), 0)
+
+        self.assertEqual(
+            invoke.call_args.args[1]["distribution"],
+            {"id": "kali", "toolset": "none"},
         )
 
     def test_create_custom_uses_prompted_name(self) -> None:

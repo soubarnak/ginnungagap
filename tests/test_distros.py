@@ -185,11 +185,26 @@ class DistributionDriverTests(unittest.TestCase):
         ):
             self.assertIn(package, yay)
 
-    def test_kali_has_no_configuration_and_only_id_metadata(self) -> None:
+    def test_kali_tool_set_is_a_choice_and_defaults_to_none(self) -> None:
         driver = kali.DISTRIBUTION
-        self.assertEqual(driver.choices(), [])
-        self.assertIsNone(driver.option_key)
-        self.assertEqual(driver.metadata(None), {"id": "kali"})
+        self.assertEqual(
+            [option for _label, option in driver.choices()],
+            ["none", "headless", "default"],
+        )
+        self.assertEqual(driver.option_key, "toolset")
+        self.assertEqual(driver.selected_option(None), "none")
+        self.assertEqual(
+            driver.metadata("none"), {"id": "kali", "toolset": "none"}
+        )
+        self.assertEqual(
+            driver.metadata("headless"), {"id": "kali", "toolset": "headless"}
+        )
+        with self.assertRaises(DistributionError):
+            driver.metadata("everything")
+        with self.assertRaises(DistributionError):
+            driver.validate({"id": "kali", "toolset": "everything"})
+        driver.validate({"id": "kali", "toolset": "default"})
+        # a space made before the choice existed has only the id and keeps validating
         driver.validate({"id": "kali"})
         command = driver.command(
             {"id": "kali"},
@@ -661,6 +676,57 @@ class DistributionDriverTests(unittest.TestCase):
             )
         self.assertEqual(commands[-1][-2:], ["/usr/bin/userdel", arch.BUILDER])
 
+    def kali_bootstrap_commands(self, toolset: str | None) -> list[list[str]]:
+        with tempfile.TemporaryDirectory() as temporary:
+            rootfs = Path(temporary) / "rootfs"
+            commands: list[list[str]] = []
+
+            def run(command: list[str], *, check: bool) -> subprocess.CompletedProcess:
+                commands.append(command)
+                if command[0] == "debootstrap":
+                    (rootfs / "etc" / "apt").mkdir(parents=True)
+                    (rootfs / "usr" / "sbin").mkdir(parents=True)
+                    (rootfs / "proc").mkdir()
+                return subprocess.CompletedProcess(command, 0)
+
+            metadata = {"id": "kali"} if toolset is None else {"id": "kali", "toolset": toolset}
+            with (
+                mock.patch.object(
+                    kali,
+                    "HOST_KEYRING",
+                    ROOT / "data" / "keys" / "kali-archive-key.gpg.base64",
+                ),
+                mock.patch.object(kali.subprocess, "run", side_effect=run),
+            ):
+                kali.DISTRIBUTION.bootstrap(metadata, rootfs)
+            return commands
+
+    def test_kali_installs_no_tool_set_by_default(self) -> None:
+        for toolset in ("none", None):
+            with self.subTest(toolset=toolset):
+                installs = [
+                    command
+                    for command in self.kali_bootstrap_commands(toolset)
+                    if "apt-get" in command and "install" in command
+                ]
+                self.assertEqual(len(installs), 1, installs)
+                self.assertIn("--no-install-recommends", installs[0])
+                self.assertFalse(
+                    any(name.startswith("kali-linux") for command in installs for name in command)
+                )
+
+    def test_kali_installs_the_chosen_tool_set_after_the_base_packages(self) -> None:
+        for toolset, package in (("headless", "kali-linux-headless"), ("default", "kali-linux-default")):
+            with self.subTest(toolset=toolset):
+                installs = [
+                    command
+                    for command in self.kali_bootstrap_commands(toolset)
+                    if "apt-get" in command and "install" in command
+                ]
+                self.assertEqual(len(installs), 2, installs)
+                self.assertIn("--no-install-recommends", installs[0])
+                self.assertEqual(installs[1][-2:], ["--yes", package])
+
     def test_kali_bootstrap_orders_signed_base_sources_and_default_tools(
         self,
     ) -> None:
@@ -688,7 +754,7 @@ class DistributionDriverTests(unittest.TestCase):
                 ),
                 mock.patch.object(kali.subprocess, "run", side_effect=run),
             ):
-                kali.DISTRIBUTION.bootstrap({"id": "kali"}, rootfs)
+                kali.DISTRIBUTION.bootstrap({"id": "kali", "toolset": "default"}, rootfs)
 
             self.assertEqual(commands[0][0:2], ["debootstrap", "--force-check-gpg"])
             self.assertEqual(

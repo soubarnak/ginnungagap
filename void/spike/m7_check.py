@@ -223,7 +223,7 @@ def check_flavor(install: bool) -> None:
     packages = {d: cfg["distros"][d]["packages"] for d in SPACES}
     check(f"auto resolves for {desktop or '?'} -> {'gtk' if expected_gtk else 'kde'} in config.json",
           all(("xdg-desktop-portal-gtk" in p) == expected_gtk for p in packages.values()), str(packages))
-    check("config.json keeps the base packages (fastfetch, tmux, zsh)", all({"fastfetch", "tmux", "zsh"} <= set(p) for p in packages.values()))
+    check("config.json adds no extra packages of its own (only the desktop flavour's)", all(not ({"fastfetch", "tmux", "zsh", "screen"} & set(p)) for p in packages.values()))
     check("no flavour package removes polkit-kde or the KDE portal",
           not any(re.search(r"kde|plasma", n) for p in packages.values() for n in p))
     check("arch has no /usr/lib32 overlay without multilib in its pacman.conf",
