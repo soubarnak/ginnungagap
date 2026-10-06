@@ -7,6 +7,8 @@ New spaces get a user namespace (root in them is not host root); spaces made bef
   sudo spaces-void userns enable NAME   (while it is stopped; --all for every space)
 Opt out for one new space: spaces create --no-userns TYPE
 
+A new Kali space installs no Kali tool set; add tools with apt (or pick one in the TUI).
+
 Autostart of spaces at login (optional, off by default):
   sudo ln -s /etc/sv/spaces-autostart /var/service/
 

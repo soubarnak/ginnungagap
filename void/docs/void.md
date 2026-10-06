@@ -117,6 +117,18 @@ sudo spaces configure ubuntu --user USER      # give another user (default: the 
 sudo spaces delete ubuntu                     # delete it; its runit service is removed with it
 ```
 
+### What a new space installs
+
+Only a small base: the distribution's minimal system, a short list of tools the integration needs (`sudo`,
+`polkit`, `git`, `nano`, `openssh`, `pipewire`, the portal and the Qt/KDE theme and wallet libraries), and, with the
+GTK desktop flavour, a few theme and portal packages (below). Nothing else: no editors, no shell extras, no tool
+collections. Since v0.0.4 **Kali** installs no Kali tool set by default either (a new Kali space is about 1.6 GB and 700
+packages instead of 14 GB and 2,600). The interactive `spaces create kali` asks which set to add: `none` (the default,
+and what `--preset` gives), `headless` (`kali-linux-headless`) or `default` (`kali-linux-default`). Add tools yourself
+afterwards, for example `spaces enter kali --root -- apt install kali-tools-top10 nmap`. The base config also no longer
+adds `fastfetch`, `screen`, `tmux` and `zsh` to every space; list what you want in `/etc/spaces/void.json`
+(`distros.<id>.packages`). A Kali space made before v0.0.4 keeps what it has.
+
 Flags verified on this machine: `create --preset basic`, `enter`, `enter -- CMD`, `enter --root -- CMD`, `start`.
 `configure`, `delete` and `enter --graphical SPACE -- CMD` (set by the desktop shortcuts, goes before the space name)
 are listed in `spaces --help` but were not exercised in M7 (`configure` asks questions in a TUI).
