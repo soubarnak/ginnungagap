@@ -32,8 +32,8 @@ the same rule (DR-020 allows running to stopped). Any other state, such as pause
 running.
 
 Refusals. A realm whose settings are services-on is started and stopped only by its `sv` service
-(ADR-003, FR-081). Until M7 both raise NotImplementedError before any write. A tier other than
-Basic raises NotImplementedError the same way, until M6. A state that DR-020 does not allow for
+(ADR-003, FR-081). Until M7 both raise GINN-E-NOT-SUPPORTED-YET (exit 2) before any write. A tier
+other than Basic raises the same code, until M6. A state that DR-020 does not allow for
 the verb raises GINN-E-REALM-STATE (exit 4). An unknown name raises GINN-E-NO-SUCH-REALM before any
 write (FR-025). A container that podman does not list is not running. A podman error while listing
 or inspecting a container is not read as "not running": it propagates, and nothing is written.
@@ -45,19 +45,24 @@ the record stays stopped; otherwise nothing is written. Neither takes a journal 
 when it writes nothing.
 
 Crash. A record that says `running` while podman does not run its container is a crash
-(DR-020, running to failed). Start then goes failed to running. Stop takes it to stopped.
+(DR-020, running to failed). Start then goes failed to running. Stop takes it to stopped. A
+running or failed record that names no container id is refused by start and stop with
+GINN-E-INTERNAL, before any state write. Its remedy is `ginn delete`, which finds the container by
+its labels (T4.7).
 
 Status and list. `RealmStatus.to_json()` gives these keys, in this order, and a golden test pins
 them: name, state, container_state, state_mismatch, distro, tier, services, generation,
 image_digest, created_at, updated_at, restart_required, share_skipped, disk, exported_apps, error.
 - state: the record's state, verbatim (DR-020). It is never rewritten from podman's view.
 - container_state: podman's state of the record's container ("created", "running", "exited",
-  ...). "absent" means podman lists no such container. "unknown" means podman did not answer.
-  Null means the container is not probed: the state is not running, stopped or failed, or the
-  record has no container id.
+  ...). "absent" means podman lists no such container. "unavailable" means podman did not answer;
+  "unknown" is podman's own state for a container it does not model. Null means the container is
+  not probed: the state is not running, stopped or failed, or the record has no container id.
 - state_mismatch: true when podman's view disagrees with the record (a running record whose
   container is not running, a stopped record whose container runs, a failed record whose
-  container runs). Null when the container is not probed or podman did not answer.
+  container runs). Podman runs a container in any state except absent, created and exited, so a
+  paused container counts as running. Null when the container is not probed, when podman did not
+  answer, or when podman reports its own "unknown" state: ginn cannot compare that one.
 - disk: `realm_home_bytes` is the allocated size of the Realm Home (FR-020), and
   `realm_home_partial` is true when the walk stopped early. The walk does not cross a file system
   boundary, and it does not follow links. `container_bytes` is null: the CLI adapter never asks
@@ -110,9 +115,16 @@ _PROBED: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmState.F
 """The states whose container podman is asked about in a status."""
 _START_FROM: Final = frozenset({RealmState.STOPPED, RealmState.FAILED})
 _STOP_FROM: Final = frozenset({RealmState.RUNNING, RealmState.FAILED})
+_WITH_CONTAINER: Final = frozenset({RealmState.RUNNING, RealmState.FAILED})
+"""The states that name a container ginn must stop or check. A record in one of them with no
+container id is refused by start and stop, and is left for `ginn delete` (T4.7)."""
 _ABSENT: Final = "absent"
-_UNKNOWN: Final = "unknown"
-_RUNNING: Final = ContainerState.RUNNING.value
+_UNAVAILABLE: Final = "unavailable"
+"""The container_state of a status whose podman query failed. It is not a podman state, so it
+never equals ContainerState.UNKNOWN, which is podman's own "unknown"."""
+_PODMAN_UNKNOWN: Final = ContainerState.UNKNOWN.value
+"""podman's own state for a container that ginn does not model. Its mismatch is null (cannot
+compare), and it is shown as "unknown", never as "unavailable"."""
 _HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
 """The container states that mean the process is not running. Any other state, such as paused or
 stopping, counts as running: a stop is then asked of podman, which is the safe reading."""
@@ -315,6 +327,17 @@ def _internal(detail: str, **values: object) -> GinnError:
     return err
 
 
+def _no_container(name: RealmName, state: RealmState) -> GinnError:
+    """A running or failed record that names no container. Start and stop cannot act on it.
+
+    The remedy is `ginn delete`, which finds the realm's containers by their labels (T4.7). The
+    record is not written here.
+    """
+    err = _internal("the realm record names no container", realm=name.value, state=state.value)
+    err.remedy = f"run 'ginn delete {name.value}', which removes the realm's containers by label"
+    return err
+
+
 def _load(store: RealmStore, name: RealmName) -> RealmRecord:
     """Read a record. A missing file is GINN-E-NO-SUCH-REALM. Any other read error is
     GINN-E-INTERNAL, as a corrupt record is (FR-020), so no caller sees a raw OSError."""
@@ -336,14 +359,25 @@ def _save(env: OpEnv, store: RealmStore, record: RealmRecord, **changes: Any) ->
 
 
 def _refuse_unsupported(record: RealmRecord, verb: str) -> None:
-    """Refuse a realm this build cannot run yet. Raises before any write (ADR-003, FR-081)."""
+    """Refuse a realm this build cannot run yet. Raises before any write (ADR-003, FR-081).
+
+    A services-on realm is started and stopped only by its sv service (ADR-003), so ginn does not
+    start or stop it with podman here.
+    """
     if record.settings.services:
-        raise NotImplementedError(
-            f"{verb} of a services-on realm arrives in M7 (ADR-003, FR-081): "
-            "a services-on realm is started and stopped only by its sv service"
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=record.name.value,
+            feature=f"{verb} of a services-on realm",
+            milestone="M7",
         )
     if record.settings.tier is not Tier.BASIC:
-        raise NotImplementedError(f"{verb} of a {record.settings.tier.value} realm arrives in M6")
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=record.name.value,
+            feature=f"{verb} of a {record.settings.tier.value} realm",
+            milestone="M6",
+        )
 
 
 def _host_user(env: OpEnv) -> HostUser:
@@ -438,6 +472,9 @@ def _start(
     """The body of a start. It runs under the realm lock, after the journal entry is written."""
     store = RealmStore(env.paths, env.clock)
     record = _load(store, name)
+    if record.container_id is None and record.state in _WITH_CONTAINER:
+        # Checked before the crash write below, so no state is written for this record.
+        raise _no_container(name, record.state)
     if record.state is RealmState.RUNNING:
         if _running(podman, name, record.container_id):
             return record
@@ -580,7 +617,7 @@ def _stop(
             allowed="running or failed",
         )
     if cid is None:
-        raise _internal("the realm has no container to stop", realm=name.value)
+        raise _no_container(name, record.state)
     try:
         podman.stop(cid, hooks.stop_timeout_s)
     except GinnError:
@@ -615,7 +652,7 @@ def _container_state(
     if cid is None or not _probed(record):
         return None, None
     if probed is None:
-        return _UNKNOWN, None
+        return _UNAVAILABLE, None
     info = probed.get(cid)
     if info is None:
         return _ABSENT, None
@@ -623,11 +660,18 @@ def _container_state(
 
 
 def _mismatch(state: RealmState, container_state: str | None) -> bool | None:
-    """True when podman's view disagrees with the record. Null when it cannot be compared."""
-    if container_state is None or container_state == _UNKNOWN:
+    """True when podman's view disagrees with the record. Null when it cannot be compared.
+
+    Null for a container that is not probed, for a podman query that failed, and for podman's own
+    "unknown" state: ginn cannot say whether such a container runs. Otherwise podman runs the
+    container in every state except absent, created and exited (_HALTED), so a paused or stopping
+    container counts as running, as in _running and _confirmed_not_running.
+    """
+    if container_state is None or container_state in (_UNAVAILABLE, _PODMAN_UNKNOWN):
         return None
     expected_running = state is RealmState.RUNNING
-    return (container_state == _RUNNING) != expected_running
+    podman_runs = container_state != _ABSENT and container_state not in _HALTED
+    return podman_runs != expected_running
 
 
 def _disk(

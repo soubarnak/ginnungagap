@@ -62,6 +62,8 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-HOST-CHANGED": 0,
     "GINN-W-REPLAY-MISSING": 0,
     "GINN-E-REALM-STATE": 4,
+    "GINN-E-HOME-UNSAFE": 77,
+    "GINN-E-NOT-SUPPORTED-YET": 2,
 }
 
 

@@ -74,7 +74,8 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 [[deferred]]
 id = "FR-019"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "unit tests on the fake podman (T4.7, ops/delete.py, test_ops_delete.py) cover: the stop of a running realm, and a failed graceful stop that is noted and followed by rm --force; the removal of the containers, the image and the record; a failed rmi that keeps the image, with a note, and lets the delete finish; a shared image kept when another container shows it by digest, id or name; a container with no image name skipped, with a note; an absent container tolerated; the purge of the Realm Home with and without confirmation; a homes directory or realm home that is a link, refused before the record moves; a mount point refused before the record moves, found in the mount table (at or below the home) and by the mount id of each directory the walk opens (a bind mount from the same file system keeps its st_dev, so st_dev alone does not catch it); a tree deeper than the limit refused; a mount table or a mount id that cannot be read refused (fail closed); a mount that appears after the check stopped before the walk enters it; a read-only owned directory, an unreadable owned directory and an inner symlink, with the symlink target kept; an entry the user does not own stopping the purge with GINN-E-HOME-UNSAFE, with its filename in the details and a remedy that depends on the reason; an interrupted delete at every journal step settled by recovery and by a GinnError, and a delete refused before recovery; the audit entries; and the refusals. AC-2 needs the `ginn delete --purge-home` confirmation in the CLI (T4.11) and a host run (M4 host run). The exported entries, the Install Manifest and the supervision entry have no code yet (M5, M7)"
 
 [[deferred]]
 id = "FR-020"
@@ -102,7 +103,7 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 id = "FR-025"
 milestone = "M4"
 partial = true
-reason = "a start, a stop or a status of an unknown realm is refused with GINN-E-NO-SUCH-REALM before any write (unit-tested in test_ops_lifecycle, T4.5, ops/lifecycle.py); the rest of the requirement, including bob's list and enter, needs the CLI and a second host user (M4 host run)"
+reason = "a start, a stop, a status or a delete of an unknown realm is refused with GINN-E-NO-SUCH-REALM before any write (unit-tested in test_ops_lifecycle, T4.5, and test_ops_delete, T4.7); a delete under another user's Owned Paths does not see the realm (test_ops_delete); the Owned Paths 0700 mode is tested in test_store_paths (T4.8); the rest of the requirement, including bob's list and enter, needs the CLI and a second host user (M4 host run)"
 
 [[deferred]]
 id = "FR-026"

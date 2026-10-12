@@ -16,6 +16,7 @@ live session under /run/user/1000 (a PipeWire socket), and a real socket would a
 import json
 import os
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -631,10 +632,12 @@ def test_services_on_start_and_stop_are_refused_until_m7(
 ) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
 
-    with pytest.raises(NotImplementedError, match="M7"):
+    with pytest.raises(GinnError, match="M7") as started:
         start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
-    with pytest.raises(NotImplementedError, match="M7"):
+    assert started.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    with pytest.raises(GinnError, match="M7") as stopped:
         stop_realm(env, fake, RealmName("lab"), hooks=hooks)
+    assert stopped.value.code == "GINN-E-NOT-SUPPORTED-YET"
 
     assert fake.calls == []
     assert list(env.audit.read()) == []
@@ -647,9 +650,10 @@ def test_a_tier_other_than_basic_is_refused_until_m6(
 ) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, tier=Tier.DEVELOPMENT)
 
-    with pytest.raises(NotImplementedError, match="M6"):
+    with pytest.raises(GinnError, match="M6") as caught:
         start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
 
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
     assert fake.calls == []
 
 
@@ -799,7 +803,7 @@ def test_a_stopped_record_with_a_container_that_is_not_running_has_no_mismatch(
 
 
 @pytest.mark.fr("FR-020")
-def test_status_says_unknown_when_podman_cannot_answer_and_list_still_shows_the_realm(
+def test_status_says_unavailable_when_podman_cannot_answer_and_list_still_shows_the_realm(
     env: OpEnv, fake: LifecyclePodman
 ) -> None:
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
@@ -809,9 +813,114 @@ def test_status_says_unknown_when_podman_cannot_answer_and_list_still_shows_the_
 
     assert (status.state, status.container_state, status.state_mismatch) == (
         "running",
-        "unknown",
+        "unavailable",
         None,
     )
+
+
+@pytest.mark.fr("FR-020")
+@pytest.mark.fr("DR-020")
+def test_podman_own_unknown_state_is_reported_as_unknown_not_as_unavailable(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    fake.containers[container_id(env, "lab")].state = ContainerState.UNKNOWN
+
+    status = realm_status(env, fake, RealmName("lab"))
+
+    # podman's own "unknown" is a state that ginn does not model. ginn cannot say whether that
+    # container runs, so the mismatch is null, and the state keeps podman's name.
+    assert (status.container_state, status.state_mismatch) == ("unknown", None)
+
+
+@pytest.mark.fr("FR-020")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", [RealmState.RUNNING, RealmState.STOPPED, RealmState.FAILED])
+def test_podman_unknown_state_is_never_a_mismatch_for_any_record_state(
+    env: OpEnv, fake: LifecyclePodman, state: RealmState
+) -> None:
+    make_realm(env, fake, "lab", state, running=False)
+    fake.containers[container_id(env, "lab")].state = ContainerState.UNKNOWN
+
+    status = realm_status(env, fake, RealmName("lab"))
+
+    assert (status.container_state, status.state_mismatch) == ("unknown", None)
+
+
+@pytest.mark.fr("FR-020")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(
+    ("state", "container", "mismatch"),
+    [
+        (RealmState.RUNNING, ContainerState.PAUSED, False),
+        (RealmState.RUNNING, ContainerState.STOPPING, False),
+        (RealmState.STOPPED, ContainerState.PAUSED, True),
+        (RealmState.FAILED, ContainerState.PAUSED, True),
+        (RealmState.RUNNING, ContainerState.EXITED, True),
+        (RealmState.RUNNING, ContainerState.CREATED, True),
+        (RealmState.STOPPED, ContainerState.EXITED, False),
+        (RealmState.STOPPED, ContainerState.CREATED, False),
+    ],
+)
+def test_a_paused_container_counts_as_running_in_the_status_mismatch(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    state: RealmState,
+    container: ContainerState,
+    mismatch: bool,
+) -> None:
+    make_realm(env, fake, "lab", state, running=False)
+    fake.containers[container_id(env, "lab")].state = container
+
+    status = realm_status(env, fake, RealmName("lab"))
+
+    assert (status.container_state, status.state_mismatch) == (container.value, mismatch)
+
+
+@pytest.mark.fr("FR-016")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", [RealmState.RUNNING, RealmState.FAILED])
+def test_start_of_a_record_with_no_container_id_is_refused_before_any_state_write(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    state: RealmState,
+) -> None:
+    make_realm(env, fake, "lab", state, running=False)
+    RealmStore(env.paths, env.clock).save(replace(stored(env, "lab"), container_id=None))
+    before = record_bytes(env, "lab")
+    fake.calls.clear()
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert "ginn delete lab" in caught.value.remedy
+    assert record_bytes(env, "lab") == before
+    assert fake.ops() == []
+    (entry,) = audit_of(env, "start")
+    assert (entry.outcome, entry.error_code) == ("error", "GINN-E-INTERNAL")
+
+
+@pytest.mark.fr("FR-016")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", [RealmState.RUNNING, RealmState.FAILED])
+def test_stop_of_a_record_with_no_container_id_points_at_delete_and_writes_no_state(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, state: RealmState
+) -> None:
+    make_realm(env, fake, "lab", state, running=False)
+    RealmStore(env.paths, env.clock).save(replace(stored(env, "lab"), container_id=None))
+    before = record_bytes(env, "lab")
+    fake.calls.clear()
+
+    with pytest.raises(GinnError) as caught:
+        stop_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert "ginn delete lab" in caught.value.remedy
+    assert record_bytes(env, "lab") == before
+    assert fake.ops() == []
 
 
 @pytest.mark.fr("FR-064")

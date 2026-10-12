@@ -32,6 +32,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |
 | `GINN-E-DISTRO-DATA` | 70 | shipped distro data {file} is invalid: {field} {rule} | the shipped distro data is invalid; reinstall ginn, or report a bug with this message | NFR-060 (ginn-defined; not an SRS code) |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |
+| `GINN-E-HOME-UNSAFE` | 77 | realm home '{path}' cannot be removed: {reason} | inspect '{path}' and fix it by hand, then run 'ginn delete {realm} --purge-home' again; 'ginn delete {realm}' removes the realm and keeps the home | DR-010, DR-021 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-NOT-SET-UP` | 77 | runtime directory {path} does not exist | run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged; changed paths: {paths} | review the listed paths, then run 'ginn integrity --ack' and retry the command | FR-006 AC-1 |
 | `GINN-E-IMAGE-UNVERIFIED` | 65 | image digest for {distro} does not match the trust manifest | do not use this image; retry later, and update ginn if the mismatch persists | FR-011 AC-1 |
@@ -42,6 +43,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-NETWORK` | 69 | network failure; retries exhausted | check the network connection, then retry the command | FR-120 AC-1, AC-2 |
 | `GINN-E-NO-SUCH-REALM` | 3 | no realm named '{realm}' for this user | run 'ginn list' to see your realms | FR-025 AC-1 |
 | `GINN-E-NO-SUCH-USER` | 2 | no account named '{user}' on this host | create that account first, or run 'sudo ginn host-setup --user &lt;name&gt;' with the name of an existing account | FR-001 (ginn-defined; not an SRS code) |
+| `GINN-E-NOT-SUPPORTED-YET` | 2 | realm '{realm}' cannot be used yet: {feature} arrives in {milestone} | use a realm this build can run; docs/roadmap.md lists the milestones | FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-OPTION-INVALID` | 2 | option {option} is not valid for distro {distro} | remove the option, or choose a distro that supports it | FR-014 AC-3 |
 | `GINN-E-PATH-FORBIDDEN` | 2 | path '{path}' may not be shared with a realm | choose another path; see DR-004 | FR-063 AC-2; FR-103 AC-1 |
 | `GINN-E-PKG-MANAGER` | 1 | native package manager failed in realm '{realm}' | run again with --verbose to see the package manager output, fix its cause, then retry | FR-040; FR-120 |

@@ -156,6 +156,7 @@ class FakePodman:
 
     def rmi(self, ref: str) -> None:
         self._record("rmi", ref)
+        self._take_op_failure("rmi")
         if self.images.pop(ref, None) is None:
             raise make("GINN-E-INTERNAL")
 

@@ -378,6 +378,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "is resumed with 'ginn create --resume {realm}' or removed with 'ginn delete {realm}'",
         source="DR-020 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-E-HOME-UNSAFE",
+        exit_code=77,
+        summary="realm home '{path}' cannot be removed: {reason}",
+        remedy="inspect '{path}' and fix it by hand, then run 'ginn delete {realm} --purge-home' "
+        "again; 'ginn delete {realm}' removes the realm and keeps the home",
+        source="DR-010, DR-021 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-NOT-SUPPORTED-YET",
+        exit_code=2,
+        summary="realm '{realm}' cannot be used yet: {feature} arrives in {milestone}",
+        remedy="use a realm this build can run; docs/roadmap.md lists the milestones",
+        source="FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
