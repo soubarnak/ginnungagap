@@ -139,7 +139,7 @@ record_mem() {
 }
 
 make_dirs() {
-  mkdir -p -m 700 "$SPIKE_XRD"
+  mkdir -p "$SPIKE_XRD"
   chmod 700 "$SPIKE_XRD"
   mkdir -p "$(dirname "$GINN_SPIKE_RUNROOT")" "$GINN_SPIKE_RUNROOT" "$SPIKE_TMPDIR" \
     "$GINN_SPIKE_ROOT"
@@ -410,7 +410,8 @@ record_packages() { # tag
 
 cmd_new_sweep() {
   init_out
-  local id="s05r-$(date +%Y%m%dT%H%M%S)"
+  local id
+  id="s05r-$(date +%Y%m%dT%H%M%S)"
   printf '%s\n' "$id" > "$OUT/sweep.id"
   log "sweep id $id"
 }
@@ -452,7 +453,7 @@ cmd_off() {
       init=$(pm inspect --format '{{.State.Pid}}' "$name")
       sleep "$WINDOW"
       record_mem "$sweep" off "$r"
-      raw="$OUT/raw/off-$r.json"
+      raw="$OUT/raw/off-$r-a$attempt.json"
       row=$(measure_realm "$con" "$init" "$raw") \
         || die "measurement invalid for off run $r (pause check or accounting)"
       pm rm -f "$name" >/dev/null 2>&1 || true
@@ -487,8 +488,8 @@ cmd_on_trial() {
   log "on-trial $cfg: $outcome | $out | $detail"
   cleanup_realm "$name" "$leaf"
   # The trial gates the sweeps: it passes only when the start settled with 0 failed units.
-  local s_settle s_boot s_state s_failed
-  IFS=$'\t' read -r s_settle s_boot s_state s_failed <<<"$out"
+  local s_settle s_failed
+  IFS=$'\t' read -r s_settle _ _ s_failed <<<"$out"
   [[ $outcome == started && $s_settle == ok && $s_failed == 0 ]]
 }
 
