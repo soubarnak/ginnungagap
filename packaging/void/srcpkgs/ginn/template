@@ -2,26 +2,24 @@
 pkgname=ginn
 version=0.1.0
 revision=1
+archs="x86_64 x86_64-musl"
 build_style=python3-pep517
-hostmakedepends="python3-setuptools python3-wheel"
-depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
-checkdepends="python3-pytest python3-hypothesis"
 # The release tarball has no git metadata, so the repo hygiene test cannot run here.
 # CI runs it on the checkout.
 make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
+hostmakedepends="python3-setuptools python3-wheel"
+depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
+checkdepends="python3-pytest python3-hypothesis"
 short_desc="Per-distribution realms on rootless Podman for Void Linux"
 maintainer="Bongbetic <soubarna@live.in>"
 license="Apache-2.0"
 homepage="https://github.com/soubarnak/ginnungagap"
 distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
 checksum=@CHECKSUM@
-archs="x86_64 x86_64-musl"
 
 post_install() {
-	vlicense LICENSE
 	vlicense NOTICE
 	vdoc README.md
-	vdoc NOTICE
 }
 
 # ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists.

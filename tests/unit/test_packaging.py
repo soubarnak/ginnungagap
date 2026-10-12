@@ -86,10 +86,16 @@ def test_template_license_is_apache_2_0() -> None:
 
 
 @pytest.mark.fr("CR-005")
-@pytest.mark.parametrize("name", ["LICENSE", "NOTICE"])
-def test_template_installs_license_and_notice_with_vlicense(name: str) -> None:
-    # Apache-2.0 4(a) requires a copy of the License and 4(d) the NOTICE text to ship with ginn.
-    assert f"vlicense {name}" in _post_install_body()
+def test_template_installs_notice_with_vlicense() -> None:
+    # Apache-2.0 4(d): the NOTICE text is project-specific, so ginn ships its own copy.
+    assert "vlicense NOTICE" in _post_install_body()
+
+
+@pytest.mark.fr("CR-005")
+def test_template_does_not_install_license_with_vlicense() -> None:
+    # Void ships the Apache-2.0 text (/usr/share/licenses/Apache-2.0), which covers 4(a).
+    # xlint reports "license Apache-2.0 should not be installed" for a vlicense of the license.
+    assert "vlicense LICENSE" not in _post_install_body()
 
 
 @pytest.mark.fr("AS-003")
