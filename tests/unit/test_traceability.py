@@ -502,14 +502,13 @@ def test_check_fails_on_a_marker_for_an_unknown_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.fr("NFR-061")
-def test_check_fails_when_the_rendered_doc_is_stale(tmp_path: Path) -> None:
+def test_check_passes_when_the_doc_file_is_absent(tmp_path: Path) -> None:
+    # docs/traceability.md is generated and not committed, so --check never needs it.
     root = _tree(tmp_path, COVERED, deferred="")
-    assert _run(root, "--write").returncode == 0
-    doc = root / "docs" / "traceability.md"
-    doc.write_text(doc.read_text(encoding="utf-8") + "\nedited by hand\n", encoding="utf-8")
     result = _run(root, "--check")
-    assert result.returncode == 1
-    assert "docs/traceability.md is missing or out of date" in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "traceability: ok" in result.stdout
+    assert not (root / "docs" / "traceability.md").exists()
 
 
 @pytest.mark.fr("NFR-061")

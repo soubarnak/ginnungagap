@@ -6,7 +6,8 @@
 #   check                      template version equal to the pyproject version, no tag yet, clean tree
 #   checksum URL_OR_FILE       write the sha256 of the release tarball into the template
 #   repo BINPKGS_DIR OUT_DIR   sign the ginn packages and build the signed repository in OUT_DIR,
-#                              one signed index per architecture found in BINPKGS_DIR
+#                              one signed index per architecture found in BINPKGS_DIR. OUT_DIR
+#                              also gets the rendered traceability matrix (traceability.md)
 #   cut                        run check, create the annotated tag v<version>, print next steps
 #
 # The signing key is read from GINN_SIGNING_KEY. Keys are never committed; *.pem and
@@ -90,6 +91,10 @@ cmd_repo() {
         count=$((count + 1))
     done
     [ "$count" -gt 0 ] || die "no ginn*.xbps packages in $bins"
+    # Render the traceability matrix and ship it with the packages (NFR-061, Appendix C).
+    # It is generated and not committed, so it is rendered here before it is copied.
+    python3 -I "$here/tools/traceability.py" --write
+    cp -- "$here/docs/traceability.md" "$out/traceability.md"
     # Sign each package before indexing: the index records the file hash.
     for pkg in "$out"/ginn*.xbps; do
         xbps-rindex --sign-pkg --signedby "$signer" --privkey "$key" "$pkg"

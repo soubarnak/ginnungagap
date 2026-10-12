@@ -10,13 +10,13 @@
 id = "FR-001"
 milestone = "M3"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M3"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
 
 [[deferred]]
 id = "FR-002"
 milestone = "M3"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M3"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
 
 [[deferred]]
 id = "FR-005"
@@ -32,7 +32,7 @@ reason = "not covered yet; the roadmap assigns its test to T3.8 (M3)"
 id = "FR-007"
 milestone = "M3"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M3"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
 
 [[deferred]]
 id = "FR-010"
@@ -43,7 +43,7 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 id = "FR-011"
 milestone = "M4"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M4"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
 
 [[deferred]]
 id = "FR-012"
@@ -204,7 +204,7 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 id = "FR-081"
 milestone = "M7"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M7"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7"
 
 [[deferred]]
 id = "FR-082"
@@ -250,7 +250,7 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 id = "FR-120"
 milestone = "M8"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M8"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
 
 [[deferred]]
 id = "FR-121"
@@ -261,25 +261,25 @@ reason = "not covered yet; the roadmap assigns its test to M8"
 id = "FR-122"
 milestone = "M8"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M8"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
 
 [[deferred]]
 id = "FR-123"
 milestone = "M8"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M8"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
 
 [[deferred]]
 id = "FR-124"
 milestone = "M2"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M2"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M2"
 
 [[deferred]]
 id = "NFR-001"
 milestone = "M10"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M10"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M10"
 
 [[deferred]]
 id = "NFR-002"
@@ -335,7 +335,7 @@ reason = "not covered yet; the roadmap assigns its test to M3"
 id = "NFR-030"
 milestone = "M8"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M8"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
 
 [[deferred]]
 id = "NFR-031"
@@ -356,7 +356,7 @@ reason = "not covered yet; the roadmap assigns its test to M3"
 id = "NFR-043"
 milestone = "M2"
 partial = true
-reason = "audit completeness: the audit writer (T2.9) is where the one-entry-per-op property is first testable; the suite-wide count closes later"
+reason = "unit or property tests cover part of the requirement (one audit entry per operation, T2.9); the remaining acceptance criteria, including the suite-wide count, need M2"
 
 [[deferred]]
 id = "NFR-060"
@@ -377,7 +377,7 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 id = "NFR-SEC-001"
 milestone = "M4"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M4"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
 
 [[deferred]]
 id = "NFR-SEC-002"
@@ -398,13 +398,13 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 id = "NFR-SEC-005"
 milestone = "M2"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M2"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M2"
 
 [[deferred]]
 id = "NFR-SEC-006"
 milestone = "M6"
 partial = true
-reason = "not covered yet; the roadmap assigns its test to M6"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M6"
 
 [[deferred]]
 id = "NFR-SEC-007"

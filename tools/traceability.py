@@ -31,8 +31,8 @@ Modes:
                      in docs/traceability-deferred.toml; a deferred entry that has a counted test
                      unless it sets `partial = true`; a `partial = true` entry with no counted
                      test; a deferred entry that lacks a milestone, has a non-boolean `partial`,
-                     or names an ID that is not a Must FR or NFR; a docs/traceability.md that is
-                     not the current render
+                     or names an ID that is not a Must FR or NFR. docs/traceability.md is not
+                     read: it is generated, not committed (NFR-061, Appendix C)
   --root DIR         repository root (default: the parent of tools/)
 
 A deferred entry with `partial = true` is an ID whose unit-level tests can run (their markers
@@ -555,10 +555,6 @@ def check(root: Path) -> tuple[Model, list[str]]:
             )
     for item in model.unmarked:
         errors.append(f"{item} has no fr marker: name the requirement it proves (AGENTS.md)")
-    doc = root / DOC_NAME
-    current = doc.read_text(encoding="utf-8") if doc.exists() else None
-    if current != render(model):
-        errors.append(f"{DOC_NAME} is missing or out of date: run tools/traceability.py --write")
     return model, errors
 
 
