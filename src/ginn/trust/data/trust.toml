@@ -1,7 +1,10 @@
 # Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, AS-024, NFR-008, NFR-SEC-004).
 #
 # Read-only at runtime. This file ships with ginn and ginn never writes it (DR-040). It changes
-# only through the refresh procedure in spikes/results/S-10.md (section 6).
+# only through the refresh procedure in spikes/results/S-10.md (section 6). The dev-time tool
+# tools/refresh-trust-manifest.py runs the digest step of that procedure (step 1, through skopeo).
+# Its --write mode rewrites only the `digest` line. The sizes, the signature and verified_on need
+# steps 3 to 5 by hand.
 #
 # digest_kind = "platform" on every entry. `digest` is the linux/amd64 PLATFORM manifest digest,
 # not the index (manifest-list) digest. An index digest changes whenever another architecture or

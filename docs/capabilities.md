@@ -2,7 +2,7 @@
 
 This document lists every podman option that ginn adds to a realm beyond the base argv that all realms share. It is the enumerated set that NFR-SEC-002 refers to. `security/caps.py` (T6.1) must produce exactly this set, and the per-tier argv test compares against it.
 
-The set is accepted (decision of 2026-10-12, recorded in ADR-006 for Development and in this file for Kali). Each row names its evidence: a spike ID and a case ID in `spikes/results/`. Rows marked "pending" are not yet proven on the reference host.
+The set is accepted (decision of 2026-10-12). The Development part follows ADR-006, as amended on the same day. Each row names its evidence: a spike ID and a case ID in `spikes/results/`. Rows marked "pending" are not yet proven on the reference host.
 
 ## Base argv (all tiers)
 
@@ -18,60 +18,87 @@ Options every realm carries. None adds a capability or a device.
 | Item | Option | Evidence | Status |
 |---|---|---|---|
 | Added options | none | none needed | done |
-| GPU device nodes (FR-061) | `--device` for each GPU node; NVIDIA through CDI (FR-069) | S-06 and ADR-008 (planned) decide the node list. Not in this document yet. | pending |
+| GPU device nodes (FR-061) | `--device` for each GPU node; NVIDIA through CDI (FR-069) | S-06 and ADR-012 (planned) decide the node list. Not in this document yet. | pending |
 
 ## Development
 
-Outer options added to every Development realm.
+Development grants Basic plus nested rootless containers (FR-062 AC-3) and `/dev/kvm` (FR-062 AC-4). The tier adds no capability to the realm. It adds two devices, two security options and one group. It also runs the inner podman in single-ID mode, with no subordinate ID range for the realm user. The design is in ADR-006.
+
+### Outer options
+
+These options are added to every Development realm, beyond the base argv.
 
 | Item | Option | Why | Evidence | Status |
 |---|---|---|---|---|
-| Inner storage device | `--device /dev/fuse` | fuse-overlayfs is the inner storage driver (FR-062 AC-3) | S-07 M2 (inner overlay mount fails without it); S-07d M-fuse (rc 127) | proven |
-| Inner network device | `--device /dev/net/tun` | pasta and slirp4netns need it for the inner default network (FR-062 AC-3) | S-07 A4 (pasta fails without it); S-07d M-tun (rc 127) | proven |
-| KVM device | `--device /dev/kvm`, added only when the host has `/dev/kvm` (IR-040) | FR-062 AC-4 | S-07c K1 (realm user opens /dev/kvm read-write with keep-groups); S-07c K2 (denied without it). K1 tests open() only. | open() proven; KVM ioctls and the combined set pending (M6) |
-| Kept groups | `--group-add keep-groups` | keeps the host supplementary groups, so the realm user keeps the kvm group. crun only (ADR-004). | S-07c K1 and K2 | proven |
-| Proc unmask | `--security-opt unmask=/proc/*` | the inner proc mounts and `ping_group_range` need the unmasked entries | S-07 M3 (`unmask=/proc/sys` fails at the proc mount); S-07 M4 (`unmask=/proc/sys/net` fails); S-07 A8 (no unmask fails); S-07d G4 passes; S-07d M-unmask fails | proven |
-| Seccomp profile | `--security-opt seccomp=<generated profile>` (rule below) | the inner crun calls `sethostname`, which the default profile refuses without CAP_SYS_ADMIN | S-07d M-seccomp (default profile: rc 126, sethostname EPERM); S-07d G2 and G4 pass; S-07d U1 (realm cannot change its own outer hostname) | proven for sethostname; setdomainname not tested alone |
+| Inner storage device | `--device /dev/fuse` | The overlay driver mounts through fuse-overlayfs. The vfs driver does not need it. | S-07d M-fuse (overlay mount fails, rc 127). S-07e E5c (vfs passes without it). | proven for the overlay driver |
+| Inner network device | `--device /dev/net/tun` | pasta, the inner default network, needs it. | S-07e E5a (pasta fails without it, rc 127). S-07d M-tun. | proven |
+| KVM device | `--device /dev/kvm`, only when the host has `/dev/kvm` (IR-040) | FR-062 AC-4 | S-07c K1 (realm user opens /dev/kvm read-write with keep-groups). S-07c K2 (denied without it). | open() proven. KVM ioctls and the full set pending (M6). |
+| Kept groups | `--group-add keep-groups` | Keeps the host's supplementary groups, so the realm user keeps the kvm group. Works under crun only (ADR-004). | S-07c K1 and K2 | proven for the /dev/kvm open(). Not run with the inner-container set. |
+| Proc unmask | `--security-opt unmask=/proc/*` | The inner proc mount and `ping_group_range` need the unmasked entries. | S-07e E5b (`ping_group_range` fails without it, rc 126). S-07d M-unmask. S-07 M3 and M4 (narrower values fail). | proven |
+| Seccomp profile | `--security-opt seccomp=<generated profile>` (rule below) | The inner crun calls `sethostname`. The default profile refuses that call without CAP_SYS_ADMIN. | S-07e E3 (default profile: rc 126, EPERM). S-07e E4c (generated profile passes). | proven for `sethostname`. `setdomainname` is not ungated, and it is not needed (S-07e Finding 3). |
 
-Realm-internal changes. These happen inside the realm image and the realm's own files, not on the host.
+The base argv also carries `--runtime crun`, `--userns keep-id`, `--network host` and `--init --init-path <catatonit>`. Every passing case in S-07e used them. ginn adds no `--cap-add`, and nothing in this table grants a capability.
+
+### Realm contents and create-time steps
+
+These steps run inside the realm or in the Realm Home. They do not change the host.
 
 | Item | Change | Why | Evidence | Status |
 |---|---|---|---|---|
-| Newuidmap helper | `/usr/bin/newuidmap` with `cap_setuid=ep`, mode 0755, no setuid bit | a setuid helper runs with euid 0, and the kernel then needs CAP_SYS_ADMIN for the uid_map write (ADR-006) | S-07d F1 passes; S-07d G3 (setuid helpers, control) fails with rc 125; S-07d P1 and P2 | proven on Debian stable only |
-| Newgidmap helper | `/usr/bin/newgidmap` with `cap_setgid=ep`, mode 0755, no setuid bit | same as newuidmap | same as above | proven on Debian stable only |
-| Setcap tool package | `libcap2-bin` (Debian and Kali), `libcap` (Arch and Fedora). Development only. | needed to run `setcap` in the realm build | S-07d used `libcap2-bin` on Debian stable | Arch and Fedora package names untested. Conflicts with FR-013 and CR-007 as written: see CL-8 below. |
-| Realm subuid and subgid | Replace the image's `useradd` line (`dev:100000:65536`) with the realm user's range. Tested value: `dev:1001:64000`. | the image's line is not mapped inside the outer namespace; inner podman needs a mapped range | S-07 Finding 4 (image line unmapped); S-07 A7 (no range: lchown fails with EINVAL); S-07c and S-07d used `dev:1001:64000` | proven as tested. The two-line form `dev:1:999` and `dev:1001:64536` gives inner 0..65535 (S-07 A6, under SYS_ADMIN). The exact value is set in T6.7. |
+| Realm user | Create the realm user with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u <uid> <name>`. No line for the realm user goes into `/etc/subuid` or `/etc/subgid`. | Plain `useradd` adds `dev:100000:65536`. Inner podman then calls newuidmap, which fails without CAP_SYS_ADMIN. | S-07e2 useradd check (plain useradd writes both lines, `-K` writes none). S-07e2 E1d-u1 (plain useradd: rc 125, newuidmap EPERM). S-07e2 E1d-u2 (`-K`: passes). | proven on Debian stable only |
+| Inner storage config | ginn writes `~/.config/containers/storage.conf` in the Realm Home. Overlay form: `[storage]` with `driver = "overlay"`, then `[storage.options.overlay]` with `mount_program = "/usr/bin/fuse-overlayfs"` and `ignore_chown_errors = "true"`. | Single-ID mode needs `ignore_chown_errors`. Without it, the image unpack fails on `/etc/shadow`. | S-07e2 E1d (pass; its image had the subordinate lines removed by `sed`). S-07e2 E1d-u2 (pass with `-K`). S-07e2 E1d-nokey (no key: lchown EINVAL, rc 125). | proven on Debian stable, podman 5.4.2 inside |
+| Inner storage config, vfs form | The same file uses `driver = "vfs"` and `[storage.options.vfs]` with `ignore_chown_errors = "true"`. | An alternative that does not need fuse-overlayfs. Not the default. | S-07e2 E1d-vfs and E1d-u2-vfs (pass). S-07e2 E1d-vfs-nokey (fails without the key). | proven as an alternative. Disk and speed cost not measured. |
+| Inner container config | ginn writes `~/.config/containers/containers.conf` with `[engine]`, `cgroup_manager = "cgroupfs"` and `events_logger = "file"`. | Present in every passing inner run. | S-07e2 (same file as S-07e). | written. Whether it is needed was not tested. |
+| Realm image | The image needs podman and its helpers. They come in as requested packages (CR-007). ginn does not add them. No setcap step, no libcap package, no helper file change. | The inner podman has to exist. | S-07e2 Conclusion, item 4, and open item 4 | open: how the request is made is the user's decision (CL-8) |
 
-### Position on CR-007, FR-013 and CL-8
+Notes on the storage choice. The overlay form with fuse-overlayfs is the design choice. It is the form the Development outer set is built for, with `/dev/fuse` in the set. The vfs form also passes, and it needs no `/dev/fuse`. Its disk and speed cost was not measured, so it stays an alternative.
 
-The helper change and the setcap package are realm-internal steps after create. They are applied only in the Development tier. They are the same kind of step as installing the Integration Package Set. The base image is not modified: it stays the official image at its pinned digest (CR-007). The steps are to be recorded so that rebuild replays them.
+Inner podman runs without `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`. Podman 5.4.2 drops the storage.conf options when `--root` is on the command line (S-07e Finding 1). With `XDG_RUNTIME_DIR` unset, the inner runroot falls back to `/tmp/storage-run-1000` (S-07e2).
 
-This does not satisfy the SRS as written, so it is not claimed as compliant:
+### Limitation: one ID inside nested containers
 
-- FR-013 limits the Integration Package Set to CA certificates and locale data, and fixes it per distribution. AC-1 allows no other package additions. A libcap package in Development realms is outside that list.
-- CR-007 limits realm contents to the official image, the Integration Package Set, and requested packages with their declared dependencies. The libcap package is none of these. The file-capability change also alters a file in the realm, which CR-007 does not list.
-- FR-021 names only the Install Manifest for rebuild. The SRS does not say that this step is replayed.
+A nested container sees one ID, uid 0. The single mapping is `0 1000 1`. `chown` to any other ID fails with EINVAL (S-07e E6: `chown 100:100 /x`, rc 1). Image files owned by other IDs unpack as root. A nested process cannot switch to another user. Only uid 0 was exercised. A nested process that runs as a non-root image user was not tested.
 
-CL-8 in `docs/clarifications.md` asks SRS v1.1 to decide this. Until then the setcap step and its package are a known conflict, not a settled rule.
+The earlier design, with setcap helpers and a subordinate range, gave a full ID map inside the realm. It needed the setcap step and the libcap package. Those conflict with FR-013 and CR-007 (ADR-006, CL-8).
 
-Rules for Development. These are things that must not appear.
+### Rules for Development
+
+These options and actions must not appear in a Development realm.
 
 | Rule | Why | Evidence |
 |---|---|---|
-| No `--cap-add` of any kind. SYS_ADMIN is not granted. | ADR-006, decision 1 | S-07d G4: CapBnd `0x800405fb`, CapEff empty |
-| No `--privileged` | NFR-SEC-001, CR-003 | refused by the argv builder |
-| No `seccomp=unconfined` | disables the whole filter, not only the two calls | S-07d G1 passes but is informative only; not used |
-| No `no-new-privileges` | blocks the file capabilities the helpers need | S-07 M5 fails with the setuid helpers; not retested with setcap |
-| No `label=disable` | the decision omits it: Void hosts have no SELinux (decision 1) | S-07 M1, and S-07d C3c-g2 and G4, pass without it. Host-specific: the test host had no SELinux. Revisit on an SELinux host. |
+| No `--cap-add` of any kind. SYS_ADMIN is not granted. | NFR-SEC-002. SYS_ADMIN is outside the rootless defaults. | The single-ID set passes without it (S-07e E1o, S-07e2 E1d-u2). The older subordinate-ID set needed it (S-07 A5, S-07c C4). |
+| No `--privileged`. | NFR-SEC-001, CR-003 | Refused by the argv builder. |
+| No `seccomp=unconfined`. | It disables the whole filter, not the one call that needs relief. | S-07d G1 passes, as an informative run only. |
+| No setcap, no libcap package, no change to a helper binary. | They conflict with FR-013 and CR-007 (CL-8). The single-ID set does not need them. | S-07e E1o-realm (helpers unused), S-07e2 E1d-u2 (no setcap, no libcap). |
+| No `/etc/subuid` or `/etc/subgid` line for the realm user. | A line makes inner podman call newuidmap, which fails. | S-07e E0 (rc 125). S-07e2 E1d-u1 (rc 125). |
+| No host ACL on `/dev/kvm`. | keep-groups already opens the device. An ACL would need a root step. | S-07c K1. |
+| No `label=disable`. | Void hosts have no SELinux. The passing runs do not use it. | S-07e E1o (passes without it). Revisit on an SELinux host. |
+| No `no-new-privileges`. | The single-ID set uses no setuid helper, so the old reason is gone. | Not tested with this set. S-07 M5 (old set: blocks the setuid helper). |
+| Inner podman takes no `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`. | Podman 5.4.2 drops the storage.conf options when `--root` is on the command line. | S-07e Finding 1 (E1 fails). S-07e2 (plain run passes). |
 
 ### Seccomp profile generation rule
 
 1. The source is `/usr/share/containers/seccomp.json` on the host, the default profile podman uses.
-2. Remove `sethostname` and `setdomainname` from every rule that names them. That removes the rule that allows them only with CAP_SYS_ADMIN, and the rule that returns EPERM without it. Drop any rule left with no names.
-3. Insert one rule at the front that allows both names unconditionally (`SCMP_ACT_ALLOW`, no includes or excludes).
-4. Change nothing else. The tested generator is `make_seccomp` in `spikes/s07d_newuidmap.sh`.
-5. Fail closed. If the source file is missing, or the `sethostname` and `setdomainname` entries are not found, ginn stops with an error. It never falls back to `seccomp=unconfined`. The error needs a catalogue code. No code for this case exists in `docs/errors.md` yet; a dedicated code is requested for the errors owner.
-6. Write the result under an Owned Path (DR-010). The file name is the SHA-256 of the source file, so a changed host profile produces a new file. Unit tests use a hand-written fixture profile, not a copy of the host file.
+2. Remove the name `sethostname` from every rule that names it. The host file names it in two rules (S-07e Finding 3). Leave `setdomainname` alone, so it keeps its original conditions. Drop any rule that is left with no names.
+3. Insert one rule at the front. It allows `sethostname` with action `SCMP_ACT_ALLOW`. It has no includes and no excludes.
+4. Change nothing else. The tested generator is the sethostname-only variant of `spikes/s07e_seccomp.py`.
+5. Fail closed. If the source file is missing, or the `sethostname` entries are not found, ginn stops with an error. It never falls back to `seccomp=unconfined`. The error needs a catalogue code. None exists in `docs/errors.md` yet. A code is requested for the errors owner.
+6. Write the result under an Owned Path (DR-010). Name the file after the SHA-256 of the source, so a changed host profile gives a new file. Unit tests use a hand-written fixture profile, not a copy of the host file.
+
+### Position on CR-007, FR-013 and CL-8
+
+The single-ID design adds no package, no helper file change and no setcap step. Its realm-side changes are these:
+
+- The realm user is created with the `-K` flags. That is part of realm creation (T4.4), not a package addition.
+- The two config files go into the Realm Home. They are ginn-owned data (DR-006).
+
+Two points stay open:
+
+- The image must contain podman and its helpers. A realm can get them only as requested packages, which CR-007 allows. FR-013 AC-1 allows no other additions, so ginn does not add podman by itself. S-07e2 left the request path to the user.
+- The `-K` user creation is not in the Install Manifest. FR-021 names only the Install Manifest for replay. The rebuild must repeat the creation step by design (T8.3). The SRS does not say so.
+
+CL-8 is withdrawn for the setcap and libcap steps. See `docs/clarifications.md`.
 
 ## Custom (FR-063)
 
@@ -93,14 +120,18 @@ Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the
 ## Not in this document
 
 - FR-085 (Docker in a realm) is deferred. Its options will be added here when it is decided (CL-2).
-- NVIDIA CDI devices (FR-069) are covered by ADR-008, which is planned.
+- NVIDIA CDI devices (FR-069) are covered by ADR-012, which is planned.
 
-## Open items for M6
+## Open items for the M6 host test
 
-The M6 host test `tests/integration/test_tiers_real.py` must prove these, because the spikes did not:
+The M6 host test `tests/integration/test_tiers_real.py` must prove these. The spikes did not.
 
-- The full Development set together: `/dev/kvm`, keep-groups, the seccomp profile and the setcap helpers, with no SYS_ADMIN.
-- KVM ioctls, not only open().
-- The setcap helpers and package on the Arch and Fedora images.
-- `setdomainname` on its own, if the seccomp rule is kept for it.
-- The realm subuid value (T6.7).
+- The full Development set together: `/dev/kvm`, keep-groups, `unmask=/proc/*`, `/dev/fuse`, `/dev/net/tun`, the seccomp profile with only `sethostname`, the Realm Home config files and `useradd -K`, with no SYS_ADMIN. Two parts were not combined. S-07e2 used the both-names profile and no keep-groups. The sethostname-only profile was tested only with CLI storage options (S-07e E4c).
+- KVM ioctls, not only open() (S-07c K1).
+- `XDG_RUNTIME_DIR` inside the realm. S-07e2 left it unset. A realm that sets it moves the inner runroot.
+- A Realm Home bind-mounted from the host. S-07e2 used the outer container's own `/home/dev`. The owner, the permissions and the keep-id mapping of a bind mount were not tested.
+- `setdomainname` through `--domainname` in an inner container, under the sethostname-only profile (S-07e follow-up 2).
+- A realm created as Basic and later changed to Development. The `-K` rule applies at create time. It does not remove a subordinate line that already exists. Not tested.
+- The disk and speed cost of the vfs form, if it is chosen.
+- Other distributions (Arch, Fedora, Kali) and other podman versions. Tested so far: a Debian stable image with podman 5.4.2 inside, and podman 5.8.8 outside.
+- Rebuild repeats the `-K` user creation (T8.3).

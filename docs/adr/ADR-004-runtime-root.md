@@ -112,3 +112,30 @@ Residual, not pinned by R11: containers/image still reads user files under `$HOM
 | CR-006 | After Host Setup, ginn writes only to Owned Paths. The podman environment is an allowlist, and TMPDIR and the config files are Owned Paths. |
 | NFR-SEC-005 | The new flags are argv entries. The OCI runtime name is validated with `require_arg`. |
 | NFR-040 | Failures map to catalogue codes: GINN-E-HOST-NOT-SET-UP and GINN-E-RUNTIME-DIR-UNSAFE for the runtime root (exit 77), and GINN-E-INTERNAL for a missing ginn config file. |
+
+## Addendum: S-04s logout simulation
+
+- Date: 2026-10-12
+
+This addendum records a simulation. It changes no decision above. It adds the evidence for the runtime root under logout. The simulation is in `spikes/results/S-04.md`, section "Simulated logout (S-04s/S-08s)".
+
+What ran. The real-logout run S-04 was invalid. Its ssh login never registered with elogind on this host, so it measured nothing. S-04s simulated the logout instead. It removed a stand-in for `/run/user/<uid>`, and it recreated that stand-in at login. It killed no process. The runs used podman 5.8.8 and crun 1.30.1, as uid 1000.
+
+Results:
+
+- Variant A (runroot and tmpdir outside the session directory, on tmpfs): passes. After the simulated logout and login, the containers stayed running. `exec` and `stop` worked with the same flags. The spike placed variant A under `/dev/shm`, not under `/run/ginn/<uid>`. The exact path in this ADR was not run. The result covers the kind of location, not the exact path.
+- Variant B (runroot and tmpdir inside the session directory): fails. On the first podman call after login, podman printed `Podman detected system restart - performing state refresh`. The containers read as exited with pid 0. `exec` failed with rc 255. `stop` had no effect. `rm -f` returned 0, and the process survived as an orphan.
+- In the same refresh, podman logged `level=error` with `acquiring lock 6 ...: file exists` for the container. This error was not traced.
+
+Assumption. The result holds when elogind does not kill user processes at logout. The Void default is `#KillUserProcesses=no` in `/etc/elogind/logind.conf`, so the default is no. With `KillUserProcesses=yes`, elogind kills the processes at logout, and the simulation does not apply. The doctor check in T3.6 fails when the effective value is `yes`.
+
+The SIGKILL on stop. The spike's `stop` logged a SIGTERM failure and a SIGKILL for variant A. The cause is the test container. It ran `sleep infinity` as PID 1 with no `--init`. ginn passes `--init` to every services-off realm (FR-082), so this is not a finding for those realms. Services-on realms run systemd as PID 1 and do not use `--init`. S-04s did not test them.
+
+Caveats:
+
+- A simulation, not a real logout. The PAM session close, the elogind teardown and the unmount of the runtime tmpfs were not measured. The test containers used `--cgroups disabled` and `--network none`.
+- The `acquiring lock ... file exists` error was not traced.
+- podman 5.8.8 only.
+- The path `/run/ginn/<uid>` was not run. Host Setup creates it (above). A run at that exact path is still open.
+
+Consequence. The decision above holds. The runtime root must sit outside the per-login directory. Variant B shows what happens when it does not. ADR-008 builds the session socket rebind on the variant A layout. A real logout test (S-04, rerun) is still open.

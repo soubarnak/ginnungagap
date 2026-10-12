@@ -6,14 +6,14 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 
 | ID | Topic | Requirement IDs | Status |
 |---|---|---|---|
-| CL-1 | Runtime directory for services-on realms | DR-010, FR-081, FR-084, DEP-3 | open, for SRS v1.1 |
+| CL-1 | Runtime directory for services-on realms | DR-010, FR-081, FR-084, DEP-3 | confirmed by S-04s (simulated); SRS wording open for v1.1 |
 | CL-2 | Docker daemon in a realm (FR-085) | FR-085, AS-006, NFR-SEC-002 | open, for SRS v1.1 (deferred with FR-085) |
 | CL-3 | Realm root maps to a subordinate UID | AS-007, CR-003, NFR-SEC-001 | open, for SRS v1.1 |
 | CL-4 | unused | none | unused |
-| CL-5 | Session sockets after re-login | IR-025, FR-084 | open, for SRS v1.1 |
+| CL-5 | Session sockets after re-login | IR-025, FR-084 | resolved by S-08s: rebind (ADR-008); SRS wording open for v1.1 |
 | CL-6 | Kali image channel | AS-024, IR-021, FR-011 | open, for SRS v1.1 |
 | CL-7 | Distribution ID is an enum | DR-005, NFR-060, DR-003 | open, for SRS v1.1 |
-| CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | open, for SRS v1.1 |
+| CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | withdrawn (2026-10-12, D2) |
 | CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
 
 ## CL-1: runtime directory for services-on realms
@@ -22,7 +22,8 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 - Issue: DR-010 names `$XDG_RUNTIME_DIR/ginn` as an Owned Path. Under elogind, `$XDG_RUNTIME_DIR` belongs to a login session (DEP-3). It is removed at logout unless lingering is enabled. This is standard logind behaviour and was not measured here. A services-on realm must keep running after logout (FR-081, FR-084), so it needs a runtime directory that does not depend on a session.
 - Proposed wording: DR-010 names `/run/ginn/<uid>`, created by Host Setup, in place of `$XDG_RUNTIME_DIR/ginn`.
 - How ginn works now: ginn uses `/run/ginn/<uid>`, created by Host Setup (ADR-004). The deviation from DR-010 stands until this clarification is written into the SRS.
-- Evidence: S-04 (roadmap M1) is the confirming spike. It has not run yet, and no S-04 result exists.
+- Evidence: the real-logout run S-04 is invalid. The host created no elogind session for the test login (`spikes/results/S-04.md`). The simulation S-04s (same file, section "Simulated logout") shows that a runroot and tmpdir outside the session directory survive a simulated logout. Inside the session directory they do not survive: podman runs a "system restart" state refresh at the first call after login, and it loses the container. Variant A used `/dev/shm`, not `/run/ginn/<uid>`. ADR-004 has the addendum.
+- Status: confirmed by S-04s (simulated). The result assumes elogind `KillUserProcesses=no`, the Void default (commented out in `/etc/elogind/logind.conf`). The doctor check in T3.6 fails when the effective value is `yes` (ADR-004). The SRS wording is still open for v1.1, so this entry stays open until the SRS author writes it.
 
 ## CL-2: Docker daemon in a realm (FR-085)
 
@@ -46,8 +47,9 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 
 - Requirement IDs: IR-025, FR-084.
 - Issue: session sockets (display, audio, D-Bus) are bound when a realm starts. After logout they go stale, while a services-on realm keeps running. A realm that autostarts (FR-084) would then hold dead sockets after the next login.
-- Proposed wording: to be decided after S-08. Either the session sockets are rebound on login, or the SRS states that a services-on realm needs a restart after re-login.
-- Evidence: S-08 (roadmap M1) decides this, by rebinding through `open_tree` and `move_mount`, or by a documented restart. S-08 has not run.
+- Proposed wording: decided by S-08s, not by the SRS. ginn rebinds the stale sockets in place (ADR-008). Suggested SRS wording: "A services-on realm keeps running after re-login, and its session sockets are rebound on the next enter or launch."
+- Evidence: the real-logout run S-08 is invalid for the same reason as S-04: no elogind session for the test login (`spikes/results/S-08.md`). The simulation S-08s (same file, section "Simulated logout") shows a stale socket after the simulated logout. An in-place rebind under `podman unshare` (umount2, then move_mount) gives a live socket with no restart. The caveats are in ADR-008.
+- Status: resolved by S-08s: rebind (ADR-008). Restart-required was rejected, because services-on realms exist to keep their services running across logout (FR-081, FR-084). The SRS wording is still open for v1.1.
 
 ## CL-6: Kali image channel
 
@@ -67,9 +69,11 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 
 - Requirement IDs: FR-013, CR-007, FR-021, FR-062, NFR-SEC-002.
 - Issue: the Development tier needs file capabilities on `newuidmap` and `newgidmap` inside the realm (ADR-006). That needs the setcap tool, from `libcap2-bin` on Debian and Kali, or `libcap` on Arch and Fedora. Both changes are made after create. FR-013 limits the Integration Package Set to CA certificates and locale data. It is fixed per distribution, and AC-1 allows no other package additions. A Development realm would show a libcap package in its package diff. CR-007 limits realm contents to the official image, the Integration Package Set, and requested packages with their declared dependencies. The libcap package fits none of these. The changed helper files are also a change to realm contents. FR-021 names only the Install Manifest for rebuild, so the SRS does not say that these steps are replayed.
-- Position: ginn applies these steps after create, only in the Development tier. They are the same kind of step as installing the Integration Package Set. The base image is not modified: it stays the official image at its pinned digest. The steps are recorded so that rebuild replays them. This does not comply with FR-013 or CR-007 as they are written, and the register does not claim that it does.
-- Proposed wording: amend FR-013 and CR-007 to allow a Development-tier set of post-create steps, named in `docs/capabilities.md`. Add the replay of those steps to FR-021. No other route is known yet that avoids both a file change and an extra package.
+- Former position (withdrawn): ginn applies these steps after create, only in the Development tier. They are the same kind of step as installing the Integration Package Set. The base image is not modified: it stays the official image at its pinned digest. The steps are recorded so that rebuild replays them. This does not comply with FR-013 or CR-007 as they are written, and the register does not claim that it does.
+- Former proposed wording (no longer needed): amend FR-013 and CR-007 to allow a Development-tier set of post-create steps, named in `docs/capabilities.md`. Add the replay of those steps to FR-021. No other route is known yet that avoids both a file change and an extra package.
 - Evidence: S-07d F1 and G3 (the helper change), and S-07d used `libcap2-bin` on Debian stable only.
+- Status: withdrawn (2026-10-12, D2). The raiser withdraws it. The single-ID design (ADR-006, amended) needs no setcap step, no libcap package and no helper file change (S-07e E1o, S-07e2 E1d-u2). The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, which is part of realm creation (T4.4). The Realm Home config files are ginn-owned data. So the setcap and libcap steps no longer conflict with FR-013 AC-1 or CR-007, and the former position and wording above are not needed.
+- Open point, not part of this withdrawal: the image must contain podman and its helpers. A realm can get them only as requested packages, which CR-007 allows. S-07e2 did not decide how the request is made. That is for the user.
 
 ## CL-9: create-time refresh and the Integration Package Set
 
