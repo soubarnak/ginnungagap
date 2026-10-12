@@ -1,18 +1,52 @@
 # SPDX-License-Identifier: Apache-2.0
 """Error catalogue checks against GINN-SRS-001 and the generated docs/errors.md (NFR-040)."""
 
-import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from ginn.errors import CATALOGUE, make
+from ginn.errors import (
+    CATALOGUE,
+    EXEC_GINN_FAILURE,
+    GinnError,
+    Warning,
+    make,
+    placeholders,
+    warn,
+)
 
 REPO = Path(__file__).resolve().parents[2]
 SRS = REPO / "GINN-SRS-001-v1.0.md"
 GENERATOR = REPO / "tools" / "gen_errors_doc.py"
 CODE_PATTERN = re.compile(r"GINN-[EW]-[A-Z0-9-]+")
+
+# The exit-code scheme. Changing a status is a deliberate edit here and in errors.py.
+EXPECTED_EXIT: dict[str, int] = {
+    "GINN-E-USAGE": 2,
+    "GINN-E-PKG-NAME-INVALID": 2,
+    "GINN-E-OPTION-INVALID": 2,
+    "GINN-E-PATH-FORBIDDEN": 2,
+    "GINN-E-NAME-INVALID": 2,
+    "GINN-E-NO-SUCH-REALM": 3,
+    "GINN-E-NAME-TAKEN": 4,
+    "GINN-E-UNDO-REALMS-EXIST": 4,
+    "GINN-E-HOST-UNACKED": 4,
+    "GINN-E-PKG-MANAGER": 1,
+    "GINN-E-DOCTOR-FAILED": 1,
+    "GINN-E-IMAGE-UNVERIFIED": 65,
+    "GINN-E-PKG-SIGNATURE": 65,
+    "GINN-E-NETWORK": 69,
+    "GINN-E-DISK-SPACE": 73,
+    "GINN-E-REALM-BUSY": 75,
+    "GINN-E-SETUP-ROOT": 77,
+    "GINN-E-INTERRUPTED": 130,
+    "GINN-E-INTERNAL": 70,
+    "GINN-W-HOST-CHANGED": 0,
+    "GINN-W-REPLAY-MISSING": 0,
+}
 
 
 @pytest.mark.fr("NFR-040")
@@ -42,17 +76,110 @@ def test_warnings_exit_zero_and_errors_exit_non_zero() -> None:
 
 
 @pytest.mark.fr("NFR-040")
-def test_make_fills_placeholders() -> None:
+def test_exit_codes_follow_the_scheme() -> None:
+    assert {code: spec.exit_code for code, spec in CATALOGUE.items()} == EXPECTED_EXIT
+
+
+@pytest.mark.fr("IR-011")
+def test_exec_ginn_failure_is_reserved_and_unused() -> None:
+    assert EXEC_GINN_FAILURE == 125
+    assert EXEC_GINN_FAILURE not in {spec.exit_code for spec in CATALOGUE.values()}
+
+
+@pytest.mark.fr("NFR-040")
+@pytest.mark.parametrize("code", sorted(CATALOGUE))
+def test_every_entry_formats_with_its_own_fields(code: str) -> None:
+    """Catches placeholder typos: each entry is filled with dummy values for exactly its fields."""
+    spec = CATALOGUE[code]
+    names = placeholders(spec.summary) | placeholders(spec.remedy)
+    for name in names:
+        assert name.isidentifier(), f"{code}: placeholder {name!r} is not an identifier"
+    values = {name: f"VALUE-{name}" for name in names}
+    if spec.exit_code == 0:
+        notice = warn(code, **values)
+        assert isinstance(notice, Warning)
+        text = notice.message + " " + notice.remedy
+    else:
+        err = make(code, **values)
+        assert err.details == values
+        text = err.message + " " + err.remedy
+    for value in values.values():
+        assert value in text, f"{code}: {value} missing from the formatted text"
+
+
+@pytest.mark.fr("NFR-040")
+def test_make_renders_message_remedy_and_details() -> None:
     err = make("GINN-E-NAME-TAKEN", name="arch")
     assert err.code == "GINN-E-NAME-TAKEN"
     assert err.message == "realm name 'arch' is already taken"
+    assert err.exit_code == 4
+    assert err.details == {"name": "arch"}
+
+
+@pytest.mark.fr("NFR-040")
+def test_make_rejects_missing_fields() -> None:
+    with pytest.raises(ValueError, match=r"GINN-E-NAME-TAKEN.*missing fields \['name'\]"):
+        make("GINN-E-NAME-TAKEN")
+
+
+@pytest.mark.fr("NFR-040")
+def test_make_rejects_unexpected_fields() -> None:
+    with pytest.raises(ValueError, match=r"GINN-E-NAME-TAKEN.*unexpected fields \['extra'\]"):
+        make("GINN-E-NAME-TAKEN", name="arch", extra="x")
+
+
+@pytest.mark.fr("FR-022")
+def test_make_refuses_warning_codes() -> None:
+    with pytest.raises(ValueError, match="GINN-W-REPLAY-MISSING"):
+        make("GINN-W-REPLAY-MISSING", package="htop")
+
+
+@pytest.mark.fr("FR-006")
+def test_warn_refuses_error_codes() -> None:
+    with pytest.raises(ValueError, match="GINN-E-NAME-TAKEN"):
+        warn("GINN-E-NAME-TAKEN", name="arch")
+
+
+@pytest.mark.fr("FR-006")
+def test_warn_renders_message_and_remedy() -> None:
+    notice = warn("GINN-W-HOST-CHANGED", paths="/etc/hosts")
+    assert notice == Warning(
+        "GINN-W-HOST-CHANGED",
+        "host files changed since baseline: /etc/hosts",
+        "review the listed paths, then run 'ginn integrity --ack'",
+    )
+
+
+@pytest.mark.fr("NFR-040")
+def test_ginn_error_refuses_exit_zero() -> None:
+    with pytest.raises(ValueError, match="warning"):
+        GinnError("GINN-E-TEST-ZERO", "message", "remedy", exit_code=0)
+
+
+@pytest.mark.fr("NFR-040")
+def test_ginn_error_refuses_a_catalogued_warning_code() -> None:
+    with pytest.raises(ValueError, match="GINN-W-REPLAY-MISSING"):
+        GinnError("GINN-W-REPLAY-MISSING", "message", "remedy", exit_code=1)
+
+
+@pytest.mark.fr("DR-002")
+def test_name_invalid_keeps_the_realm_name_pattern_literal() -> None:
+    err = make("GINN-E-NAME-INVALID", name="Arch!")
+    assert "^[a-z][a-z0-9-]{0,31}$" in err.message
     assert err.exit_code == 2
 
 
 @pytest.mark.fr("NFR-040")
+def test_placeholders_skip_escaped_braces() -> None:
+    assert placeholders("pattern {{0,31}} and {name}") == frozenset({"name"})
+
+
+@pytest.mark.fr("NFR-040")
 def test_generated_errors_doc_is_current() -> None:
-    spec = importlib.util.spec_from_file_location("gen_errors_doc", GENERATOR)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.main(["--check"]) == 0
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [sys.executable, str(GENERATOR), "--check"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

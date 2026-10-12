@@ -17,7 +17,6 @@ dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy"]
 
 [project.scripts]
 ginn = "ginn.__main__:main"
-ginn-gui = "ginn.gui.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

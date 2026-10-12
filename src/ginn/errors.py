@@ -1,28 +1,81 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Error catalogue (NFR-040).
+"""Error catalogue (NFR-040, IR-011).
 
 Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry, plus the CLI-level
 codes GINN-E-USAGE, GINN-E-INTERRUPTED and GINN-E-INTERNAL. `source` cites the requirement that
-defines the failure. Summaries and remedies may hold {placeholders} that `make()` fills.
+defines the failure.
+
+Exit statuses, by category:
+    0    success. GINN-W-* warnings also keep 0: they are notices, not exceptions.
+    1    operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED
+    2    input validation: usage, names, options, paths
+    3    not found: GINN-E-NO-SUCH-REALM
+    4    conflict with existing state: name taken, undo refused, unacknowledged host change
+    65   data error (EX_DATAERR): image or package signature not verified
+    69   network failure
+    70   internal error (EX_SOFTWARE)
+    73   not enough disk space
+    75   realm busy (EX_TEMPFAIL)
+    77   Host Setup must run as root (EX_NOPERM)
+    125  reserved; see EXEC_GINN_FAILURE
+    130  interrupted by the user
+
+Summaries and remedies may hold {placeholders} that `make()` and `warn()` fill. A literal brace
+is written as {{ or }}. `make()` and `warn()` reject missing and unexpected placeholder names.
 """
 
+import string
+from collections.abc import Mapping
 from dataclasses import dataclass
+
+EXEC_GINN_FAILURE = 125
+"""Exit status for ginn-side failures of `ginn exec` and `ginn enter` (IR-011, FR-049).
+
+`ginn exec` returns the inner command's exit status, so a ginn failure must not reuse a status
+a command can return. The exec command remaps its own failures to this value (used in M4).
+No catalogue entry uses it.
+"""
 
 
 class GinnError(Exception):
-    """A failure with a catalogue code, a one-line remedy and a process exit status."""
+    """A failure with a catalogue code, a one-line remedy and a non-zero process exit status.
 
-    def __init__(self, code: str, message: str, remedy: str, exit_code: int = 1) -> None:
+    Exit status 0 belongs to warnings, which are not exceptions, so it raises ValueError here
+    (use `warn()`). `details` holds the values that filled the placeholders; the JSON error
+    object carries them.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        remedy: str,
+        exit_code: int = 1,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        catalogued = CATALOGUE.get(code)
+        if exit_code == 0 or (catalogued is not None and catalogued.exit_code == 0):
+            raise ValueError(f"{code} is a warning (exit 0); use warn(), not an exception")
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
         self.remedy = remedy
         self.exit_code = exit_code
+        self.details: dict[str, object] = dict(details or {})
+
+
+@dataclass(frozen=True)
+class Warning:
+    """A non-fatal GINN-W-* notice. The command keeps going and exits 0."""
+
+    code: str
+    message: str
+    remedy: str
 
 
 @dataclass(frozen=True)
 class ErrorSpec:
-    """One catalogue entry."""
+    """One catalogue entry. Warnings (GINN-W-*) use the same record with exit_code 0."""
 
     code: str
     exit_code: int
@@ -41,7 +94,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ),
     ErrorSpec(
         code="GINN-E-UNDO-REALMS-EXIST",
-        exit_code=1,
+        exit_code=4,
         summary="undo refused: user {user} still has realms",
         remedy="delete those realms first with 'ginn delete <realm>'",
         source="FR-003 AC-2",
@@ -54,22 +107,37 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-006 AC-1; FR-104 AC-1",
     ),
     ErrorSpec(
+        code="GINN-E-HOST-UNACKED",
+        exit_code=4,
+        summary="host integrity warning not acknowledged",
+        remedy="run 'ginn integrity --ack', then retry the command",
+        source="FR-006 AC-1",
+    ),
+    ErrorSpec(
         code="GINN-E-NAME-TAKEN",
-        exit_code=2,
+        exit_code=4,
         summary="realm name '{name}' is already taken",
         remedy="choose another name with --name",
         source="FR-010 AC-3",
     ),
     ErrorSpec(
+        code="GINN-E-NAME-INVALID",
+        exit_code=2,
+        summary="realm name '{name}' does not match ^[a-z][a-z0-9-]{{0,31}}$ or is reserved",
+        remedy="use a lowercase letter first, then lowercase letters, digits or hyphens; "
+        "not ginn, host, root or all",
+        source="DR-002",
+    ),
+    ErrorSpec(
         code="GINN-E-IMAGE-UNVERIFIED",
-        exit_code=1,
+        exit_code=65,
         summary="image digest for {distro} does not match the trust manifest",
         remedy="do not use this image; retry later, and update ginn if the mismatch persists",
         source="FR-011 AC-1",
     ),
     ErrorSpec(
         code="GINN-E-PKG-SIGNATURE",
-        exit_code=1,
+        exit_code=65,
         summary="package signature check failed in realm '{realm}'",
         remedy="fix the repository keys; ginn never skips signature checks",
         source="FR-012 AC-1",
@@ -90,7 +158,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ),
     ErrorSpec(
         code="GINN-E-NO-SUCH-REALM",
-        exit_code=2,
+        exit_code=3,
         summary="no realm named '{realm}' for this user",
         remedy="run 'ginn list' to see your realms",
         source="FR-025 AC-1",
@@ -108,6 +176,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         summary="path '{path}' may not be shared with a realm",
         remedy="choose another path; see DR-004",
         source="FR-063 AC-2; FR-103 AC-1",
+    ),
+    ErrorSpec(
+        code="GINN-E-PKG-MANAGER",
+        exit_code=1,
+        summary="native package manager failed in realm '{realm}'",
+        remedy="run again with --verbose to see the package manager output, fix its cause, "
+        "then retry",
+        source="FR-040; FR-120",
+    ),
+    ErrorSpec(
+        code="GINN-E-DOCTOR-FAILED",
+        exit_code=1,
+        summary="{failed} of {total} doctor checks failed",
+        remedy="run the command printed under each failing check, then run 'ginn doctor' again",
+        source="FR-007 AC-1",
     ),
     ErrorSpec(
         code="GINN-E-NETWORK",
@@ -156,12 +239,41 @@ _SPECS: tuple[ErrorSpec, ...] = (
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
 
 
-def make(code: str, **fmt: object) -> GinnError:
-    """Build a GinnError for a catalogue code, filling {placeholders} from `fmt`."""
-    spec = CATALOGUE[code]
-    return GinnError(
-        code,
-        spec.summary.format(**fmt),
-        spec.remedy.format(**fmt),
-        spec.exit_code,
+def placeholders(text: str) -> frozenset[str]:
+    """Return the {field} names in a catalogue template. Escaped braces are not fields."""
+    return frozenset(
+        name for _literal, name, _spec, _conv in string.Formatter().parse(text) if name is not None
     )
+
+
+def _render(code: str, spec: ErrorSpec, fmt: Mapping[str, object]) -> tuple[str, str]:
+    """Fill summary and remedy. Missing or unexpected placeholder names raise ValueError."""
+    fields = placeholders(spec.summary) | placeholders(spec.remedy)
+    not_names = sorted(name for name in fields if not name.isidentifier())
+    if not_names:
+        raise ValueError(f"{code}: placeholder names must be identifiers, got {not_names}")
+    missing = sorted(fields - set(fmt))
+    unexpected = sorted(set(fmt) - fields)
+    if missing or unexpected:
+        raise ValueError(
+            f"{code}: missing fields {missing or 'none'}, unexpected fields {unexpected or 'none'}"
+        )
+    return spec.summary.format(**fmt), spec.remedy.format(**fmt)
+
+
+def make(code: str, **fmt: object) -> GinnError:
+    """Build a GinnError for an error code, filling {placeholders} from `fmt`."""
+    spec = CATALOGUE[code]
+    if spec.exit_code == 0:
+        raise ValueError(f"{code} is a warning (exit 0); use warn(), not make()")
+    message, remedy = _render(code, spec, fmt)
+    return GinnError(code, message, remedy, spec.exit_code, details=fmt)
+
+
+def warn(code: str, **fmt: object) -> Warning:
+    """Build a Warning for a GINN-W-* code, filling {placeholders} from `fmt`."""
+    spec = CATALOGUE[code]
+    if spec.exit_code != 0:
+        raise ValueError(f"{code} is an error (exit {spec.exit_code}); use make(), not warn()")
+    message, remedy = _render(code, spec, fmt)
+    return Warning(code, message, remedy)

@@ -25,6 +25,9 @@ HEADER = (
     "\n"
     "Placeholders in braces, such as `{name}`, are filled in at run time.\n"
     "\n"
+    "Exit status 125 is not used by any code below. `ginn exec` returns the inner command's exit "
+    "status, so ginn-side failures of `exec` and `enter` exit 125 instead (IR-011, FR-049).\n"
+    "\n"
 )
 
 
@@ -40,6 +43,11 @@ def _cell(text: str) -> str:
     return text.replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _template(text: str) -> str:
+    """Show a catalogue template as written: doubled braces are literal braces in the output."""
+    return text.replace("{{", "{").replace("}}", "}")
+
+
 def render(specs: Iterable[ErrorSpec]) -> str:
     """Return the full text of docs/errors.md for the given entries, sorted by code."""
     rows = ["| Code | Exit | Meaning | Remedy | Source |", "|---|---|---|---|---|"]
@@ -48,8 +56,8 @@ def render(specs: Iterable[ErrorSpec]) -> str:
         cells = [
             f"`{spec.code}`",
             str(spec.exit_code),
-            _cell(spec.summary),
-            _cell(spec.remedy),
+            _cell(_template(spec.summary)),
+            _cell(_template(spec.remedy)),
             _cell(spec.source),
         ]
         rows.append("| " + " | ".join(cells) + " |")

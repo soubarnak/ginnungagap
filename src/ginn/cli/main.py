@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parse arguments, dispatch to a command and render failures (IR-010, IR-011, NFR-052).
 
-Exit statuses: 0 success, 2 usage or validation, 130 interrupted, 70 internal error, and the
-per-code status from the error catalogue. Usage problems are detected before argparse runs
-so the message text does not depend on the Python version.
+Each failure exits with the status of its error-catalogue entry (see ginn.errors): 0 success;
+1 operational failure; 2 input validation; 3 not found; 4 conflict; 65 data error; 69 network;
+70 internal error; 73 disk space; 75 realm busy; 77 Host Setup must run as root; 125 reserved for
+ginn-side failures of `exec` and `enter`; 130 interrupted.
+
+Missing and unknown commands are detected before argparse runs, so their message text does not
+depend on the Python version.
 """
 
 import argparse
@@ -13,7 +17,8 @@ from collections.abc import Sequence
 from typing import NoReturn
 
 from ginn import __version__
-from ginn.cli.commands import COMMANDS, CommandSpec, Context
+from ginn.cli import commands as registry
+from ginn.cli.commands import CommandSpec, Context
 from ginn.cli.output import Output
 from ginn.errors import GinnError, make
 
@@ -63,17 +68,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     --json and --verbose are accepted before and after the command name. The subcommand copies
     use default=SUPPRESS, so `ginn --json list` is not reset to False by the subparser.
+    Abbreviations are rejected (allow_abbrev=False), so `--js` is an unknown option, not `--json`.
     """
     parser = _Parser(
         prog="ginn",
         description="Ginnungagap: isolated per-distribution Realms on rootless Podman.",
         epilog=MAIN_EPILOG,
         formatter_class=_HELP_FORMAT,
+        allow_abbrev=False,
     )
     _add_json_verbose(parser, default=False)
     parser.add_argument("--version", action="version", version=f"ginn {__version__}")
-    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
-    for spec in COMMANDS:
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="COMMAND",
+        required=True,
+        help="command to run; see 'ginn COMMAND --help'",
+    )
+    for spec in registry.COMMANDS:
         _check_example(spec)
         sub = subparsers.add_parser(
             spec.name,
@@ -81,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
             description=spec.help,
             epilog=f"Example: {spec.example}",
             formatter_class=_HELP_FORMAT,
+            allow_abbrev=False,
         )
         _add_json_verbose(sub, default=argparse.SUPPRESS)
         spec.configure(sub)
@@ -98,6 +111,8 @@ def _before_separator(tokens: Sequence[str]) -> list[str]:
 
 
 def _first_positional(tokens: Sequence[str]) -> str | None:
+    # Assumes every root option is a flag (nargs == 0). test_root_options_are_flags_only pins
+    # this. A root option that took a value would make its value look like the command name.
     for word in tokens:
         if not word.startswith("-"):
             return word
@@ -105,17 +120,24 @@ def _first_positional(tokens: Sequence[str]) -> str | None:
 
 
 def run(argv: Sequence[str] | None = None) -> int:
-    """Run one ginn invocation and return the process exit status."""
+    """Run one ginn invocation and return the process exit status.
+
+    Failures go to Output.error and exit with the catalogue status. An unexpected exception
+    becomes GINN-E-INTERNAL (70). Under --verbose its traceback is written before the error.
+    """
     tokens = list(sys.argv[1:] if argv is None else argv)
-    out = Output(json_mode="--json" in _before_separator(tokens), verbose=False)
-    parser = build_parser()
+    before_sep = _before_separator(tokens)
+    # Pre-scan the global flags so failures before parsing (for example a registry error) still
+    # honour --json and --verbose.
+    out = Output(json_mode="--json" in before_sep, verbose="--verbose" in before_sep)
     try:
+        parser = build_parser()
+        names = {spec.name: spec for spec in registry.COMMANDS}
         first = _first_positional(tokens)
         if first is None and HELP_OR_VERSION.isdisjoint(tokens):
             if not out.json_mode:
                 parser.print_help(sys.stderr)
             raise make("GINN-E-USAGE", detail="missing command")
-        names = {spec.name: spec for spec in COMMANDS}
         if first is not None and first not in names:
             raise make("GINN-E-USAGE", detail=f"unknown command '{first}'")
         args = parser.parse_args(tokens)
@@ -130,10 +152,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         out.error(err)
         return err.exit_code
     except KeyboardInterrupt:
-        out.error(make("GINN-E-INTERRUPTED"))
-        return 130
+        interrupted = make("GINN-E-INTERRUPTED")
+        out.error(interrupted)
+        return interrupted.exit_code
     except Exception:
-        # Last-resort boundary: any unexpected failure becomes GINN-E-INTERNAL.
-        out.error(make("GINN-E-INTERNAL"))
+        # Last-resort boundary: any unexpected failure becomes GINN-E-INTERNAL. The traceback
+        # goes first so that the error object stays the last line on stderr.
         out.verbose_line(traceback.format_exc())
-        return 70
+        internal = make("GINN-E-INTERNAL")
+        out.error(internal)
+        return internal.exit_code
