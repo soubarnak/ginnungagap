@@ -155,20 +155,17 @@ class Journal:
     def begin(
         self, op: str, realm: RealmName, params: Mapping[str, Any] | None = None
     ) -> JournalEntry:
-        """Record that `op` has started on `realm`. Refuses to overwrite an existing entry."""
+        """Record that `op` has started on `realm`. Refuses to overwrite an existing entry.
+
+        An existing entry raises GINN-E-RECOVERY-PENDING (exit 4). The SRS defines no code for an
+        unrecovered interrupted operation, so the catalogue entry is ginn-defined.
+        """
         self._paths.journal.mkdir(mode=OWNED_DIR_MODE, parents=True, exist_ok=True)
         path = self._file(realm.value)
         if path.exists():
             existing = JournalEntry.from_json(read_json(path, SCHEMA_VERSION), str(path))
-            err = make("GINN-E-INTERNAL")
-            err.details.update(
-                {
-                    "reason": "an interrupted operation is journalled; recovery must run first",
-                    "realm": realm.value,
-                    "op": existing.op,
-                    "pid": existing.pid,
-                }
-            )
+            err = make("GINN-E-RECOVERY-PENDING", realm=realm.value, op=existing.op)
+            err.details["pid"] = existing.pid
             raise err
         pid = os.getpid()
         entry = JournalEntry(

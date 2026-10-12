@@ -47,7 +47,7 @@ _COMPONENTS = st.sampled_from(
     [
         ".", "..", "", "Music", "Downloads", ".ssh", ".gnupg", ".config", "autostart", "fish",
         "config.fish", ".bashrc", ".local", "share", "applications", "ginn", "realms", "etc",
-        "usr", "USB", "bob", "x",
+        "usr", "USB", "bob", "x", "a:b", "c,d",
     ]
 )  # fmt: skip
 _PREFIXES = st.sampled_from(
@@ -74,6 +74,7 @@ def test_accepted_share_never_reaches_a_forbidden_target(
         return
     target = shared.path
     assert target == Path(os.path.realpath(target)), "accepted path is not canonical"
+    assert ":" not in str(target) and "," not in str(target), "accepted path has a separator"
     roots = [HOME, *(Path(os.path.realpath(root)) for root in ROOTS_UNDER_TEST)]
     assert any(root in target.parents for root in roots), "accepted path is outside every root"
     for rule in FORBIDDEN_RULES:

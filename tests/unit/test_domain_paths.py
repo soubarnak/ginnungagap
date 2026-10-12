@@ -126,6 +126,10 @@ REFUSED = [
     ("/home/alice/.local/share/ginn", "ro"),
     ("/home/alice/.local/share/ginn/realms/x", "rw"),
     ("/home/alice/.local/share", "rw"),
+    ("/home/alice/Music:x", "ro"),
+    ("/home/alice/Music,x", "rw"),
+    ("/home/alice/x:y/../Music", "rw"),
+    ("/run/media/alice/USB:1", "rw"),
     ("/run/media", "ro"),
     ("/run/media", "rw"),
     ("/media", "rw"),
@@ -214,6 +218,18 @@ def test_symlink_into_ssh_is_refused(real_home: Path) -> None:
     with pytest.raises(GinnError) as info:
         SharedPath.parse(str(real_home / "safe"), home=real_home, owned_paths=[], mode="ro")
     assert info.value.details["reason"].startswith("DR-004.ssh")
+
+
+@pytest.mark.parametrize("name", ["odd:name", "odd,name"])
+def test_symlink_to_a_target_with_a_separator_is_refused(real_home: Path, name: str) -> None:
+    """The link text has no separator, but the mount would use the target, which does."""
+    (real_home / name).mkdir()
+    (real_home / "link").symlink_to(real_home / name)
+    with pytest.raises(GinnError) as info:
+        SharedPath.parse(str(real_home / "link"), home=real_home, owned_paths=[], mode="ro")
+    assert info.value.code == "GINN-E-PATH-FORBIDDEN"
+    assert info.value.details["path"] == str(real_home / "link")
+    assert "':' or ','" in info.value.details["reason"]
 
 
 def test_dangling_symlink_into_ssh_is_refused(real_home: Path) -> None:

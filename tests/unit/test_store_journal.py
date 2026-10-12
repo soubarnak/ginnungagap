@@ -80,11 +80,40 @@ def test_finish_removes_the_entry_and_a_second_finish_is_harmless(paths: OwnedPa
 
 @pytest.mark.fr("FR-122")
 def test_begin_refuses_to_overwrite_an_interrupted_entry(paths: OwnedPaths) -> None:
+    """A create killed mid-way leaves a journal whose process is gone: recovery is pending."""
+    dead = _dead_pid()
+    _write_entry(
+        paths,
+        "debian",
+        JournalEntry(
+            op="create",
+            realm="debian",
+            pid=dead,
+            started="2026-10-12T09:00:00.000Z",
+            pid_start=None,
+            step="download",
+            params={},
+        ),
+    )
+    before = (paths.journal / "debian.json").read_bytes()
+    with pytest.raises(GinnError) as excinfo:
+        Journal(paths).begin("rebuild", RealmName("debian"))
+    err = excinfo.value
+    assert err.code == "GINN-E-RECOVERY-PENDING"
+    assert err.exit_code == 4
+    assert err.details == {"realm": "debian", "op": "create", "pid": dead}
+    assert "ginn create --resume debian" in err.remedy
+    assert "ginn delete debian" in err.remedy
+    assert (paths.journal / "debian.json").read_bytes() == before
+
+
+@pytest.mark.fr("FR-122")
+def test_begin_over_a_same_process_entry_is_also_refused(paths: OwnedPaths) -> None:
     journal = Journal(paths)
     journal.begin("create", RealmName("debian"))
     with pytest.raises(GinnError) as excinfo:
         journal.begin("rebuild", RealmName("debian"))
-    assert excinfo.value.code == "GINN-E-INTERNAL"
+    assert excinfo.value.code == "GINN-E-RECOVERY-PENDING"
     assert excinfo.value.details["op"] == "create"
     stored = json.loads((paths.journal / "debian.json").read_text(encoding="utf-8"))
     assert stored["op"] == "create"

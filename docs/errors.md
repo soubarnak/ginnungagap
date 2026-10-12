@@ -14,7 +14,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
-| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change |
+| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered |
 | 65 | data error (EX_DATAERR): image or package signature not verified |
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
@@ -44,6 +44,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-PKG-NAME-INVALID` | 2 | package name '{name}' is not valid | use plain package names with no wildcards or shell characters | FR-040 AC-2 |
 | `GINN-E-PKG-SIGNATURE` | 65 | package signature check failed in realm '{realm}' | fix the repository keys; ginn never skips signature checks | FR-012 AC-1 |
 | `GINN-E-REALM-BUSY` | 75 | {op} in progress | wait for the running operation to finish, then retry | FR-123 AC-1 |
+| `GINN-E-RECOVERY-PENDING` | 4 | realm '{realm}' has an interrupted {op} that was never recovered | run 'ginn create --resume {realm}' if the operation was a create, or 'ginn delete {realm}' | FR-122 (ginn-defined; not an SRS code) |
 | `GINN-E-SETUP-ROOT` | 77 | Host Setup must run as root | run 'sudo ginn host-setup --user &lt;name&gt;' | FR-001 AC-2 |
 | `GINN-E-UNDO-REALMS-EXIST` | 4 | undo refused: user {user} still has realms | delete those realms first with 'ginn delete &lt;realm&gt;' | FR-003 AC-2 |
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |

@@ -29,6 +29,7 @@ Ginnungagap (`ginn`) is a Void Linux tool. It creates per-distribution Realms on
 - Realms are always rootless. Never pass `--privileged` to Podman. Never run a Realm as host root (CR-003, OOS-3, OOS-10).
 - Pass package names, paths and other input to subprocesses as argv lists. Never build a shell string or use `shell=True` (NFR-SEC-005).
 - Every mutating operation goes through the single choke point `ops/_mutating.py` (DR-032, FR-123, FR-124).
+- Never run `podman system reset` or `podman system prune`. Every podman call in tests, spikes and tools, including `podman unshare`, passes `--root`, `--runroot` and `--tmpdir` pointing at its own storage. Never read, write or delete `~/.local/share/containers` or `/run/user/<uid>/libpod`, because they hold the user's own containers.
 
 ## Layout
 

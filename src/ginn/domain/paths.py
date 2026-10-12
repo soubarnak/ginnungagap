@@ -6,10 +6,12 @@ raw string with `os.path.realpath`, then checks the resolved target. The stored 
 resolved target, so the bind mount uses exactly what was validated. Lexical `normpath` is not run
 first: `link/../x` means something different once `link` is followed.
 
-Rule order: the input must be absolute with no NUL byte. The resolved target must not be a
-forbidden path, must not contain one, and must not sit inside one (see `_conflicts`). It must lie
-strictly under an allowed root. Forbidden rules are checked before the root rule, so `/etc` reports
-its own rule.
+Rule order: the input must be absolute with no NUL byte and no `:` or `,`. Podman's `-v` and
+`--mount` syntax splits on those characters, so such a path would bind a different mount. The
+resolved target gets the same character check, because a symlink can hide them. Then the resolved
+target must not be a forbidden path, must not contain one, and must not sit inside one (see
+`_conflicts`). It must lie strictly under an allowed root. Forbidden rules are checked before the
+root rule, so `/etc` reports its own rule.
 
 `FORBIDDEN_RULES` is the data that docs/capabilities.md and the GUI render. The rules are checked
 against resolved paths, so a symlink to a forbidden target is refused like the target itself.
@@ -137,6 +139,14 @@ def _refuse(raw: str, reason: str) -> GinnError:
     return reject(PATH_CODE, {"reason": reason}, path=raw)
 
 
+def _podman_separator(text: str) -> bool:
+    """True when `text` holds a character that podman's -v and --mount syntax splits on."""
+    return ":" in text or "," in text
+
+
+_SEPARATOR_REASON: Final = "contains ':' or ','; podman's -v and --mount syntax cannot carry it"
+
+
 @dataclass(frozen=True)
 class SharedPath:
     """A host path validated for sharing with a realm. Build it with `parse`.
@@ -173,10 +183,14 @@ class SharedPath:
             raise _refuse(raw, "contains a NUL byte")
         if not raw.startswith("/"):
             raise _refuse(raw, "not absolute; give the full path, since ~ is not expanded")
+        if _podman_separator(raw):
+            raise _refuse(raw, _SEPARATOR_REASON)
 
         home_real = _real(home)
         owned_real = [_real(path) for path in owned_paths]
         target = _real(raw)
+        if _podman_separator(str(target)):
+            raise _refuse(raw, f"resolves to a path that {_SEPARATOR_REASON}")
         for rule, forbidden in _forbidden(home_real, owned_real):
             if _conflicts(target, forbidden, rule, mode):
                 raise _refuse(raw, f"{rule.rule_id}: {rule.description}")

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Error catalogue (NFR-040, IR-011).
 
-Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry, plus the CLI-level
-codes GINN-E-USAGE, GINN-E-INTERRUPTED and GINN-E-INTERNAL. `source` cites the requirement that
-defines the failure.
+Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some codes are
+ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
+GINN-E-INTERNAL, and GINN-E-RECOVERY-PENDING (FR-122). `source` cites the requirement that defines
+the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -210,6 +211,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-123 AC-1",
     ),
     ErrorSpec(
+        code="GINN-E-RECOVERY-PENDING",
+        exit_code=4,
+        summary="realm '{realm}' has an interrupted {op} that was never recovered",
+        remedy="run 'ginn create --resume {realm}' if the operation was a create, "
+        "or 'ginn delete {realm}'",
+        source="FR-122 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-USAGE",
         exit_code=2,
         summary="{detail}",
@@ -239,7 +248,11 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (1, "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED"),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
-    (4, "conflict with existing state: name taken, undo refused, unacknowledged host change"),
+    (
+        4,
+        "conflict with existing state: name taken, undo refused, unacknowledged host change, "
+        "interrupted operation not yet recovered",
+    ),
     (65, "data error (EX_DATAERR): image or package signature not verified"),
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
