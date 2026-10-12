@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Three-flag rule: every podman call (teardown included) passes --root, --runroot and --tmpdir,
 # all inside this spike's directories. Without --tmpdir podman shares the user's libpod tmpdir.
+# XDG pin: every podman call also runs with XDG_RUNTIME_DIR set to $SPIKE_XRD. The three flags do
+# not move the rootless pause lookup, which follows XDG_RUNTIME_DIR. Earlier runs of this script
+# did not pin it (see spikes/results/S-01.md, Disclosures).
 #
 # S-01 (risk R-001): can systemd run as PID 1 in a rootless podman container
 # under a root-created, user-owned, controller-delegated cgroup subtree?
@@ -21,18 +24,76 @@ SPIKE_DIR="$(dirname "$SELF")"
 CG_ROOT=/sys/fs/cgroup
 CTL_SET=(cpu memory pids io cpuset)
 IMAGE=localhost/ginn-s01:debian-stable
+SPIKE_XRD="/run/user/$(id -u)/ginn-spike-s01c-xrd"
 GINN_SPIKE_ROOT="${GINN_SPIKE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike/podman}"
-GINN_SPIKE_RUNROOT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike"
-GINN_SPIKE_TMP="$GINN_SPIKE_RUNROOT/libpod-tmp"
+GINN_SPIKE_RUNROOT="$SPIKE_XRD/runroot"
+GINN_SPIKE_TMP="$SPIKE_XRD/libpod-tmp"
 OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s01}"
 export GINN_SPIKE_ROOT
-PM=(podman --root "$GINN_SPIKE_ROOT" --runroot "$GINN_SPIKE_RUNROOT" --tmpdir "$GINN_SPIKE_TMP")
+# Every podman call goes through "$SELF --podman", which runs the guard and pins XDG_RUNTIME_DIR.
+PM=("$SELF" --podman)
 COMMON_FLAGS=(--systemd=always --cgroupns private --userns keep-id --user 0:0
               --network host --stop-signal SIGRTMIN+3)
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 need_root() { [[ $(id -u) -eq 0 ]] || die "$1 must run as root (sudo)"; }
+
+# require_pin: refuse unless the pinned XDG dir is this uid's own 0700 directory at the exact path.
+require_pin() {
+  [[ $SPIKE_XRD == "/run/user/$(id -u)/ginn-spike-s01c-xrd" ]] || die "refusing: pin is '$SPIKE_XRD'"
+  [[ -d $SPIKE_XRD && ! -L $SPIKE_XRD ]] || die "refusing: pinned dir $SPIKE_XRD does not exist"
+  [[ $(stat -c '%u %a' "$SPIKE_XRD") == "$(id -u) 700" ]] \
+    || die "refusing: $SPIKE_XRD is not uid $(id -u) with mode 700"
+}
+
+# require_caller_xdg: user-level entry points refuse unless the caller already exports the pin.
+require_caller_xdg() {
+  [[ ${XDG_RUNTIME_DIR:-} == "$SPIKE_XRD" ]] \
+    || die "refusing: XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-unset}', must be $SPIKE_XRD"
+}
+
+# podman_pinned: the only way podman runs here. Guard first, then pin XDG_RUNTIME_DIR for the call.
+podman_pinned() {
+  require_pin
+  exec env XDG_RUNTIME_DIR="$SPIKE_XRD" podman --root "$GINN_SPIKE_ROOT" \
+    --runroot "$GINN_SPIKE_RUNROOT" --tmpdir "$GINN_SPIKE_TMP" "$@"
+}
+
+# is_spike_pid <pid>: true when the process environ has the exact pinned XDG_RUNTIME_DIR.
+is_spike_pid() {
+  [[ -r /proc/$1/environ ]] || return 1
+  tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep -qx "XDG_RUNTIME_DIR=$SPIKE_XRD"
+}
+
+# spike_pids: pids of this uid carrying the pinned XDG, excluding this shell and its ancestors.
+spike_pids() {
+  local d p cur=$BASHPID ancestry=" $$ $BASHPID "
+  while (( cur > 1 )); do
+    ancestry+="$cur "
+    cur=$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d ' ') || break
+    [[ -n $cur ]] || break
+  done
+  for d in /proc/[0-9]*; do
+    p=${d#/proc/}
+    [[ $ancestry == *" $p "* ]] && continue
+    if is_spike_pid "$p"; then echo "$p"; fi
+  done
+  return 0
+}
+
+# kill_spike_procs: TERM, then KILL. Each exact pid is re-checked against the pinned XDG first.
+kill_spike_procs() {
+  local p
+  for p in $(spike_pids); do
+    if is_spike_pid "$p"; then log "TERM spike pid $p"; kill -TERM "$p" 2>/dev/null || true; fi
+  done
+  sleep 3
+  for p in $(spike_pids); do
+    if is_spike_pid "$p"; then log "KILL spike pid $p (alive after TERM)"; kill -KILL "$p" 2>/dev/null || true; fi
+  done
+  return 0
+}
 
 # ---------------------------------------------------------------- root steps
 
@@ -245,8 +306,9 @@ cmd_run() {
   local uid gid orig best
   uid=$(id -u)
   gid=$(id -g)
-  mkdir -p "$OUT" "$GINN_SPIKE_ROOT" "$GINN_SPIKE_RUNROOT" "$GINN_SPIKE_TMP"
-  chmod 700 "$GINN_SPIKE_RUNROOT"
+  require_caller_xdg
+  mkdir -p "$OUT" "$GINN_SPIKE_ROOT" "$SPIKE_XRD" "$GINN_SPIKE_RUNROOT" "$GINN_SPIKE_TMP"
+  chmod 700 "$SPIKE_XRD"
   orig=$(sed -n 's/^0:://p' /proc/self/cgroup)
   echo "$orig" > "$OUT/orig-cgroup"
   printf 'variant\tname\trun_rc\tstate\tfailed_units\tcontrollers\tboot_s\tconmon_rss_kib\tctr_rss_kib\tnotes\n' \
@@ -315,6 +377,7 @@ cmd_run() {
 cmd_teardown() {
   local uid
   uid=$(id -u)
+  require_caller_xdg
   mkdir -p "$OUT"
   if [[ -d $GINN_SPIKE_ROOT ]]; then
     "${PM[@]}" rm -af >/dev/null 2>&1 || true
@@ -326,7 +389,9 @@ cmd_teardown() {
     "${PM[@]}" unshare rm -rf "$GINN_SPIKE_ROOT" 2>/dev/null || true
     rm -rf "$GINN_SPIKE_ROOT" 2>/dev/null || log "storage removal incomplete: $GINN_SPIKE_ROOT"
   fi
-  rm -rf "$GINN_SPIKE_RUNROOT"
+  # The rootless pause process keeps the pinned XDG; stop it by exact pid before removing the dir.
+  kill_spike_procs
+  rm -rf "$SPIKE_XRD"
   if [[ -f $OUT/orig-cgroup ]]; then
     log "root cleanup (sudo)"
     sudo "$SELF" --root-cleanup "$uid" "$OUT"
@@ -336,7 +401,8 @@ cmd_teardown() {
 
 usage() {
   cat <<'EOF'
-usage: s01_systemd_rootless.sh run | teardown
+usage: XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01c-xrd s01_systemd_rootless.sh run | teardown
+       s01_systemd_rootless.sh --podman <podman args>            (pinned wrapper, used internally)
        s01_systemd_rootless.sh --root-setup <uid> <gid> <out>   (root only)
        s01_systemd_rootless.sh --root-move <uid> <pid> <out>    (root only)
        s01_systemd_rootless.sh --root-cleanup <uid> <out>       (root only)
@@ -346,6 +412,7 @@ EOF
 case ${1:-} in
   run) cmd_run ;;
   teardown) cmd_teardown ;;
+  --podman) shift; podman_pinned "$@" ;;
   --root-setup) setup_root "${2:?uid}" "${3:?gid}" "${4:?out}" ;;
   --root-move) move_launcher "${2:?uid}" "${3:?pid}" "${4:?out}" ;;
   --root-cleanup) cleanup_root "${2:?uid}" "${3:?out}" ;;
