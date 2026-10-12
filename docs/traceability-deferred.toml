@@ -19,6 +19,11 @@ milestone = "M10"
 reason = "host write confinement is proven by tools/host-diff.sh (T10.2); the M3 heading range lists it but the proving test lands in M10"
 
 [[deferred]]
+id = "FR-006"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to T3.8 (M3)"
+
+[[deferred]]
 id = "FR-007"
 milestone = "M3"
 reason = "not covered yet; the roadmap assigns its test to M3"
@@ -72,6 +77,11 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 id = "FR-021"
 milestone = "M8"
 reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-022"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to T8.3 (M8)"
 
 [[deferred]]
 id = "FR-023"
@@ -339,6 +349,11 @@ milestone = "M2"
 reason = "not covered yet; the roadmap assigns its test to M2"
 
 [[deferred]]
+id = "NFR-062"
+milestone = "M10"
+reason = "not covered yet; the Must-FR suite must pass on the glibc and musl CI matrix, an M10 release gate"
+
+[[deferred]]
 id = "NFR-063"
 milestone = "M10"
 reason = "not covered yet; the roadmap assigns its test to M10"
@@ -352,6 +367,11 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 id = "NFR-SEC-002"
 milestone = "M6"
 reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "NFR-SEC-003"
+milestone = "M10"
+reason = "not covered yet; the M10 package job scans the built .xbps for setuid or setgid files (the source scan is AS-003)"
 
 [[deferred]]
 id = "NFR-SEC-004"

@@ -4,20 +4,20 @@
 
 Every FR and NFR in `GINN-SRS-001-v1.0.md`, the tests whose `fr` marker names it, and its status (NFR-061, Appendix C).
 
-- `covered`: at least one test carries the marker.
-- `deferred (Mx)`: no test yet; `docs/traceability-deferred.toml` names the milestone.
-- `MISSING`: no test and not deferred. Must items with this status fail `--check`.
+- `covered`: at least one test that can run carries the marker.
+- `deferred (Mx)`: no such test yet; `docs/traceability-deferred.toml` names the milestone.
+- `MISSING`: no such test and not deferred. Must items with this status fail `--check`.
 
-Must requirements: 85. Covered: 8. Deferred: 77. Missing: 0.
+Must requirements: 85. Covered: 4. Deferred: 81. Missing: 0.
 
 | ID | Title | Priority | Tests | Status |
 |---|---|---|---|---|
 | FR-001 | One-time Host Setup | Must | 0 | deferred (M3) |
 | FR-002 | Host Setup idempotent | Must | 0 | deferred (M3) |
 | FR-003 | Host Setup undo | Should | 0 | MISSING |
-| FR-004 | No host package management | Must | `tests/unit/test_fr004_no_xbps.py` (3) | covered |
+| FR-004 | No host package management | Must | `tests/unit/test_fr004_no_xbps.py` (6) | covered |
 | FR-005 | Host write confinement | Must | 0 | deferred (M10) |
-| FR-006 | Host integrity check | Must | `tests/unit/test_cli_smoke.py` (3), `tests/unit/test_errors.py` (2) | covered |
+| FR-006 | Host integrity check | Must | 0 | deferred (M3) |
 | FR-007 | Doctor | Must | 0 | deferred (M3) |
 | FR-010 | Create realm | Must | 0 | deferred (M4) |
 | FR-011 | Image verification | Must | 0 | deferred (M4) |
@@ -31,7 +31,7 @@ Must requirements: 85. Covered: 8. Deferred: 77. Missing: 0.
 | FR-019 | Delete realm | Must | 0 | deferred (M4) |
 | FR-020 | List and status | Must | 0 | deferred (M4) |
 | FR-021 | Rebuild preserving home | Must | 0 | deferred (M8) |
-| FR-022 | Rebuild replay failures | Must | `tests/unit/test_errors.py` (1) | covered |
+| FR-022 | Rebuild replay failures | Must | 0 | deferred (M8) |
 | FR-023 | Manual update | Must | 0 | deferred (M8) |
 | FR-024 | Update availability check | Should | 0 | MISSING |
 | FR-025 | Per-user realm isolation | Must | 0 | deferred (M4) |
@@ -95,7 +95,7 @@ Must requirements: 85. Covered: 8. Deferred: 77. Missing: 0.
 | NFR-031 | Rebuild atomicity | Must | 0 | deferred (M8) |
 | NFR-032 | Rebuild time | Should | 0 | MISSING |
 | NFR-033 | Supervised restart | Must | 0 | deferred (M7) |
-| NFR-040 | Error reporting | Must | `tests/unit/test_cli_smoke.py` (2), `tests/unit/test_errors.py` (12) | covered |
+| NFR-040 | Error reporting | Must | `tests/unit/test_cli_smoke.py` (3), `tests/unit/test_errors.py` (15) | covered |
 | NFR-041 | Doctor coverage | Must | 0 | deferred (M3) |
 | NFR-042 | Diagnostic verbosity | Should | `tests/unit/test_cli_smoke.py` (4) | covered |
 | NFR-043 | Audit completeness | Must | 0 | deferred (M2) |
@@ -103,12 +103,12 @@ Must requirements: 85. Covered: 8. Deferred: 77. Missing: 0.
 | NFR-051 | Keyboard and screen reader | Should | 0 | MISSING |
 | NFR-052 | CLI help | Must | `tests/unit/test_cli_smoke.py` (2) | covered |
 | NFR-060 | Distribution definitions as data | Must | 0 | deferred (M2) |
-| NFR-061 | Automated test coverage | Must | `tests/unit/test_traceability.py` (14) | covered |
-| NFR-062 | Portability | Must | `tests/unit/test_packaging.py` (1) | covered |
+| NFR-061 | Automated test coverage | Must | `tests/unit/test_traceability.py` (23) | covered |
+| NFR-062 | Portability | Must | 0 | deferred (M10) |
 | NFR-063 | Clean-room provenance | Must | 0 | deferred (M10) |
 | NFR-SEC-001 | Realms always run rootless. No realm is ever started in privileged mode, in any tier. | Must | 0 | deferred (M4) |
 | NFR-SEC-002 | Capabilities added beyond the runtime's rootless defaults are limited to: raw-socket capability for Kali (own network namespace only) and the enumerated set required by Development-tier nested containers and `/dev/kvm`. The enumerated set is fixed in the HLD and tested. | Must | 0 | deferred (M6) |
-| NFR-SEC-003 | ginn ships no setuid or setgid executables of its own. | Must | `tests/unit/test_packaging.py` (1) | covered |
+| NFR-SEC-003 | ginn ships no setuid or setgid executables of its own. | Must | 0 | deferred (M10) |
 | NFR-SEC-004 | Images are used only if they match the Trust Manifest; package-manager signature checks are never disabled. | Must | 0 | deferred (M4) |
 | NFR-SEC-005 | All user input is validated at entry against DR-001…DR-005; invalid values are rejected before any side effect. Package names and paths are passed as single arguments, never through a shell. | Must | 0 | deferred (M2) |
 | NFR-SEC-006 | Never-shareable paths (DR-004) cannot be shared in any tier, including Custom. | Must | 0 | deferred (M6) |

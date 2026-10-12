@@ -128,19 +128,19 @@ def test_make_rejects_unexpected_fields() -> None:
         make("GINN-E-NAME-TAKEN", name="arch", extra="x")
 
 
-@pytest.mark.fr("FR-022")
+@pytest.mark.fr("NFR-040")
 def test_make_refuses_warning_codes() -> None:
     with pytest.raises(ValueError, match="GINN-W-REPLAY-MISSING"):
         make("GINN-W-REPLAY-MISSING", package="htop")
 
 
-@pytest.mark.fr("FR-006")
+@pytest.mark.fr("NFR-040")
 def test_warn_refuses_error_codes() -> None:
     with pytest.raises(ValueError, match="GINN-E-NAME-TAKEN"):
         warn("GINN-E-NAME-TAKEN", name="arch")
 
 
-@pytest.mark.fr("FR-006")
+@pytest.mark.fr("NFR-040")
 def test_warn_renders_message_and_remedy() -> None:
     notice = warn("GINN-W-HOST-CHANGED", paths="/etc/hosts")
     assert notice == Warning(

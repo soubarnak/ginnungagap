@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Void packaging checks: template metadata, declared dependencies and setuid-free tools.
 
-Covers AS-003 (ginn ships as a Void package that declares Podman and its helpers),
-DEP-1 (Podman and its runtime helpers), CR-005 (Apache-2.0), NFR-062 (x86_64 glibc and
-musl targets) and NFR-SEC-003 (no setuid or setgid files). The template is parsed with
-regular expressions; xbps-src is never run.
+Covers AS-003 (ginn ships as a Void package that declares Podman and its helpers, with the
+x86_64 glibc and musl archs, and no setuid or setgid tool source), DEP-1 (Podman and its runtime
+helpers) and CR-005 (Apache-2.0). The template is parsed with regular expressions; xbps-src is
+never run. NFR-062 (the CI matrix) and NFR-SEC-003 (the built .xbps) are not proven here; see
+docs/traceability-deferred.toml.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def test_template_license_is_apache_2_0() -> None:
     assert _template_fields()["license"] == "Apache-2.0"
 
 
-@pytest.mark.fr("NFR-062")
+@pytest.mark.fr("AS-003")
 def test_template_builds_for_glibc_and_musl_x86_64() -> None:
     archs = set(_template_fields()["archs"].split())
     assert {"x86_64", "x86_64-musl"} <= archs
@@ -95,7 +96,7 @@ def test_checksum_is_placeholder_or_sha256() -> None:
     assert CHECKSUM_VALUE.match(_template_fields()["checksum"])
 
 
-@pytest.mark.fr("NFR-SEC-003")
+@pytest.mark.fr("AS-003")
 def test_no_setuid_or_setgid_modes_in_packaging_tools() -> None:
     offenders: list[str] = []
     for root in (REPO / "tools", REPO / "packaging"):

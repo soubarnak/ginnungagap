@@ -1,10 +1,22 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
 # PATH shim for FR-004: ginn must never invoke an xbps-* command. The test session puts this
-# directory first on PATH (see conftest.py). Each call is appended to the session log and fails.
-# The seven xbps-* names are identical copies of this script.
-if [ -n "${GINN_XBPS_SHIM_LOG:-}" ]; then
-    printf '%s\n' "$(basename "$0") $*" >> "$GINN_XBPS_SHIM_LOG"
+# directory first on PATH (see conftest.py). Each call writes one file into the session log
+# directory and fails with status 97. The seven xbps-* names are identical copies of this script.
+#
+# Log directory: GINN_XBPS_SHIM_LOG_DIR when set. Otherwise the directory named in .logdir next to
+# this script, which conftest.py writes, so a child that clears its environment still logs.
+# One file per call, so truncating one file cannot erase the record of earlier calls.
+# Limit: a call by absolute path (/usr/bin/xbps-install) does not go through PATH and is not
+# logged here. The strace of M10 (T10.3) covers that case.
+dir="${GINN_XBPS_SHIM_LOG_DIR:-}"
+if [ -z "$dir" ] && [ -r "$(dirname "$0")/.logdir" ]; then
+    dir=$(cat "$(dirname "$0")/.logdir")
+fi
+if [ -n "$dir" ]; then
+    # Error output comes first so a missing directory stays silent; the exit status below still
+    # fails the call. conftest.py fails the session when the directory is missing or non-empty.
+    printf '%s\n' "$(basename "$0") $*" 2>/dev/null > "$dir/$(date +%s%N)-$$.log"
 fi
 printf 'xbps shim: ginn must never invoke %s (FR-004)\n' "$0" >&2
 exit 97

@@ -269,7 +269,7 @@ def test_help_audit_every_subcommand_has_example_and_help(
             assert action.help != argparse.SUPPRESS, f"{name}: {action.dest} is suppressed"
 
 
-@pytest.mark.fr("FR-006")
+@pytest.mark.fr("AS-025")
 def test_json_warning_is_added_to_the_result(capsys: pytest.CaptureFixture[str]) -> None:
     out = Output(json_mode=True, verbose=False)
     out.warn(warn("GINN-W-HOST-CHANGED", paths="/etc/hosts"))
@@ -288,7 +288,7 @@ def test_json_warning_is_added_to_the_result(capsys: pytest.CaptureFixture[str])
     }
 
 
-@pytest.mark.fr("FR-006")
+@pytest.mark.fr("NFR-040")
 def test_text_warning_goes_to_stderr_only(capsys: pytest.CaptureFixture[str]) -> None:
     out = Output(json_mode=False, verbose=False)
     out.warn(warn("GINN-W-HOST-CHANGED", paths="/etc/hosts"))
@@ -300,7 +300,7 @@ def test_text_warning_goes_to_stderr_only(capsys: pytest.CaptureFixture[str]) ->
     )
 
 
-@pytest.mark.fr("FR-006")
+@pytest.mark.fr("AS-025")
 def test_json_warning_is_kept_when_the_command_fails(capsys: pytest.CaptureFixture[str]) -> None:
     out = Output(json_mode=True, verbose=False)
     out.warn(warn("GINN-W-HOST-CHANGED", paths="/etc/hosts"))

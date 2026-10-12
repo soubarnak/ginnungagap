@@ -15,5 +15,6 @@ native/ginn-*
 *.pem
 *.key
 CLAUDE.local.md
+tests/shims/xbps-fail/.logdir
 .claude/
 .venv/

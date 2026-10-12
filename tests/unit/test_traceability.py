@@ -152,6 +152,159 @@ reason = "planned"
 """
 
 
+SKIPPED_AND_XFAIL = """\
+import sys
+
+import pytest
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.skip(reason="not yet")
+def test_skipped() -> None:
+    pass
+
+
+@pytest.mark.fr("NFR-001")
+@pytest.mark.xfail(strict=True)
+def test_expected_failure() -> None:
+    pass
+
+
+@pytest.mark.fr("CR-004")
+@pytest.mark.skip
+def test_bare_skip() -> None:
+    pass
+
+
+@pytest.mark.fr("FR-002")
+@pytest.mark.skipif(sys.platform == "linux", reason="linux only")
+def test_skipif_counts() -> None:
+    pass
+
+
+@pytest.mark.fr("DR-002")
+@pytest.mark.xfail(sys.platform == "linux", strict=True)
+def test_conditional_xfail_counts() -> None:
+    pass
+"""
+
+DISABLED_MODULE = """\
+import pytest
+
+pytestmark = pytest.mark.skip(reason="module off")
+
+
+@pytest.mark.fr("FR-001")
+def test_module_skipped() -> None:
+    pass
+"""
+
+DISABLED_CLASS = """\
+import pytest
+
+
+@pytest.mark.skip(reason="class off")
+class TestOff:
+    @pytest.mark.fr("FR-002")
+    def test_method(self) -> None:
+        pass
+"""
+
+PARAM_CASES = """\
+import pytest
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(1, marks=pytest.mark.fr("FR-001")),
+        pytest.param(2, marks=[pytest.mark.fr("NFR-001")]),
+        pytest.param(3, marks=[pytest.mark.skip, pytest.mark.fr("DR-002")]),
+    ],
+)
+def test_cases(value: int) -> None:
+    pass
+"""
+
+MARK_ALIASES = """\
+import pytest as pt
+from pytest import mark
+from pytest import mark as m
+
+
+@mark.fr("FR-001")
+def test_from_import() -> None:
+    pass
+
+
+@m.fr("NFR-001")
+def test_renamed_import() -> None:
+    pass
+
+
+@pt.mark.fr("DR-002")
+def test_module_alias() -> None:
+    pass
+"""
+
+UNMARKED = """\
+import pytest
+
+
+@pytest.mark.fr("FR-001")
+def test_marked() -> None:
+    pass
+
+
+def test_bare() -> None:
+    pass
+
+
+class TestBare:
+    @pytest.mark.fr("NFR-001")
+    def test_marked_method(self) -> None:
+        pass
+
+    def test_unmarked_method(self) -> None:
+        pass
+
+    def helper(self) -> None:
+        pass
+"""
+
+UNKNOWN_IDS = """\
+import pytest
+
+
+@pytest.mark.fr("REF-1")
+def test_reference() -> None:
+    pass
+
+
+@pytest.mark.fr("Q-001")
+@pytest.mark.skip(reason="off")
+def test_skipped_unknown() -> None:
+    pass
+"""
+
+SRS_OUTSIDE_FAMILIES = """\
+#### FR-001 · First · Must
+
+| ID | Requirement | Verification | Priority |
+|---|---|---|---|
+| NFR-001 | Thing | Check | Must |
+| DR-020 | Realm state | Review |
+| Q-001 | Open question | Decide |
+| REF-1 | Reference | Read |
+| OOS-3 | Out of scope | None |
+| R-002 | Risk | Mitigate |
+
+DR-021: a prose definition in the family.
+Q-002: a prose line outside the families.
+**Limit (OOS-4)** is out of scope.
+"""
+
+
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -308,3 +461,91 @@ def test_check_passes_on_the_repository() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_parse_srs_ignores_ids_outside_the_families(tmp_path: Path) -> None:
+    path = tmp_path / SRS_NAME
+    _write(path, SRS_OUTSIDE_FAMILIES)
+    assert set(tr.parse_srs(path)) == {"FR-001", "NFR-001", "DR-020", "DR-021"}
+
+
+@pytest.mark.fr("NFR-061")
+def test_real_srs_does_not_define_q_r_oos_or_ref_ids() -> None:
+    # These IDs occur in the real SRS, and the parser returned them before the family filter.
+    reqs = tr.parse_srs(SRS)
+    assert not {"Q-001", "R-002", "OOS-3", "REF-1"} & set(reqs)
+
+
+@pytest.mark.fr("NFR-061")
+def test_id_problem_names_the_family_or_the_missing_id() -> None:
+    reqs = tr.parse_srs(SRS)
+    assert tr.id_problem("FR-001", reqs) is None
+    missing = tr.id_problem("FR-999", reqs)
+    assert missing is not None
+    assert "not defined" in missing
+    outside = tr.id_problem("REF-1", reqs)
+    assert outside is not None
+    assert "not an ID of a family" in outside
+
+
+@pytest.mark.fr("NFR-061")
+def test_skip_and_unconditional_xfail_do_not_count(tmp_path: Path) -> None:
+    _write(tmp_path / "tests" / "unit" / "test_skips.py", SKIPPED_AND_XFAIL)
+    scan = tr.scan_tests(tmp_path / "tests")
+    assert set(scan.markers) == {"FR-002", "DR-002"}
+    assert set(scan.all_markers) == {"FR-001", "NFR-001", "CR-004", "FR-002", "DR-002"}
+    assert scan.unmarked == []
+
+
+@pytest.mark.fr("NFR-061")
+def test_skip_on_a_module_or_a_class_disables_its_tests(tmp_path: Path) -> None:
+    _write(tmp_path / "tests" / "unit" / "test_module_off.py", DISABLED_MODULE)
+    _write(tmp_path / "tests" / "unit" / "test_class_off.py", DISABLED_CLASS)
+    scan = tr.scan_tests(tmp_path / "tests")
+    assert scan.markers == {}
+    assert set(scan.all_markers) == {"FR-001", "FR-002"}
+
+
+@pytest.mark.fr("NFR-061")
+def test_param_case_marks_count_unless_that_case_is_skipped(tmp_path: Path) -> None:
+    _write(tmp_path / "tests" / "unit" / "test_params.py", PARAM_CASES)
+    scan = tr.scan_tests(tmp_path / "tests")
+    item = "tests/unit/test_params.py::test_cases"
+    assert scan.markers == {"FR-001": [item], "NFR-001": [item]}
+    assert scan.all_markers["DR-002"] == [item]
+    assert scan.unmarked == []
+
+
+@pytest.mark.fr("NFR-061")
+def test_from_pytest_import_mark_and_aliases_are_collected(tmp_path: Path) -> None:
+    _write(tmp_path / "tests" / "unit" / "test_aliases.py", MARK_ALIASES)
+    markers = tr.collect_markers(tmp_path / "tests")
+    rel = "tests/unit/test_aliases.py"
+    assert markers == {
+        "DR-002": [f"{rel}::test_module_alias"],
+        "FR-001": [f"{rel}::test_from_import"],
+        "NFR-001": [f"{rel}::test_renamed_import"],
+    }
+
+
+@pytest.mark.fr("NFR-061")
+def test_unmarked_test_is_a_check_error_but_write_still_renders(tmp_path: Path) -> None:
+    root = _tree(tmp_path, UNMARKED, deferred="")
+    assert _run(root, "--write").returncode == 0
+    result = _run(root, "--check")
+    assert result.returncode == 1
+    prefix = "tests/unit/test_mini.py::"
+    assert f"{prefix}test_bare has no fr marker" in result.stderr
+    assert f"{prefix}TestBare::test_unmarked_method has no fr marker" in result.stderr
+    assert "helper" not in result.stderr
+    assert "test_marked_method has no fr marker" not in result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_unknown_or_outside_family_ids_fail_even_on_a_skipped_test(tmp_path: Path) -> None:
+    root = _tree(tmp_path, UNKNOWN_IDS, deferred="")
+    result = _run(root, "--check")
+    assert result.returncode == 1
+    assert "marker REF-1 is not an ID of a family" in result.stderr
+    assert "marker Q-001 is not an ID of a family" in result.stderr
