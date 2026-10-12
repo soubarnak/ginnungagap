@@ -196,14 +196,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-W-HOST-CHANGED",
         exit_code=0,
         summary="host files changed since baseline: {paths}",
-        remedy="review the listed paths, then run 'ginn integrity --ack'",
+        remedy="review the listed paths; the likely cause is xbps or a system file edit made while "
+        "ginn was running (R-004); then run 'ginn integrity --ack'",
         source="FR-006 AC-1; FR-104 AC-1",
     ),
     ErrorSpec(
         code="GINN-E-HOST-UNACKED",
         exit_code=4,
-        summary="host integrity warning not acknowledged",
-        remedy="run 'ginn integrity --ack', then retry the command",
+        summary="host integrity warning not acknowledged; changed paths: {paths}",
+        remedy="review the listed paths, then run 'ginn integrity --ack' and retry the command",
         source="FR-006 AC-1",
     ),
     ErrorSpec(

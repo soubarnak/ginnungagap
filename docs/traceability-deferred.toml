@@ -25,8 +25,9 @@ reason = "host write confinement is proven by tools/host-diff.sh (T10.2); the M3
 
 [[deferred]]
 id = "FR-006"
-milestone = "M3"
-reason = "not covered yet; the roadmap assigns its test to T3.8 (M3)"
+milestone = "M5"
+partial = true
+reason = "the fingerprint, baseline, pending change, acknowledgement and ginn integrity are unit-tested under temporary roots (T3.8); AC-1 needs a host-level run that alters /etc during ginn install arch htop, which needs ginn install (M5)"
 
 [[deferred]]
 id = "FR-007"
@@ -333,8 +334,9 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 
 [[deferred]]
 id = "NFR-011"
-milestone = "M3"
-reason = "not covered yet; the roadmap assigns its test to M3"
+milestone = "M10"
+partial = true
+reason = "the 5000-file before and after pair is unit-tested under temporary roots (T3.8). This host has about 44,600 entries in scope, and one capture takes about 2.4 s there. NFR-011 is scoped to at most 5000 files, so host timing in T10.4 must measure a scope within that limit"
 
 [[deferred]]
 id = "NFR-030"

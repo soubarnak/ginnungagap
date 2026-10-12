@@ -159,7 +159,8 @@ def test_warn_renders_message_and_remedy() -> None:
     assert notice == Warning(
         "GINN-W-HOST-CHANGED",
         "host files changed since baseline: /etc/hosts",
-        "review the listed paths, then run 'ginn integrity --ack'",
+        "review the listed paths; the likely cause is xbps or a system file edit made while ginn "
+        "was running (R-004); then run 'ginn integrity --ack'",
     )
 
 

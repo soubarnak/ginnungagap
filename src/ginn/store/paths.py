@@ -309,6 +309,11 @@ class OwnedPaths:
         return self.state / "journal"
 
     @property
+    def integrity(self) -> Path:
+        """Host integrity state: baseline.json and pending.json (FR-006, AS-020)."""
+        return self.state / "integrity"
+
+    @property
     def locks(self) -> Path:
         return self.runtime / "locks"
 

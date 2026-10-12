@@ -32,7 +32,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-DISTRO-DATA` | 70 | shipped distro data {file} is invalid: {field} {rule} | the shipped distro data is invalid; reinstall ginn, or report a bug with this message | NFR-060 (ginn-defined; not an SRS code) |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |
 | `GINN-E-HOST-NOT-SET-UP` | 77 | runtime directory {path} does not exist | run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
-| `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged | run 'ginn integrity --ack', then retry the command | FR-006 AC-1 |
+| `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged; changed paths: {paths} | review the listed paths, then run 'ginn integrity --ack' and retry the command | FR-006 AC-1 |
 | `GINN-E-IMAGE-UNVERIFIED` | 65 | image digest for {distro} does not match the trust manifest | do not use this image; retry later, and update ginn if the mismatch persists | FR-011 AC-1 |
 | `GINN-E-INTERNAL` | 70 | internal error; this is a bug | re-run with --verbose and report the output | NFR-040 |
 | `GINN-E-INTERRUPTED` | 130 | interrupted by the user | run 'ginn list' to check realm state, then retry | IR-011 |
@@ -60,5 +60,5 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-UNDO-SERVICE-RUNNING` | 75 | service ginn-{user} is still running after {seconds} s; undo stopped before its cleanup | run 'sudo sv force-stop /etc/sv/ginn-{user}', then 'sudo sv exit /etc/sv/ginn-{user}', then run 'sudo ginn host-setup --undo --user {user}' again; the Host Setup Record is kept | FR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-UNDO-SUPERVISE-STATE` | 77 | runsv state {path} is a {state}, but runit keeps a FIFO there; undo stopped before its cleanup | run 'sudo ls -l {path}' to see what it is; if no runsv runs for ginn-{user}, remove that entry by hand, then run 'sudo ginn host-setup --undo --user {user}' again; the Host Setup Record is kept | FR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |
-| `GINN-W-HOST-CHANGED` | 0 | host files changed since baseline: {paths} | review the listed paths, then run 'ginn integrity --ack' | FR-006 AC-1; FR-104 AC-1 |
+| `GINN-W-HOST-CHANGED` | 0 | host files changed since baseline: {paths} | review the listed paths; the likely cause is xbps or a system file edit made while ginn was running (R-004); then run 'ginn integrity --ack' | FR-006 AC-1; FR-104 AC-1 |
 | `GINN-W-REPLAY-MISSING` | 0 | package {package} is no longer available upstream | reinstall it later with 'ginn install' if it returns | FR-022 AC-1 |

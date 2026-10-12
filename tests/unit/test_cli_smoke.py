@@ -282,7 +282,8 @@ def test_json_warning_is_added_to_the_result(capsys: pytest.CaptureFixture[str])
             {
                 "code": "GINN-W-HOST-CHANGED",
                 "message": "host files changed since baseline: /etc/hosts",
-                "remedy": "review the listed paths, then run 'ginn integrity --ack'",
+                "remedy": "review the listed paths; the likely cause is xbps or a system file edit "
+                "made while ginn was running (R-004); then run 'ginn integrity --ack'",
             }
         ],
     }
