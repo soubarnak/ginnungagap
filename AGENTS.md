@@ -20,6 +20,7 @@ Ginnungagap (`ginn`) is a Void Linux tool. It creates per-distribution Realms on
 - Every test carries `@pytest.mark.fr("<ID>")` naming the requirement it proves.
 - Every ADR in `docs/adr/` cites the requirement IDs it decides for.
 - Build only what the SRS asks for. Do not build the items in SRS section 8 (Out of Scope).
+- Git: stage only the files you own (`git add <paths>`), never `git add -A` or `commit -a`, and never `git commit --amend`; other agents commit on the same branch concurrently. One commit per task.
 
 ## Hard runtime rules
 
