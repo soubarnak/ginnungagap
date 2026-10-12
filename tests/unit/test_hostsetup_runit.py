@@ -1,26 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""System runit service for the user's runsvdir: golden files, shell checks, install.
+"""System runit service for the user's runsvdir: golden files and shell checks.
 
-Covers FR-001 (Host Setup writes the service and the delegated cgroup leaf), FR-003 (the
-pre-images that undo needs), FR-081 (the service is linked into var/service, where runit
-supervises it), and NFR-001 (the resident supervisor is runsvdir). NFR-001's 1 MiB RSS and FR-084
-(autostart at boot) need a booted runit host, so they are not proven here. These tests check the
-rendered script and the installed files only.
+Covers FR-001 (the service scripts that Host Setup writes), FR-081 (the service that runit
+supervises from var/service), and NFR-001 (the resident supervisor is runsvdir). NFR-001's 1 MiB
+RSS and FR-084 (autostart at boot) need a booted runit host, so they are not proven here. These
+tests check the rendered text only. setup.py writes the files and the link, and its tests cover
+that.
 """
 
 from __future__ import annotations
 
-import os
 import shlex
 import shutil
-import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from ginn.hostsetup.cgroups import CONTROLLERS, DEFAULT_CGROUP_ROOT, chown_paths
-from ginn.hostsetup.runit_system import InstallPlan, install, render
+from ginn.hostsetup.runit_system import render
 
 pytestmark = [pytest.mark.fr("FR-001"), pytest.mark.fr("FR-081")]
 
@@ -251,95 +249,3 @@ def test_primary_gid_is_numeric_and_never_derived_from_the_user_name() -> None:
     assert "GID_NUM=100" in script
     assert _exec_command(script)[3] == "--regid=$GID_NUM"
     assert "chown 1000:100 /sys/fs/cgroup/ginn/1000 " in script
-
-
-@pytest.mark.fr("FR-081")
-def test_install_writes_mode_0755_scripts_and_links_the_service_last(tmp_path: Path) -> None:
-    plan = install(tmp_path, _alice())
-    sv = tmp_path / "etc" / "sv" / "ginn-alice"
-    link = tmp_path / "var" / "service" / "ginn-alice"
-    assert set(plan.created) == {
-        tmp_path / "etc",
-        tmp_path / "etc" / "sv",
-        sv,
-        sv / "log",
-        tmp_path / "var",
-        tmp_path / "var" / "service",
-        sv / "run",
-        sv / "finish",
-        sv / "log" / "run",
-        link,
-    }
-    assert plan.created[-1] == link
-    assert plan.replaced == []
-    assert plan.relinked == []
-    assert plan.pre_images == {}
-    assert plan.pre_links == {}
-    for name in ("run", "finish", "log/run"):
-        path = sv / name
-        assert path.read_text(encoding="utf-8") == _alice()[f"etc/sv/ginn-alice/{name}"]
-        assert stat.S_IMODE(os.stat(path).st_mode) == 0o755
-    assert os.readlink(link) == "/etc/sv/ginn-alice"
-
-
-def test_second_install_changes_nothing(tmp_path: Path) -> None:
-    install(tmp_path, _alice())
-    assert install(tmp_path, _alice()) == InstallPlan()
-
-
-def test_install_rewrites_only_a_file_whose_content_changed(tmp_path: Path) -> None:
-    install(tmp_path, _alice())
-    finish = tmp_path / FINISH
-    before = finish.read_bytes()
-    changed = dict(_alice())
-    changed[FINISH] = changed[FINISH] + "# edited\n"
-    plan = install(tmp_path, changed)
-    assert plan == InstallPlan(replaced=[finish], pre_images={finish: before})
-
-
-@pytest.mark.fr("FR-003")
-def test_install_records_the_old_bytes_of_a_script_it_replaces(tmp_path: Path) -> None:
-    sv = tmp_path / "etc" / "sv" / "ginn-alice"
-    sv.mkdir(parents=True)
-    old = b"#!/bin/sh\n# hand-written run script\nexec sleep 1000\n"
-    (sv / "run").write_bytes(old)
-    plan = install(tmp_path, _alice())
-    assert plan.replaced == [sv / "run"]
-    assert plan.pre_images == {sv / "run": old}
-    assert (sv / "run").read_bytes() == _alice()[RUN].encode("utf-8")
-    assert (sv / "run").stat().st_mode & 0o777 == 0o755
-
-
-@pytest.mark.fr("FR-003")
-def test_install_repoints_a_link_and_records_the_old_target(tmp_path: Path) -> None:
-    service = tmp_path / "var" / "service"
-    service.mkdir(parents=True)
-    link = service / "ginn-alice"
-    os.symlink("/etc/sv/somewhere-else", link)
-    plan = install(tmp_path, _alice())
-    assert plan.relinked == [link]
-    assert plan.pre_links == {link: "/etc/sv/somewhere-else"}
-    assert link not in plan.created
-    assert os.readlink(link) == "/etc/sv/ginn-alice"
-
-
-def test_install_refuses_a_regular_file_where_the_link_goes(tmp_path: Path) -> None:
-    (tmp_path / "var" / "service").mkdir(parents=True)
-    (tmp_path / "var" / "service" / "ginn-alice").write_text("not a link\n")
-    with pytest.raises(ValueError, match="not a symlink"):
-        install(tmp_path, _alice())
-    # The refusal comes before the first write, so no script was written either.
-    assert not (tmp_path / "etc").exists()
-
-
-def test_install_refuses_a_non_regular_file_where_a_script_goes(tmp_path: Path) -> None:
-    sv = tmp_path / "etc" / "sv" / "ginn-alice"
-    sv.mkdir(parents=True)
-    os.symlink("/nonexistent/target", sv / "run")
-    with pytest.raises(ValueError, match="not a regular file"):
-        install(tmp_path, _alice())
-
-
-def test_install_refuses_a_rendered_set_that_is_not_one_service(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="expected exactly"):
-        install(tmp_path, {RUN: "#!/bin/sh\n"})

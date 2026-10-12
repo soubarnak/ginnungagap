@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from ginn.hostsetup.subids import (
     DEFAULT_CEILING,
     MIN_SIZE,
     Change,
+    Removal,
     SubIdEntry,
     SubIdExhausted,
     SubIdLocked,
@@ -36,6 +38,7 @@ from ginn.hostsetup.subids import (
     ensure_single,
     newuidmap_present,
     parse_entries,
+    remove_exact,
 )
 
 pytestmark = [pytest.mark.fr("FR-001"), pytest.mark.fr("AS-005")]
@@ -271,10 +274,10 @@ def test_the_lock_for_each_file_sits_under_run_lock_of_the_root(
     etc_while_held: list[list[str]] = []
     real_atomic_write = subids.atomic_write
 
-    def probe(target: Path, data: bytes, mode: int) -> None:
+    def probe(target: Path, data: bytes, mode: int, *, fixed_tmp: bool = False) -> None:
         locks_while_held.append(_names(_lock_path(tmp_path, path).parent))
         etc_while_held.append(_names(etc))
-        real_atomic_write(target, data, mode)
+        real_atomic_write(target, data, mode, fixed_tmp=fixed_tmp)
 
     monkeypatch.setattr(subids, "atomic_write", probe)
     ensure_range(path, "alice", MIN_SIZE, root_dir=tmp_path)
@@ -370,13 +373,13 @@ def test_lock_is_held_during_the_edit_and_removed_afterwards(
     real_atomic_write = subids.atomic_write
     probed: list[str] = []
 
-    def probe(target: Path, data: bytes, mode: int) -> None:
+    def probe(target: Path, data: bytes, mode: int, *, fixed_tmp: bool = False) -> None:
         # Another caller must not get in while this one replaces the file, and the lock names us.
         assert lock.read_text() == f"{os.getpid()}\n"
         with pytest.raises(SubIdLocked):
             ensure_range(target, "bob", MIN_SIZE, root_dir=tmp_path, lock_timeout=0.0)
         probed.append("refused")
-        real_atomic_write(target, data, mode)
+        real_atomic_write(target, data, mode, fixed_tmp=fixed_tmp)
 
     monkeypatch.setattr(subids, "atomic_write", probe)
     ensure_range(path, "alice", MIN_SIZE, root_dir=tmp_path)
@@ -642,11 +645,13 @@ def test_release_does_not_unlink_a_lock_that_another_process_replaced(
     lock = _lock_path(tmp_path, path)
     real_atomic_write = subids.atomic_write
 
-    def replaced_by_another_process(target: Path, data: bytes, mode: int) -> None:
+    def replaced_by_another_process(
+        target: Path, data: bytes, mode: int, *, fixed_tmp: bool = False
+    ) -> None:
         staged = lock.with_name(f"{lock.name}.other")
         staged.write_bytes(b"another holder\n")
         os.replace(staged, lock)
-        real_atomic_write(target, data, mode)
+        real_atomic_write(target, data, mode, fixed_tmp=fixed_tmp)
 
     monkeypatch.setattr(subids, "atomic_write", replaced_by_another_process)
     ensure_range(path, "alice", MIN_SIZE, root_dir=tmp_path)
@@ -933,6 +938,14 @@ def test_ensure_exact_accepts_a_same_name_line_that_covers_the_recorded_range(
             b"alice:100000:1048576\ndave:300000:1000\n",
             id="another-user-overlap-beside-a-covering-line",
         ),
+        pytest.param(
+            b"alice:200000:524288\ndave:300000:1000\n",
+            id="another-user-overlap-beside-the-exact-line",
+        ),
+        pytest.param(
+            b"alice:200000:524288\nalice:150000:524288\n",
+            id="same-name-partial-overlap-beside-the-exact-line",
+        ),
     ],
 )
 def test_ensure_exact_refuses_an_overlap_that_is_not_a_covering_same_name_line(
@@ -951,3 +964,192 @@ def test_ensure_exact_refuses_an_overlap_that_is_not_a_covering_same_name_line(
     }
     assert path.read_bytes() == content
     assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+_WRITERS: dict[str, Callable[[Path, Path], object]] = {
+    "ensure_range": lambda path, root: ensure_range(path, "alice", MIN_SIZE, root_dir=root),
+    "ensure_single": lambda path, root: ensure_single(path, "alice", root_dir=root),
+    "ensure_exact": lambda path, root: ensure_exact(path, RECORDED, root_dir=root),
+}
+"""Each writer that replaces the file, called as `writer(path, root_dir)`."""
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+def test_every_write_uses_the_fixed_temporary_name_and_removes_a_stale_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    path = _subuid(tmp_path, b"root:100000:65536\n")
+    # A killed earlier run leaves this name behind. The write must remove it, not add a new one.
+    (path.parent / ".subuid.ginn-tmp").write_bytes(b"left by a killed run\n")
+    replaced_from: list[str] = []
+    real_replace = os.replace
+
+    def record(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        replaced_from.append(Path(src).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", record)
+    _WRITERS[writer](path, tmp_path)
+    assert replaced_from == [".subuid.ginn-tmp"]
+    assert path.read_bytes().startswith(b"root:100000:65536\n")
+    assert _names(path.parent) == ["subuid"]
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_removes_the_matching_line_and_nothing_else(tmp_path: Path) -> None:
+    content = b"root:100000:65536\nalice:200000:524288\nbob:724288:65536\n"
+    path = _subuid(tmp_path, content)
+    os.chmod(path, 0o640)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change == Removal(
+        before=content, after=b"root:100000:65536\nbob:724288:65536\n", changed=True
+    )
+    assert path.read_bytes() == change.after
+    assert _mode(path) == 0o640
+    assert _names(path.parent) == ["subuid"]
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_without_a_match_writes_nothing(tmp_path: Path) -> None:
+    content = b"root:100000:65536\nbob:300000:1000\n"
+    path = _subuid(tmp_path, content)
+    inode = _inode(path)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change == Removal(before=content, after=content, changed=False)
+    assert _inode(path) == inode
+    assert path.read_bytes() == content
+    assert _names(path.parent) == ["subuid"]
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_does_not_create_a_missing_file(tmp_path: Path) -> None:
+    path = _subuid(tmp_path)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change == Removal(before=b"", after=b"", changed=False)
+    assert not path.exists()
+    assert _names(path.parent) == []
+
+
+@pytest.mark.fr("FR-003")
+@pytest.mark.parametrize(
+    ("content", "after", "changed"),
+    [
+        pytest.param(
+            b"alice:100000:524288\nalice:200000:524288\n",
+            b"alice:100000:524288\n",
+            True,
+            id="exact-line-removed-differing-line-kept",
+        ),
+        pytest.param(
+            b"alice:100000:524288\n",
+            b"alice:100000:524288\n",
+            False,
+            id="no-exact-line-differing-line-kept-and-reported",
+        ),
+    ],
+)
+def test_remove_exact_keeps_a_same_name_line_with_another_range_and_reports_it(
+    tmp_path: Path, content: bytes, after: bytes, changed: bool
+) -> None:
+    path = _subuid(tmp_path, content)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change == Removal(
+        before=content,
+        after=after,
+        changed=changed,
+        kept_differing=(SubIdEntry("alice", 100000, MIN_SIZE),),
+    )
+    assert path.read_bytes() == after
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_keeps_other_users_lines_byte_for_byte_and_in_order(tmp_path: Path) -> None:
+    kept_before = (
+        b"# subordinate ids, managed by hand \xff\n"
+        b"\n"
+        b"root:100000:65536\r\n"
+        b"  carol:  800000 : 1000   \n"
+    )
+    kept_after = b"bob:724288:65536   # second user\nnot a range line"
+    content = kept_before + b"alice:200000:524288\n" + kept_after
+    path = _subuid(tmp_path, content)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change.changed is True
+    assert change.kept_differing == ()
+    assert change.after == kept_before + kept_after
+    assert path.read_bytes() == kept_before + kept_after
+
+
+@pytest.mark.fr("FR-003")
+def test_removing_the_only_line_leaves_an_empty_file_in_place(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, b"alice:200000:524288\n")
+    os.chmod(path, 0o640)
+    change = remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert change == Removal(before=b"alice:200000:524288\n", after=b"", changed=True)
+    assert path.read_bytes() == b""
+    assert _mode(path) == 0o640
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_writes_through_the_fixed_temporary_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _subuid(tmp_path, b"root:100000:65536\nalice:200000:524288\n")
+    (path.parent / ".subuid.ginn-tmp").write_bytes(b"left by a killed run\n")
+    replaced_from: list[str] = []
+    real_replace = os.replace
+
+    def record(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        replaced_from.append(Path(src).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", record)
+    remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert replaced_from == [".subuid.ginn-tmp"]
+    assert path.read_bytes() == b"root:100000:65536\n"
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_holds_the_lock_while_it_writes_and_releases_it_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _subuid(tmp_path, b"root:100000:65536\nalice:200000:524288\n")
+    lock = _lock_path(tmp_path, path)
+    real_atomic_write = subids.atomic_write
+    probed: list[str] = []
+
+    def probe(target: Path, data: bytes, mode: int, *, fixed_tmp: bool = False) -> None:
+        # Another caller must not get in while this one replaces the file, and the lock names us.
+        assert lock.read_text() == f"{os.getpid()}\n"
+        with pytest.raises(SubIdLocked):
+            remove_exact(target, "alice", 200000, MIN_SIZE, root_dir=tmp_path, lock_timeout=0.0)
+        probed.append("refused")
+        real_atomic_write(target, data, mode, fixed_tmp=fixed_tmp)
+
+    monkeypatch.setattr(subids, "atomic_write", probe)
+    remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path)
+    assert probed == ["refused"]
+    assert path.read_bytes() == b"root:100000:65536\n"
+    assert _names(lock.parent) == []
+
+
+@pytest.mark.fr("FR-003")
+def test_remove_exact_times_out_on_a_lock_held_by_a_live_pid_and_leaves_the_file(
+    tmp_path: Path,
+) -> None:
+    content = b"root:100000:65536\nalice:200000:524288\n"
+    path = _subuid(tmp_path, content)
+    lock = _lock_path(tmp_path, path)
+    lock.write_text(f"{os.getpid()}\n")
+    with pytest.raises(SubIdLocked, match=re.escape(f"(pid {os.getpid()})")):
+        remove_exact(path, "alice", 200000, MIN_SIZE, root_dir=tmp_path, lock_timeout=0.1)
+    assert lock.read_text() == f"{os.getpid()}\n"
+    assert path.read_bytes() == content
+    assert _names(lock.parent) == [lock.name]

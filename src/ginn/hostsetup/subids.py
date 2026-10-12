@@ -4,7 +4,10 @@
 A line is `name_or_uid:start:count`. Blank lines, comments and lines this module does not
 understand are kept byte for byte. `ensure_range` only ever appends, so the bytes already in the
 file are never rewritten. A user who already holds at least `size` IDs in total is left alone,
-which makes a second run a no-op (FR-002).
+which makes a second run a no-op (FR-002). `remove_exact` is the only function that removes a
+line. It removes lines that match the recorded range exactly, and keeps every other byte (undo,
+FR-003). Every write uses the fixed temporary name `.<name>.ginn-tmp`, so a killed run leaves a
+predictable file that the next run removes (see `_atomic`).
 
 The read-modify-replace runs under a lock file, `<root_dir>/run/lock/ginn-<name>.lock`. On a real
 host that is /run/lock/ginn-subuid.lock and /run/lock/ginn-subgid.lock, so two Host Setup runs
@@ -114,6 +117,21 @@ class Change:
     added: SubIdEntry | None = None
 
 
+@dataclass(frozen=True)
+class Removal:
+    """Result of `remove_exact`. `before` and `after` are the exact file bytes.
+
+    `kept_differing` lists the same-name lines that stay in the file because their range is not
+    the one asked for, in file order. They are reported whether or not anything was removed, so
+    undo can warn about them.
+    """
+
+    before: bytes
+    after: bytes
+    changed: bool
+    kept_differing: tuple[SubIdEntry, ...] = ()
+
+
 def parse_entries(text: str) -> list[SubIdEntry]:
     """Return every well-formed `name:start:count` line in `text`, in file order.
 
@@ -202,7 +220,7 @@ def ensure_range(
             return Change(before=before, after=before, changed=False)
         added = allocate(entries, user, size, floor=floor, ceiling=ceiling)
         after = _append_line(before, added.render().encode("utf-8"))
-        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE), fixed_tmp=True)
         return Change(before=before, after=after, changed=True, added=added)
 
 
@@ -238,7 +256,7 @@ def ensure_single(
                 return Change(before=before, after=before, changed=False), entry
         added = allocate(entries, user, size, floor=floor, ceiling=ceiling)
         after = _append_line(before, added.render().encode("utf-8"))
-        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE), fixed_tmp=True)
         return Change(before=before, after=after, changed=True, added=added), added
 
 
@@ -251,24 +269,22 @@ def ensure_exact(
 ) -> Change:
     """Make sure the file holds the range `entry` and never chooses another range.
 
-    Used on a repair, to reuse the range that the Host Setup Record stored. Three outcomes:
+    Used on a repair, to reuse the range that the Host Setup Record stored. The rule is the same
+    whether or not the exact line is already there. Three outcomes:
 
-    - The exact line is already there. Nothing is written.
     - Every line that overlaps the range is a same-name line that covers all of it, and at least
-      one exists. That is what happens when the admin widened the user's line. Nothing is written.
-      This is the only case where an overlap is accepted.
+      one exists. The exact line is such a line, and so is a line the admin widened. Nothing is
+      written. This is the only case where an overlap is accepted.
     - Any other overlapping line is a conflict: another user's line, or a same-name line that
-      only partly overlaps. GINN-E-SUBID-CONFLICT is raised and the file is left alone.
-
-    Otherwise the line is appended under the lock that `ensure_range` uses.
+      only partly overlaps. That holds beside the exact line too. GINN-E-SUBID-CONFLICT is raised
+      and the file is left alone.
+    - No line overlaps the range. The line is appended under the lock that `ensure_range` uses.
     """
     _check_name(entry.name)
     _check_size(entry.count)
     with _lock(path, root_dir, lock_timeout):
         before = _read_bytes(path)
         entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
-        if entry in entries:
-            return Change(before=before, after=before, changed=False)
         covered = False
         for other in entries:
             if not (other.count and other.start < entry.end and entry.start < other.end):
@@ -287,8 +303,55 @@ def ensure_exact(
         if covered:
             return Change(before=before, after=before, changed=False)
         after = _append_line(before, entry.render().encode("utf-8"))
-        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE), fixed_tmp=True)
         return Change(before=before, after=after, changed=True, added=entry)
+
+
+def remove_exact(
+    path: Path,
+    name: str,
+    start: int,
+    count: int,
+    *,
+    root_dir: Path,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+) -> Removal:
+    """Remove the line `name:start:count` from the file at `path`, and no other line.
+
+    Undo uses this to take back a range that Host Setup added. Only lines that match the range
+    exactly are removed. A same-name line with another range stays, and is listed in
+    `kept_differing`. Every other line, comment and blank line keeps its bytes and its order. If
+    the file ends up empty it stays as an empty file. Runs under the same lock and gate as the
+    writers above.
+
+    - No line matches. Nothing is written, and a missing file is not created.
+    - One or more lines match. All of them are removed, so no copy of the range is left behind.
+      The file is replaced with the fixed temporary name.
+    """
+    _check_name(name)
+    target = SubIdEntry(name=name, start=start, count=count)
+    with _lock(path, root_dir, lock_timeout):
+        before = _read_bytes(path)
+        kept: list[str] = []
+        differing: list[SubIdEntry] = []
+        removed = False
+        # Split the same way parse_entries splits, and keep each line's terminator, so the lines
+        # that stay are written back as the same bytes.
+        for raw in before.decode("utf-8", errors="surrogateescape").splitlines(keepends=True):
+            entry = _parse_line(raw)
+            if entry == target:
+                removed = True
+                continue
+            if entry is not None and entry.name == name:
+                differing.append(entry)
+            kept.append(raw)
+        if not removed:
+            return Removal(
+                before=before, after=before, changed=False, kept_differing=tuple(differing)
+            )
+        after = "".join(kept).encode("utf-8", errors="surrogateescape")
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE), fixed_tmp=True)
+        return Removal(before=before, after=after, changed=True, kept_differing=tuple(differing))
 
 
 def _read_bytes(path: Path) -> bytes:

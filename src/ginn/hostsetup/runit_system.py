@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """System runit service that runs a user's runsvdir (FR-001, FR-081, FR-084, NFR-001).
 
-Host Setup renders etc/sv/ginn-<user>/{run,finish,log/run} and links it into var/service, so the
-system runit starts it at boot. `run` runs as root. It creates /run/ginn/<uid>, creates the
-delegated cgroup leaf (the same writes as cgroups.delegate_user_tree, S-01), moves itself into
+`render` builds the text of etc/sv/ginn-<user>/{run,finish,log/run}. This module does no file
+I/O. setup.py writes those scripts, and it makes the var/service link to /etc/sv/ginn-<user>
+itself, so the system runit starts the service at boot.
+
+`run` runs as root. It creates /run/ginn/<uid>, creates the delegated cgroup leaf (the same
+writes as cgroups.delegate_user_tree, S-01), moves itself into
 the supervisor leaf, waits for the user's state directory, then drops to the user and execs
 runsvdir. runsvdir is the process that stays resident, and NFR-001 allows it 1 MiB RSS.
 
@@ -23,15 +26,12 @@ Golden files for the rendered scripts are in tests/fixtures/hostsetup/ginn-alice
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
-import stat
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from dataclasses import dataclass
+from pathlib import PurePosixPath
 
-from ginn.hostsetup._atomic import atomic_write
 from ginn.hostsetup.cgroups import (
     CONTROLLERS,
     DEFAULT_CGROUP_ROOT,
@@ -46,7 +46,6 @@ LINK_PARENT = "var/service"
 DEFAULT_RUNTIME_PARENT = "/run/ginn"
 WAIT_SECONDS = 60
 XDG_KEYS: tuple[str, ...] = ("XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME")
-SCRIPT_NAMES: tuple[str, ...] = ("run", "finish", "log/run")
 
 _ACCOUNT = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _PLACEHOLDER = re.compile(r"@([A-Z_]+)@")
@@ -67,24 +66,6 @@ def _groups(uid: int) -> _Groups:
     return _Groups(ginn=str(ginn), user=str(user), supervisor=str(user / SUPERVISOR_LEAF))
 
 
-@dataclass
-class InstallPlan:
-    """What `install` changed under the root, for the Host Setup Record (DR-009) and undo (FR-003).
-
-    `created` lists the directories, scripts and link that did not exist before this call. Undo
-    removes them. `replaced` lists scripts that existed with other bytes, and `pre_images` holds
-    each one's bytes from before the change. `relinked` lists a var/service link that pointed
-    somewhere else, and `pre_links` holds the old target. A path is in exactly one of `created`,
-    `replaced` or `relinked`. Nothing is listed when the content already matched.
-    """
-
-    created: list[Path] = field(default_factory=list)
-    replaced: list[Path] = field(default_factory=list)
-    relinked: list[Path] = field(default_factory=list)
-    pre_images: dict[Path, bytes] = field(default_factory=dict)
-    pre_links: dict[Path, str] = field(default_factory=dict)
-
-
 def render(
     user: str,
     uid: int,
@@ -97,7 +78,7 @@ def render(
     """Render the service scripts for `user`.
 
     Returns a mapping from root-relative path to file text, for example
-    "etc/sv/ginn-alice/run". `install` takes that mapping directly.
+    "etc/sv/ginn-alice/run". setup.py writes each entry under the root, with mode SCRIPT_MODE.
 
     `gid` is the user's numeric primary group. The caller resolves it, and the scripts never use
     a group name. `runtime_dir` defaults to /run/ginn/<uid> (ADR-004). uid 0 and gid 0 are
@@ -134,64 +115,6 @@ def render(
         f"{base}/finish": _FINISH,
         f"{base}/log/run": _log_script(values),
     }
-
-
-def install(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
-    """Write the rendered service under `root_dir` and link it into var/service.
-
-    Each script is written atomically with mode 0755. A script whose bytes and mode already
-    match is not rewritten. The symlink is created last, so runsvdir never sees a half-built
-    service. The link target is the absolute /etc/sv/ginn-<user>, not prefixed with `root_dir`.
-
-    Every path that changed is recorded with its pre-image, so undo can restore it. A path that
-    exists but is not a regular file (or, for the link, not a symlink) is refused, because undo
-    could not restore it. Host Setup calls `install_scripts` and `install_link` separately, so it
-    can record its progress between them.
-    """
-    service = _service_name(rendered)
-    # The link is refused before the first write, so a refused call leaves nothing behind.
-    _check_link(root_dir / LINK_PARENT / service)
-    plan = install_scripts(root_dir, rendered)
-    install_link(root_dir, rendered, plan)
-    return plan
-
-
-def install_scripts(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
-    """Write the scripts of the rendered service, as `install` does, and leave the link alone.
-
-    Every refusal is checked before the first write. The plan lists the directories and the
-    scripts that changed.
-    """
-    _service_name(rendered)
-    existing = {rel: _read_script(root_dir / rel) for rel in sorted(rendered)}
-    plan = InstallPlan()
-    for rel in sorted(rendered):
-        target = root_dir / rel
-        _ensure_dirs(target.parent, root_dir, plan)
-        data = rendered[rel].encode("utf-8")
-        before = existing[rel]
-        if before is not None and before == (data, SCRIPT_MODE):
-            continue
-        atomic_write(target, data, SCRIPT_MODE)
-        if before is None:
-            plan.created.append(target)
-        else:
-            plan.replaced.append(target)
-            plan.pre_images[target] = before[0]
-    return plan
-
-
-def install_link(root_dir: Path, rendered: Mapping[str, str], plan: InstallPlan) -> None:
-    """Link the rendered service into var/service, adding the changes to `plan`.
-
-    The link is refused when it exists and is not a symbolic link. An existing link to another
-    target is replaced, and its old target is recorded in `plan`.
-    """
-    service = _service_name(rendered)
-    link = root_dir / LINK_PARENT / service
-    _check_link(link)
-    _ensure_dirs(link.parent, root_dir, plan)
-    _ensure_link(link, f"/{SV_PARENT}/{service}", plan)
 
 
 def _run_script(v: Mapping[str, str], uid: int) -> str:
@@ -253,69 +176,6 @@ def _abs(label: str, value: str) -> str:
 def _check_account(label: str, name: str) -> None:
     if _ACCOUNT.fullmatch(name) is None:
         raise ValueError(f"invalid {label} name: {name!r}")
-
-
-def _service_name(rendered: Mapping[str, str]) -> str:
-    keys = set(rendered)
-    if not keys:
-        raise ValueError("nothing rendered")
-    first = PurePosixPath(sorted(keys)[0])
-    if len(first.parts) < 3 or first.parts[:2] != tuple(SV_PARENT.split("/")):
-        raise ValueError(f"rendered path is not under {SV_PARENT}: {first}")
-    service = first.parts[2]
-    if not service.startswith("ginn-"):
-        raise ValueError(f"service directory must start with ginn-: {service}")
-    expected = {f"{SV_PARENT}/{service}/{name}" for name in SCRIPT_NAMES}
-    if keys != expected:
-        raise ValueError(f"expected exactly {sorted(expected)}, got {sorted(keys)}")
-    return service
-
-
-def _read_script(target: Path) -> tuple[bytes, int] | None:
-    """Return (bytes, mode bits) of the regular file at `target`, or None if it does not exist.
-
-    A path that exists but is not a regular file is refused. Its previous content could not be
-    recorded as bytes, so undo could not restore it.
-    """
-    try:
-        st = os.lstat(target)
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(st.st_mode):
-        raise ValueError(f"{target} exists and is not a regular file")
-    return target.read_bytes(), stat.S_IMODE(st.st_mode)
-
-
-def _ensure_dirs(directory: Path, root_dir: Path, plan: InstallPlan) -> None:
-    current = root_dir
-    for part in directory.relative_to(root_dir).parts:
-        current = current / part
-        if not current.exists():
-            os.mkdir(current, SCRIPT_MODE)
-            plan.created.append(current)
-
-
-def _check_link(link: Path) -> None:
-    """Refuse a path that exists and is not a symlink, because undo could not restore it."""
-    if not link.is_symlink() and link.exists():
-        raise ValueError(f"{link} exists and is not a symlink")
-
-
-def _ensure_link(link: Path, target: str, plan: InstallPlan) -> None:
-    """Point `link` at `target`, recording the old target if it was different."""
-    if link.is_symlink():
-        before = os.readlink(link)
-        if before == target:
-            return
-        tmp = link.with_name(f".{link.name}.tmp")
-        tmp.unlink(missing_ok=True)
-        os.symlink(target, tmp)
-        os.replace(tmp, link)
-        plan.relinked.append(link)
-        plan.pre_links[link] = before
-        return
-    os.symlink(target, link)
-    plan.created.append(link)
 
 
 _FINISH = """\
