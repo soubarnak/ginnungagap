@@ -25,7 +25,8 @@ steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 # --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
 install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
 remove = ["apt-get", "--yes", "remove", "{packages}"]
-# Needs current package lists first (apt-get update is not in any verb; see the loader notes).
+# Needs current package lists first. No verb here runs apt-get update; the caller must (not yet
+# specified).
 upgrade = ["apt-get", "--yes", "--no-install-recommends", "upgrade"]
 # apt list --upgradable: the lists as last refreshed. apt warns on stderr that its CLI is unstable.
 check-updates = ["apt", "list", "--upgradable"]

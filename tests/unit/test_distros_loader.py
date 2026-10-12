@@ -2,9 +2,10 @@
 """Distribution data and loader: NFR-060 (data only), DR-003, DR-005, FR-012, FR-013, FR-040,
 FR-041, NFR-SEC-005.
 
-The shipped files are checked as data: their Integration Package Set against S-10 and the Trust
-Manifest, their verbs for non-interactive and signature-preserving flags, and their name patterns
-against domain.packages. The `_test` fixture and renamed copies prove that a new distribution
+The shipped files are checked as data: their Integration Package Set against S-10 (the distro TOML
+is the single source for it; trust.toml's copy is a duplicate to be removed later), their verbs
+for non-interactive and signature-preserving flags, and their name patterns against
+domain.packages. The `_test` fixture and renamed copies prove that a new distribution
 needs no code change. Every validation rule in loader.py has a test that breaks it.
 """
 
@@ -34,7 +35,6 @@ from ginn.errors import GinnError
 
 REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "src" / "ginn" / "distros" / "data"
-TRUST_TOML = REPO / "src" / "ginn" / "trust" / "data" / "trust.toml"
 SHIPPED = ("arch", "debian", "fedora", "kali")
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
 PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
@@ -211,14 +211,6 @@ def test_integration_set_for_en_us_matches_the_s10_findings(
     result = load(name).integration_set("en_US.UTF-8")
     assert result.packages == packages
     assert result.steps == steps
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_integration_packages_match_the_trust_manifest_entry(name: str) -> None:
-    trust = tomllib.loads(TRUST_TOML.read_text(encoding="utf-8"))
-    entry = trust["distro"][load(name).trust_key]
-    assert list(load(name).integration.packages) == entry["integration_packages"]
 
 
 @pytest.mark.fr("FR-013")
