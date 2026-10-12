@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Kali Linux distribution definition, data only (NFR-060, FR-014 not covered here). Read by
+# src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+#
+# Image: trust_key names [distro.kali] in src/ginn/trust/data/trust.toml (DR-040). The channel is
+# kali-rolling, a proposal (S-10 section 2; AS-024 does not cover Kali). The Integration packages
+# and the locale step are the same as Debian. Not verified on a host (M4), and not tested with
+# network. Kali network and capability settings, and the --everything option, are not here
+# (T8.7, T10.1).
+schema = 1
+id = "kali"
+trust_key = "kali"
+shell = "/bin/bash"
+# DR-003 (Debian and Kali), matched with fullmatch.
+package_name_regex = '[a-z0-9][a-z0-9.+-]{1,127}'
+# FR-012: apt messages for a missing public key, an invalid signature or an unsigned repository.
+signature_error_regex = 'NO_PUBKEY|public key is not available|signatures were invalid|is not signed'
+
+[integration]
+packages = ["ca-certificates", "locales"]
+steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
+
+[verbs]
+# --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
+install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
+remove = ["apt-get", "--yes", "remove", "{packages}"]
+# Needs current package lists first (apt-get update is not in any verb; see the loader notes).
+upgrade = ["apt-get", "--yes", "--no-install-recommends", "upgrade"]
+# apt list --upgradable: the lists as last refreshed. apt warns on stderr that its CLI is unstable.
+check-updates = ["apt", "list", "--upgradable"]
+# apt-mark showmanual: names of packages installed by hand (DR-007).
+list-explicit = ["apt-mark", "showmanual"]
+# apt-cache depends --recurse: the dependency closure, without recommends or suggests. Changes
+# nothing. Output includes <virtual> lines that the caller filters.
+resolve = [
+    "apt-cache", "depends", "--recurse",
+    "--no-recommends", "--no-suggests", "--no-conflicts",
+    "--no-breaks", "--no-replaces", "--no-enhances",
+    "{packages}",
+]
+# apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
+estimate = ["apt-cache", "show", "{packages}"]

@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fedora distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+#
+# Image: trust_key names [distro.fedora] in src/ginn/trust/data/trust.toml (DR-040). The image is
+# fedora-minimal:44 with dnf5 5.4.6 (S-10b). Its only missing Integration package is
+# glibc-langpack-en. Its locale data needs no generation step, so there are no steps.
+# The image sets %_install_langs en_US (S-10 section 5). Other LANG values need that overridden,
+# which is an M4 item. dnf needs a writable HOME (runtime, not here).
+# Not verified on a host (M4): every verb. gpgcheck is never disabled (FR-012).
+schema = 1
+id = "fedora"
+trust_key = "fedora"
+shell = "/bin/bash"
+# DR-003 (Fedora), matched with fullmatch.
+package_name_regex = '[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}'
+# FR-012: dnf messages for a failed GPG check or a missing public key.
+signature_error_regex = '(?i)gpg check failed|public key for .* is not installed|signature verification failed'
+
+[integration]
+packages = ["glibc-langpack-{lang}"]
+steps = []
+
+[verbs]
+# install_weak_deps=False: only hard dependencies are installed (FR-040, CR-007).
+install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", "{packages}"]
+remove = ["dnf", "--assumeyes", "remove", "{packages}"]
+upgrade = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
+# check-upgrade exits 100 when updates exist and 0 when none. dnf refreshes expired metadata itself.
+check-updates = ["dnf", "check-upgrade"]
+# repoquery --userinstalled: names of packages installed by hand (DR-007). Format is rpm's %{name}.
+list-explicit = ["dnf", "repoquery", "--userinstalled", "--queryformat", '%{{name}}\n']
+# --assumeno: print the transaction and make no change. dnf exits 1 after the no answer.
+resolve = [
+    "dnf", "--assumeno", "--setopt=install_weak_deps=False", "install", "{packages}",
+]
+# repoquery with download and install sizes per package, one line each. Changes nothing.
+estimate = [
+    "dnf", "repoquery",
+    "--queryformat", '%{{name}} %{{downloadsize}} %{{installsize}}\n',
+    "{packages}",
+]

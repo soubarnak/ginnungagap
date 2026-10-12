@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Test-only fake distribution (NFR-060). It is not a real distribution: available() leaves it out
+# unless include_test=True, and it has no table in src/ginn/trust/data/trust.toml. Tests load it,
+# and load a renamed copy, to prove that a new distribution needs no code change.
+schema = 1
+id = "_test"
+trust_key = "_test"
+shell = "/bin/sh"
+package_name_regex = '[a-z][a-z0-9.+-]{1,63}'
+signature_error_regex = 'FAKE-SIGNATURE-ERROR'
+
+[integration]
+packages = ["fake-ca", "fake-locale-{lang}"]
+steps = [["fake-locale-gen", "{locale}"]]
+
+[verbs]
+install = ["fake-pm", "install", "{packages}"]
+remove = ["fake-pm", "remove", "{packages}"]
+upgrade = ["fake-pm", "upgrade"]
+check-updates = ["fake-pm", "check"]
+list-explicit = ["fake-pm", "list"]
+resolve = ["fake-pm", "resolve", "{packages}"]
+estimate = ["fake-pm", "estimate", "{packages}"]

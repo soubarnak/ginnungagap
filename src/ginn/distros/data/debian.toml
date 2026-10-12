@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Debian stable distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+#
+# Image: trust_key names [distro.debian] in src/ginn/trust/data/trust.toml (DR-040). The image is
+# debian:stable-slim, trixie in S-10b. ca-certificates and locales are missing from the image, so
+# both are Integration packages. The steps run after the packages, as container root.
+# Not verified on a host (M4): every verb and the step. Network is needed for the packages.
+schema = 1
+id = "debian"
+trust_key = "debian"
+shell = "/bin/bash"
+# DR-003 (Debian and Kali), matched with fullmatch.
+package_name_regex = '[a-z0-9][a-z0-9.+-]{1,127}'
+# FR-012: apt messages for a missing public key, an invalid signature or an unsigned repository.
+signature_error_regex = 'NO_PUBKEY|public key is not available|signatures were invalid|is not signed'
+
+[integration]
+packages = ["ca-certificates", "locales"]
+steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
+
+[verbs]
+# --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
+install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
+remove = ["apt-get", "--yes", "remove", "{packages}"]
+# Needs current package lists first (apt-get update is not in any verb; see the loader notes).
+upgrade = ["apt-get", "--yes", "--no-install-recommends", "upgrade"]
+# apt list --upgradable: the lists as last refreshed. apt warns on stderr that its CLI is unstable.
+check-updates = ["apt", "list", "--upgradable"]
+# apt-mark showmanual: names of packages installed by hand (DR-007).
+list-explicit = ["apt-mark", "showmanual"]
+# apt-cache depends --recurse: the dependency closure, without recommends or suggests. Changes
+# nothing. Output includes <virtual> lines that the caller filters.
+resolve = [
+    "apt-cache", "depends", "--recurse",
+    "--no-recommends", "--no-suggests", "--no-conflicts",
+    "--no-breaks", "--no-replaces", "--no-enhances",
+    "{packages}",
+]
+# apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
+estimate = ["apt-cache", "show", "{packages}"]

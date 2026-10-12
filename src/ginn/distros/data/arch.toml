@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Arch Linux distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+#
+# Image: trust_key names [distro.arch] in src/ginn/trust/data/trust.toml (DR-040). Image facts from
+# S-10b: pacman 137 packages; en_US.UTF-8 absent; no Integration package missing.
+# The locale step runs localedef, the program that locale-gen calls. S-10b tested locale-gen, not
+# localedef. Not verified on a host (M4): every verb and the step.
+schema = 1
+id = "arch"
+trust_key = "arch"
+shell = "/bin/bash"
+# DR-003 (Arch and AUR), matched with fullmatch.
+package_name_regex = '[a-z0-9@_+][a-z0-9@._+-]{0,127}'
+# FR-012: pacman messages for an unknown or untrusted signing key, or a corrupt signed package.
+signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted package \(PGP signature\)|could not be looked up remotely'
+
+[integration]
+packages = []
+steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
+
+[verbs]
+# --needed skips packages already installed. No --refresh: the sync databases must be current
+# before this runs. The image ships none (see the loader notes on metadata refresh).
+install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
+# No --recursive: pacman refuses to remove a package that another installed package needs.
+remove = ["pacman", "--remove", "--noconfirm", "{packages}"]
+# --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade.
+upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+# --query --upgrades is -Qu: upgradable packages against the sync databases as last refreshed.
+check-updates = ["pacman", "--query", "--upgrades"]
+# --query --explicit --quiet is -Qeq: explicitly installed package names only (DR-007).
+list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
+# --print with --print-format %n: names of the packages a sync would fetch. Changes nothing.
+resolve = ["pacman", "--sync", "--print", "--print-format", "%n", "{packages}"]
+# --info is -Si: repository info, including Download Size and Installed Size. Changes nothing.
+estimate = ["pacman", "--sync", "--info", "{packages}"]
