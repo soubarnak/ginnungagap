@@ -3,8 +3,8 @@
 
 Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some codes are
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
-GINN-E-INTERNAL, and GINN-E-RECOVERY-PENDING (FR-122). `source` cites the requirement that defines
-the failure.
+GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122) and GINN-E-HOST-NOT-SET-UP (DR-010). `source`
+cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -88,6 +88,13 @@ _SPECS: tuple[ErrorSpec, ...] = (
         summary="Host Setup must run as root",
         remedy="run 'sudo ginn host-setup --user <name>'",
         source="FR-001 AC-2",
+    ),
+    ErrorSpec(
+        code="GINN-E-HOST-NOT-SET-UP",
+        exit_code=77,
+        summary="Host Setup has not created the runtime directory {path}",
+        remedy="run 'sudo ginn host-setup --user <name>', then retry",
+        source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-UNDO-REALMS-EXIST",
@@ -258,7 +265,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
     (75, "realm busy (EX_TEMPFAIL)"),
-    (77, "Host Setup must run as root (EX_NOPERM)"),
+    (77, "Host Setup must run as root, or has not run for this user (EX_NOPERM)"),
     (EXEC_GINN_FAILURE, "reserved; see EXEC_GINN_FAILURE"),
     (130, "interrupted by the user"),
 )

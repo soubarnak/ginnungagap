@@ -62,7 +62,8 @@ def test_template_version_matches_pyproject_without_dev_marker() -> None:
 def test_template_depends_on_podman_and_its_helpers() -> None:
     depends = set(_template_fields()["depends"].split())
     assert "podman" in depends
-    assert depends & {"crun", "runc"}, "no OCI runtime (crun or runc) declared"
+    assert "crun" in depends, "ginn passes --runtime crun on every podman call (ADR-004)"
+    assert "runc" not in depends, "runc is not the OCI runtime ginn uses (ADR-004)"
     assert "conmon" in depends
     assert "netavark" in depends
     assert depends & {"passt", "slirp4netns"}, "no rootless network helper declared"

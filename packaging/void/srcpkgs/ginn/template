@@ -4,7 +4,7 @@ version=0.1.0
 revision=1
 build_style=python3-pep517
 hostmakedepends="python3-setuptools python3-wheel"
-depends="python3 podman runc conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
+depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
 checkdepends="python3-pytest python3-hypothesis"
 # The release tarball has no git metadata, so the repo hygiene test cannot run here.
 # CI runs it on the checkout.

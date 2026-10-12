@@ -20,7 +20,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 70 | internal error (EX_SOFTWARE) |
 | 73 | not enough disk space |
 | 75 | realm busy (EX_TEMPFAIL) |
-| 77 | Host Setup must run as root (EX_NOPERM) |
+| 77 | Host Setup must run as root, or has not run for this user (EX_NOPERM) |
 | 125 | reserved; see EXEC_GINN_FAILURE |
 | 130 | interrupted by the user |
 
@@ -30,6 +30,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 |---|---|---|---|---|
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |
+| `GINN-E-HOST-NOT-SET-UP` | 77 | Host Setup has not created the runtime directory {path} | run 'sudo ginn host-setup --user &lt;name&gt;', then retry | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged | run 'ginn integrity --ack', then retry the command | FR-006 AC-1 |
 | `GINN-E-IMAGE-UNVERIFIED` | 65 | image digest for {distro} does not match the trust manifest | do not use this image; retry later, and update ginn if the mismatch persists | FR-011 AC-1 |
 | `GINN-E-INTERNAL` | 70 | internal error; this is a bug | re-run with --verbose and report the output | NFR-040 |

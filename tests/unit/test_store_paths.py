@@ -108,10 +108,11 @@ def test_missing_runtime_directory_is_refused_and_never_replaced_on_disk(
     with pytest.raises(GinnError) as excinfo:
         OwnedPaths.from_env(env, uid=1000, system_run=tmp_path / "run")
 
-    assert excinfo.value.code == "GINN-E-USAGE"
-    assert excinfo.value.exit_code == 2
-    assert "host-setup" in excinfo.value.message
+    assert excinfo.value.code == "GINN-E-HOST-NOT-SET-UP"
+    assert excinfo.value.exit_code == 77
+    assert "host-setup" in excinfo.value.remedy
     assert str(tmp_path / "run" / "ginn" / "1000") in excinfo.value.message
+    assert excinfo.value.details == {"path": str(tmp_path / "run" / "ginn" / "1000")}
     # No runroot, tmpdir or locks on disk under state: nothing was created.
     assert not (tmp_path / ".local" / "state" / "ginn").exists()
 
@@ -125,7 +126,7 @@ def test_runtime_directory_is_per_user(tmp_path: Path) -> None:
     )
     with pytest.raises(GinnError) as excinfo:
         OwnedPaths.from_env(env, uid=1000, system_run=system_run)
-    assert excinfo.value.code == "GINN-E-USAGE"
+    assert excinfo.value.code == "GINN-E-HOST-NOT-SET-UP"
 
 
 @pytest.mark.fr("DR-010")

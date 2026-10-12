@@ -12,6 +12,8 @@ The provenance scan checks that ginn source does not copy code from the referenc
 
 `PROVENANCE_SEEDS` takes comma-separated integers from 0 to 4294967295, with no leading zeros and no repeats. Any other value exits with status 2. A larger seed set can only raise the numbers in the table, never lower them.
 
+The script fails closed on an empty reference. After steps 1 and 2, it counts the files in each reference clone whose names end in `.py`, `.sh`, `.c` or `.h`, with `.git` skipped and the step 2 copies included. A clone with no such files, for example from a wrong `REF` or a changed layout, would give zero matches and pass the gate. In that case the script exits with status 2, naming the reference, before any detector runs. The count of each reference is printed as `reference files to compare`.
+
 ## Determinism
 
 With the same seeds, the same reference commits and the same tree, two runs produce the same `table.txt`. The table does not depend on the order in which copydetect returns its pairs: ties on similarity and tokens resolve by reference label. The resolved reference commits are printed on stdout, not written to the table, so that the table diffs only when the detection changes.
@@ -38,7 +40,7 @@ The gate is calibrated this way because any non-zero similarity is noise. Common
 
 The gate runs on the merged maxima over the seeds. The thresholds are not seed-dependent.
 
-Exit status: `0` when no file fails, `1` when a file fails, `2` for a configuration error such as a malformed allowlist, an invalid `PROVENANCE_REPOS` entry or an invalid `PROVENANCE_SEEDS`.
+Exit status: `0` when no file fails, `1` when a file fails, `2` for a configuration error such as a malformed allowlist, an invalid `PROVENANCE_REPOS` entry, an invalid `PROVENANCE_SEEDS`, or a reference with no files of the scanned extensions.
 
 ## The allowlist
 

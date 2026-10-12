@@ -14,8 +14,8 @@ Roots, from the environment (XDG Base Directory spec; empty or relative values c
 $XDG_RUNTIME_DIR is never read here. Under elogind it exists only while a login session lives, so
 a session ginn and the boot-time supervisor would disagree on the runtime root (ADR-004).
 
-If the runtime directory does not exist, `from_env` refuses with GINN-E-USAGE. It never falls
-back to a directory on disk: Podman needs its runroot and tmpdir on tmpfs to detect a reboot.
+If the runtime directory does not exist, `from_env` refuses with GINN-E-HOST-NOT-SET-UP. It never
+falls back to a directory on disk: Podman needs its runroot and tmpdir on tmpfs to detect a reboot.
 
 `applications_dir` ($XDG_DATA_HOME/applications) is shared with the host and is NOT owned as a
 whole. Only `ginn-*.desktop` files in it are owned (`desktop_entry_glob`). It is therefore left out
@@ -57,13 +57,7 @@ def _runtime_dir(env: Mapping[str, str], uid: int, system_run: Path) -> Path:
         return Path(override)
     runtime = system_run / _APP_NAME / str(uid)
     if not runtime.is_dir():
-        raise make(
-            "GINN-E-USAGE",
-            detail=(
-                f"runtime directory {runtime} is missing; run "
-                "'sudo ginn host-setup --user <name>' or 'ginn doctor'"
-            ),
-        )
+        raise make("GINN-E-HOST-NOT-SET-UP", path=str(runtime))
     return runtime
 
 
@@ -88,8 +82,8 @@ class OwnedPaths:
         """Compute the owned paths from `env` (default: os.environ) and the user id.
 
         `system_run` is the root that holds the Host Setup runtime directory `ginn/<uid>`. Tests
-        pass a temporary directory. Raises GINN-E-USAGE when that directory is missing and no
-        GINN_RUNTIME_DIR override is set.
+        pass a temporary directory. Raises GINN-E-HOST-NOT-SET-UP when that directory is missing
+        and no GINN_RUNTIME_DIR override is set.
         """
         environ: Mapping[str, str] = os.environ if env is None else env
         home_raw = environ.get("HOME", "")
