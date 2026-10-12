@@ -14,11 +14,11 @@ order (Decision 15 (v)):
 3. Per-user cleanup: the per-user service directories, leaf first; the subordinate ID lines that
    setup appended (`subids.remove_exact`); and the per-user files and directories, restored from
    their pre-images or removed.
-4. Shared state. Applied only when this is the last record. The root cgroup.subtree_control gets
-   `-<ctrl>` for each controller that is present now and absent from its pre-image, and only in the
-   boot that shared.json recorded. Each shared directory whose pre-image is absent is removed with
-   rmdir, leaf first. Then shared.json is removed. When another record remains, every shared path
-   that still exists is reported and left.
+4. Shared state. Applied only when this is the last record. Each shared directory whose pre-image
+   is absent is removed with rmdir, leaf first. Then the root cgroup.subtree_control gets `-<ctrl>`
+   for each controller that is present now and absent from its pre-image, and only in the boot that
+   shared.json recorded; a refused write is reported. Then shared.json is removed. When another
+   record remains, every shared path that still exists is reported and left.
 5. The user's own record is removed.
 6. /etc/ginn is removed with rmdir, but only when shared.json listed it with pre-image absent. That
    entry is read before step 4 removes shared.json (Decision 15 (v) step 6, Decision 20).
@@ -75,8 +75,8 @@ UNDO_STEPS: tuple[str, ...] = (
     "service",
     "subids",
     "files",
-    "control",
     "shared-dirs",
+    "control",
     "shared",
     "record",
     "records-dir",
@@ -496,13 +496,13 @@ def _report_shared(ctx: _Ctx, shared: rec.SharedRecord) -> None:
 
 
 def _apply_shared(ctx: _Ctx, shared: rec.SharedRecord) -> None:
-    """Step 4 for the last record: controllers, then shared directories, then shared.json."""
-    boot_now = read_boot_id(ctx.root)
-    for entry in shared.service_paths:
-        if entry.kind == "file":
-            _disable_controllers(ctx, entry, shared.boot_id, boot_now)
-    ctx.hit("control")
+    """Step 4 for the last record: shared directories, then controllers, then shared.json.
 
+    The directories go first. cgroup v2 refuses to disable a controller at a parent while a child
+    cgroup still enables it, so the root controllers are written only after the cgroup directories
+    are gone. Decision 15 (v) step 4 lists (ii) before (iii), but (ii) itself says it runs after the
+    cgroup directories are removed. The code follows that rationale.
+    """
     dirs = [
         entry
         for entry in (*shared.paths, *shared.service_paths)
@@ -511,6 +511,12 @@ def _apply_shared(ctx: _Ctx, shared: rec.SharedRecord) -> None:
     for entry in _deepest_first(dirs):
         _undo_shared_dir(ctx, entry)
     ctx.hit("shared-dirs")
+
+    boot_now = read_boot_id(ctx.root)
+    for entry in shared.service_paths:
+        if entry.kind == "file":
+            _disable_controllers(ctx, entry, shared.boot_id, boot_now)
+    ctx.hit("control")
 
     ctx.unlink(SHARED_RELPATH)
     ctx.hit("shared")
@@ -543,7 +549,11 @@ def _disable_controllers(
     wanted = frozenset(pre.data.decode("ascii", errors="replace").split())
     now = frozenset(path.read_text(encoding="ascii", errors="replace").split())
     for ctrl in sorted(now - wanted):
-        ctx.write_control(path, f"-{ctrl}")
+        try:
+            ctx.write_control(path, f"-{ctrl}")
+        except OSError as exc:
+            # EBUSY: a cgroup that is not ours still enables the controller. Report, do not crash.
+            ctx.leave(rel, f"-{ctrl} refused: {exc.strerror}")
 
 
 def _undo_shared_dir(ctx: _Ctx, entry: rec.PathEntry) -> None:

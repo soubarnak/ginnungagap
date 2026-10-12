@@ -176,8 +176,14 @@ def _cgroup_rmdir(path: Path) -> None:
 
 
 def _cgroup_write(path: Path, text: str) -> None:
-    """One cgroupfs controller write: "+ctrl" enables and "-ctrl" disables, keeping the order."""
+    """One cgroupfs controller write: "+ctrl" enables and "-ctrl" disables, keeping the order.
+
+    cgroup v2 refuses to disable a controller at the root while a child cgroup still exists (its
+    subtree_control may enable it), so a disable with a child directory present fails with EBUSY.
+    """
     op, ctrl = text[0], text[1:]
+    if op == "-" and any(child.is_dir() for child in path.parent.iterdir()):
+        raise OSError(errno.EBUSY, os.strerror(errno.EBUSY), str(path))
     tokens = path.read_text(encoding="utf-8").split()
     if op == "-":
         tokens = [token for token in tokens if token != ctrl]
@@ -492,6 +498,24 @@ def test_a_service_that_outlives_the_wait_stops_undo_and_a_rerun_completes(tmp_p
     rerun = _undo(root)
     assert rerun.left == ()
     assert _content(_snapshot(root)) == expected
+
+
+@pytest.mark.fr("FR-003")
+def test_a_root_controller_that_a_foreign_child_cgroup_still_uses_is_refused_and_reported(
+    tmp_path: Path,
+) -> None:
+    root = _host(tmp_path)
+    _setup(root)
+    _service(root, "alice")
+    (root / "sys/fs/cgroup/ginn/9999").mkdir()
+    result = _undo(root)
+    assert sorted(_left(result)) == sorted(
+        [
+            ("sys/fs/cgroup/ginn", REASON_NOT_EMPTY),
+            (SUBTREE, f"-pids refused: {os.strerror(errno.EBUSY)}"),
+        ]
+    )
+    assert (root / SUBTREE).read_text(encoding="utf-8") == "cpu io memory pids\n"
 
 
 @pytest.mark.fr("FR-003")
