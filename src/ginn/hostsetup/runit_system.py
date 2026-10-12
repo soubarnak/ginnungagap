@@ -385,7 +385,8 @@ if ! enable_controllers @USER_CGROUP@; then
 fi
 @CHOWN_LINES@
 
-# 3. Move this process into the supervisor leaf. The exec below keeps the PID and the cgroup.
+# 3. Move this process into the supervisor leaf. The leaf stays root-owned (ADR-003), so this
+# write is made as root. The exec below keeps the PID and the cgroup.
 printf '%s\\n' "$$" > @SUPERVISOR_CGROUP@/cgroup.procs
 
 # 4. Wait for the state directory, for example an encrypted home that is not mounted yet.

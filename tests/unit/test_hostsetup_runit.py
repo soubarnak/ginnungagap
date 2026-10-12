@@ -87,6 +87,16 @@ def test_run_chowns_exactly_the_paths_the_cgroup_module_lists() -> None:
     assert sorted(chowned) == sorted(chown_paths(DEFAULT_CGROUP_ROOT, 1000))
 
 
+@pytest.mark.fr("FR-001")
+def test_run_chowns_nothing_under_the_supervisor_leaf() -> None:
+    # The leaf stays root-owned (ADR-003): the run script writes the supervisor pid into it as root.
+    leaf = f"{DEFAULT_CGROUP_ROOT}/ginn/1000/supervisor"
+    for line in _alice()[RUN].splitlines():
+        if line.startswith("chown "):
+            for word in line.split()[2:]:
+                assert word != leaf and not word.startswith(f"{leaf}/"), line
+
+
 def test_run_enables_the_same_controllers_as_the_cgroup_module() -> None:
     assert f"CONTROLLERS='{' '.join(sorted(CONTROLLERS))}'" in _alice()[RUN]
 

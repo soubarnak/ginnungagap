@@ -5,11 +5,14 @@ Layout created by `delegate_user_tree`, with `<uid>` the user:
 
     <root>/ginn/                  controllers enabled, root-owned
     <root>/ginn/<uid>/            controllers enabled, chowned to uid:gid
-    <root>/ginn/<uid>/supervisor/ leaf for the runit supervisor, chowned
+    <root>/ginn/<uid>/supervisor/ leaf for the runit supervisor, root-owned
 
 A cgroup that has controllers in subtree_control cannot hold processes, so the processes sit in
-the leaves. Only the directories and the procs, threads and subtree_control files are chowned.
-Limit files such as memory.max stay root-owned, so the user cannot raise its own limits.
+the leaves. Only `<root>/ginn/<uid>` and its cgroup.procs, cgroup.threads and cgroup.subtree_control
+are chowned. The supervisor leaf stays root-owned: cgroup v2 migration needs write access to the
+common ancestor and to the destination, not to the source leaf, so nothing in the leaf has to be
+written by the user (S-01, ADR-003). Limit files such as memory.max stay root-owned, so the user
+cannot raise its own limits.
 
 NOTE: there is deliberately no leaf for `ginn start` or `podman start`. A session process cannot
 move itself into <root>/ginn/<uid>/...: cgroup v2 migration needs write access to cgroup.procs of
@@ -38,7 +41,6 @@ CONTROLLERS: frozenset[str] = frozenset({"cpu", "cpuset", "io", "memory", "pids"
 GINN_DIR = "ginn"
 SUPERVISOR_LEAF = "supervisor"
 USER_CHOWN_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads", "cgroup.subtree_control")
-LEAF_CHOWN_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads")
 TOLERATED_ROOT_ERRNOS: frozenset[int] = frozenset({errno.EBUSY, errno.EACCES})
 
 
@@ -77,14 +79,12 @@ class Verification:
 def chown_groups(cgroup_root: Path, uid: int) -> tuple[tuple[Path, ...], ...]:
     """Return the paths chowned to the user, one tuple per directory, in chown order.
 
-    The runit renderer reads these same groups, so the two cannot drift apart.
+    Only `ginn/<uid>` and its three files are listed. The supervisor leaf is not, because it stays
+    root-owned (see the module docstring). The runit renderer reads these same groups, so the two
+    cannot drift apart.
     """
     user_dir = cgroup_root / GINN_DIR / str(uid)
-    supervisor = user_dir / SUPERVISOR_LEAF
-    return (
-        (user_dir, *(user_dir / name for name in USER_CHOWN_FILES)),
-        (supervisor, *(supervisor / name for name in LEAF_CHOWN_FILES)),
-    )
+    return ((user_dir, *(user_dir / name for name in USER_CHOWN_FILES)),)
 
 
 def chown_paths(cgroup_root: Path, uid: int) -> tuple[Path, ...]:
@@ -120,6 +120,9 @@ def enable_controllers(path: Path, wanted: Iterable[str]) -> frozenset[str]:
 
 def delegate_user_tree(cgroup_root: Path, uid: int, gid: int) -> DelegationPlan:
     """Create and delegate `ginn/<uid>` with its supervisor leaf, as S-01 showed is required.
+
+    The leaf is created by root and is not chowned: the run script writes its pid into the leaf as
+    root, and the user never needs to write there (see the module docstring).
 
     The root `subtree_control` write may fail with EBUSY or EACCES. That sets `root_refused`,
     is recorded in `warnings`, and the rest goes on, so `pids` may be missing and is reported
@@ -196,6 +199,9 @@ def verify(cgroup_root: Path, uid: int, *, tolerated_root: bool = False) -> Veri
         owner = os.stat(path).st_uid
         if owner != uid:
             result.problems.append(f"{path}: owned by uid {owner}, expected {uid}")
+    supervisor = user_dir / SUPERVISOR_LEAF
+    if not supervisor.is_dir():
+        result.problems.append(f"{supervisor}: missing")
     return result
 
 

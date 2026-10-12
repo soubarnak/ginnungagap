@@ -45,6 +45,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-HOST-NOT-SET-UP": 77,
     "GINN-E-RUNTIME-DIR-UNSAFE": 77,
     "GINN-E-SUBID-LOCK-UNSAFE": 77,
+    "GINN-E-SUBID-LOCKED": 75,
     "GINN-E-INTERRUPTED": 130,
     "GINN-E-INTERNAL": 70,
     "GINN-E-DISTRO-DATA": 70,
@@ -213,16 +214,33 @@ def test_runtime_dir_unsafe_names_the_path_owner_and_mode() -> None:
 
 @pytest.mark.fr("FR-001")
 def test_subid_lock_unsafe_names_the_lock_gate_and_the_root_fix() -> None:
-    err = make("GINN-E-SUBID-LOCK-UNSAFE", lock="/etc/subuid.lock", path="/etc/subuid.lock.reclaim")
+    lock = "/run/lock/ginn-subuid.lock"
+    gate = "/run/lock/ginn-subuid.lock.reclaim"
+    err = make("GINN-E-SUBID-LOCK-UNSAFE", lock=lock, path=gate)
     assert err.code == "GINN-E-SUBID-LOCK-UNSAFE"
     assert err.exit_code == 77
     assert err.message == (
-        "stale subordinate ID lock /etc/subuid.lock cannot be reclaimed: "
-        "its reclaim gate /etc/subuid.lock.reclaim is a symbolic link"
+        f"stale subordinate ID lock {lock} cannot be reclaimed: "
+        f"its reclaim gate {gate} is a symbolic link"
     )
-    assert "as root, run 'ls -l /etc/subuid.lock.reclaim'" in err.remedy
-    assert "'rm /etc/subuid.lock.reclaim' to remove the link itself" in err.remedy
+    assert f"as root, run 'ls -l {gate}'" in err.remedy
+    assert f"'rm {gate}' to remove the link itself" in err.remedy
     assert "\n" not in err.remedy
+
+
+@pytest.mark.fr("FR-001")
+def test_subid_locked_names_the_holder_and_the_manual_lock_removal() -> None:
+    lock = "/run/lock/ginn-subuid.lock"
+    held = make("GINN-E-SUBID-LOCKED", lock=lock, holder="pid 4242")
+    assert held.code == "GINN-E-SUBID-LOCKED"
+    assert held.exit_code == 75
+    assert held.message == f"subordinate ID lock {lock} is held by another process (pid 4242)"
+    assert "check for a running 'ginn host-setup'" in held.remedy
+    assert f"if none is running, remove {lock} by hand" in held.remedy
+    assert "then run 'sudo ginn host-setup --user <name>' again" in held.remedy
+    assert "\n" not in held.remedy
+    unknown = make("GINN-E-SUBID-LOCKED", lock=lock, holder="no readable pid")
+    assert "(no readable pid)" in unknown.message
 
 
 @pytest.mark.fr("DR-040")

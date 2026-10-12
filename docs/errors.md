@@ -19,7 +19,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
 | 73 | not enough disk space |
-| 75 | realm busy (EX_TEMPFAIL) |
+| 75 | realm or subordinate ID file busy (EX_TEMPFAIL) |
 | 77 | Host Setup must run as root, has not run for this user, or refuses an unsafe path it cannot repair (EX_NOPERM) |
 | 125 | reserved; see EXEC_GINN_FAILURE |
 | 130 | interrupted by the user |
@@ -50,6 +50,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-RUNTIME-DIR-UNSAFE` | 77 | runtime directory {path} must be a real directory owned by uid {uid} with mode 0700; found {found} | run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-SETUP-ROOT` | 77 | Host Setup must run as root | run 'sudo ginn host-setup --user &lt;name&gt;' | FR-001 AC-2 |
 | `GINN-E-SUBID-LOCK-UNSAFE` | 77 | stale subordinate ID lock {lock} cannot be reclaimed: its reclaim gate {path} is a symbolic link | as root, run 'ls -l {path}' to see where the link points, then run 'rm {path}' to remove the link itself, not its target; then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
+| `GINN-E-SUBID-LOCKED` | 75 | subordinate ID lock {lock} is held by another process ({holder}) | check for a running 'ginn host-setup'; if none is running, remove {lock} by hand, then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
 | `GINN-E-TRUST-DATA` | 70 | shipped trust data {source} is invalid: {problem} | the shipped trust data is invalid; reinstall ginn, or report a bug with this message | DR-040 (ginn-defined; not an SRS code) |
 | `GINN-E-UNDO-REALMS-EXIST` | 4 | undo refused: user {user} still has realms | delete those realms first with 'ginn delete &lt;realm&gt;' | FR-003 AC-2 |
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |

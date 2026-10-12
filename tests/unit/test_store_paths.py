@@ -340,6 +340,31 @@ def test_ensure_refuses_a_missing_runtime_directory_and_creates_nothing(tmp_path
     assert not paths.data.exists()
 
 
+@pytest.mark.fr("DR-010")
+@pytest.mark.parametrize(
+    ("kind", "found"),
+    [("file", "a file that is not a directory"), ("symlink", "a symbolic link")],
+)
+def test_ensure_refuses_a_runtime_path_that_is_not_a_directory(
+    tmp_path: Path, kind: str, found: str
+) -> None:
+    # from_env sees a valid directory. The swap happens afterwards, so ensure() must catch it.
+    paths = _paths(tmp_path)
+    paths.runtime.rmdir()
+    if kind == "file":
+        paths.runtime.write_text("not a directory", encoding="utf-8")
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir(mode=0o700)
+        paths.runtime.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(GinnError) as excinfo:
+        paths.ensure()
+    assert excinfo.value.code == "GINN-E-RUNTIME-DIR-UNSAFE"
+    assert excinfo.value.exit_code == 77
+    assert excinfo.value.details == {"path": str(paths.runtime), "uid": str(UID), "found": found}
+    assert not paths.data.exists()
+
+
 @pytest.mark.fr("CR-006")
 @pytest.mark.fr("DR-010")
 def test_image_tmp_is_an_owned_directory_on_disk_under_data(tmp_path: Path) -> None:

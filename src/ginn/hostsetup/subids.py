@@ -38,7 +38,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from ginn.errors import make
+from ginn.errors import GinnError, make
 from ginn.hostsetup._atomic import atomic_write, file_mode
 
 MIN_SIZE = 524_288
@@ -74,13 +74,13 @@ class SubIdExhausted(Exception):
     """
 
 
-class SubIdLocked(Exception):
+class SubIdLocked(GinnError):
     """Another process holds the lock for a subordinate ID file and did not let go in time.
 
-    The lock is not removed while its holder is alive, and the message names the holder's PID
-    when the lock records one. A lock with no usable PID is never reclaimed. The message tells the
-    admin to check for a running `ginn host-setup` and, if none is running, to remove the lock
-    file by hand, and then to run Host Setup again.
+    This is the catalogue error GINN-E-SUBID-LOCKED (exit 75). The lock is not removed while its
+    holder is alive, and a lock with no usable PID is never reclaimed. The catalogue remedy tells
+    the admin to check for a running `ginn host-setup` and, if none is running, to remove the lock
+    file by hand. The message names the holder's PID when the lock records one.
 
     A reclaim gate that is a symbolic link is a different case: the stale lock cannot be reclaimed
     until a person removes the link. That raises GINN-E-SUBID-LOCK-UNSAFE instead (see
@@ -267,12 +267,10 @@ def _lock(path: Path, root_dir: Path, timeout: float) -> Iterator[None]:
                 break
             continue
         if time.monotonic() >= deadline:
-            holder = "" if seen is None or seen.pid is None else f" (pid {seen.pid})"
-            raise SubIdLocked(
-                f"{lock} is held by another process{holder}; check for a running "
-                f"'ginn host-setup' and, if none is running, remove {lock} by hand, "
-                "then run Host Setup again"
-            )
+            pid = None if seen is None else seen.pid
+            holder = "no readable pid" if pid is None else f"pid {pid}"
+            err = make("GINN-E-SUBID-LOCKED", lock=str(lock), holder=holder)
+            raise SubIdLocked(err.code, err.message, err.remedy, err.exit_code, details=err.details)
         time.sleep(LOCK_POLL_SECONDS)
     try:
         yield
@@ -400,20 +398,50 @@ def _reclaim_stale(lock: Path, seen: _LockIdentity, deadline: float) -> _Inode |
     A symbolic link in place of the gate fails the open with ELOOP. That is raised as
     GINN-E-SUBID-LOCK-UNSAFE, because the stale lock cannot be reclaimed until a person removes
     the link. Any other error from the open propagates as it is.
+
+    Another process may unlink the gate and put a new file at its path while this call holds the
+    old one. The lock the call took then guards nothing. So once the gate is taken, the descriptor
+    must still be the file at its path (`_gate_is_at_path`). Otherwise the descriptor is closed and
+    the path is opened again, until the same deadline. A symbolic link put in its place is refused
+    in the same way as above.
     """
     gate_path = lock.with_name(f"{lock.name}.reclaim")
+    while True:
+        gate = _open_gate(lock, gate_path)
+        try:
+            if not _take_gate(gate, deadline):
+                return None
+            if _gate_is_at_path(gate, gate_path):
+                return _reclaim_locked(lock, seen)
+        finally:
+            os.close(gate)
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(LOCK_POLL_SECONDS)
+
+
+def _open_gate(lock: Path, gate_path: Path) -> int:
+    """Open the reclaim gate, creating it with mode 0600 if missing (see `_reclaim_stale`)."""
     try:
-        gate = os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        return os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise make("GINN-E-SUBID-LOCK-UNSAFE", lock=str(lock), path=str(gate_path)) from exc
         raise
+
+
+def _gate_is_at_path(gate: int, gate_path: Path) -> bool:
+    """True when the open descriptor `gate` is still the file at `gate_path` (st_dev, st_ino).
+
+    lstat, so a symbolic link at the path never counts as the descriptor's own file. A path that
+    is missing does not count either.
+    """
     try:
-        if not _take_gate(gate, deadline):
-            return None
-        return _reclaim_locked(lock, seen)
-    finally:
-        os.close(gate)
+        at_path = os.lstat(gate_path)
+    except FileNotFoundError:
+        return False
+    held = os.fstat(gate)
+    return (held.st_dev, held.st_ino) == (at_path.st_dev, at_path.st_ino)
 
 
 def _take_gate(gate: int, deadline: float) -> bool:

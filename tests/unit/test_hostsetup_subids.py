@@ -404,9 +404,11 @@ def test_an_empty_or_unparseable_lock_is_held_never_reclaimed_and_refused_after_
     with pytest.raises(SubIdLocked, match="held by another process") as refused:
         ensure_range(path, "alice", MIN_SIZE, root_dir=tmp_path, lock_timeout=0.1)
     assert time.monotonic() - started >= 0.1
-    assert "(pid" not in str(refused.value)
-    assert "ginn host-setup" in str(refused.value)
-    assert "by hand" in str(refused.value)
+    assert refused.value.code == "GINN-E-SUBID-LOCKED"
+    assert refused.value.exit_code == 75
+    assert "(no readable pid)" in str(refused.value)
+    assert "ginn host-setup" in refused.value.remedy
+    assert "by hand" in refused.value.remedy
     assert lock.read_bytes() == content
     assert path.read_bytes() == SAMPLE
     assert _names(lock.parent) == [lock.name]
@@ -505,6 +507,55 @@ def test_the_reclaim_gate_is_polled_without_blocking_and_gives_up_at_the_deadlin
     assert len(calls) >= 3, "the gate should be polled several times before the deadline"
     assert all(op & fcntl.LOCK_NB for op in calls)
     assert 0.3 <= elapsed < 5.0
+    assert lock.read_text() == dead_text
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+def test_a_reclaim_gate_replaced_while_held_is_not_used_to_reclaim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Another process unlinks the gate and puts a new file at its path after this call took the
+    # old one, and a rival then holds the new file. Reclaiming through the old descriptor would
+    # bypass the rival. The call must reopen the path, wait on the new file, and give up at the
+    # deadline without reclaiming.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(tmp_path, path)
+    dead_text = f"{_dead_pid()}\n"
+    lock.write_text(dead_text)
+    gate = lock.with_name(f"{lock.name}.reclaim")
+    gate.write_bytes(b"")
+    real_take = subids._take_gate
+    real_locked = subids._reclaim_locked
+    rivals: list[int] = []
+    takes: list[int] = []
+    reclaimed: list[Path] = []
+
+    def take_then_replace(fd: int, deadline: float) -> bool:
+        taken = real_take(fd, deadline)
+        takes.append(fd)
+        if taken and not rivals:
+            gate.unlink()
+            gate.write_bytes(b"")
+            rival = os.open(gate, os.O_RDONLY)
+            fcntl.flock(rival, fcntl.LOCK_EX)
+            rivals.append(rival)
+        return taken
+
+    def recording_locked(target: Path, seen: subids._LockIdentity) -> subids._Inode | None:
+        reclaimed.append(target)
+        return real_locked(target, seen)
+
+    monkeypatch.setattr(subids, "_take_gate", take_then_replace)
+    monkeypatch.setattr(subids, "_reclaim_locked", recording_locked)
+    try:
+        with pytest.raises(SubIdLocked):
+            ensure_range(path, "alice", MIN_SIZE, root_dir=tmp_path, lock_timeout=0.3)
+    finally:
+        for rival in rivals:
+            os.close(rival)
+    assert len(takes) >= 2, "the call must open the path again after the replacement"
+    assert reclaimed == []
     assert lock.read_text() == dead_text
     assert path.read_bytes() == SAMPLE
 

@@ -5,7 +5,8 @@ Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
 GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
 GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
-(NFR-060) and GINN-E-TRUST-DATA (DR-040). `source` cites the requirement that defines the failure.
+(NFR-060), GINN-E-SUBID-LOCKED (FR-001) and GINN-E-TRUST-DATA (DR-040). `source` cites the
+requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -115,6 +116,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="as root, run 'ls -l {path}' to see where the link points, then run 'rm {path}' to "
         "remove the link itself, not its target; then run 'sudo ginn host-setup --user <name>' "
         "again",
+        source="FR-001 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SUBID-LOCKED",
+        exit_code=75,
+        summary="subordinate ID lock {lock} is held by another process ({holder})",
+        remedy="check for a running 'ginn host-setup'; if none is running, remove {lock} by hand, "
+        "then run 'sudo ginn host-setup --user <name>' again",
         source="FR-001 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
@@ -302,7 +311,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
-    (75, "realm busy (EX_TEMPFAIL)"),
+    (75, "realm or subordinate ID file busy (EX_TEMPFAIL)"),
     (
         77,
         "Host Setup must run as root, has not run for this user, or refuses an unsafe path it "

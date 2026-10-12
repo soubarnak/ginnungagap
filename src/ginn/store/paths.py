@@ -188,13 +188,18 @@ def _write_owned_file(path: Path, data: bytes) -> None:
 
 @dataclass(frozen=True)
 class OwnedPaths:
-    """The host locations ginn owns. Build it with `from_env`; the fields are the four roots."""
+    """The host locations ginn owns. Build it with `from_env`.
+
+    The fields are the four roots, the applications directory, and `uid`, the user that owns the
+    runtime directory. `uid` is needed only to report an unsafe runtime directory.
+    """
 
     data: Path
     config: Path
     state: Path
     runtime: Path
     applications_dir: Path
+    uid: int
 
     @classmethod
     def from_env(
@@ -225,6 +230,7 @@ class OwnedPaths:
             state=state,
             runtime=_runtime_dir(environ, real_uid, system_run),
             applications_dir=data_base / "applications",
+            uid=real_uid,
         )
 
     # Derived locations. Each is inside one of the four roots.
@@ -349,13 +355,14 @@ class OwnedPaths:
     def ensure(self, on_tighten: Callable[[str], None] | None = None) -> None:
         """Create every owned directory except the runtime one, with mode 0700, and tighten others.
 
-        A missing runtime directory raises GINN-E-HOST-NOT-SET-UP and nothing is created. Without
+        A missing runtime directory raises GINN-E-HOST-NOT-SET-UP, and a runtime path that is not a
+        directory raises GINN-E-RUNTIME-DIR-UNSAFE. Either way nothing is created. Without
         that check, creating a child would also create the runtime directory, with the default
         mode. The owner and mode of the runtime directory are checked by `check_runtime_dir`.
         `on_tighten` gets one line per directory whose group or other bits were removed. Missing
         non-owned parents (for example ~/.local/share) are created with the default mode.
         """
-        _require_runtime_present(self.runtime)
+        _require_runtime_present(self.runtime, self.uid)
         for directory in self.owned_directories():
             _ensure_dir(directory, on_tighten)
 
@@ -373,17 +380,21 @@ class OwnedPaths:
         _write_owned_file(self.podman_storage_conf, storage.encode("utf-8"))
 
 
-def _require_runtime_present(runtime: Path) -> None:
+def _require_runtime_present(runtime: Path, uid: int) -> None:
     """Refuse a runtime directory that is missing, or is not a real directory (ADR-004).
 
-    lstat, so a symbolic link is refused. Owner and mode are left to `check_runtime_dir`.
+    lstat, so a symbolic link is refused. Owner and mode are left to `check_runtime_dir`. Any
+    other non-directory raises GINN-E-RUNTIME-DIR-UNSAFE, with the same wording as there.
     """
     try:
-        mode = os.lstat(runtime).st_mode
+        info = os.lstat(runtime)
     except FileNotFoundError:
         raise make("GINN-E-HOST-NOT-SET-UP", path=str(runtime)) from None
-    if not stat.S_ISDIR(mode):
-        raise OSError(f"runtime directory {runtime} is not a real directory; refusing to use it")
+    if not stat.S_ISDIR(info.st_mode):
+        found = (
+            "a symbolic link" if stat.S_ISLNK(info.st_mode) else "a file that is not a directory"
+        )
+        raise make("GINN-E-RUNTIME-DIR-UNSAFE", path=str(runtime), uid=str(uid), found=found)
 
 
 def _ensure_dir(directory: Path, on_tighten: Callable[[str], None] | None) -> None:

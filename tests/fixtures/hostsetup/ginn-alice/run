@@ -66,9 +66,9 @@ if ! enable_controllers /sys/fs/cgroup/ginn/1000; then
     exit 1
 fi
 chown 1000:1000 /sys/fs/cgroup/ginn/1000 /sys/fs/cgroup/ginn/1000/cgroup.procs /sys/fs/cgroup/ginn/1000/cgroup.threads /sys/fs/cgroup/ginn/1000/cgroup.subtree_control
-chown 1000:1000 /sys/fs/cgroup/ginn/1000/supervisor /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs /sys/fs/cgroup/ginn/1000/supervisor/cgroup.threads
 
-# 3. Move this process into the supervisor leaf. The exec below keeps the PID and the cgroup.
+# 3. Move this process into the supervisor leaf. The leaf stays root-owned (ADR-003), so this
+# write is made as root. The exec below keeps the PID and the cgroup.
 printf '%s\n' "$$" > /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs
 
 # 4. Wait for the state directory, for example an encrypted home that is not mounted yet.

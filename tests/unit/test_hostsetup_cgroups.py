@@ -159,9 +159,6 @@ def test_delegate_writes_and_chowns_exactly_the_expected_paths(
         tree["user"] / "cgroup.procs",
         tree["user"] / "cgroup.threads",
         tree["user"] / "cgroup.subtree_control",
-        tree["supervisor"],
-        tree["supervisor"] / "cgroup.procs",
-        tree["supervisor"] / "cgroup.threads",
     }
     chowned = [path for path, _, _ in chowns]
     assert set(chowned) == expected_chown
@@ -174,6 +171,21 @@ def test_delegate_writes_and_chowns_exactly_the_expected_paths(
     assert not set(limit_files) & set(chowned)
     assert tree["ginn"] not in chowned
     assert fake.root not in chowned
+
+
+@pytest.mark.fr("FR-001")
+def test_no_path_under_the_supervisor_leaf_is_chowned(
+    fake: FakeCgroupfs, chowns: list[tuple[Path, int, int]]
+) -> None:
+    # The run script writes the supervisor pid into the leaf as root. Migration out of the leaf
+    # needs write access to the common ancestor and the destination, not to the leaf (ADR-003).
+    leaf = _user_tree(fake.root, 1000)["supervisor"]
+    delegate_user_tree(fake.root, 1000, 1000)
+    chowned = [path for path, _, _ in chowns]
+    assert [path for path in chowned if path == leaf or leaf in path.parents] == []
+    planned = chown_paths(fake.root, 1000)
+    assert [path for path in planned if path == leaf or leaf in path.parents] == []
+    assert leaf not in planned
 
 
 def test_controllers_are_never_enabled_inside_the_leaves(
@@ -277,8 +289,7 @@ def test_verify_reports_a_missing_leaf(
     supervisor = _user_tree(fake.root, uid)["supervisor"]
     shutil.rmtree(supervisor)
     problems = verify(fake.root, uid).problems
-    assert f"{supervisor}: missing" in problems
-    assert len(problems) == 3
+    assert problems == [f"{supervisor}: missing"]
 
 
 def test_move_self_to_writes_this_pid_into_the_leaf(
