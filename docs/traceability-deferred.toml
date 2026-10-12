@@ -1,0 +1,389 @@
+# Must FR and NFR requirements with no automated test yet (NFR-061, Appendix C).
+# Each entry names the roadmap milestone (docs/roadmap.md) that owns the proving test.
+# tools/traceability.py --check fails when an entry lacks a milestone, names an ID that is not
+# a Must FR or NFR, or has gained a test (delete the entry then).
+
+[[deferred]]
+id = "FR-001"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to M3"
+
+[[deferred]]
+id = "FR-002"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to M3"
+
+[[deferred]]
+id = "FR-005"
+milestone = "M10"
+reason = "host write confinement is proven by tools/host-diff.sh (T10.2); the M3 heading range lists it but the proving test lands in M10"
+
+[[deferred]]
+id = "FR-007"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to M3"
+
+[[deferred]]
+id = "FR-010"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-011"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-012"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-013"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-015"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-016"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-017"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-019"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-020"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-021"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-023"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-025"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-026"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-040"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-041"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-042"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-043"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-044"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-045"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-046"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "FR-048"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-049"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-060"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-061"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-062"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-063"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-064"
+milestone = "M4"
+reason = "missing tier folders are skipped by the Basic binds of T4.2 (M4); the M6 heading range lists the whole FR-060..069 block"
+
+[[deferred]]
+id = "FR-065"
+milestone = "M4"
+reason = "identical paths are set by the Basic binds of T4.2 (M4); the M6 heading range lists the whole FR-060..069 block"
+
+[[deferred]]
+id = "FR-066"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-067"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-069"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "FR-080"
+milestone = "M7"
+reason = "not covered yet; the roadmap assigns its test to M7"
+
+[[deferred]]
+id = "FR-081"
+milestone = "M7"
+reason = "not covered yet; the roadmap assigns its test to M7"
+
+[[deferred]]
+id = "FR-082"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "FR-083"
+milestone = "M7"
+reason = "not covered yet; the roadmap assigns its test to M7"
+
+[[deferred]]
+id = "FR-100"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-101"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-102"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-103"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-105"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-106"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "FR-120"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-121"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-122"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-123"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "FR-124"
+milestone = "M2"
+reason = "not covered yet; the roadmap assigns its test to M2"
+
+[[deferred]]
+id = "NFR-001"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-002"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-003"
+milestone = "M7"
+reason = "not covered yet; the roadmap assigns its test to M7"
+
+[[deferred]]
+id = "NFR-004"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-005"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "NFR-006"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-007"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "NFR-008"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-009"
+milestone = "M5"
+reason = "not covered yet; the roadmap assigns its test to M5"
+
+[[deferred]]
+id = "NFR-010"
+milestone = "M9"
+reason = "not covered yet; the roadmap assigns its test to M9"
+
+[[deferred]]
+id = "NFR-011"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to M3"
+
+[[deferred]]
+id = "NFR-030"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "NFR-031"
+milestone = "M8"
+reason = "not covered yet; the roadmap assigns its test to M8"
+
+[[deferred]]
+id = "NFR-033"
+milestone = "M7"
+reason = "not covered yet; the roadmap assigns its test to M7"
+
+[[deferred]]
+id = "NFR-041"
+milestone = "M3"
+reason = "not covered yet; the roadmap assigns its test to M3"
+
+[[deferred]]
+id = "NFR-043"
+milestone = "M2"
+reason = "audit completeness: the audit writer (T2.9) is where the one-entry-per-op property is first testable; the suite-wide count closes later"
+
+[[deferred]]
+id = "NFR-060"
+milestone = "M2"
+reason = "not covered yet; the roadmap assigns its test to M2"
+
+[[deferred]]
+id = "NFR-063"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-SEC-001"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "NFR-SEC-002"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "NFR-SEC-004"
+milestone = "M4"
+reason = "not covered yet; the roadmap assigns its test to M4"
+
+[[deferred]]
+id = "NFR-SEC-005"
+milestone = "M2"
+reason = "not covered yet; the roadmap assigns its test to M2"
+
+[[deferred]]
+id = "NFR-SEC-006"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "NFR-SEC-007"
+milestone = "M6"
+reason = "not covered yet; the roadmap assigns its test to M6"
+
+[[deferred]]
+id = "NFR-SEC-008"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-SEC-009"
+milestone = "M9"
+reason = "Control Plane to backend same-user channel is the GUI backend (T9.1)"
+
+[[deferred]]
+id = "NFR-SEC-010"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"

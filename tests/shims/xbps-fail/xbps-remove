@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# PATH shim for FR-004: ginn must never invoke an xbps-* command. The test session puts this
+# directory first on PATH (see conftest.py). Each call is appended to the session log and fails.
+# The seven xbps-* names are identical copies of this script.
+if [ -n "${GINN_XBPS_SHIM_LOG:-}" ]; then
+    printf '%s\n' "$(basename "$0") $*" >> "$GINN_XBPS_SHIM_LOG"
+fi
+printf 'xbps shim: ginn must never invoke %s (FR-004)\n' "$0" >&2
+exit 97
