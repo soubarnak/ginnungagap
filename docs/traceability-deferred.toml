@@ -363,9 +363,9 @@ reason = "unit or property tests cover part of the requirement (one audit entry 
 
 [[deferred]]
 id = "NFR-060"
-milestone = "M2"
+milestone = "M4"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M2"
+reason = "domain, loader and store accept a new distribution definition with no code change (the _test fixture and a renamed copy, through DistroId, PackageName and RealmRecord); the lifecycle half (create and the Trust Manifest pull, ops/create in T4.4) is not built yet"
 
 [[deferred]]
 id = "NFR-062"

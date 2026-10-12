@@ -3,6 +3,7 @@
 
 import pytest
 
+from ginn.distros import available
 from ginn.domain.enums import DistroId
 from ginn.domain.packages import PackageName
 from ginn.errors import GinnError
@@ -13,10 +14,12 @@ pytestmark = [
     pytest.mark.fr("NFR-SEC-005"),
 ]
 
-DISTROS = list(DistroId)
+# Every name the data directory offers, the `_test` fixture included (NFR-060). Each name's
+# pattern comes from its definition, so these cases also run through the data path.
+DISTROS = [DistroId(name) for name in available(include_test=True)]
 
 
-@pytest.mark.parametrize("distro", DISTROS)
+@pytest.mark.parametrize("distro", DISTROS, ids=lambda distro: distro.value)
 @pytest.mark.parametrize(
     "raw",
     [
@@ -52,13 +55,13 @@ def test_as027_shapes_are_rejected_for_every_distro(distro: DistroId, raw: str) 
 )
 def test_as027_rule_names_the_rejected_shape(raw: str, rule_prefix: str) -> None:
     with pytest.raises(GinnError) as info:
-        PackageName.parse(raw, DistroId.ARCH)
+        PackageName.parse(raw, DistroId("arch"))
     rule = info.value.details["rule"]
     assert isinstance(rule, str)
     assert rule.startswith(rule_prefix)
 
 
-@pytest.mark.parametrize("distro", DISTROS)
+@pytest.mark.parametrize("distro", DISTROS, ids=lambda distro: distro.value)
 @pytest.mark.parametrize("raw", ["firefox", "python3-pip", "gcc-c++", "libstdc++", "gimp-1.2"])
 def test_common_names_are_accepted_for_every_distro(distro: DistroId, raw: str) -> None:
     assert PackageName.parse(raw, distro).value == raw
@@ -67,34 +70,35 @@ def test_common_names_are_accepted_for_every_distro(distro: DistroId, raw: str) 
 @pytest.mark.parametrize(
     ("distro", "accepted"),
     [
-        (DistroId.ARCH, True),
-        (DistroId.DEBIAN, False),
-        (DistroId.FEDORA, False),
-        (DistroId.KALI, False),
+        ("arch", True),
+        ("debian", False),
+        ("fedora", False),
+        ("kali", False),
+        ("_test", False),
     ],
 )
-def test_at_sign_is_an_arch_only_character(distro: DistroId, accepted: bool) -> None:
+def test_at_sign_is_an_arch_only_character(distro: str, accepted: bool) -> None:
     if accepted:
-        assert PackageName.parse("zfs-dkms@git", distro).value == "zfs-dkms@git"
+        assert PackageName.parse("zfs-dkms@git", DistroId(distro)).value == "zfs-dkms@git"
     else:
         with pytest.raises(GinnError):
-            PackageName.parse("zfs-dkms@git", distro)
+            PackageName.parse("zfs-dkms@git", DistroId(distro))
 
 
 def test_uppercase_is_fedora_only() -> None:
-    assert PackageName.parse("Firefox", DistroId.FEDORA).value == "Firefox"
+    assert PackageName.parse("Firefox", DistroId("fedora")).value == "Firefox"
     with pytest.raises(GinnError):
-        PackageName.parse("Firefox", DistroId.ARCH)
+        PackageName.parse("Firefox", DistroId("arch"))
 
 
 def test_single_character_is_not_a_debian_name() -> None:
-    assert PackageName.parse("a", DistroId.ARCH).value == "a"
+    assert PackageName.parse("a", DistroId("arch")).value == "a"
     with pytest.raises(GinnError):
-        PackageName.parse("a", DistroId.DEBIAN)
+        PackageName.parse("a", DistroId("debian"))
 
 
 def test_version_like_name_is_a_plain_name_not_a_constraint() -> None:
-    assert PackageName.parse("gimp-1.2", DistroId.DEBIAN).value == "gimp-1.2"
+    assert PackageName.parse("gimp-1.2", DistroId("debian")).value == "gimp-1.2"
 
 
 def test_distro_must_be_a_distro_id() -> None:
@@ -104,4 +108,4 @@ def test_distro_must_be_a_distro_id() -> None:
 
 def test_direct_construction_is_checked_like_parse() -> None:
     with pytest.raises(GinnError):
-        PackageName("gimp*", DistroId.ARCH)
+        PackageName("gimp*", DistroId("arch"))

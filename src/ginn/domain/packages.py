@@ -1,28 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Package names passed to a realm's native package manager (DR-003, AS-027).
 
-The per-distribution regexes of DR-003 decide validity. AS-027 adds a check that names the
-rejected character: globs, version constraints, paths, capability "provides" and a leading `-`
-(which an option parser would read as a flag). A name such as `gimp-1.2` is valid only because
-the regex allows its characters; it is never read as a version constraint.
+The distribution's `package_name_regex` (DR-003, held in its definition under `ginn.distros`)
+decides validity. AS-027 adds a check that names the rejected character: globs, version
+constraints, paths, capability "provides" and a leading `-` (which an option parser would read as
+a flag). A name such as `gimp-1.2` is valid only because the regex allows its characters; it is
+never read as a version constraint.
 """
 
-import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Self
 
+from ginn.distros import load
 from ginn.domain._errors import reject
 from ginn.domain.enums import DistroId
 
 PACKAGE_CODE: Final = "GINN-E-PKG-NAME-INVALID"
-
-PACKAGE_PATTERNS: Final[Mapping[DistroId, str]] = {
-    DistroId.ARCH: r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
-    DistroId.DEBIAN: r"[a-z0-9][a-z0-9.+-]{1,127}",
-    DistroId.FEDORA: r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
-    DistroId.KALI: r"[a-z0-9][a-z0-9.+-]{1,127}",
-}
 
 _AS027_CHARS: Final = frozenset("*?[]=<>/")
 
@@ -40,11 +33,11 @@ def _check(raw: str, distro: DistroId) -> None:
             )
     if raw.startswith("-"):
         raise reject(PACKAGE_CODE, {"rule": "AS-027: leading '-' reads as an option"}, name=raw)
-    pattern = PACKAGE_PATTERNS[distro]
-    if re.fullmatch(pattern, raw) is None:
+    pattern = load(distro.value).name_pattern
+    if pattern.fullmatch(raw) is None:
         raise reject(
             PACKAGE_CODE,
-            {"rule": f"must match {pattern} for {distro.value} (DR-003)"},
+            {"rule": f"must match {pattern.pattern} for {distro.value} (DR-003)"},
             name=raw,
         )
 

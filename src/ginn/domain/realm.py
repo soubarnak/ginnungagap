@@ -43,7 +43,8 @@ class RealmSettings:
                 option="--autostart without services",
                 distro=self.distro.value,
             )
-        if self.everything and self.distro is not DistroId.KALI:
+        # DR-013 names Kali as the only distribution with the everything flag.
+        if self.everything and self.distro.value != "kali":
             raise reject(
                 OPTION_CODE,
                 {"rule": "everything is for kali only (DR-013)"},

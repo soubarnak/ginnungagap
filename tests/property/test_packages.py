@@ -20,14 +20,16 @@ pytestmark = [
     pytest.mark.fr("NFR-SEC-005"),
 ]
 
-# Patterns copied from DR-003 in the SRS. Kali uses the Debian pattern.
-PATTERNS: dict[DistroId, str] = {
-    DistroId.ARCH: r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
-    DistroId.DEBIAN: r"[a-z0-9][a-z0-9.+-]{1,127}",
-    DistroId.FEDORA: r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
-    DistroId.KALI: r"[a-z0-9][a-z0-9.+-]{1,127}",
+# Patterns copied from DR-003 in the SRS. Kali uses the Debian pattern. `_test` is the NFR-060
+# fixture, which is not an SRS distribution, so its pattern is copied from its definition.
+PATTERNS: dict[str, str] = {
+    "arch": r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
+    "debian": r"[a-z0-9][a-z0-9.+-]{1,127}",
+    "fedora": r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
+    "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
+    "_test": r"[a-z][a-z0-9.+-]{1,63}",
 }
-DISTROS = list(DistroId)
+DISTROS = list(PATTERNS)
 AS027_CHARS = "*?[]=<>/ \t\n\x00"
 NOISE = "()!,;:|&$`\\'\"{}~@^%#" + AS027_CHARS + "abcXYZ019._+-"
 
@@ -43,21 +45,19 @@ INVALID_ANY = st.tuples(st.sampled_from(DISTROS), st.text()).filter(
 
 
 @given(VALID)
-def test_valid_names_parse_for_their_distro(pair: tuple[DistroId, str]) -> None:
+def test_valid_names_parse_for_their_distro(pair: tuple[str, str]) -> None:
     distro, raw = pair
-    name = PackageName.parse(raw, distro)
+    name = PackageName.parse(raw, DistroId(distro))
     assert name.value == raw
-    assert name.distro is distro
+    assert name.distro == DistroId(distro)
     assert str(name) == raw
 
 
 @given(st.one_of(INVALID, INVALID_ANY))
-def test_invalid_names_are_rejected_with_pkg_name_invalid_exit_2(
-    pair: tuple[DistroId, str],
-) -> None:
+def test_invalid_names_are_rejected_with_pkg_name_invalid_exit_2(pair: tuple[str, str]) -> None:
     distro, raw = pair
     with pytest.raises(GinnError) as info:
-        PackageName.parse(raw, distro)
+        PackageName.parse(raw, DistroId(distro))
     err = info.value
     assert err.code == "GINN-E-PKG-NAME-INVALID"
     assert err.exit_code == 2

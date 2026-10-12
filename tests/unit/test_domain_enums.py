@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Closed value sets (DR-005, DR-011) and the realm settings rules (DR-012, DR-013)."""
+"""Distribution IDs (DR-005), closed value sets (DR-011, DR-020) and the realm settings rules
+(DR-012, DR-013)."""
 
 import dataclasses
 import itertools
 
 import pytest
 
+from ginn.distros import available
 from ginn.domain.enums import DistroId, RealmState, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.realm import RealmSettings
@@ -18,9 +20,15 @@ pytestmark = [
     pytest.mark.fr("DR-013"),
 ]
 
+# Every name the data directory offers, the `_test` fixture included (NFR-060).
+DISTROS = [DistroId(name) for name in available(include_test=True)]
+ARCH = DistroId("arch")
+FEDORA = DistroId("fedora")
+KALI = DistroId("kali")
 
-def test_distro_values_are_the_four_listed_in_dr005() -> None:
-    assert [member.value for member in DistroId] == ["arch", "debian", "fedora", "kali"]
+
+def test_shipped_distribution_ids_are_the_four_listed_in_dr005() -> None:
+    assert available() == ("arch", "debian", "fedora", "kali")
 
 
 def test_tier_values_are_the_three_listed_in_dr011() -> None:
@@ -40,10 +48,17 @@ def test_realm_state_values_are_the_eight_listed_in_dr020() -> None:
     ]
 
 
-@pytest.mark.parametrize("enum_cls", [DistroId, Tier, RealmState], ids=["distro", "tier", "state"])
+@pytest.mark.parametrize("enum_cls", [Tier, RealmState], ids=["tier", "state"])
 def test_every_member_parses_from_its_value(enum_cls: type) -> None:
     for member in enum_cls:
         assert enum_cls.parse(member.value) is member
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("distro", DISTROS, ids=lambda distro: distro.value)
+def test_every_definition_name_is_a_distro_id(distro: DistroId) -> None:
+    assert DistroId.parse(distro.value) == distro
+    assert str(distro) == distro.value
 
 
 @pytest.mark.parametrize(
@@ -56,6 +71,8 @@ def test_every_member_parses_from_its_value(enum_cls: type) -> None:
         (DistroId, "arch\n"),
         (DistroId, ""),
         (DistroId, "arch;rm"),
+        (DistroId, "../arch"),
+        (DistroId, "arch.toml"),
         (Tier, "Basic"),
         (Tier, "gold"),
         (Tier, ""),
@@ -74,6 +91,28 @@ def test_unknown_values_raise_option_invalid_exit_2(enum_cls: type, raw: str) ->
     assert isinstance(err.details["rule"], str)
 
 
+@pytest.mark.fr("DR-005")
+def test_unknown_distro_message_lists_the_shipped_names_only() -> None:
+    with pytest.raises(GinnError) as info:
+        DistroId.parse("gentoo")
+    assert info.value.details["rule"] == "allowed values: arch, debian, fedora, kali (DR-005)"
+    assert info.value.details["option"] == "--distro=gentoo"
+
+
+@pytest.mark.fr("DR-005")
+def test_distro_id_must_be_a_str() -> None:
+    with pytest.raises(TypeError):
+        DistroId(1)  # type: ignore[arg-type]
+
+
+@pytest.mark.fr("DR-005")
+def test_distro_id_is_a_frozen_value_compared_by_name() -> None:
+    assert DistroId("arch") == ARCH
+    assert hash(DistroId("arch")) == hash(ARCH)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ARCH.value = "debian"  # type: ignore[misc]
+
+
 def _settings(distro: DistroId, services: bool, autostart: bool, everything: bool) -> RealmSettings:
     return RealmSettings(
         name=RealmName.parse("work"),
@@ -87,14 +126,14 @@ def _settings(distro: DistroId, services: bool, autostart: bool, everything: boo
 
 @pytest.mark.parametrize(
     ("distro", "services", "autostart", "everything"),
-    list(itertools.product(list(DistroId), [False, True], [False, True], [False, True])),
+    list(itertools.product(DISTROS, [False, True], [False, True], [False, True])),
 )
 def test_realm_settings_follow_dr012_and_dr013_for_every_combination(
     distro: DistroId, services: bool, autostart: bool, everything: bool
 ) -> None:
     # Written out from the rules, not from the code: autostart needs services (DR-012),
     # everything needs kali (DR-013).
-    allowed = (not autostart or services) and (not everything or distro is DistroId.KALI)
+    allowed = (not autostart or services) and (not everything or distro.value == "kali")
     if allowed:
         built = _settings(distro, services, autostart, everything)
         assert built.autostart is autostart
@@ -107,23 +146,23 @@ def test_realm_settings_follow_dr012_and_dr013_for_every_combination(
 
 def test_autostart_without_services_names_the_option() -> None:
     with pytest.raises(GinnError) as info:
-        _settings(DistroId.ARCH, services=False, autostart=True, everything=False)
+        _settings(ARCH, services=False, autostart=True, everything=False)
     assert info.value.details["option"] == "--autostart without services"
     assert info.value.details["distro"] == "arch"
 
 
 def test_everything_on_a_non_kali_distro_is_refused() -> None:
     with pytest.raises(GinnError) as info:
-        _settings(DistroId.FEDORA, services=True, autostart=False, everything=True)
+        _settings(FEDORA, services=True, autostart=False, everything=True)
     assert info.value.details["option"] == "--everything"
 
 
 def test_everything_is_allowed_on_kali() -> None:
-    assert _settings(DistroId.KALI, False, False, True).everything is True
+    assert _settings(KALI, False, False, True).everything is True
 
 
 def test_realm_settings_are_frozen() -> None:
-    settings = _settings(DistroId.ARCH, False, False, False)
+    settings = _settings(ARCH, False, False, False)
     with pytest.raises(dataclasses.FrozenInstanceError):
         settings.services = True  # type: ignore[misc]
 

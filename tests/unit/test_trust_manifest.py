@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import ginn.trust as trust_package
-from ginn.domain.enums import DistroId
+from ginn.distros import available
 from ginn.errors import GinnError
 from ginn.trust import SignatureKind, TrustManifest, load, load_file, pull_reference
 from ginn.trust.manifest import VERIFIED_SIGNATURE_KINDS, parse
@@ -83,7 +83,7 @@ def test_packaged_manifest_loads_and_matches_the_packaged_copy() -> None:
 @pytest.mark.fr("IR-021")
 def test_packaged_manifest_covers_the_four_official_channels() -> None:
     manifest = load()
-    assert {entry.key for entry in manifest.entries} == {member.value for member in DistroId}
+    assert {entry.key for entry in manifest.entries} == set(available())
     repositories = {entry.key: entry.repository for entry in manifest.entries}
     assert repositories == {
         "arch": "quay.io/archlinux/archlinux",

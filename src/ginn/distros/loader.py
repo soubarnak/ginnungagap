@@ -3,7 +3,9 @@
 
 Each distribution is one TOML file in `data/`, named `<id>.toml`. Adding a distribution means a
 new file and a Trust Manifest entry, with no code change (NFR-060). `_test.toml` is a fake
-distribution for the tests. `available()` leaves it out unless asked.
+distribution for the tests. `available()` leaves it out unless asked. `ginn.domain` reads this
+package for distribution IDs (DR-005) and package-name patterns (DR-003), so this module must
+never import `ginn.domain`.
 
 Placeholders use the errors.py convention. `{name}` is replaced, and `{{` and `}}` are literal
 braces. Three names are defined, each valid in one place only:

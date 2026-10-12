@@ -5,8 +5,9 @@ FR-041, NFR-SEC-005.
 The shipped files are checked as data: their Integration Package Set against S-10 (the distro TOML
 is the single source for it; the Trust Manifest holds no copy since R9), their verbs for
 non-interactive and signature-preserving flags, their `refresh` verb, and their name patterns
-against domain.packages. The `_test` fixture and renamed copies prove that a new distribution
-needs no code change. Every validation rule in loader.py has a test that breaks it.
+against the DR-003 table in this file. The `_test` fixture and renamed copies prove that a new
+distribution needs no code change, both in the loader and through domain validation. Every
+validation rule in loader.py has a test that breaks it.
 """
 
 import copy
@@ -29,13 +30,19 @@ from ginn.distros.loader import (
     load_file,
     parse_text,
 )
-from ginn.domain.enums import DistroId
-from ginn.domain.packages import PACKAGE_PATTERNS
+from ginn.domain import DistroId, PackageName, RealmName, RealmSettings, Tier
 from ginn.errors import GinnError
 
 REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "src" / "ginn" / "distros" / "data"
 SHIPPED = ("arch", "debian", "fedora", "kali")
+# DR-003 name patterns, copied from the SRS. The shipped TOML files must carry these.
+DR003_PATTERNS = {
+    "arch": r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
+    "debian": r"[a-z0-9][a-z0-9.+-]{1,127}",
+    "fedora": r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
+    "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
+}
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
 PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
@@ -84,12 +91,6 @@ def test_available_lists_the_shipped_distributions_and_leaves_out_the_fixture() 
     assert available(include_test=True) == ("_test", *SHIPPED)
 
 
-@pytest.mark.fr("DR-005")
-def test_shipped_distributions_are_exactly_the_distro_ids() -> None:
-    assert set(available()) == {d.value for d in DistroId}
-    assert "_test" not in {d.value for d in DistroId}
-
-
 @pytest.mark.fr("NFR-060")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_each_shipped_distribution_loads_with_every_verb(name: str) -> None:
@@ -127,6 +128,36 @@ def test_a_new_file_in_the_data_directory_is_discovered_without_code_changes(
     monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
     assert available() == ("fixture",)
     assert load("fixture").id == "fixture"
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("DR-003")
+@pytest.mark.fr("DR-005")
+def test_a_new_definition_passes_domain_validation_with_zero_code_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the definition file says what this distribution's IDs and package names look like.
+    (tmp_path / "fixture.toml").write_text(
+        _shipped_text("_test").replace('id = "_test"', 'id = "fixture"'), encoding="utf-8"
+    )
+    monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
+    distro = DistroId.parse("fixture")
+    assert PackageName.parse("fake-pm.1", distro).value == "fake-pm.1"
+    with pytest.raises(GinnError) as name_info:
+        PackageName.parse("Fake", distro)  # the fixture pattern starts with a lowercase letter
+    assert name_info.value.code == "GINN-E-PKG-NAME-INVALID"
+    settings = RealmSettings(
+        name=RealmName.parse("work"),
+        distro=distro,
+        tier=Tier.BASIC,
+        services=False,
+        autostart=False,
+        everything=False,
+    )
+    assert settings.distro == distro
+    with pytest.raises(GinnError) as id_info:
+        DistroId.parse("_test")  # not in this data directory any more
+    assert id_info.value.code == "GINN-E-OPTION-INVALID"
 
 
 @pytest.mark.fr("NFR-060")
@@ -171,7 +202,7 @@ def test_verb_and_placeholder_syntax_round_trip_through_the_fedora_rpm_format() 
 @pytest.mark.fr("DR-003")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_name_pattern_is_the_dr003_pattern_for_the_distribution(name: str) -> None:
-    assert load(name).name_pattern.pattern == PACKAGE_PATTERNS[DistroId(name)]
+    assert load(name).name_pattern.pattern == DR003_PATTERNS[name]
 
 
 @pytest.mark.fr("DR-003")

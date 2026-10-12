@@ -1,13 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Closed value sets: distributions (DR-005), tiers (DR-011) and realm states (DR-020).
+"""Closed value sets: tiers (DR-011) and realm states (DR-020), and distribution IDs (DR-005).
 
 Each enum parses a raw string with `parse()`. Any other value raises GINN-E-OPTION-INVALID.
 Matching is exact and case-sensitive.
+
+Distribution IDs are not a closed set in this module. The valid IDs are the names of the
+definitions in `ginn.distros` (NFR-060), so a new distribution needs no change here. This module
+imports `ginn.distros`, which must never import `ginn.domain`.
 """
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Self
 
+from ginn.distros import available
 from ginn.domain._errors import reject
 
 OPTION_CODE: Final = "GINN-E-OPTION-INVALID"
@@ -27,17 +33,35 @@ def _parse_enum[E: StrEnum](cls: type[E], raw: str, option: str) -> E:
         ) from None
 
 
-class DistroId(StrEnum):
-    """Supported distributions (DR-005)."""
+@dataclass(frozen=True)
+class DistroId:
+    """A distribution ID (DR-005): the name of a distribution definition in `ginn.distros`.
 
-    ARCH = "arch"
-    DEBIAN = "debian"
-    FEDORA = "fedora"
-    KALI = "kali"
+    Validated on construction against the definitions that exist. The `_test` fixture counts as
+    one, so tests can run through this path (NFR-060). An unknown name raises GINN-E-OPTION-INVALID
+    and the message lists the names users may choose.
+    """
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str):
+            raise TypeError(f"distro ID must be a str, not {type(self.value).__name__}")
+        if self.value not in available(include_test=True):
+            allowed = ", ".join(available())
+            raise reject(
+                OPTION_CODE,
+                {"rule": f"allowed values: {allowed} (DR-005)"},
+                option=f"--distro={self.value}",
+                distro="any",
+            )
 
     @classmethod
     def parse(cls, raw: str) -> Self:
-        return _parse_enum(cls, raw, "--distro")
+        return cls(raw)
+
+    def __str__(self) -> str:
+        return self.value
 
 
 class Tier(StrEnum):

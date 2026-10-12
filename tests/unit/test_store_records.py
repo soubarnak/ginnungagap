@@ -23,6 +23,7 @@ from ginn.store.records import RealmRecord, RealmStore, read_json, write_json_at
 from tests.fakes.clock import FakeClock
 
 CREATED = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
+ARCH = DistroId("arch")
 
 
 def _paths(tmp_path: Path) -> OwnedPaths:
@@ -37,7 +38,7 @@ def _paths(tmp_path: Path) -> OwnedPaths:
 
 def _settings(
     name: str = "arch",
-    distro: DistroId = DistroId.ARCH,
+    distro: DistroId = ARCH,
     *,
     services: bool = False,
     autostart: bool = False,
@@ -149,7 +150,7 @@ def test_realm_record_round_trips_through_json(tmp_path: Path) -> None:
         previous_state=RealmState.RUNNING,
         restart_required=True,
         share_skipped=["/etc/shadow"],
-        settings=_settings("debian", DistroId.DEBIAN, services=True, autostart=True),
+        settings=_settings("debian", DistroId("debian"), services=True, autostart=True),
     )
     data = record.to_json()
     assert data["schema_version"] == 1
@@ -158,6 +159,21 @@ def test_realm_record_round_trips_through_json(tmp_path: Path) -> None:
     assert data["created_at"] == "2026-10-12T09:30:00.000Z"
 
     restored = RealmRecord.from_json(json.loads(json.dumps(data)))
+    assert restored == record
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("DR-001")
+def test_realm_record_stores_the_distro_as_its_plain_name_and_reads_the_fixture(
+    tmp_path: Path,
+) -> None:
+    # The on-disk form is the bare name, as before the ID became a value type. The `_test`
+    # fixture is a definition like any other, so a record for it round-trips without code changes.
+    record = _record(settings=_settings("fixture", DistroId("_test")))
+    data = record.to_json()
+    assert data["settings"]["distro"] == "_test"
+    restored = RealmRecord.from_json(json.loads(json.dumps(data)))
+    assert restored.settings.distro == DistroId("_test")
     assert restored == record
 
 
