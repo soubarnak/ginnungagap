@@ -1,76 +1,108 @@
-# Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, FR-013, AS-024, NFR-SEC-004).
+# Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, FR-013, AS-024, NFR-008, NFR-SEC-004).
 #
 # Read-only at runtime. This file ships with ginn and ginn never writes it (DR-040). It changes
-# only through the refresh procedure in spikes/results/S-10.md.
+# only through the refresh procedure in spikes/results/S-10.md (section 6).
 #
-# digest (FR-011): the linux/amd64 PLATFORM manifest digest, not the index (manifest-list)
-# digest. An index digest changes whenever another architecture or an attestation is rebuilt,
-# which would force a refresh with no change on x86_64. Each table's comment gives the index
-# digest for traceability.
+# digest_kind = "platform" on every entry. `digest` is the linux/amd64 PLATFORM manifest digest,
+# not the index (manifest-list) digest. An index digest changes whenever another architecture or
+# an attestation is rebuilt, which would force a refresh with no change on x86_64. Each table's
+# comment gives the index digest for traceability. S-10b pulled each recommended image by this
+# digest, and the local image digest matched it.
 #
-# compressed_size_bytes: sum of layer sizes in the platform manifest.
-# estimated_installed_bytes: sum of uncompressed layer tar sizes (gzip ISIZE trailer). It covers
-# the base image only. The Integration Package Set and --with packages are added by the install
-# estimate, and FR-121 applies its 1.10 factor on top.
+# compressed_size_bytes: sum of layer sizes in the platform manifest (registry metadata).
+# estimated_installed_bytes: sum of uncompressed layer tar sizes (gzip ISIZE trailer, registry
+# range reads). measured_installed_bytes: `podman image inspect --format '{{.Size}}'` after a
+# digest pull (S-10b). Both cover the base image only. The Integration Package Set and --with
+# packages are added by the install estimate, and FR-121 applies its 1.10 factor on top. NFR-008
+# caps a realm at the official image size plus 200 MiB.
 #
 # signature: "sigstore" = cosign keyless signature found, ECDSA check passed, payload pins this
 # digest (Fulcio chain and Rekor inclusion not checked). "none" = no signature found.
 #
-# integration_packages (FR-013): CA certificates and locale data. "{lang}" is replaced from the
-# host LANG at create time. The loader (T2.13) must implement this substitution.
+# integration_packages (FR-013): packages missing from the pulled base image, which must be
+# added. Presence was checked in S-10b. "{lang}" is replaced from the host LANG at create time
+# (en_US.UTF-8 gives "en"). Locale generation steps that are not packages are in each table's
+# comment. The loader (T2.13) must implement the substitution and the steps.
 #
-# verified_on: date the S-10 facts for this entry were collected.
+# verified_on: date the S-10 and S-10b facts for this entry were collected.
 
 schema = 1
 
 [distro.arch]
 # Official Arch Linux channel on quay.io, built by the Arch project's CI (archlinux-docker).
-# Not the Docker Hub mirror docker.io/library/archlinux:base: that index (sha256:4e77cf2e...)
-# is one week older and carries no signature.
-# Single manifest, so index digest == platform digest.
+# Not the Docker Hub mirror docker.io/library/archlinux:base (index sha256:4e77cf2e..., one week
+# older, unsigned). Single manifest, so index digest == platform digest.
+# Pulled image: VERSION_ID 20261011.0.609834, pacman 137 packages.
+# Present: ca-certificates 20240618-1 and ca-certificates-mozilla 3.131-1 (versions recorded;
+# freshness not checked). Missing packages: none.
+# Locale: en_US.UTF-8 is absent. Its sources are present, and `en_US.UTF-8 UTF-8` in /etc/locale.gen
+# followed by `locale-gen`, run as container root, generates it offline (locale-archive 3,064,432
+# bytes). Realm create must run this as root inside the container. That is a step,
+# not a package. glibc-locales is not a package in this image.
 image = "quay.io/archlinux/archlinux:base"
+digest_kind = "platform"
 digest = "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93"
 compressed_size_bytes = 139248529
 estimated_installed_bytes = 410379776
+measured_installed_bytes = 410385305
 signature = "sigstore"
 verified_on = "2026-10-12"
-# Locale data: no package verified; glibc generates locales with locale-gen (M4 check).
-integration_packages = ["ca-certificates"]
+integration_packages = []
 
 [distro.debian]
-# Debian stable, minimal variant (CR-007, Q-004). Tracks the current Debian stable release (AS-024).
-# Docker Hub official image, index sha256:eb593cf2...; no cosign signature found.
-# Codename behind "stable" not confirmed (needs /etc/os-release from a pulled layer).
+# Debian stable, minimal variant (CR-007, Q-004). `stable` tracks the current release (AS-024).
+# Pulled image: VERSION_CODENAME=trixie (Debian 13), dpkg 78 packages. Docker Hub official
+# image, index sha256:eb593cf2...; no cosign signature found.
+# Missing: ca-certificates and locales (dpkg reports both "not installed").
+# Locale: en_US.UTF-8 is absent and /usr/share/i18n is absent, so install `locales` first (needs
+# network, untested), then add `en_US.UTF-8 UTF-8` to /etc/locale.gen and run `locale-gen`.
+# /etc/dpkg/dpkg.cfg.d/docker excludes /usr/share/locale/* (message catalogues only).
 image = "docker.io/library/debian:stable-slim"
+digest_kind = "platform"
 digest = "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
 compressed_size_bytes = 29843347
 estimated_installed_bytes = 81254400
+measured_installed_bytes = 81256893
 signature = "none"
 verified_on = "2026-10-12"
 integration_packages = ["ca-certificates", "locales"]
 
 [distro.fedora]
-# Current Fedora release, 44 (AS-024). `latest` and `44` are the same digest on
-# registry.fedoraproject.org and quay.io/fedora, and Docker Hub latest equals 44 too.
-# Index sha256:1b8544582f97...; the same index is served by quay.io/fedora/fedora:latest.
+# Fedora 44, minimal image (CR-007, Q-004: official minimal image). Pulled image: VERSION_ID 44,
+# rpm 106 packages, dnf5 5.4.6 (`dnf` is a symlink to dnf5). The full fedora:44 image was not
+# chosen. It has the same dnf5 but 147 rpm packages and 190.9 MB installed, so the dnf check does
+# not separate the two. Index sha256:94938a50...; quay.io/fedora/fedora-minimal serves the same index.
 # Fedora 45 is not used: its GA status is not verified. Refresh to 45 once it is GA.
-# No cosign signature found. Lookaside signatures not found (registry extensions endpoint 404).
-image = "registry.fedoraproject.org/fedora:44"
-digest = "sha256:05e3c351a7e762aca8fb067a9a92c1f775a7c4fbb1382c97cdd87bd6fb5b162c"
-compressed_size_bytes = 71969746
-estimated_installed_bytes = 190937088
+# Present: ca-certificates 2026.2.90, glibc-minimal-langpack (C.UTF-8 only). No signature found;
+# lookaside signatures not found (registry extensions endpoint 404).
+# Missing: glibc-langpack-en. Its locale data needs no generation step (not tested).
+# %_install_langs en_US is set in the image. That is fine for host LANG en_US. Any other LANG needs
+# that macro overridden, or the langpack files are dropped (M4). tsflags=nodocs in /etc/dnf/dnf.conf.
+# dnf needs a writable HOME under --userns keep-id.
+image = "registry.fedoraproject.org/fedora-minimal:44"
+digest_kind = "platform"
+digest = "sha256:86d2e2423cce020de50ff67579216b799e57247f5565b2891f3870189d84dd4b"
+compressed_size_bytes = 56632319
+estimated_installed_bytes = 140837888
+measured_installed_bytes = 140839859
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["ca-certificates", "glibc-langpack-{lang}"]
+integration_packages = ["glibc-langpack-{lang}"]
 
 [distro.kali]
-# Kali rolling (current). Docker Hub official image, index sha256:02f5d6c0...; no cosign
-# signature found. AS-024 does not cover Kali: this channel is a proposal for the SRS author.
-# kali-last-release is pinned to the 2026.3 branch and would not move until a new tag.
+# Kali rolling (current channel). Pulled image: VERSION_ID 2026.3, VERSION_CODENAME kali-rolling,
+# dpkg 79 packages. Its label version is 2026.10.11. Docker Hub official image, index
+# sha256:02f5d6c0...; no cosign signature found. AS-024 does not cover Kali: this channel is a
+# proposal for the SRS author. kali-last-release is pinned to 2026.3 and would not move.
+# Missing: ca-certificates and locales (dpkg reports both "not installed").
+# Locale: en_US.UTF-8 is absent and /usr/share/i18n is absent, so the same sequence as Debian
+# applies (install `locales`, then generate). Not tested (needs network). No dpkg path-exclude rules.
 image = "docker.io/kalilinux/kali-rolling:latest"
+digest_kind = "platform"
 digest = "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54"
 compressed_size_bytes = 52909587
 estimated_installed_bytes = 125312512
+measured_installed_bytes = 125316242
 signature = "none"
 verified_on = "2026-10-12"
 integration_packages = ["ca-certificates", "locales"]
