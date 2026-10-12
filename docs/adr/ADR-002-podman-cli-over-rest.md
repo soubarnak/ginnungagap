@@ -48,7 +48,7 @@ Positive:
 
 Negative:
 
-- Each operation starts one `podman` process. This cost is part of the launch path. Spike S-02 measures it against NFR-004. If the target is missed, ADR-006 can route the hot launch path through the C helper `ginn-run`.
+- Each operation starts one `podman` process. This cost is part of the launch path. Spike S-02 measures it against NFR-004. If the target is missed, ADR-010 can route the hot launch path through the C helper `ginn-run`.
 - Separate storage means an image that the user already has is stored again for ginn. Disk accounting (FR-121, DR-015) counts ginn's copy.
 - ginn depends on the flags and output format of the Podman command line. A Podman upgrade that changes either one breaks the adapter. The change is contained in `podman/cli.py` and `podman/models.py`. Recorded outputs in the replay shim are refreshed by hand when Podman's output changes.
 - ginn owns the mapping from Podman exit codes and messages to `GINN-E-*` codes. This mapping is required by NFR-040.

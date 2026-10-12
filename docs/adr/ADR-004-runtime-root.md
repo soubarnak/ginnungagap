@@ -12,7 +12,7 @@ DR-010 lists `$XDG_RUNTIME_DIR/ginn` as an Owned Path. Three requirements depend
 - Podman's rootless runroot and tmpdir: podman keeps its state there and detects a reboot by finding them empty. That detection needs a tmpfs. A disk path breaks it.
 - DEP-3 names `XDG_RUNTIME_DIR` as provided by elogind, turnstile or an equivalent, that is, by a login session. The boot-time user supervisor (DEP-6, FR-081, FR-084) starts without a login session.
 
-Host Setup already creates `/run/ginn/<uid>` for the supervisor (`hostsetup/runit_system.py`), and the supervisor exports `XDG_RUNTIME_DIR` and `GINN_RUNTIME_DIR` with that value.
+The supervisor run script creates `/run/ginn/<uid>` at each start (`hostsetup/runit_system.py`). `/run` is a tmpfs, so a directory made once by Host Setup would vanish at reboot. The supervisor exports `XDG_RUNTIME_DIR` and `GINN_RUNTIME_DIR` with that value.
 
 The Opus review of the T2 and T3 code (R4, finding 1) found the split this decision removes. `from_env` resolved `$XDG_RUNTIME_DIR/ginn`, so a session `ginn` used `/run/user/<uid>/ginn` while the supervisor used `/run/ginn/<uid>`. The locks, the podman runroot and the podman tmpdir were then in two places. The same review found that a missing runtime directory fell back to a disk path (finding 2), and that podman's default tmpdir is the user's own `$XDG_RUNTIME_DIR/libpod/tmp`, which a user's own podman also uses (finding 3).
 
@@ -28,13 +28,13 @@ Ranked characteristics (SRS section 4), in order:
 
 Assumptions, each to be confirmed by a spike or task:
 
-- `/run/ginn/<uid>` survives logout and is visible from the user's session. Spike S-04 (roadmap, M1) is still to run. This ADR is decided ahead of it; S-04 is the confirming test.
+- `/run/ginn/<uid>` survives logout and is visible from the user's session. The simulated logout S-04s tested a tmpfs location of the same kind, and it survived (Addendum). The real logout run S-04 was invalid, because the test login never got an elogind session. A real logout run at the exact path `/run/ginn/<uid>` is still open.
 - Podman reads `XDG_RUNTIME_DIR` for its rootless state. Assumed from podman's documented behaviour; S-04 and the first real podman task confirm it.
 - Podman accepts a `CONTAINERS_CONF` or `CONTAINERS_STORAGE_CONF` path that does not exist. **False.** Podman 5.8 refuses it. See Verification. ginn therefore writes both files before any podman call.
 
 ## Decision
 
-ginn uses one runtime root per user: `/run/ginn/<uid>`. The supervisor run script creates it at boot, as root, owned by the user with mode 0700 (`hostsetup/runit_system.py`). Every ginn process of that user resolves it the same way, whatever the session. Owned Paths never read `$XDG_RUNTIME_DIR`. `GINN_RUNTIME_DIR`, when set to an absolute path, replaces the default, and the supervisor exports the same path.
+ginn uses one runtime root per user: `/run/ginn/<uid>`. The supervisor run script creates it at each start, as root, owned by the user with mode 0700 (`hostsetup/runit_system.py`). Every ginn process of that user resolves it the same way, whatever the session. Owned Paths never read `$XDG_RUNTIME_DIR`. `GINN_RUNTIME_DIR`, when set to an absolute path, replaces the default, and the supervisor exports the same path.
 
 Every resolution checks the directory (R11):
 
@@ -136,6 +136,6 @@ Caveats:
 - A simulation, not a real logout. The PAM session close, the elogind teardown and the unmount of the runtime tmpfs were not measured. The test containers used `--cgroups disabled` and `--network none`.
 - The `acquiring lock ... file exists` error was not traced.
 - podman 5.8.8 only.
-- The path `/run/ginn/<uid>` was not run. Host Setup creates it (above). A run at that exact path is still open.
+- The path `/run/ginn/<uid>` was not run. The supervisor run script creates it at each start (above). A run at that exact path is still open.
 
 Consequence. The decision above holds. The runtime root must sit outside the per-login directory. Variant B shows what happens when it does not. ADR-008 builds the session socket rebind on the variant A layout. A real logout test (S-04, rerun) is still open.

@@ -98,9 +98,9 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, AD
 - T3.1 `hostsetup/subids.py` append >= 524288 non-overlapping to `/etc/subuid|subgid`.
 - T3.2 `hostsetup/cgroups.py` delegated subtree (mkdir, chown, `subtree_control`); test on a fake cgroupfs tree.
 - T3.3 `hostsetup/runit_system.py` renders `/etc/sv/ginn-<user>/{run,finish,log/run}`; golden file + shellcheck.
-- T3.4 `hostsetup/record.py`, `setup.py`: root check `GINN-E-SETUP-ROOT`, idempotent "already configured", record with pre-images; tests under a `--root-dir` prefix (FR-001 AC-2, FR-002).
-- T3.5 `hostsetup/undo.py` `GINN-E-UNDO-REALMS-EXIST` (FR-003).
-- T3.6 `doctor/checks.py`: podman rootless, subids, runtime dir, user runsvdir, cgroup delegation, userns sysctl, overlay/fuse, free disk, NVIDIA-on-musl informational; every FAIL prints its fix command (FR-007, FR-069 AC-2, NFR-041). elogind `KillUserProcesses` is checked: a FAIL when the effective value is `yes`. The check reads `/etc/elogind/logind.conf` and `/etc/elogind/logind.conf.d/*.conf`, the last value wins, and an unset value counts as no. The printed fix sets it to `no` and restarts elogind (ADR-004).
+- T3.4 `hostsetup/record.py`, `setup.py`: root check `GINN-E-SETUP-ROOT`, idempotent "already configured", record with pre-images; tests under a `--root-dir` prefix (FR-001 AC-2, FR-002). Setup runs before `/run/ginn/<uid>` exists, and it must not stop on that (ADR-004).
+- T3.5 `hostsetup/undo.py` `GINN-E-UNDO-REALMS-EXIST` (FR-003). Undo restores the recorded root cgroup `subtree_control` pre-image. Host Setup adds `pids` there (S-01), so undo must not assume the original value.
+- T3.6 `doctor/checks.py`: podman rootless, subids, runtime dir (FAIL "supervisor not running" when `/run/ginn/<uid>` is missing), user runsvdir, cgroup delegation, userns sysctl, overlay/fuse, free disk, NVIDIA-on-musl informational; every FAIL prints its fix command (FR-007, FR-069 AC-2, NFR-041). elogind `KillUserProcesses` is checked: a FAIL when the effective value is `yes`. The check reads `/etc/elogind/logind.conf` and `/etc/elogind/logind.conf.d/*.conf`, the last value wins, and an unset value counts as no. The printed fix sets it to `no` and restarts elogind (ADR-004).
 - T3.7 `doctor/report.py` text + `--json`.
 - T3.8 `integrity/fingerprint.py`, `state.py`, `ginn integrity [--ack]`, `GINN-W-HOST-CHANGED`; 5000-file timing test (NFR-011).
 - T3.9 `ops/_mutating.py` choke point; ordering test (DR-032).
@@ -132,7 +132,7 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, AD
 - T6.2 `ginn tier` / `ginn perms`, Custom toggles and shared paths (DR-004), restart-required flag (FR-060, FR-063, FR-066).
 - T6.3 `native/ginn-agent-filter.c`; hypothesis test over framing with a fake agent (FR-067 AC-1, NFR-SEC-007).
 - T6.4 `security/agent.py` filter + gpg extra socket lifecycle, Development realms only.
-- T6.5 `security/dbus_filter.py` xdg-dbus-proxy argv and lifecycle (FR-068).
+- T6.5 `security/dbus_filter.py` xdg-dbus-proxy argv and lifecycle (FR-068). The proxy starts lazily, not with the realm, because S-05 measured 4.7 MiB RSS for one resident proxy (NFR-002).
 - T6.6 `security/nvidia.py` detection, CDI generation, `ldconfig` once per driver version, musl informational (FR-069).
 - T6.7 Development realm: create the realm user without subuid lines (`useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`), write the Realm Home `storage.conf` (and `containers.conf`), generate the seccomp profile (FR-062 AC-3, ADR-006).
 - Host-only `test_tiers_real.py` (FR-061 AC-1/2, FR-062 AC-1..4, FR-063 AC-1).
@@ -171,7 +171,7 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, AD
 - T10.5 Two-user FR-025 test, NFR-SEC-008 audit-log reachability, NFR-SEC-010 network capture allow-list.
 - T10.6 `tools/release.sh cut`, signed repo, release notes listing deferred Should FRs (9.8).
 
-Dependencies: M1 before M4 (ADR-004/006 shape `runtime/`; ADR-011 shapes the distro verbs in T2.13, `packages/manager.py` in T5.1 and `ops/update.py` in T8.4), S-01 before M7, S-05 before M6/M7 acceptance, S-10 before M4 real-distro tests.
+Dependencies: M1 before M4 (ADR-004, ADR-006 and ADR-010 shape `runtime/`; ADR-011 shapes the distro verbs in T2.13, `packages/manager.py` in T5.1 and `ops/update.py` in T8.4), S-01 before M7, S-05 before M6/M7 acceptance, S-10 before M4 real-distro tests.
 
 ## Testing strategy
 

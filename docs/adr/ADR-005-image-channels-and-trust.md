@@ -76,10 +76,10 @@ R-003 mitigation. When a refreshed `trust.toml` ships, an existing realm moves t
 
 - Code must pull by digest and must refuse a mismatch before any layer remains in storage (FR-011 AC-1). The digest is verified, never the tag.
 - Code must not treat a `signature` value as verification. Only kinds in `VERIFIED_SIGNATURE_KINDS` count, and that set is empty.
-- The Integration Package Set is not in `trust.toml`. It is in each distro's TOML (R9). Debian and Kali need `locales` and Fedora needs `glibc-langpack-en`, and those package steps are not yet tested (see Context). The Arch locale step needs a root step inside the container. It was tested offline.
+- The Integration Package Set is not in `trust.toml`. It is in each distro's TOML (R9). Debian and Kali need `locales` and Fedora needs `glibc-langpack-en`, and those package steps are not yet tested (see Context). The Arch locale step needs a root step inside the container. S-10b tested `locale-gen` offline, as container root. The data uses `localedef`, which S-10b did not run, so that step is not verified until M4.
 - Fedora needs a writable HOME for dnf under keep-id. The realm must set it (S-10 section 8, item 8).
 - Sizes in `trust.toml` are the input for FR-121's disk check (ISIZE times 1.10). The stored size is the base image only. The Integration Package Set and `--with` packages are added at check time.
-- The `trust.toml` header still says the file changes only through S-10 section 6. The refresh tool now does the digest step. The header should be updated when the file is next edited.
+- The `trust.toml` header names the refresh procedure (S-10 section 6). It says which steps the tool runs (step 1, and the `digest` line of step 5) and which steps are by hand.
 - Follow-ups: CL-6 (Kali channel, SRS v1.1), the M4 host tests for each distro, T8.4 (update path that checks the new digest), and the S-10 open items in section 8.
 
 ## Requirement IDs

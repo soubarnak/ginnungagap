@@ -2,9 +2,10 @@
 #
 # Read-only at runtime. This file ships with ginn and ginn never writes it (DR-040). It changes
 # only through the refresh procedure in spikes/results/S-10.md (section 6). The dev-time tool
-# tools/refresh-trust-manifest.py runs the digest step of that procedure (step 1, through skopeo).
-# Its --write mode rewrites only the `digest` line. The sizes, the signature and verified_on need
-# steps 3 to 5 by hand.
+# tools/refresh-trust-manifest.py runs step 1 (the digest read, through skopeo) and the `digest`
+# line of step 5 (--write). Before it writes, it parses the new file with ginn's loader, which is
+# the parse check of step 6. Steps 2 to 4, the other fields of step 5 (sizes, signature,
+# measured_installed_bytes, verified_on), step 7 and the commit in step 8 are by hand.
 #
 # digest_kind = "platform" on every entry. `digest` is the linux/amd64 PLATFORM manifest digest,
 # not the index (manifest-list) digest. An index digest changes whenever another architecture or

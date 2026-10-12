@@ -16,7 +16,7 @@ The constraints that apply are these.
 - SRS section 4 ranks the driving characteristics as follows: performance efficiency (1), host integrity and isolation (2), recoverability (3), interoperability (4), usability (5). Performance is the main cost of an interpreted language, so this choice needs a stated mitigation.
 - The packages python3, python3-gobject, gtk4 and libadwaita exist in the Void repository. This was confirmed on the reference host. Their availability on musl is not yet confirmed. Spike S-03 tests it.
 
-For NFR-004, spike S-02 measures the `podman exec` launch path over 100 runs. If its p95 misses 300 ms, a small C fast-path helper (`ginn-run`, which enters the realm with setns) is added. ADR-006 decides that path.
+For NFR-004, spike S-02 measures the `podman exec` launch path over 100 runs. If its p95 misses 300 ms, a small C fast-path helper (`ginn-run`, which enters the realm with setns) is added. ADR-010 decides that path.
 
 ## Decision
 
@@ -43,7 +43,7 @@ Positive:
 
 Negative:
 
-- Interpreter start-up adds to launch latency. NFR-004 is at risk (R-006). Spike S-02 measures it. If the target is missed, ADR-006 adds the C helper `ginn-run`.
+- Interpreter start-up adds to launch latency. NFR-004 is at risk (R-006). Spike S-02 measures it. If the target is missed, ADR-010 adds the C helper `ginn-run`.
 - The interpreter uses memory only while a command runs. A resident interpreter is not allowed, so this cost never falls on the idle budget.
 - PyGObject and GTK4 on musl are not yet proven. Spike S-03 must pass before M9. NFR-062 requires the Must-FR suite to pass on musl, and FR-100 to FR-103, FR-105 and FR-106 are Must requirements. If S-03 fails, this ADR is reopened before the GUI milestone.
 - Any future request for a resident Python process, such as a daemon, conflicts with NFR-001. It requires a superseding ADR.
@@ -59,7 +59,7 @@ Negative:
 | CR-009 | This ADR makes the language and GUI toolkit choices that the SRS leaves open. |
 | NFR-001 | No Python process stays resident. Only C helpers may stay resident. |
 | NFR-002 | With no resident interpreter, the idle budget excludes interpreter memory. |
-| NFR-004 | Interpreter start-up is a launch risk. Spike S-02 measures it, and ADR-006 sets the mitigation. |
+| NFR-004 | Interpreter start-up is a launch risk. Spike S-02 measures it, and ADR-010 sets the mitigation. |
 | NFR-061 | Viewmodels hold GUI logic and are tested without GTK. Ruff and mypy run in CI. |
 | NFR-062 | PyGObject and GTK4 on musl are gated by spike S-03 before the GUI milestone. |
 | FR-105 | The Control Plane runs as the user and never requests root. |

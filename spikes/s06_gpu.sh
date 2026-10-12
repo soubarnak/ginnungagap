@@ -31,6 +31,10 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike-s06"
 PM_ROOT="$DATA/podman"
 PM_RUNROOT="$XRD/ginn-spike-s06"
 PM_TMP="$PM_RUNROOT/libpod-tmp"
+# Pin XDG_RUNTIME_DIR for podman calls only (AGENTS.md; pm() sets it). Computed from XRD, the
+# caller's value, so the host-side Wayland and X11 probes keep the real session directory.
+SPIKE_XRD="$XRD/ginn-spike-s06/xdg"
+mkdir -p -m 0700 "$SPIKE_XRD"
 CDI_DIR="$DATA/cdi"
 OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s06}"
 REALM_RUN="/run/user/$UID_"
@@ -46,7 +50,7 @@ INIT_NOTE=""
 say() { printf '%s\n' "$*" >&2; }
 die() { say "s06: $*"; exit 1; }
 
-pm() { podman --root "$PM_ROOT" --runroot "$PM_RUNROOT" --tmpdir "$PM_TMP" "$@"; }
+pm() { XDG_RUNTIME_DIR="$SPIKE_XRD" podman --root "$PM_ROOT" --runroot "$PM_RUNROOT" --tmpdir "$PM_TMP" "$@"; }
 
 # probe [--user U] CTR NAME CMD...: run CMD in CTR, keep its log, record rc. Never aborts.
 probe() {

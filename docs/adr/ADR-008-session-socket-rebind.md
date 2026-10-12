@@ -32,6 +32,7 @@ Assumptions and gaps:
 - Only a server that dies at logout was tested. A server that outlives the logout, with its socket unlinked under it, was not tested.
 - Processes that already hold the old socket descriptor were not tested.
 - The rebind ran as the container's owner, uid 1000. A container with another owner was not tested.
+- Rebind into a keep-id container is untested. The S-08 container ran without `--userns keep-id`. S-08t reruns it.
 - Tested on podman 5.8.8 and crun 1.30.1 only.
 
 ## Decision
@@ -39,7 +40,7 @@ Assumptions and gaps:
 ginn rebinds stale session sockets with a small native helper, `native/ginn-rebind.c`. The helper is at most 200 lines of C. For each path in its list, the helper does four steps:
 
 1. It enters the container's mount namespace with `setns`. The namespace comes from the container's init process.
-2. It compares the path with the host socket. If the inode in the container already matches, it skips the path. A second run therefore changes nothing.
+2. It compares the `(st_dev, st_ino)` pair of the path with the host socket. If the pair in the container already matches, it skips the path. A second run therefore changes nothing.
 3. It calls `umount2` on the stale path only.
 4. It opens a clone of the host socket with `open_tree`, and it moves that clone onto the path with `move_mount`.
 
@@ -48,12 +49,12 @@ The helper takes an explicit path list from `runtime/env.py`. That module decide
 ginn runs the helper through podman, with the global flags that ADR-004 requires:
 
 ```
-podman --remote=false --root <root> --runroot <runroot> --tmpdir <tmpdir> unshare ginn-rebind <init-pid> <path>...
+podman --remote=false --root <root> --runroot <runroot> --tmpdir <tmpdir> --runtime crun unshare ginn-rebind <init-pid> <path>...
 ```
 
 This is the only form that worked. A plain session cannot call `open_tree`. The call returns EPERM (S-08s rows 4 and 6). So the rebind must run inside `podman unshare`. The helper needs no root, and it runs no resident process.
 
-The trigger is lazy. The enter and launch path compares the host socket inodes with the container's before it execs the app. It runs the helper only when a path differs. The enter and launch path is T4.6 for every realm, and T7.1 for services-on realms. Services do not use session sockets, so there is no login hook. A services-on realm that never launches a GUI app never runs the helper.
+The trigger is lazy. The enter and launch path compares the `(st_dev, st_ino)` pair of each host socket with the container's before it execs the app. It runs the helper only when a path differs. The enter and launch path is T4.6 for every realm, and T7.1 for services-on realms. Services do not use session sockets, so there is no login hook. A services-on realm that never launches a GUI app never runs the helper.
 
 The helper exits 0 when every path matches or was rebound. It exits non-zero on any failure, and ginn reports that failure as a catalogue error. The catalogue code is added with the helper (T7.8).
 
@@ -68,7 +69,7 @@ The helper exits 0 when every path matches or was rebound. It exits non-zero on 
 
 ## Consequences
 
-- The helper depends on the rootless user namespace that the store creates. Because of keep-id, that namespace is shared by the realm's container. ginn can rebind only into a container of a store whose user namespace `podman unshare` enters. It cannot reach an arbitrary container. The spike did not check whether that namespace belongs to the store's pause process.
+- The helper depends on the rootless user namespace that the store creates. In the S-08 run, the container init and `podman unshare` reported one user namespace (observed topology; the cause was not checked). ginn can rebind only into a container of a store whose user namespace `podman unshare` enters. It cannot reach an arbitrary container. The spike did not check whether that namespace belongs to the store's pause process.
 - Between `umount2` and `move_mount`, the path holds the placeholder that podman created for the bind. It does not hold a socket. A client that connects in that window gets an error. The spike did not time the window. It is expected to be short.
 - The ENOENT from `move_mount` onto a stale mount is inferred, not verified. The likely cause is that the kernel cannot find a mount point on an unlinked dentry. The kernel source was not checked.
 - Processes that already hold the old socket descriptor keep it. Their state after the rebind was not measured.

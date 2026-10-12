@@ -21,7 +21,11 @@ Measured on the reference host (Void glibc x86_64, kernel 7.2.9_1, rootless podm
 
 Assumptions and gaps, each with the test that confirms it:
 
-- The full Development set is not proven together: `/dev/kvm`, keep-groups, `unmask=/proc/*`, the sethostname-only profile, the Realm Home config files and `useradd -K`. The M6 test `tests/integration/test_tiers_real.py` proves it. S-07e2 used the both-names profile and no keep-groups. The sethostname-only profile was tested with CLI storage options (S-07e E4c).
+- FR-062 AC-3 passes in parts; the decided combination is pending S-07f. The parts never run together:
+  - the CLI storage options (S-07e E1o, E4c) and the Realm Home `storage.conf` (S-07e2 E1d, E1d-u2) were run separately;
+  - the both-names seccomp profile (S-07e E1o, S-07e2 E1d-u2) and the sethostname-only profile (S-07e E4c) were run separately;
+  - keep-groups was not run with the single-ID set. Keep-groups combined with a single-ID user namespace that denies `setgroups` is untested.
+  The full set, with `/dev/kvm`, `unmask=/proc/*`, the sethostname-only profile, the Realm Home config files and `useradd -K`, is for the M6 test `tests/integration/test_tiers_real.py`.
 - K1 tests open() only. The KVM ioctls were not run.
 - Inner tests used a Debian stable image and podman 5.4.2 inside the realm. Arch, Fedora and Kali were not tested.
 - `setdomainname` is not ungated. An inner container that sets `--domainname` was not tested (S-07e follow-up 2).
@@ -65,13 +69,13 @@ The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must 
 
 ## Consequences
 
-- Positive: AC-3 passes with no SYS_ADMIN and no setcap step (S-07e E1o, S-07e2 E1d-u2). AC-4 open() passes under crun with keep-groups (S-07c K1). The added set is short and fully listed. It adds no capability.
+- Positive: FR-062 AC-3 passes in parts; the decided combination is pending S-07f. The parts pass with no SYS_ADMIN and no setcap step (S-07e E1o, S-07e2 E1d-u2). AC-4 open() passes under crun with keep-groups (S-07c K1). The added set is short and fully listed. It adds no capability.
 - Negative: nested containers see one ID. `chown` to any other ID fails with EINVAL (S-07e E6). Images that need other IDs run as root inside a nested container. This is a known limitation. A user who needs a full ID map inside the realm needs a different design, and that design is not decided.
 - Negative: the seccomp profile lets a realm process call `sethostname` without CAP_SYS_ADMIN. The kernel still checks the UTS namespace. The realm cannot change its own outer hostname (S-07d U1). The change is still a change to the host's filter, so it is a documented rule, not a loose setting.
 - The code must not add a capability for any Development option. It must not use `seccomp=unconfined`, `--privileged` or `no-new-privileges`.
 - The code must create the realm user with the `-K` flags. It must not write a subordinate line for that user. The rebuild (T8.3) must repeat the same creation step. A realm changed to Development after create needs its own check. That check was not tested.
 - The code must write the Realm Home config files. It must not pass `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt` to inner podman.
-- The seccomp source is a host file. The package that provides it on Void is not checked. A dedicated GINN error code is needed for a missing source or entry. None exists in `docs/errors.md`, and one is requested for the errors owner, as ADR-004 did for the runtime directory.
+- The seccomp source is a host file. On Void it belongs to the `containers-common` package (checked in the xbps file list on 2026-10-12), and the ginn package template declares that package. A dedicated GINN error code is needed for a missing source or entry. None exists in `docs/errors.md`, and one is requested for the errors owner, as ADR-004 did for the runtime directory.
 - Follow-up tasks: T6.1 (`security/caps.py`), T6.7 (realm user creation with `-K`, the Realm Home config files and the seccomp profile), T8.3 (the rebuild repeats the user creation), the M6 test `test_tiers_real.py` (the open items in `docs/capabilities.md`), and CL-8 (withdrawn; the podman request route is still open).
 - FR-085 (Docker in a realm) is deferred. Its options are not in this decision. Re-run S-07 Part B after M7. CL-2 records the open question.
 - The Launch path reservation that the ADR index gave to ADR-006 now sits at ADR-010. See the ADR index.
@@ -81,7 +85,7 @@ The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must 
 | ID | How this ADR bears on it |
 |---|---|
 | NFR-SEC-002 | Decides the enumerated Development set and the seccomp rule. `docs/capabilities.md` lists it, and T6.1 tests it. |
-| FR-062 | AC-3 passes with no SYS_ADMIN and no setcap (S-07e E1o, S-07e2 E1d-u2). AC-4 open() passes under crun with keep-groups (S-07c K1). ioctls and the full set are pending in M6. |
+| FR-062 | AC-3 passes in parts; the decided combination is pending S-07f. No SYS_ADMIN and no setcap in the parts (S-07e E1o, S-07e2 E1d-u2). AC-4 open() passes under crun with keep-groups (S-07c K1). ioctls and the full set are pending in M6. |
 | FR-013 | ginn adds no package in the Development tier. The libcap package is withdrawn. Podman comes in only as a requested package (CR-007). |
 | CR-007 | The realm changes are the user creation at create time, and the Realm Home config files, which are ginn-owned data. Podman enters as a requested package. No helper file changes. |
 | FR-021 | The rebuild must repeat the user creation step. FR-021 names only the Install Manifest, so the replay is a design choice (T8.3). The SRS does not say it. |

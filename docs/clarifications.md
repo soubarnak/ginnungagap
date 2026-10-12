@@ -10,7 +10,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-2 | Docker daemon in a realm (FR-085) | FR-085, AS-006, NFR-SEC-002 | open, for SRS v1.1 (deferred with FR-085) |
 | CL-3 | Realm root maps to a subordinate UID | AS-007, CR-003, NFR-SEC-001 | open, for SRS v1.1 |
 | CL-4 | unused | none | unused |
-| CL-5 | Session sockets after re-login | IR-025, FR-084 | resolved by S-08s: rebind (ADR-008); SRS wording open for v1.1 |
+| CL-5 | Session sockets after re-login | IR-025, FR-084 | resolved for containers without keep-id; keep-id pending S-08t (rebind, ADR-008); SRS wording open for v1.1 |
 | CL-6 | Kali image channel | AS-024, IR-021, FR-011 | open, for SRS v1.1 |
 | CL-7 | Distribution ID is an enum | DR-005, NFR-060, DR-003 | open, for SRS v1.1 |
 | CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | withdrawn (2026-10-12, D2) |
@@ -20,15 +20,15 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 
 - Requirement IDs: DR-010, FR-081, FR-084, DEP-3.
 - Issue: DR-010 names `$XDG_RUNTIME_DIR/ginn` as an Owned Path. Under elogind, `$XDG_RUNTIME_DIR` belongs to a login session (DEP-3). It is removed at logout unless lingering is enabled. This is standard logind behaviour and was not measured here. A services-on realm must keep running after logout (FR-081, FR-084), so it needs a runtime directory that does not depend on a session.
-- Proposed wording: DR-010 names `/run/ginn/<uid>`, created by Host Setup, in place of `$XDG_RUNTIME_DIR/ginn`.
-- How ginn works now: ginn uses `/run/ginn/<uid>`, created by Host Setup (ADR-004). The deviation from DR-010 stands until this clarification is written into the SRS.
+- Proposed wording: DR-010 names `/run/ginn/<uid>`, created by the supervisor run script at each start, in place of `$XDG_RUNTIME_DIR/ginn`.
+- How ginn works now: ginn uses `/run/ginn/<uid>`. The supervisor run script creates it at each start, as root (`hostsetup/runit_system.py`, ADR-004). `/run` is a tmpfs, so a directory made once at setup would vanish at reboot. The deviation from DR-010 stands until this clarification is written into the SRS.
 - Evidence: the real-logout run S-04 is invalid. The host created no elogind session for the test login (`spikes/results/S-04.md`). The simulation S-04s (same file, section "Simulated logout") shows that a runroot and tmpdir outside the session directory survive a simulated logout. Inside the session directory they do not survive: podman runs a "system restart" state refresh at the first call after login, and it loses the container. Variant A used `/dev/shm`, not `/run/ginn/<uid>`. ADR-004 has the addendum.
 - Status: confirmed by S-04s (simulated). The result assumes elogind `KillUserProcesses=no`, the Void default (commented out in `/etc/elogind/logind.conf`). The doctor check in T3.6 fails when the effective value is `yes` (ADR-004). The SRS wording is still open for v1.1, so this entry stays open until the SRS author writes it.
 
 ## CL-2: Docker daemon in a realm (FR-085)
 
 - Requirement IDs: FR-085 (Should), AS-006, NFR-SEC-002.
-- Issue: FR-085 asks for `docker run --rm hello-world` inside a services-on Development realm. A realm with services on shares the host network namespace (AS-006). S-07 expects, without testing it, that creating bridges in that namespace needs CAP_NET_ADMIN there, and NFR-SEC-002 does not grant it. A rootless dockerd would need the newuidmap set from ADR-006, which is not tested for dockerd.
+- Issue: FR-085 asks for `docker run --rm hello-world` inside a services-on Development realm. A realm with services on shares the host network namespace (AS-006). S-07 expects, without testing it, that creating bridges in that namespace needs CAP_NET_ADMIN there, and NFR-SEC-002 does not grant it. A rootless dockerd would need a full ID map inside the realm. The single-ID design of ADR-006 (amended, S-07e) gives one ID only, and dockerd was not tested on it.
 - Proposed wording: FR-085 names a rootless-mode dockerd. A rootful dockerd in a realm is out of scope for v1.
 - Evidence: S-07 Part B was skipped. Its expectations are not tested (S-07 Part B). FR-085 is deferred with its milestone, and S-07 Part B is re-run after M7, when services are on.
 
@@ -49,7 +49,7 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Issue: session sockets (display, audio, D-Bus) are bound when a realm starts. After logout they go stale, while a services-on realm keeps running. A realm that autostarts (FR-084) would then hold dead sockets after the next login.
 - Proposed wording: decided by S-08s, not by the SRS. ginn rebinds the stale sockets in place (ADR-008). Suggested SRS wording: "A services-on realm keeps running after re-login, and its session sockets are rebound on the next enter or launch."
 - Evidence: the real-logout run S-08 is invalid for the same reason as S-04: no elogind session for the test login (`spikes/results/S-08.md`). The simulation S-08s (same file, section "Simulated logout") shows a stale socket after the simulated logout. An in-place rebind under `podman unshare` (umount2, then move_mount) gives a live socket with no restart. The caveats are in ADR-008.
-- Status: resolved by S-08s: rebind (ADR-008). Restart-required was rejected, because services-on realms exist to keep their services running across logout (FR-081, FR-084). The SRS wording is still open for v1.1.
+- Status: resolved for containers without keep-id; keep-id pending S-08t. The resolution is the rebind (S-08s, ADR-008). Restart-required was rejected, because services-on realms exist to keep their services running across logout (FR-081, FR-084). The SRS wording is still open for v1.1.
 
 ## CL-6: Kali image channel
 
@@ -72,8 +72,9 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Former position (withdrawn): ginn applies these steps after create, only in the Development tier. They are the same kind of step as installing the Integration Package Set. The base image is not modified: it stays the official image at its pinned digest. The steps are recorded so that rebuild replays them. This does not comply with FR-013 or CR-007 as they are written, and the register does not claim that it does.
 - Former proposed wording (no longer needed): amend FR-013 and CR-007 to allow a Development-tier set of post-create steps, named in `docs/capabilities.md`. Add the replay of those steps to FR-021. No other route is known yet that avoids both a file change and an extra package.
 - Evidence: S-07d F1 and G3 (the helper change), and S-07d used `libcap2-bin` on Debian stable only.
-- Status: withdrawn (2026-10-12, D2). The raiser withdraws it. The single-ID design (ADR-006, amended) needs no setcap step, no libcap package and no helper file change (S-07e E1o, S-07e2 E1d-u2). The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, which is part of realm creation (T4.4). The Realm Home config files are ginn-owned data. So the setcap and libcap steps no longer conflict with FR-013 AC-1 or CR-007, and the former position and wording above are not needed.
+- Status: withdrawn (2026-10-12, D2). The raiser withdraws it. The single-ID design (ADR-006, amended) needs no setcap step, no libcap package and no helper file change (S-07e E1o, S-07e2 E1d-u2). The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, which is part of realm creation (T4.4). The Realm Home config files are ginn-owned data. So the setcap and libcap steps no longer conflict with FR-013 AC-1 or CR-007, and the former position and wording above are not needed. FR-062 AC-3 passes in parts; the decided combination is pending S-07f (ADR-006).
 - Open point, not part of this withdrawal: the image must contain podman and its helpers. A realm can get them only as requested packages, which CR-007 allows. S-07e2 did not decide how the request is made. That is for the user.
+- Open point, a CR-007 question: the inner `storage.conf` sets `mount_program = "/usr/bin/fuse-overlayfs"`. Whether fuse-overlayfs comes from the host package or must be in the realm image is not decided. fuse-overlayfs stays in the design and in ginn's packaging template.
 
 ## CL-9: create-time refresh and the Integration Package Set
 

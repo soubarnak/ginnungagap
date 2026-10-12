@@ -8,7 +8,9 @@ build_style=python3-pep517
 # CI runs it on the checkout.
 make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
 hostmakedepends="python3-setuptools python3-wheel"
-depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
+# containers-common ships /usr/share/containers/seccomp.json. ginn generates its seccomp profile
+# from that file and fails closed without it (ADR-006).
+depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux containers-common"
 checkdepends="python3-pytest python3-hypothesis"
 short_desc="Per-distribution realms on rootless Podman for Void Linux"
 maintainer="Bongbetic <soubarna@live.in>"

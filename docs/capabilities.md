@@ -30,7 +30,7 @@ These options are added to every Development realm, beyond the base argv.
 
 | Item | Option | Why | Evidence | Status |
 |---|---|---|---|---|
-| Inner storage device | `--device /dev/fuse` | The overlay driver mounts through fuse-overlayfs. The vfs driver does not need it. | S-07d M-fuse (overlay mount fails, rc 127). S-07e E5c (vfs passes without it). | proven for the overlay driver |
+| Inner storage device | `--device /dev/fuse` | The overlay driver mounts through fuse-overlayfs. The vfs driver does not need it. | S-07d M-fuse (overlay mount fails, rc 127), in the S-07d setcap design. S-07e E5c (vfs passes without it). The single-ID overlay runs (S-07e E1o, E1d) carry `/dev/fuse` and never drop it. | proven for the overlay driver in the S-07d setcap design. Pending S-07f for the single-ID set. |
 | Inner network device | `--device /dev/net/tun` | pasta, the inner default network, needs it. | S-07e E5a (pasta fails without it, rc 127). S-07d M-tun. | proven |
 | KVM device | `--device /dev/kvm`, only when the host has `/dev/kvm` (IR-040) | FR-062 AC-4 | S-07c K1 (realm user opens /dev/kvm read-write with keep-groups). S-07c K2 (denied without it). | open() proven. KVM ioctls and the full set pending (M6). |
 | Kept groups | `--group-add keep-groups` | Keeps the host's supplementary groups, so the realm user keeps the kvm group. Works under crun only (ADR-004). | S-07c K1 and K2 | proven for the /dev/kvm open(). Not run with the inner-container set. |
@@ -67,7 +67,7 @@ These options and actions must not appear in a Development realm.
 
 | Rule | Why | Evidence |
 |---|---|---|
-| No `--cap-add` of any kind. SYS_ADMIN is not granted. | NFR-SEC-002. SYS_ADMIN is outside the rootless defaults. | The single-ID set passes without it (S-07e E1o, S-07e2 E1d-u2). The older subordinate-ID set needed it (S-07 A5, S-07c C4). |
+| No `--cap-add` of any kind. SYS_ADMIN is not granted. | NFR-SEC-002. SYS_ADMIN is outside the rootless defaults. | The single-ID set passes without it (S-07e E1o, S-07e2 E1d-u2). The S-07d setcap set also passes without it (S-07d G4: `/dev/fuse`, `/dev/net/tun`, `unmask=/proc/*`, the narrow seccomp profile, no label, setcap helpers; inner rc 0; outer CapEff 0). The older subordinate-ID set needed it (S-07 A5, S-07c C4). |
 | No `--privileged`. | NFR-SEC-001, CR-003 | Refused by the argv builder. |
 | No `seccomp=unconfined`. | It disables the whole filter, not the one call that needs relief. | S-07d G1 passes, as an informative run only. |
 | No setcap, no libcap package, no change to a helper binary. | They conflict with FR-013 and CR-007 (CL-8). The single-ID set does not need them. | S-07e E1o-realm (helpers unused), S-07e2 E1d-u2 (no setcap, no libcap). |
@@ -126,7 +126,7 @@ Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the
 
 The M6 host test `tests/integration/test_tiers_real.py` must prove these. The spikes did not.
 
-- The full Development set together: `/dev/kvm`, keep-groups, `unmask=/proc/*`, `/dev/fuse`, `/dev/net/tun`, the seccomp profile with only `sethostname`, the Realm Home config files and `useradd -K`, with no SYS_ADMIN. Two parts were not combined. S-07e2 used the both-names profile and no keep-groups. The sethostname-only profile was tested only with CLI storage options (S-07e E4c).
+- The full Development set together: `/dev/kvm`, keep-groups, `unmask=/proc/*`, `/dev/fuse`, `/dev/net/tun`, the seccomp profile with only `sethostname`, the Realm Home config files and `useradd -K`, with no SYS_ADMIN. Three parts were not combined: the CLI storage options and the Realm Home `storage.conf` (each run separately), the both-names and sethostname-only profiles (each run separately), and keep-groups (not run with the single-ID set). S-07e2 used the both-names profile and no keep-groups. The sethostname-only profile was tested only with CLI storage options (S-07e E4c).
 - KVM ioctls, not only open() (S-07c K1).
 - `XDG_RUNTIME_DIR` inside the realm. S-07e2 left it unset. A realm that sets it moves the inner runroot.
 - A Realm Home bind-mounted from the host. S-07e2 used the outer container's own `/home/dev`. The owner, the permissions and the keep-id mapping of a bind mount were not tested.

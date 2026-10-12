@@ -14,6 +14,11 @@ REPO=$(cd "$HERE/.." && pwd)
 OUT="$HERE/out"
 ROOT="${S02_ROOT:-$HOME/.local/share/ginn-spike-s02/podman}"
 RUNROOT="${S02_RUNROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike-s02}"
+# Pin XDG_RUNTIME_DIR for every podman call (AGENTS.md): podman's pause.pid lookup ignores --tmpdir.
+# Computed from the caller's value before the override. The LAUNCH_EXEC python child inherits it.
+SPIKE_XRD="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike-s02/xdg"
+mkdir -p -m 0700 "$SPIKE_XRD"
+export XDG_RUNTIME_DIR="$SPIKE_XRD"
 TMPROOT="$RUNROOT/libpod-tmp"
 NAME=s02
 IMAGE=docker.io/library/alpine:3
