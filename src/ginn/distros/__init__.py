@@ -3,6 +3,7 @@
 
 from ginn.distros.loader import (
     TEST_SWITCH_ENV,
+    TMPDIR_FIELD,
     DistroDef,
     HostLocale,
     Integration,
@@ -16,10 +17,12 @@ from ginn.distros.loader import (
     load,
     load_file,
     parse_text,
+    unknown_distribution_error,
 )
 
 __all__ = [
     "TEST_SWITCH_ENV",
+    "TMPDIR_FIELD",
     "DistroDef",
     "HostLocale",
     "Integration",
@@ -33,4 +36,5 @@ __all__ = [
     "load",
     "load_file",
     "parse_text",
+    "unknown_distribution_error",
 ]

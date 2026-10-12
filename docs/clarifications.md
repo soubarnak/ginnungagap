@@ -14,6 +14,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-6 | Kali image channel | AS-024, IR-021, FR-011 | open, for SRS v1.1 |
 | CL-7 | Distribution ID is an enum | DR-005, NFR-060, DR-003 | open, for SRS v1.1 |
 | CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | open, for SRS v1.1 |
+| CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -69,3 +70,11 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Position: ginn applies these steps after create, only in the Development tier. They are the same kind of step as installing the Integration Package Set. The base image is not modified: it stays the official image at its pinned digest. The steps are recorded so that rebuild replays them. This does not comply with FR-013 or CR-007 as they are written, and the register does not claim that it does.
 - Proposed wording: amend FR-013 and CR-007 to allow a Development-tier set of post-create steps, named in `docs/capabilities.md`. Add the replay of those steps to FR-021. No other route is known yet that avoids both a file change and an extra package.
 - Evidence: S-07d F1 and G3 (the helper change), and S-07d used `libcap2-bin` on Debian stable only.
+
+## CL-9: create-time refresh and the Integration Package Set
+
+- Requirement IDs: FR-013, FR-023, CR-007.
+- Issue: FR-013 AC-1 and FR-023 AC-1 do not say whether creating a realm may bring the image's packages up to date. CR-007 lists realm contents as the official image, the Integration Package Set and the requested packages, and does not say which versions of the image's packages a new realm keeps. On Arch the first install needs a current sync database, and a full synchronisation at creation is the only supported way to get one (ADR-011). Debian, Kali and Fedora run a metadata refresh first, which changes no installed package.
+- Proposed wording: "The Integration Package Set is installed against package versions current at creation; on rolling distributions creation includes a full synchronisation of the image's packages."
+- How ginn works now: creation runs `refresh` once, then installs the Integration Package Set, on every distribution. On Arch the refresh is the full upgrade. ADR-011 gives the reading under which this complies with the SRS as written. The register does not claim compliance, because the wording is open.
+- Evidence: `spikes/results/S-10.md` section 5 and section 7 (the Arch image ships `ca-certificates`). S-10 does not record the image's sync database or package lists. M4 records both, and ADR-011 lists the check.

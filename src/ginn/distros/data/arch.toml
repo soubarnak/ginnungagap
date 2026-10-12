@@ -2,15 +2,14 @@
 # Arch Linux distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
 #
 # Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
-# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+# {locale} (integration steps), {tmpdir} (check-updates steps). Write {{ and }} for literal braces.
+# Every command is an argv list.
 #
 # Image: trust_key names [distro.arch] in src/ginn/trust/data/trust.toml (DR-040). Image facts from
-# S-10b: pacman 137 packages; en_US.UTF-8 absent; no sync database; no Integration package missing.
-# The locale step runs localedef, the program that locale-gen calls. S-10b tested locale-gen, not
-# localedef. pacman-contrib is an Integration package only because checkupdates needs it (ADR-011).
-# FR-013 limits the set to CA certificates and locale data, so this is a recorded deviation.
-# Not verified on a host (M4): every verb, the step, the checkupdates exit status, and the stale
-# metadata message.
+# S-10b (spikes/results/S-10.md section 7): pacman 137 packages; ca-certificates present; en_US.UTF-8
+# absent, with its sources present under /usr/share/i18n. S-10b did not record the sync database or
+# /var/lib/pacman/local; M4 checks both in a fresh realm. Not verified on a host (M4): every verb, the
+# locale step, the check-updates steps and their exit statuses (ADR-011), the stale metadata text.
 schema = 1
 id = "arch"
 trust_key = "arch"
@@ -27,13 +26,17 @@ stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL ret
 refresh_before = []
 
 [integration]
-packages = ["pacman-contrib"]
+# ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
+# CA-certificates item of FR-013, which every distribution has (ADR-011).
+packages = ["ca-certificates"]
+# S-10b generated en_US with locale-gen from /etc/locale.gen, offline, as container root. This step
+# runs localedef, which S-10b did not run, so it is not verified until M4.
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 
 [verbs]
 # -Syu, not -Sy: Arch does not support partial upgrades. The only refresh of the sync database is a
 # full upgrade, so `refresh` and `upgrade` are the same argv. Realm creation runs it once before the
-# first install, because the image ships no sync database (ADR-011).
+# first install. That full upgrade is the creation rule of CL-9 (ADR-011).
 refresh = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
 # No --refresh and no --sysupgrade: install uses the sync database as the last full upgrade left it,
 # so it never upgrades the realm (FR-040 AC-1, ADR-011).
@@ -43,11 +46,23 @@ install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
 remove = ["pacman", "--remove", "--noconfirm", "{packages}"]
 # --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade (FR-023).
 upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
-# checkupdates (pacman-contrib) lists upgradable packages without running a system update (Arch
-# Wiki, System maintenance). It passes no sync or upgrade flag. That it leaves the realm's sync
-# database unchanged is not verified until M4, and FR-024 depends on it (ADR-011). Its exit status
-# is not relied on here either.
-check-updates = ["checkupdates"]
+# check-updates is a list of steps, run in order by the caller, and none of them writes the realm's
+# sync database. --dbpath sets the whole database directory (pacman(8)), so every step that uses
+# pacman reads or writes only under {tmpdir}. The caller chooses a path that does not exist yet,
+# and removes it after the last step whether or not a step failed. Removal must delete the `local`
+# link, not follow it into /var/lib/pacman/local. --logfile keeps the realm's pacman log unchanged.
+# The sync step has --refresh without --sysupgrade. That is allowed here only, because it refreshes
+# the scratch copy and never a full upgrade (ADR-011).
+# Exit statuses, observed in a scratch probe and not in pacman(8), which documents none (ADR-011):
+# the sync step exits 0 on success. The query exits 0 with the upgradable packages on stdout. It
+# exits 1 with nothing on stdout or stderr when nothing is upgradable, and 1 with a message on
+# stderr when it cannot run, for example with no sync database. M4 confirms these in a realm.
+check-updates = [
+    ["mkdir", "-p", "{tmpdir}"],
+    ["ln", "-s", "/var/lib/pacman/local", "{tmpdir}/local"],
+    ["pacman", "--sync", "--refresh", "--dbpath", "{tmpdir}", "--logfile", "/dev/null"],
+    ["pacman", "--query", "--upgrades", "--dbpath", "{tmpdir}"],
+]
 # --query --explicit --quiet is -Qeq: explicitly installed package names only (DR-007).
 list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 # --print with --print-format %n: names of the packages a sync would fetch. Changes nothing.

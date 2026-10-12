@@ -9,26 +9,31 @@ for, and `load()` refuses them without the switch. `ginn.domain` reads this pack
 IDs (DR-005) and package-name patterns (DR-003), so this module must never import `ginn.domain`.
 
 Placeholders use the errors.py convention. `{name}` is replaced, and `{{` and `}}` are literal
-braces. Three names are defined, each valid in one place only:
+braces. Four names are defined, each valid in one place only:
 - `{packages}` in a verb, as a whole element. It splices one argv element per package name. Names
   are never split, joined or re-parsed, so shell characters stay inside one element. A verb with no
   `{packages}` element takes no packages, and `argv()` refuses them.
 - `{lang}` in `integration.packages`. It is the language part of the host LANG (en_US.UTF-8
   gives `en`).
 - `{locale}` in `integration.steps`. It is the language and territory of the host LANG (en_US).
+- `{tmpdir}` in the `check-updates` steps, as a whole element or inside one. It is the scratch
+  directory the caller passes to `check_updates()`: an absolute path that does not exist yet.
 
-Every distribution defines every verb in `Verb`. `refresh` loads the package metadata a manager
-needs and never upgrades an installed package. `refresh_before` lists the verbs the caller runs
-`refresh` before (ADR-011). The list is empty where the verb already refreshes what it needs:
+Every distribution defines every verb in `Verb`. `check-updates` is the exception: it is a list of
+steps, run in order, and `check_updates()` returns them. Every other verb is one argv. `refresh`
+loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
+lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
+refreshes what it needs:
 - Arch never refreshes the sync database outside a full upgrade (`upgrade` is `pacman -Syu`),
-  because Arch does not support partial upgrades. `check-updates` runs `checkupdates`, which passes
-  no sync or upgrade flag (its effect on the database is verified in M4, ADR-011).
+  because Arch does not support partial upgrades. Its `check-updates` syncs a scratch database
+  selected by `--dbpath`, so the realm's own sync database is never written (ADR-011).
 - Debian and Kali run `apt-get update` (lists only) before install, upgrade, check-updates, resolve
   and estimate.
 - Fedora: `check-updates` passes dnf5's global `--refresh`, and dnf5 refreshes expired metadata by
   itself.
-A fresh image has no package lists, so realm creation runs `refresh` once before its first install
-on every distribution. The ops layer does that, not this module (ADR-011).
+Realm creation runs `refresh` once, then installs the Integration Package Set, on every distribution
+(ADR-011). The ops layer does that, not this module. On Arch the refresh is the full upgrade, so the
+image's packages move to current versions at creation (CL-9).
 
 A host LANG with no locale data to generate (unset, empty, `C`, `POSIX` or `C.UTF-8`) gets no
 entries that use `{lang}` or `{locale}`. A host LANG that is set but is not a UTF-8 locale name with
@@ -64,6 +69,7 @@ DATA_PACKAGE: Final = "ginn.distros"
 DATA_DIR: Final = "data"
 TEST_SWITCH_ENV: Final = "GINN_TEST_DISTROS"
 PACKAGES_ELEMENT: Final = "{packages}"
+TMPDIR_FIELD: Final = "tmpdir"
 C_UTF8: Final = "C.UTF-8"
 
 _ID_RE: Final = re.compile(r"_?[a-z][a-z0-9-]{0,31}")
@@ -138,10 +144,12 @@ class DistroDef:
     """One validated distribution definition.
 
     `trust_key` names a table in the Trust Manifest. Only its non-emptiness is checked here (T2.14
-    checks it against the manifest). `verbs` maps each Verb to its argv template. `name_pattern` is
-    matched with fullmatch, by argv() and by the Integration Package Set. `signature_error` and
-    `stale_metadata` are matched with search against the package manager's output (FR-012,
-    ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before (ADR-011).
+    checks it against the manifest). `verbs` maps each Verb except check-updates to its argv
+    template. `check_steps` is the check-updates step list, one argv template per step.
+    `name_pattern` is matched with fullmatch, by argv() and by the Integration Package Set.
+    `signature_error` and `stale_metadata` are matched with search against the package manager's
+    output (FR-012, ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before
+    (ADR-011).
     """
 
     id: str
@@ -154,6 +162,7 @@ class DistroDef:
     refresh_before: frozenset[Verb]
     integration: Integration
     verbs: Mapping[Verb, tuple[str, ...]]
+    check_steps: tuple[tuple[str, ...], ...]
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -162,10 +171,15 @@ class DistroDef:
         given to a verb that takes none. Every package name must fullmatch `name_pattern` (DR-003),
         or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
         a leading `-`, so a name that passes can never be read as an option. domain.packages checks
-        AS-027 first; this check is the second line of defence.
+        AS-027 first; this check is the second line of defence. check-updates is not one argv, so
+        it is refused here; see check_updates().
         """
         if isinstance(packages, str):
             raise TypeError("packages must be a sequence of names, not one str")
+        if verb is Verb.CHECK_UPDATES:
+            raise make(
+                "GINN-E-USAGE", detail="verb check-updates is a list of steps; use check_updates()"
+            )
         template = self.verbs[verb]
         takes_packages = PACKAGES_ELEMENT in template
         if takes_packages and not packages:
@@ -179,6 +193,32 @@ class DistroDef:
             else:
                 out.append(_render(element, {}))
         return out
+
+    @property
+    def check_updates_needs_tmpdir(self) -> bool:
+        """True when a check-updates step uses `{tmpdir}`: the caller must pass a scratch path."""
+        return any(
+            TMPDIR_FIELD in _field_names(element) for step in self.check_steps for element in step
+        )
+
+    def check_updates(self, tmpdir: str | None = None) -> tuple[list[str], ...]:
+        """Return the check-updates steps as argv lists, with `{tmpdir}` filled in, in run order.
+
+        The caller runs the steps in order, stops at the first failure, and removes `tmpdir`
+        afterwards (ADR-011). `tmpdir` is required when `check_updates_needs_tmpdir` is true and
+        refused otherwise. Raises GINN-E-USAGE for a missing, unexpected or unusable path.
+        """
+        values: dict[str, str] = {}
+        if self.check_updates_needs_tmpdir:
+            if tmpdir is None:
+                raise make("GINN-E-USAGE", detail="verb check-updates needs a tmpdir")
+            values[TMPDIR_FIELD] = _checked_tmpdir(tmpdir)
+        elif tmpdir is not None:
+            raise make("GINN-E-USAGE", detail="verb check-updates takes no tmpdir")
+        steps: list[list[str]] = []
+        for step in self.check_steps:
+            steps.append([_render(element, values) for element in step])
+        return tuple(steps)
 
     def integration_set(self, lang_env: str | None) -> IntegrationSet:
         """Return the Integration Package Set for a host LANG value (FR-013).
@@ -284,9 +324,9 @@ def load(name: str) -> DistroDef:
     name. A successful load is cached per data directory until `clear_cache()`.
     """
     if not isinstance(name, str) or _ID_RE.fullmatch(name) is None:
-        raise _unknown(name)
+        raise unknown_distribution_error(name)
     if name.startswith("_") and not distro_fixtures_enabled():
-        raise _unknown(name)
+        raise unknown_distribution_error(name)
     data_dir = _data_dir()
     key = (str(data_dir), name)
     cached = _CACHE.get(key)
@@ -294,7 +334,7 @@ def load(name: str) -> DistroDef:
         return cached
     entry = data_dir / f"{name}.toml"
     if not entry.is_file():
-        raise _unknown(name)
+        raise unknown_distribution_error(name)
     source = f"{DATA_PACKAGE}/{DATA_DIR}/{name}.toml"
     definition = parse_text(entry.read_text(encoding="utf-8"), source)
     if definition.id != name:
@@ -338,7 +378,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
-    verbs = _verbs(reader, raw["verbs"])
+    verbs, check_steps = _verbs(reader, raw["verbs"])
     return DistroDef(
         id=distro_id,
         source=source,
@@ -350,6 +390,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         refresh_before=refresh_before,
         integration=integration,
         verbs=MappingProxyType(verbs),
+        check_steps=check_steps,
     )
 
 
@@ -386,11 +427,31 @@ def _integration(reader: "_Reader", value: object, name_pattern: re.Pattern[str]
     return Integration(packages=packages, steps=steps)
 
 
-def _verbs(reader: "_Reader", value: object) -> dict[Verb, tuple[str, ...]]:
+def _verbs(
+    reader: "_Reader", value: object
+) -> tuple[dict[Verb, tuple[str, ...]], tuple[tuple[str, ...], ...]]:
     table = reader.table(value, "verbs")
     _only_keys(reader, table, frozenset(v.value for v in Verb), "verbs")
     allowed = frozenset({"packages"})
-    return {Verb(key): reader.argv(table[key], f"verbs.{key}", allowed, allowed) for key in table}
+    verbs = {
+        Verb(key): reader.argv(table[key], f"verbs.{key}", allowed, allowed)
+        for key in table
+        if key != Verb.CHECK_UPDATES.value
+    }
+    return verbs, _check_steps(reader, table[Verb.CHECK_UPDATES.value])
+
+
+def _check_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...]:
+    """Validate the check-updates step list: a non-empty list of argv lists (ADR-011)."""
+    field = f"verbs.{Verb.CHECK_UPDATES.value}"
+    if not isinstance(value, list) or not value:
+        raise reader.fail(field, "must be a non-empty list of argv lists")
+    steps: list[tuple[str, ...]] = []
+    for step in value:
+        if not isinstance(step, list):
+            raise reader.fail(field, "every step must be an argv list")
+        steps.append(reader.argv(step, field, frozenset({TMPDIR_FIELD}), frozenset()))
+    return tuple(steps)
 
 
 class _Reader:
@@ -490,12 +551,28 @@ def _render(template: str, values: Mapping[str, str]) -> str:
     return "".join(out)
 
 
+def _checked_tmpdir(raw: object) -> str:
+    """Return `raw` when it is an absolute path that is not `/` and has no `..` (ADR-011)."""
+    if not isinstance(raw, str):
+        raise TypeError(f"tmpdir must be str, not {type(raw).__name__}")
+    path = PurePosixPath(raw)
+    below_root = path.is_absolute() and len(path.parts) > 1
+    if not raw or "\0" in raw or not below_root or ".." in path.parts:
+        raise make(
+            "GINN-E-USAGE", detail=f"tmpdir {raw!r} must be an absolute path below / with no '..'"
+        )
+    return raw
+
+
 def _data_dir() -> Traversable:
     return files(DATA_PACKAGE).joinpath(DATA_DIR)
 
 
-def _unknown(name: object) -> GinnError:
-    """Return GINN-E-USAGE for a name with no definition. The list never names a fixture."""
+def unknown_distribution_error(name: object) -> GinnError:
+    """Return GINN-E-USAGE for a name with no definition. The list never names a fixture.
+
+    `DistroId` raises this too, so both places word an unknown distribution the same way.
+    """
     return make(
         "GINN-E-USAGE",
         detail=f"unknown distribution {name!r}; available: {', '.join(available())}",
@@ -514,6 +591,7 @@ __all__ = [
     "PACKAGES_ELEMENT",
     "SCHEMA",
     "TEST_SWITCH_ENV",
+    "TMPDIR_FIELD",
     "DistroDef",
     "HostLocale",
     "Integration",
@@ -527,4 +605,5 @@ __all__ = [
     "load",
     "load_file",
     "parse_text",
+    "unknown_distribution_error",
 ]

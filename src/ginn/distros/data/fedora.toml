@@ -2,7 +2,8 @@
 # Fedora distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
 #
 # Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
-# {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
+# {locale} (integration steps), {tmpdir} (check-updates steps). Write {{ and }} for literal braces.
+# Every command is an argv list.
 #
 # Image: trust_key names [distro.fedora] in src/ginn/trust/data/trust.toml (DR-040). The image is
 # fedora-minimal:44 with dnf5 5.4.6 (S-10b). Its only missing Integration package is
@@ -40,8 +41,8 @@ install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", 
 remove = ["dnf", "--assumeyes", "remove", "{packages}"]
 upgrade = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
 # --refresh forces fresh metadata, so the check the Control Plane runs reflects the mirror (FR-024).
-# check-upgrade exits 100 when updates exist and 0 when none.
-check-updates = ["dnf", "--refresh", "check-upgrade"]
+# check-upgrade exits 100 when updates exist and 0 when none. A one-step list (see arch.toml).
+check-updates = [["dnf", "--refresh", "check-upgrade"]]
 # repoquery --userinstalled: names of packages installed by hand (DR-007). Format is rpm's %{name}.
 list-explicit = ["dnf", "repoquery", "--userinstalled", "--queryformat", '%{{name}}\n']
 # --assumeno: print the transaction and make no change. dnf exits 1 after the no answer.

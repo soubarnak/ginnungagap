@@ -12,6 +12,7 @@ validation rule in loader.py has a test that breaks it.
 """
 
 import copy
+import re
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -49,9 +50,12 @@ DR003_PATTERNS = {
     "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
 }
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
-PKG_MANAGERS = frozenset(
-    {"pacman", "checkupdates", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"}
-)
+PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
+# Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
+# mkdir and links the installed-package database into it with ln (arch.toml).
+SCRATCH_TOOLS = frozenset({"mkdir", "ln"})
+# The scratch path a caller would pass to check_updates(). The loader never creates it.
+CHECK_TMP = "/srv/ginn-check-0001"
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
 # Tokens that turn off a native signature check (FR-012). None is needed for any verb.
 SIGNATURE_BYPASS = (
@@ -110,6 +114,26 @@ def _expect(code: str, exit_code: int) -> Callable[[GinnError], None]:
     return check
 
 
+def _check_steps_of(name: str) -> list[list[str]]:
+    """The check-updates steps of a shipped distribution, with CHECK_TMP when it takes one."""
+    definition = load(name)
+    tmpdir = CHECK_TMP if definition.check_updates_needs_tmpdir else None
+    return [list(step) for step in definition.check_updates(tmpdir)]
+
+
+def _every_argv(name: str) -> list[tuple[str, list[str]]]:
+    """Each verb's argv (check-updates excluded), then each check-updates step, labelled."""
+    definition = load(name)
+    out: list[tuple[str, list[str]]] = []
+    for verb in Verb:
+        if verb is not Verb.CHECK_UPDATES:
+            packages = ["gimp"] if verb in PACKAGE_VERBS else []
+            out.append((verb.value, definition.argv(verb, packages)))
+    for index, step in enumerate(_check_steps_of(name)):
+        out.append((f"check-updates[{index}]", step))
+    return out
+
+
 @pytest.fixture(autouse=True)
 def _fresh_cache() -> Iterator[None]:
     """Start and end each test with an empty definition cache, so monkeypatched dirs are read."""
@@ -143,7 +167,8 @@ def test_each_shipped_distribution_loads_with_every_verb() -> None:
         assert definition.id == name
         assert definition.trust_key == name
         assert definition.shell == "/bin/bash"
-        assert set(definition.verbs) == set(Verb)
+        assert set(definition.verbs) == set(Verb) - {Verb.CHECK_UPDATES}
+        assert definition.check_steps
 
 
 @pytest.mark.fr("NFR-060")
@@ -223,7 +248,7 @@ def test_a_new_definition_passes_domain_validation_with_zero_code_changes(
     assert settings.distro == distro
     with pytest.raises(GinnError) as id_info:
         DistroId.parse("_test")  # not in this data directory any more
-    assert id_info.value.code == "GINN-E-OPTION-INVALID"
+    assert id_info.value.code == "GINN-E-USAGE"
 
 
 @pytest.mark.fr("NFR-060")
@@ -297,8 +322,7 @@ S10_STEPS = (("localedef", "-i", "en_US", "-f", "UTF-8", "en_US.UTF-8"),)
 @pytest.mark.parametrize(
     ("name", "packages", "steps"),
     [
-        # pacman-contrib is a recorded deviation from FR-013's set (ADR-011): checkupdates needs it.
-        ("arch", ("pacman-contrib",), S10_STEPS),
+        ("arch", ("ca-certificates",), S10_STEPS),
         ("debian", ("ca-certificates", "locales"), S10_STEPS),
         ("kali", ("ca-certificates", "locales"), S10_STEPS),
         ("fedora", ("glibc-langpack-en",), ()),
@@ -385,13 +409,11 @@ def test_host_locale_reduces_lang_to_language_and_territory() -> None:
 @pytest.mark.fr("NFR-SEC-005")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_every_verb_is_an_argv_list_and_never_a_shell(name: str) -> None:
-    definition = load(name)
-    for verb in Verb:
-        argv = definition.argv(verb, ["gimp"] if verb in PACKAGE_VERBS else [])
-        assert argv, verb
+    for label, argv in _every_argv(name):
+        assert argv, (name, label)
         assert all(isinstance(element, str) for element in argv)
-        assert argv[0] in PKG_MANAGERS, (name, verb, argv[0])
-        assert not SHELLS & set(argv), (name, verb)
+        assert argv[0] in PKG_MANAGERS | SCRATCH_TOOLS, (name, label, argv[0])
+        assert not SHELLS & set(argv), (name, label)
 
 
 @pytest.mark.fr("FR-040")
@@ -405,23 +427,24 @@ def test_mutating_verbs_never_wait_for_a_prompt(name: str) -> None:
 
 
 @pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-024")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_dry_run_verbs_never_carry_a_yes_flag(name: str) -> None:
     definition = load(name)
-    for verb in (Verb.RESOLVE, Verb.ESTIMATE, Verb.CHECK_UPDATES, Verb.LIST_EXPLICIT):
+    for verb in (Verb.RESOLVE, Verb.ESTIMATE, Verb.LIST_EXPLICIT):
         argv = definition.argv(verb, ["gimp"] if verb in PACKAGE_VERBS else [])
         assert not YES_FLAGS & set(argv), (name, verb)
+    for step in _check_steps_of(name):
+        assert not YES_FLAGS & set(step), (name, step)
 
 
 @pytest.mark.fr("FR-012")
 @pytest.mark.parametrize("name", SHIPPED)
 def test_no_verb_disables_a_native_signature_check(name: str) -> None:
-    definition = load(name)
-    for verb in Verb:
-        packages = ["gimp"] if verb in PACKAGE_VERBS else []
-        text = " ".join(definition.argv(verb, packages)).lower()
+    for label, argv in _every_argv(name):
+        text = " ".join(argv).lower()
         for token in SIGNATURE_BYPASS:
-            assert token not in text, (name, verb, token)
+            assert token not in text, (name, label, token)
 
 
 @pytest.mark.fr("FR-040")
@@ -480,16 +503,16 @@ def test_refresh_before_lists_only_the_verbs_a_metadata_refresh_makes_safe(
 
 @pytest.mark.fr("FR-040")
 def test_arch_never_refreshes_the_sync_database_outside_a_full_upgrade() -> None:
-    # Arch does not support partial upgrades, so -Sy alone is never a refresh (Arch Wiki).
+    # Arch does not support partial upgrades, so -Sy alone is never a refresh (Arch Wiki). The one
+    # exception is the check-updates scratch copy, which the tests below pin to --dbpath.
     arch = load("arch")
     full = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
     assert arch.argv(Verb.REFRESH) == full
     assert arch.argv(Verb.UPGRADE) == full
     assert arch.refresh_before == frozenset()
-    for verb in Verb:
-        argv = arch.argv(verb, ["gimp"] if verb in PACKAGE_VERBS else [])
-        if "--refresh" in argv:
-            assert "--sysupgrade" in argv, (verb, argv)
+    for label, argv in _every_argv("arch"):
+        if not label.startswith("check-updates") and "--refresh" in argv:
+            assert "--sysupgrade" in argv, (label, argv)
 
 
 @pytest.mark.fr("FR-040")
@@ -504,15 +527,124 @@ def test_arch_install_uses_the_sync_database_as_the_last_full_upgrade_left_it() 
 
 
 @pytest.mark.fr("FR-024")
-def test_arch_check_updates_passes_no_sync_or_upgrade_flag() -> None:
-    assert load("arch").argv(Verb.CHECK_UPDATES) == ["checkupdates"]
+def test_arch_check_updates_is_four_steps_against_a_scratch_database() -> None:
+    assert _check_steps_of("arch") == [
+        ["mkdir", "-p", CHECK_TMP],
+        ["ln", "-s", "/var/lib/pacman/local", f"{CHECK_TMP}/local"],
+        ["pacman", "--sync", "--refresh", "--dbpath", CHECK_TMP, "--logfile", "/dev/null"],
+        ["pacman", "--query", "--upgrades", "--dbpath", CHECK_TMP],
+    ]
+
+
+@pytest.mark.fr("FR-024")
+def test_arch_check_updates_refreshes_only_the_scratch_copy() -> None:
+    refreshing = [step for step in _check_steps_of("arch") if "--refresh" in step]
+    assert len(refreshing) == 1
+    step = refreshing[0]
+    assert "--sysupgrade" not in step
+    assert "--dbpath" in step
+    assert step[step.index("--dbpath") + 1] == CHECK_TMP
+
+
+@pytest.mark.fr("FR-024")
+def test_arch_check_updates_never_touches_the_realm_sync_database() -> None:
+    absolute = [
+        element for step in _check_steps_of("arch") for element in step if element.startswith("/")
+    ]
+    assert [e for e in absolute if not e.startswith(CHECK_TMP)] == [
+        "/var/lib/pacman/local",
+        "/dev/null",
+    ]
+    assert not any("/var/lib/pacman/sync" in element for element in absolute)
+
+
+@pytest.mark.fr("FR-024")
+def test_arch_check_updates_has_no_short_flag_that_syncs_or_upgrades() -> None:
+    cluster = re.compile(r"-[A-Za-z]*[yu][A-Za-z]*")  # -Sy, -Syu, -Qu and the like
+    for step in _check_steps_of("arch"):
+        for element in step:
+            assert cluster.fullmatch(element) is None, step
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_only_arch_check_updates_takes_a_scratch_directory(name: str) -> None:
+    assert load(name).check_updates_needs_tmpdir is (name == "arch")
+
+
+@pytest.mark.fr("FR-024")
+def test_check_updates_refuses_a_scratch_directory_it_does_not_take() -> None:
+    with pytest.raises(GinnError) as info:
+        load("fedora").check_updates(CHECK_TMP)
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == "verb check-updates takes no tmpdir"
+
+
+@pytest.mark.fr("FR-024")
+def test_check_updates_needs_a_scratch_directory_where_the_data_uses_one() -> None:
+    with pytest.raises(GinnError) as info:
+        load("arch").check_updates()
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == "verb check-updates needs a tmpdir"
+
+
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("bad", ["", "relative/dir", "/", "/srv/../x", "/srv/a\0b"])
+def test_check_updates_refuses_a_scratch_path_that_is_not_below_root(bad: str) -> None:
+    with pytest.raises(GinnError) as info:
+        load("arch").check_updates(bad)
+    _expect("GINN-E-USAGE", 2)(info.value)
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_check_updates_refuses_a_scratch_path_that_is_not_a_str() -> None:
+    with pytest.raises(TypeError):
+        load("arch").check_updates(1)  # type: ignore[arg-type]
 
 
 @pytest.mark.fr("FR-024")
 def test_fedora_check_updates_forces_fresh_metadata_and_never_upgrades() -> None:
-    argv = load("fedora").argv(Verb.CHECK_UPDATES)
-    assert argv == ["dnf", "--refresh", "check-upgrade"]
-    assert not YES_FLAGS & set(argv)
+    steps = load("fedora").check_updates()
+    assert steps == (["dnf", "--refresh", "check-upgrade"],)
+    assert not YES_FLAGS & set(steps[0])
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.parametrize("name", ["debian", "kali"])
+def test_apt_check_updates_reads_the_lists_as_last_refreshed(name: str) -> None:
+    assert load(name).check_updates() == (["apt", "list", "--upgradable"],)
+
+
+@pytest.mark.fr("FR-024")
+def test_check_updates_is_refused_as_one_argv() -> None:
+    with pytest.raises(GinnError) as info:
+        load("arch").argv(Verb.CHECK_UPDATES)
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == "verb check-updates is a list of steps; use check_updates()"
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", ["debian", "kali"])
+def test_apt_upgrade_is_the_full_upgrade_dist_upgrade(name: str) -> None:
+    # FR-023 AC-2 names the native full upgrade. A plain apt upgrade leaves a package at its
+    # installed version when its new version needs a dependency that is not installed yet, so it
+    # is not full (apt-get(8)). --no-install-recommends is a global apt-get option, valid here.
+    assert load(name).argv(Verb.UPGRADE) == [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "dist-upgrade",
+    ]
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("CR-007")
+def test_arch_creation_refresh_is_the_full_upgrade_and_its_set_is_ca_certificates() -> None:
+    # ADR-011 and CL-9: creation runs refresh once, then installs the set. On Arch that refresh is
+    # the full sync-and-upgrade, the same argv as the upgrade verb.
+    arch = load("arch")
+    assert arch.argv(Verb.REFRESH) == arch.argv(Verb.UPGRADE)
+    assert arch.integration_set("en_US.UTF-8").packages == ("ca-certificates",)
 
 
 @pytest.mark.fr("FR-040")
@@ -545,9 +677,7 @@ def test_remove_never_widens_the_removal_with_autoremove_or_cascade(name: str) -
 
 @pytest.mark.fr("FR-040")
 @pytest.mark.parametrize("name", [*SHIPPED, "_test"])
-@pytest.mark.parametrize(
-    "verb", [Verb.REFRESH, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.LIST_EXPLICIT]
-)
+@pytest.mark.parametrize("verb", [Verb.REFRESH, Verb.UPGRADE, Verb.LIST_EXPLICIT])
 def test_packages_given_to_a_verb_that_takes_none_are_refused(name: str, verb: Verb) -> None:
     with pytest.raises(GinnError) as info:
         load(name).argv(verb, ["gimp"])
@@ -758,6 +888,31 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("verbs missing refresh", _del("verbs", "refresh")),
     ("verbs missing remove", _del("verbs", "remove")),
     ("verbs has an unknown verb", _set("verbs", "check_updates", value=["x"])),
+    ("verbs missing check-updates", _del("verbs", "check-updates")),
+    (
+        "check-updates is one argv, not a step list",
+        _set("verbs", "check-updates", value=["fake-pm", "check"]),
+    ),
+    ("check-updates is an empty list", _set("verbs", "check-updates", value=[])),
+    ("check-updates has an empty step", _set("verbs", "check-updates", value=[[]])),
+    (
+        "check-updates step uses {packages}",
+        _set("verbs", "check-updates", value=[["fake-pm", "{packages}"]]),
+    ),
+    (
+        "check-updates step uses {lang}",
+        _set("verbs", "check-updates", value=[["fake-pm", "{lang}"]]),
+    ),
+    (
+        "check-updates first element uses {tmpdir}",
+        _set("verbs", "check-updates", value=[["{tmpdir}/x"]]),
+    ),
+    (
+        "check-updates uses an unknown placeholder",
+        _set("verbs", "check-updates", value=[["fake-pm", "{image}"]]),
+    ),
+    ("install uses {tmpdir}", _set("verbs", "install", value=["fake-pm", "install", "{tmpdir}"])),
+    ("verb is a list of lists", _set("verbs", "upgrade", value=[["fake-pm"]])),
     ("verb is an empty list", _set("verbs", "upgrade", value=[])),
     ("verb element is not a string", _set("verbs", "upgrade", value=["fake-pm", 1])),
     ("verb has an unknown placeholder", _set("verbs", "upgrade", value=["fake-pm", "{image}"])),
@@ -810,7 +965,9 @@ def test_distro_data_error_names_the_file_field_and_rule() -> None:
 
 @pytest.mark.fr("NFR-060")
 def test_the_unbroken_fixture_validates() -> None:
-    assert from_mapping(_base(), source="fixture.toml").id == "_test"
+    fixture = from_mapping(_base(), source="fixture.toml")
+    assert fixture.id == "_test"
+    assert fixture.check_updates() == (["fake-pm", "check"],)
 
 
 @pytest.mark.fr("NFR-040")

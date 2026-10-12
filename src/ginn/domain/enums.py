@@ -5,15 +5,16 @@ Each enum parses a raw string with `parse()`. Any other value raises GINN-E-OPTI
 Matching is exact and case-sensitive.
 
 Distribution IDs are not a closed set in this module. The valid IDs are the names of the
-definitions in `ginn.distros` (NFR-060), so a new distribution needs no change here. This module
-imports `ginn.distros`, which must never import `ginn.domain`.
+definitions in `ginn.distros` (NFR-060), so a new distribution needs no change here. An unknown ID
+raises the loader's unknown-distribution error, GINN-E-USAGE, so the two places word it the same.
+This module imports `ginn.distros`, which must never import `ginn.domain`.
 """
 
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Self
 
-from ginn.distros import available
+from ginn.distros import available, unknown_distribution_error
 from ginn.domain._errors import reject
 
 OPTION_CODE: Final = "GINN-E-OPTION-INVALID"
@@ -40,7 +41,8 @@ class DistroId:
     Validated on construction against the definitions that exist. The `_test` fixture counts as
     one only while the test switch is on (GINN_TEST_DISTROS=1, see ginn.distros.loader), so tests
     can run through this path and production never accepts it (NFR-060). An unknown name raises
-    GINN-E-OPTION-INVALID and the message lists the names users may choose.
+    GINN-E-USAGE, the loader's unknown-distribution error, and its message lists the names users
+    may choose.
     """
 
     value: str
@@ -49,13 +51,7 @@ class DistroId:
         if not isinstance(self.value, str):
             raise TypeError(f"distro ID must be a str, not {type(self.value).__name__}")
         if self.value not in available(include_test=True):
-            allowed = ", ".join(available())
-            raise reject(
-                OPTION_CODE,
-                {"rule": f"allowed values: {allowed} (DR-005)"},
-                option=f"--distro={self.value}",
-                distro="any",
-            )
+            raise unknown_distribution_error(self.value)
 
     @classmethod
     def parse(cls, raw: str) -> Self:

@@ -64,15 +64,6 @@ def test_every_definition_name_is_a_distro_id(distro: DistroId) -> None:
 @pytest.mark.parametrize(
     ("enum_cls", "raw"),
     [
-        (DistroId, "gentoo"),
-        (DistroId, "ARCH"),
-        (DistroId, " arch"),
-        (DistroId, "arch "),
-        (DistroId, "arch\n"),
-        (DistroId, ""),
-        (DistroId, "arch;rm"),
-        (DistroId, "../arch"),
-        (DistroId, "arch.toml"),
         (Tier, "Basic"),
         (Tier, "gold"),
         (Tier, ""),
@@ -92,11 +83,27 @@ def test_unknown_values_raise_option_invalid_exit_2(enum_cls: type, raw: str) ->
 
 
 @pytest.mark.fr("DR-005")
+@pytest.mark.parametrize(
+    "raw",
+    ["gentoo", "ARCH", " arch", "arch ", "arch\n", "", "arch;rm", "../arch", "arch.toml"],
+)
+def test_unknown_distro_ids_raise_the_loader_usage_error(raw: str) -> None:
+    with pytest.raises(GinnError) as info:
+        DistroId.parse(raw)
+    err = info.value
+    assert err.code == "GINN-E-USAGE"
+    assert err.exit_code == 2
+    assert err.message == f"unknown distribution {raw!r}; available: {', '.join(available())}"
+
+
+@pytest.mark.fr("DR-005")
 def test_unknown_distro_message_lists_the_shipped_names_only() -> None:
     with pytest.raises(GinnError) as info:
         DistroId.parse("gentoo")
-    assert info.value.details["rule"] == f"allowed values: {', '.join(available())} (DR-005)"
-    assert info.value.details["option"] == "--distro=gentoo"
+    assert info.value.message == (
+        "unknown distribution 'gentoo'; available: arch, debian, fedora, kali"
+    )
+    assert "_test" not in info.value.message
 
 
 @pytest.mark.fr("NFR-060")
@@ -106,9 +113,10 @@ def test_the_fixture_is_not_a_distro_id_without_the_test_switch(
     monkeypatch.delenv(TEST_SWITCH_ENV)
     with pytest.raises(GinnError) as info:
         DistroId.parse("_test")
-    assert info.value.code == "GINN-E-OPTION-INVALID"
-    assert info.value.details["option"] == "--distro=_test"
-    assert "_test" not in info.value.details["rule"]
+    assert info.value.code == "GINN-E-USAGE"
+    assert info.value.message == (
+        f"unknown distribution '_test'; available: {', '.join(available())}"
+    )
 
 
 @pytest.mark.fr("DR-005")
