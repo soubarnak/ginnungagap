@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07f Arch useradd check (FR-062 AC-3, FR-013). Not a Realm image, and no podman inside: only realm user creation
+# is tested. Base: the Arch Linux platform digest pinned in src/ginn/trust/data/trust.toml.
+# The realm user is created with the decided form (useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0).
+FROM quay.io/archlinux/archlinux@sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93
+ARG REALM_USERADD="-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev"
+RUN echo "== before useradd"; command -v useradd; ls -l /etc/subuid /etc/subgid 2>&1 || true; \
+    grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs || true; \
+    echo "== useradd $REALM_USERADD"; useradd $REALM_USERADD; \
+    echo "-- /etc/subuid"; cat /etc/subuid 2>&1 || echo absent; \
+    echo "-- /etc/subgid"; cat /etc/subgid 2>&1 || echo absent; \
+    id dev

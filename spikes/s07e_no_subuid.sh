@@ -15,18 +15,20 @@
 #   spikes/s07e_no_subuid.sh case <id>    build, then one case (same ids as run)
 #   spikes/s07e_no_subuid.sh teardown     remove containers and storage under the spike roots only
 #
-# Every host podman call passes --root, --runroot and --tmpdir at spike-owned directories. The inner podman runs
+# Every host podman call passes --root, --runroot and --tmpdir at spike-owned directories and XDG_RUNTIME_DIR pinned to the spike dir. The inner podman runs
 # inside an outer container and gets the same three flags at container paths; its storage is the outer
 # container's own filesystem under the spike root. No --privileged, no sudo, no xbps, no host package changes.
 # Logs, the attempts table and generated profiles stay in the spike output directory, outside the repository.
+# Run with XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s07e-xrd; the wrapper refuses any other value.
 set -euo pipefail
 
 SELF="$(readlink -f "$0")"
 SPIKE_DIR="$(dirname "$SELF")"
 ROOT_DIR="${GINN_SPIKE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike-s07e/podman}"
-RUN_DIR="${GINN_SPIKE_RUNROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike-s07e}"
+RUN_DIR="/run/user/$(id -u)/ginn-spike-s07e"
 OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s07e}"
-PM=(podman --root "$ROOT_DIR" --runroot "$RUN_DIR" --tmpdir "$RUN_DIR/libpod-tmp")
+SPIKE_XRD="/run/user/$(id -u)/ginn-spike-s07e-xrd"
+PM=(env XDG_RUNTIME_DIR="$SPIKE_XRD" podman --root "$ROOT_DIR" --runroot "$RUN_DIR" --tmpdir "$RUN_DIR/libpod-tmp")
 BASE_IMG=localhost/ginn-s07e:base
 REALM_IMG=localhost/ginn-s07e:nosubuid
 U1_IMG=localhost/ginn-s07e2:useradd
@@ -132,6 +134,38 @@ BODY
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# The only way podman runs in this script. require_xdg refuses unless XDG_RUNTIME_DIR is the spike dir, and pm
+# passes that value to every call. Podman's rootless pause.pid lives under $XDG_RUNTIME_DIR/libpod/tmp, and
+# --tmpdir does not move it, so an unpinned call would join the user's own pause process.
+require_xdg() {
+  [[ ${XDG_RUNTIME_DIR:-} == "$SPIKE_XRD" ]] \
+    || die "refusing: XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-unset}', must be $SPIKE_XRD"
+}
+pm() {
+  require_xdg
+  "${PM[@]}" "$@"
+}
+# ensure_xrd: create the spike XDG dir with mode 0700, owned by this user.
+ensure_xrd() {
+  mkdir -p -m 700 "$SPIKE_XRD"
+  [[ $(stat -c '%a %u' "$SPIKE_XRD") == "700 $(id -u)" ]] \
+    || die "spike XDG dir is not 0700 and owned by this user: $SPIKE_XRD"
+}
+# stop_spike_pause: stop the rootless pause process under the spike XDG, by exact pid, and only when its environ
+# carries XDG_RUNTIME_DIR equal to the spike dir. Call it after the last podman call.
+stop_spike_pause() {
+  local pidf="$SPIKE_XRD/libpod/tmp/pause.pid" pid env_txt
+  [[ -f $pidf ]] || return 0
+  pid=$(cat "$pidf")
+  [[ $pid =~ ^[0-9]+$ ]] || die "pause.pid does not hold a pid: $pidf"
+  [[ -r /proc/$pid/environ ]] || return 0
+  env_txt=$(tr '\0' '\n' < "/proc/$pid/environ")
+  grep -qx "XDG_RUNTIME_DIR=$SPIKE_XRD" <<<"$env_txt" \
+    || die "pid $pid does not carry the spike XDG; not signalled"
+  kill -TERM "$pid"
+  log "stopped spike pause pid $pid"
+}
 join() { local IFS=' '; printf '%s' "$*"; }
 
 # spike_path_ok <path>: absolute, has a ginn-spike-s07e component, not $HOME, not an ancestor of $HOME,
@@ -140,11 +174,20 @@ spike_path_ok() {
   local p=$1
   [[ $p == /* ]] || return 1
   case $p in
-    */ginn-spike-s07e | */ginn-spike-s07e/*) ;;
+    */ginn-spike-s07e | */ginn-spike-s07e/* | */ginn-spike-s07e-xrd) ;;
     *) return 1 ;;
   esac
   [[ $p != / && $p != "$HOME" && $HOME != "$p"/* ]] || return 1
-  [[ ! -L $p ]] || return 1
+  # Each component, not only the leaf, must not be a symlink. The walk tests every prefix.
+  local cur="" comp
+  local -a comps=()
+  IFS=/ read -r -a comps <<< "$p"
+  for comp in "${comps[@]}"; do
+    if [[ -n $comp ]]; then
+      cur="$cur/$comp"
+      [[ ! -L $cur ]] || return 1
+    fi
+  done
   [[ "$(readlink -m -- "$p")" == "$p" ]] || return 1
 }
 
@@ -156,12 +199,13 @@ check_roots() {
 init_out() {
   check_roots
   mkdir -p "$OUT/logs" "$OUT/ctx" "$ROOT_DIR" "$RUN_DIR/libpod-tmp"
+  ensure_xrd
   if [[ ! -s $TABLE ]]; then
     printf 'id\tnote\timage\tprofile\tdriver\touter argv\tinner argv\touter rc\tinner rc\tfirst error\n' > "$TABLE"
   fi
   if [[ ! -s $OUT/env.txt ]]; then
     {
-      echo "podman: $(podman --version)"
+      echo "podman: $(pm --version)"
       echo "crun: $(crun --version | head -1)"
       echo "kernel: $(uname -r)"
       echo "host user: $(id)"
@@ -178,7 +222,7 @@ useradd_check() {
   for args in "-m -u 1000 dev" "-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev"; do
     {
       echo "== stock $ALPINE_BASE, useradd $args"
-      "${PM[@]}" run --rm --runtime crun "$ALPINE_BASE" sh -c "echo '-- before'; ls -l /etc/subuid /etc/subgid 2>&1; grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs; useradd $args; echo '-- after: /etc/subuid'; cat /etc/subuid 2>&1; echo '-- after: /etc/subgid'; cat /etc/subgid 2>&1; id dev"
+      pm run --rm --runtime crun "$ALPINE_BASE" sh -c "echo '-- before'; ls -l /etc/subuid /etc/subgid 2>&1; grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs; useradd $args; echo '-- after: /etc/subuid'; cat /etc/subuid 2>&1; echo '-- after: /etc/subgid'; cat /etc/subgid 2>&1; id dev"
     } >> "$out" 2>&1
   done
   log "useradd check: $out"
@@ -186,23 +230,23 @@ useradd_check() {
 
 build_images() {
   init_out
-  if ! "${PM[@]}" image exists "$BASE_IMG"; then
-    "${PM[@]}" build -t "$BASE_IMG" -f "$SPIKE_DIR/Dockerfile.s07" "$OUT/ctx" \
+  if ! pm image exists "$BASE_IMG"; then
+    pm build -t "$BASE_IMG" -f "$SPIKE_DIR/Dockerfile.s07" "$OUT/ctx" \
       > "$OUT/logs/build-base.log" 2>&1 || die "base build failed, see $OUT/logs/build-base.log"
   fi
-  "${PM[@]}" build -t "$REALM_IMG" -f "$SPIKE_DIR/Dockerfile.s07e" "$OUT/ctx" \
+  pm build -t "$REALM_IMG" -f "$SPIKE_DIR/Dockerfile.s07e" "$OUT/ctx" \
     > "$OUT/logs/build-nosubuid.log" 2>&1 || die "no-subuid build failed, see $OUT/logs/build-nosubuid.log"
-  "${PM[@]}" build --build-arg 'REALM_USERADD=-m -u 1000 dev' -t "$U1_IMG" -f "$SPIKE_DIR/Dockerfile.s07e2" "$OUT/ctx" \
+  pm build --build-arg 'REALM_USERADD=-m -u 1000 dev' -t "$U1_IMG" -f "$SPIKE_DIR/Dockerfile.s07e2" "$OUT/ctx" \
     > "$OUT/logs/build-useradd.log" 2>&1 || die "useradd build failed, see $OUT/logs/build-useradd.log"
-  "${PM[@]}" build --build-arg 'REALM_USERADD=-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev' -t "$U2_IMG" \
+  pm build --build-arg 'REALM_USERADD=-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev' -t "$U2_IMG" \
     -f "$SPIKE_DIR/Dockerfile.s07e2" "$OUT/ctx" > "$OUT/logs/build-useradd-k.log" 2>&1 \
     || die "useradd-k build failed, see $OUT/logs/build-useradd-k.log"
   useradd_check
   if [[ ! -s $OUT/catatonit ]]; then
-    if "${PM[@]}" container exists s07e-ext; then "${PM[@]}" rm -f s07e-ext >/dev/null; fi
-    "${PM[@]}" create --name s07e-ext "$BASE_IMG" >/dev/null
-    "${PM[@]}" cp s07e-ext:/usr/bin/catatonit "$OUT/catatonit"
-    "${PM[@]}" rm -f s07e-ext >/dev/null
+    if pm container exists s07e-ext; then pm rm -f s07e-ext >/dev/null; fi
+    pm create --name s07e-ext "$BASE_IMG" >/dev/null
+    pm cp s07e-ext:/usr/bin/catatonit "$OUT/catatonit"
+    pm rm -f s07e-ext >/dev/null
     chmod 0755 "$OUT/catatonit"
   fi
   python3 -I "$SPIKE_DIR/s07e_seccomp.py" /usr/share/containers/seccomp.json \
@@ -214,7 +258,7 @@ build_images() {
   for img in "$BASE_IMG" "$REALM_IMG" "$U1_IMG" "$U2_IMG"; do
     {
       echo "== image $img"
-      "${PM[@]}" run --rm --runtime crun "$img" sh -c 'echo "-- /etc/subuid"; cat /etc/subuid; echo "-- /etc/subgid"; cat /etc/subgid; echo "-- setuid helpers"; ls -ln /usr/bin/newuidmap /usr/bin/newgidmap; for t in getcap setcap; do command -v $t || echo "$t absent"; done; dpkg -s libcap2-bin >/dev/null 2>&1; echo "libcap2-bin dpkg rc=$? (non-zero means absent)"'
+      pm run --rm --runtime crun "$img" sh -c 'echo "-- /etc/subuid"; cat /etc/subuid; echo "-- /etc/subgid"; cat /etc/subgid; echo "-- setuid helpers"; ls -ln /usr/bin/newuidmap /usr/bin/newgidmap; for t in getcap setcap; do command -v $t || echo "$t absent"; done; dpkg -s libcap2-bin >/dev/null 2>&1; echo "libcap2-bin dpkg rc=$? (non-zero means absent)"'
     } >> "$OUT/image-state.txt" 2>&1
   done
   log "build: images $BASE_IMG $REALM_IMG; catatonit, seccomp profiles and image-state.txt written"
@@ -234,15 +278,16 @@ start_outer() {
   local name=$1 img=$2 prof=$3
   shift 3
   profile_args "$prof"
-  if "${PM[@]}" container exists "$name"; then "${PM[@]}" rm -f "$name" >/dev/null; fi
+  if pm container exists "$name"; then pm rm -f "$name" >/dev/null; fi
   OUTER_ARGV=("${PM[@]}" run -d --name "$name" "${SHARED[@]}" "$@" "${PROF_ARGS[@]}" "$img" sleep infinity)
   OUTER_RC=0
+  require_xdg
   "${OUTER_ARGV[@]}" > "$OUT/logs/$name.outer.log" 2>&1 || OUTER_RC=$?
   log "$name: outer rc=$OUTER_RC"
 }
 
 cleanup() {
-  if "${PM[@]}" container exists "$1"; then "${PM[@]}" rm -f "$1" >/dev/null; fi
+  if pm container exists "$1"; then pm rm -f "$1" >/dev/null; fi
 }
 
 write_inner_config() {
@@ -254,9 +299,9 @@ write_inner_config() {
     vfs-nokey) storage=$STORAGE_VFS_NOKEY ;;
     *) die "unknown storage config $drv" ;;
   esac
-  printf '%s\n' "$storage" | "${PM[@]}" exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
+  printf '%s\n' "$storage" | pm exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
     sh -c 'mkdir -p /home/dev/.config/containers && cat > /home/dev/.config/containers/storage.conf'
-  printf '%s\n' "$CONTAINERS_CONF" | "${PM[@]}" exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
+  printf '%s\n' "$CONTAINERS_CONF" | pm exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
     sh -c 'mkdir -p /home/dev/.config/containers && cat > /home/dev/.config/containers/containers.conf'
 }
 
@@ -266,7 +311,7 @@ inner_exec() {
   local name=$1 tag=$2 body=$3 istor=$4
   INNER_RC=0
   body=${body//@ISTOR@/"$istor"}
-  "${PM[@]}" exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$INNER_PRE"$'\n'"$body" \
+  pm exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$INNER_PRE"$'\n'"$body" \
     > "$OUT/logs/$tag.inner.log" 2>&1 || INNER_RC=$?
 }
 
@@ -274,7 +319,7 @@ inner_exec() {
 plain_exec() {
   local name=$1 tag=$2 body=$3
   INNER_RC=0
-  "${PM[@]}" exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$body" \
+  pm exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$body" \
     > "$OUT/logs/$tag.inner.log" 2>&1 || INNER_RC=$?
 }
 
@@ -282,7 +327,7 @@ plain_exec() {
 realm_exec() {
   local name=$1 tag=$2 body=$3
   PROBE_RC=0
-  "${PM[@]}" exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$body" \
+  pm exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$body" \
     > "$OUT/logs/$tag.probe.log" 2>&1 || PROBE_RC=$?
 }
 
@@ -420,13 +465,13 @@ cmd_teardown() {
   check_roots
   if [[ -e $ROOT_DIR || -e $RUN_DIR ]]; then
     local count
-    count=$("${PM[@]}" ps -aq | wc -l)
+    count=$(pm ps -aq | wc -l)
     log "teardown: containers under spike roots before removal: $count"
-    if (( count > 0 )); then "${PM[@]}" rm -af; fi
-    if [[ -e $ROOT_DIR ]]; then "${PM[@]}" rmi -af; fi
+    if (( count > 0 )); then pm rm -af; fi
+    if [[ -e $ROOT_DIR ]]; then pm rmi -af; fi
   fi
   if [[ -e $ROOT_DIR ]]; then
-    "${PM[@]}" unshare rm -rf -- "$ROOT_DIR" || log "teardown: unshare rm exited non-zero; checking what remains"
+    pm unshare rm -rf -- "$ROOT_DIR" || log "teardown: unshare rm exited non-zero; checking what remains"
   fi
   if [[ -e $ROOT_DIR ]]; then
     local foreign
@@ -442,6 +487,11 @@ cmd_teardown() {
     spike_path_ok "$RUN_DIR" || die "path check failed before rm: $RUN_DIR"
     rm -rf -- "$RUN_DIR"
   fi
+  stop_spike_pause
+  if [[ -e $SPIKE_XRD ]]; then
+    spike_path_ok "$SPIKE_XRD" || die "refusing to remove $SPIKE_XRD"
+    rm -rf -- "$SPIKE_XRD"
+  fi
   local parent
   parent=$(dirname "$ROOT_DIR")
   if [[ $(basename "$parent") == ginn-spike-s07e ]] && spike_path_ok "$parent" && [[ -d $parent ]]; then
@@ -453,6 +503,7 @@ cmd_teardown() {
 main() {
   local cmd=${1:-}
   shift || true
+  require_xdg
   case $cmd in
     build) init_out; build_images ;;
     run)
