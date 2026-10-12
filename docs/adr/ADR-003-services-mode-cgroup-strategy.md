@@ -1,9 +1,10 @@
 # ADR-003: Services-mode cgroup strategy
 
-- Status: Accepted
+- Status: Accepted, S-01 on runc and crun (the roadmap argv ran under the pin on both). FR-080 AC-1/AC-2 on crun, and a run from the root-owned `supervisor` leaf on crun, are pending T7.7.
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D5). The keep-id form, the chown scope (S-01 step 6) and the FR-083 generation wording are corrected. No decision changes.
 - Amended: 2026-10-12 (D6). The chown scope and the leaf ownership are stated in full, with the evidence for a root-owned leaf and the reason the user does not need write access to it. No decision changes. F6a changes the code to match.
+- Amended: 2026-10-12 (D7). Status qualifier added. The root-owned leaf is evidenced by the unpinned runc leg only, the order of the root writes is stated, and the stale `cgroups.py` note is removed. No decision changes.
 
 ## Context
 
@@ -39,7 +40,7 @@ ginn does not add `--cgroups=split`. Podman 5.8.8 rejects it together with `--cg
 
 ginn starts a services-on realm only through its runit supervisor entry (`sv`, FR-081). The `ginn` CLI process does not run `podman run` or `podman start` for a services-on realm. Realm processes sit under `/ginn/<uid>/<realm>` only when a descendant of the supervisor starts them.
 
-Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. Host Setup chowns only `/sys/fs/cgroup/ginn/<uid>` and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files to the user (S-01 step 6). The `supervisor` leaf stays root-owned, and so does everything else under the subtree, so limit files such as `memory.max` stay root-owned too. The run script writes its own pid into the leaf as root before it drops privileges to the user (`runit_system.py`, step 3). Migrating a process out of the leaf needs write access on the common ancestor's `cgroup.procs`, which is `/sys/fs/cgroup/ginn/<uid>`, not on the leaf (a cgroup v2 rule; not measured here). The user therefore needs no write access to the leaf. S-01's runc leg passed variant a with a root-owned launcher leaf. The variant b note in the S-01 variant table records that leaf as root-owned in that setup. F6a changes the code to match this rule. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control` (S-01 step 2, the only controller that was new there). Undo restores the recorded value and does not assume the original one (T3.5).
+Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. Host Setup chowns only `/sys/fs/cgroup/ginn/<uid>` and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files to the user (S-01 step 6). The `supervisor` leaf stays root-owned, and so does everything else under the subtree, so limit files such as `memory.max` stay root-owned too. The run script writes its own pid into the leaf as root before it drops privileges to the user (`runit_system.py`, step 3). Migrating a process out of the leaf needs write access on the common ancestor's `cgroup.procs`, which is `/sys/fs/cgroup/ginn/<uid>`, not on the leaf (a cgroup v2 rule; not measured here). The user therefore needs no write access to the leaf. The root-owned leaf is evidenced by the unpinned runc leg only. `spikes/s01_systemd_rootless.sh:144` creates the launcher leaf as root, and the variant b note in the S-01 variant table records that leaf as root-owned in that setup. The pinned crun leg created its leaves as the user (`spikes/s01c_crun.sh:223`). The cgroup v2 rule does not depend on the runtime, so the risk is low, and T7.7 runs crun from the root-owned leaf. The order of the root writes does not matter. `spikes/results/S-01.md` (Root steps) puts the pid write before the chown. The script runs the chown first (`s01_systemd_rootless.sh:151`, in `--root-setup`) and the pid write after it (`:167`, in `--root-move`). Both are root writes. F6a changes the code to match this rule. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control` (S-01 step 2, the only controller that was new there). Undo restores the recorded value and does not assume the original one (T3.5).
 
 ## Alternatives considered
 
@@ -56,15 +57,15 @@ Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script re
 - Services mode is fixed at create. `ginn services on|off` creates a new container generation, and the toggle takes effect at that generation's first start (FR-083). The Install Manifest replay (FR-021, T8.3) must carry installed packages across the new generation. That replay is not measured, so FR-083 AC-1 (htop stays installed) is open.
 - The services-on create argv keeps the flags above, with no `--cgroups=split`.
 - Host Setup keeps the chown limited to the paths listed above.
-- `ginn exec` placement is not verified. S-01 saw `exec`, `stop` and `top` succeed from the session scope, but it did not check where exec'd processes land. ginn does not rely on that placement.
+- `ginn exec` placement is not verified. S-01 saw `exec`, `stop` and `top` succeed from the session scope, but it did not check where exec'd processes land. ginn does not rely on that placement. The placement check is in T4.6.
 - T3.3 already has the placement step (run script, step 3). T7.1 carries the argv and T7.4 carries the supervisor start. T7.7 runs the test.
-- Stale text: the `cgroups.py` module docstring says routing for services-on realms is designed in T3.4 and M7. This ADR puts it in T7.1 and T7.4. The code is not changed here.
 - Packaging: the Void template depends on `crun` and `containers-common` (`packaging/void/srcpkgs/ginn/template`). Roadmap T0.6 lists the same runtime dependency, crun and not runc, and containers-common.
 - R-001 stays open. S-01 is the early spike that R-001 asks for. The items still open are:
-  - FR-080 AC-1 and AC-2 (cron install, restart). S-01 ran them only on the earlier unpinned runc leg, not on crun or under the pin.
-  - A check of `cgroup.controllers` inside the container. It was not read for the crun rows.
-  - musl. No S-03 result exists in `spikes/results/`. FR-080 and FR-081 must pass on glibc and musl (SRS release gate, section 9.3).
-  - Arch and Fedora images. Only Debian 13 ran.
+  - FR-080 AC-1 and AC-2 (cron install, restart). S-01 ran them only on the earlier unpinned runc leg, not on crun or under the pin. Closes in T7.7.
+  - A check of `cgroup.controllers` inside the container. It was not read for the crun rows. Closes in T7.7.
+  - A run from the root-owned `supervisor` leaf on crun. Closes in T7.7.
+  - musl. No S-03 result exists in `spikes/results/`. FR-080 and FR-081 must pass on glibc and musl (SRS release gate, section 9.3). The musl services run closes in T7.7, and release gate 1(b) closes in T10.6.
+  - Arch and Fedora images. Only Debian 13 ran. Closes in T7.7, parametrised over the three images.
 
 ## Caveats
 

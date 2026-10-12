@@ -82,12 +82,24 @@ Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test 
 ### M1 Spikes S-01..S-10
 Deliverables: `spikes/*.sh|py`, `spikes/results/S-*.md` (one committed result per spike), ADR-003 (S-01), ADR-004, ADR-005, ADR-006, ADR-007 (S-05), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1 (`src/ginn/trust/data/trust.toml`). All host-only. M2 and M3 run in parallel with M1.
 Status: M1 spike phase closed; open residuals. Each residual names the task that closes it.
-- S-03 (musl): no result file yet. Closes after M4.
+- S-01:
+  - FR-080 AC-1 and AC-2 on crun under the pin: T7.7.
+  - `cgroup.controllers` read inside the crun container: T7.7.
+  - A run from the root-owned `supervisor` leaf on crun: T7.7.
+  - Arch and Fedora services-on boot: T7.7, parametrised over the three images.
+  - Placement of exec'd processes under `--cgroup-parent` unverified: T4.6.
+- S-05s itself (the create-time mitigations of ADR-007): before T7.3.
+- S-03 (musl): no result file yet. The musl S-01 repeat closes in T7.7, and the musl Must-FR suite closes at the M10 gate run (T10.6). Release gate 1(b) (SRS section 9) needs a musl bare-metal host or GPU passthrough, because a Void musl VM has no AMD or Intel GPU.
 - S-04 and S-08 (real logout): the real-logout runs were invalid, because the host created no elogind session. The simulated runs (S-04s, S-08s) stand in until the real logout runs. Closes in T7.8.
 - S-05 helper and xdg-dbus-proxy RSS: the helpers that NFR-002 and NFR-003 count were not measured. The proxy's RSS (about 4.7 MiB) comes from S-05 and was not re-measured in S-05r. Closes in T7.7 (helpers) and T6.5 (proxy).
-- S-07 Part B (dockerd, FR-085, CL-2) was skipped. Re-run after M7.
+- S-06: the audio connection (T6.6), the menu launch (T5.4), the NVIDIA Wayland EGL failure (T6.6), and the bare `eglinfo` llvmpipe fallback root cause (T6.6).
+- S-07:
+  - KVM ioctls, and the Arch and Fedora nested podman runs: T6.7.
+  - Part B (dockerd, FR-085, CL-2) was skipped. Re-run in T7.7, which has services on. FR-085 is deferred (CL-2). If it stays deferred, T10.6 lists it in the release notes (gate 8).
+- S-09: open item 1, the stock nmap needs an image change: T10.1.
+- S-10: locale installs untested: T4.4.
 - S-02 on crun: T4.9. S-06 on crun: T6.6.
-- The capabilities Basic row is now filled, with each option marked exercised or design-only (FR-061, D6). ADR-010 is Accepted on runc, and ADR-012 is Accepted for FR-046 and for the S-06 parts of FR-069.
+- The capabilities Basic row is now filled, with each option marked exercised or design-only (FR-061, D6). ADR-010 is Accepted on runc. ADR-012 is Accepted for the FR-046 renderer check (runc) and the S-06 parts of FR-069; audio, menu launch, crun and the CDI env field are pending T6.6 and T5.4.
 `spikes/run-all.sh` and `spikes/RESULTS.md` are dropped. Re-running every host spike, root steps included, buys nothing over the committed per-spike results: each result file records its own environment, and the root steps are one-off host writes that a full run would repeat.
 
 ### M2 Domain, store, podman adapter, distro data (DR-001..013, DR-020, DR-030..035, NFR-SEC-005, NFR-060)
@@ -108,7 +120,7 @@ Status: M1 spike phase closed; open residuals. Each residual names the task that
 - T3.3 `hostsetup/runit_system.py` renders `/etc/sv/ginn-<user>/{run,finish,log/run}`; golden file + shellcheck. The run script moves its own pid into `ginn/<uid>/supervisor/cgroup.procs` before the drop to the user, so runsvdir and every service it starts sit in the delegated subtree (ADR-003). Step 3 of the script does this.
 - T3.4 `hostsetup/record.py`, `setup.py`: root check `GINN-E-SETUP-ROOT`, idempotent "already configured", record with pre-images; tests under a `--root-dir` prefix (FR-001 AC-2, FR-002). Setup runs before `/run/ginn/<uid>` exists, and it must not stop on that (ADR-004).
 - T3.5 `hostsetup/undo.py` `GINN-E-UNDO-REALMS-EXIST` (FR-003). Undo restores the recorded root cgroup `subtree_control` pre-image. Host Setup adds `pids` there (S-01), so undo must not assume the original value.
-- T3.6 `doctor/checks.py`: podman rootless, subids, runtime dir (FAIL "supervisor not running" when `/run/ginn/<uid>` is missing), user runsvdir, cgroup delegation, userns sysctl, overlay/fuse, free disk, NVIDIA-on-musl informational; every FAIL prints its fix command (FR-007, FR-069 AC-2, NFR-041). elogind `KillUserProcesses` is checked: a FAIL when the effective value is `yes`. The check reads `/etc/elogind/logind.conf` and `/etc/elogind/logind.conf.d/*.conf`, the last value wins, and an unset value counts as no. The printed fix sets it to `no` and restarts elogind (ADR-004).
+- T3.6 `doctor/checks.py`: podman rootless, subids, runtime dir (FAIL "supervisor not running" when `/run/ginn/<uid>` is missing), user runsvdir, cgroup delegation, userns sysctl, overlay/fuse, free disk, NVIDIA-on-musl informational; every FAIL prints its fix command (FR-007, FR-069 AC-2, NFR-041). elogind `KillUserProcesses` is checked: a FAIL when the effective value is `yes`. The check reads `/etc/elogind/logind.conf` and `/etc/elogind/logind.conf.d/*.conf`, the last value wins, and an unset value counts as no. The printed fix sets it to `no` and restarts elogind (ADR-004). Add a render node mode check, which reports the mode of `/dev/dri/renderD*`. Basic GPU access works on the reference host because the render nodes are mode 0666 (S-06 section 2). A host with 0660 render nodes needs `keep-groups`, which M6 decides.
 - T3.7 `doctor/report.py` text + `--json`.
 - T3.8 `integrity/fingerprint.py`, `state.py`, `ginn integrity [--ack]`, `GINN-W-HOST-CHANGED`; 5000-file timing test (NFR-011).
 - T3.9 `ops/_mutating.py` choke point; ordering test (DR-032).
@@ -148,7 +160,7 @@ Status: M1 spike phase closed; open residuals. Each residual names the task that
 ### M7 Services mode, runit supervision, autostart (FR-080..085, NFR-003, NFR-033, AS-028)
 - T7.1 services-on argv variant per ADR-003, added to the realm's create argv, with `-e SYSTEMD_LOG_LEVEL=warning` (ADR-007, mitigation d). Supervisor-launch rule (ADR-003): a services-on realm starts only through its runit entry (`sv up`, FR-081), never from the CLI process. The enter and launch path runs the lazy session socket rebind (ADR-008) for services-on realms too.
 - T7.2 `native/ginn-wait.c`.
-- S-05s (spike, runs before T7.3): the create-time forms of the ADR-007 mitigations a+b+d. Pass: journald honours the mounted drop-in (`/etc/systemd/journald.conf.d/ginn.conf`, read-only, `Storage=volatile`, `RuntimeMaxUse=8M`), with journald's computed maximum recorded in the result, and the idle median is within ±1 MiB of 37.63 MiB (the S-05r a+b+d median). S-05s does not show that the `/dev/null` masks take effect (ADR-007). Fallback: in-realm files under CL-10. T7.3 does not ship the mitigations until S-05s passes or CL-10 is decided.
+- S-05s (spike, runs before T7.3): the create-time forms of the ADR-007 mitigations a+b+d. Pass: journald honours the mounted drop-in (`/etc/systemd/journald.conf.d/ginn.conf`, read-only, `Storage=volatile`, `RuntimeMaxUse=8M`), with journald's computed maximum recorded in the result, and the idle median is within ±1 MiB of 37.63 MiB (the S-05r a+b+d median). The masks are checked with `systemctl show -p LoadState,ActiveState <unit>`, which must print `masked` and `inactive` for each unit in `spikes/s05/masks-base.txt`. The median alone does not show that the masks took effect (ADR-007). Fallback: in-realm files under CL-10. T7.3 does not ship the mitigations until S-05s passes or CL-10 is decided.
 - T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default, as create-time mounts and environment and not as files in realm /etc: a read-only bind of the ginn-owned journald drop-in at `/etc/systemd/journald.conf.d/ginn.conf` (`Storage=volatile`, `RuntimeMaxUse=8M`), `/dev/null` bind mounts over the unit paths in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`. These forms ship only after S-05s.
 - T7.4 `services/supervisor.py` via `sv`; `ginn services on|off` (FR-083).
 - T7.5 `services/autostart.py` (`down` file semantics, DR-012).
@@ -178,7 +190,7 @@ Status: M1 spike phase closed; open residuals. Each residual names the task that
 - T10.3 `tools/trace-no-xbps.sh` strace over the integration suite (FR-004).
 - T10.4 `docs/verification-report.md` + `tools/measure/*.sh` for NFR-001..011.
 - T10.5 Two-user FR-025 test, NFR-SEC-008 audit-log reachability, NFR-SEC-010 network capture allow-list.
-- T10.6 `tools/release.sh cut`, signed repo, release notes listing deferred Should FRs (9.8).
+- T10.6 `tools/release.sh cut`, signed repo, release notes listing deferred Should FRs (9.8). The release notes state that Intel GPU is supported but untested, and that AMD meets release gate 1(a) (SRS section 9).
 
 Dependencies: M1 before M4 (ADR-004, ADR-006 and ADR-010 shape `runtime/`; ADR-011 shapes the distro verbs in T2.13, `packages/manager.py` in T5.1 and `ops/update.py` in T8.4), S-01 before M7, S-05 before M6/M7 acceptance, S-10 before M4 real-distro tests.
 
@@ -188,7 +200,7 @@ Dependencies: M1 before M4 (ADR-004, ADR-006 and ADR-010 shape `runtime/`; ADR-0
 - Property/fuzz (NFR-SEC-005): hypothesis on DR-002..005 and CLI parsing; 500 examples in CI, 10000 under `GINN_FUZZ=1`; fake podman log must be empty after any rejection.
 - Integration (`GINN_INTEGRATION=1`): one file per milestone; markers `host_glibc`, `host_musl`, `host_nvidia` for the section 9 matrix.
 - Coverage: `--cov=ginn --cov-fail-under=80`, GUI views omitted (NFR-061).
-- Traceability: `@pytest.mark.fr` + `tools/traceability.py --check` (Appendix C).
+- Traceability: `@pytest.mark.fr` + `tools/traceability.py --check` (Appendix C). The CI job `traceability` (`.github/workflows/ci.yaml`, lines 76-97) runs `--check`, renders `docs/traceability.md` with `--write`, and uploads it as an artifact. The file stays gitignored as a generated artifact. This closes the fifth-review finding on the traceability document.
 - Provenance (NFR-063): CI runs `copydetect` of `src/` against pinned reference sources; any match fails.
 - FR-004: PATH shim in every unit run plus strace in M10.
 - Crash safety: journal-step fault injection (T8.6) plus host SIGKILL runs in M10.

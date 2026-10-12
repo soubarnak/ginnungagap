@@ -1,8 +1,9 @@
 # ADR-004: Runtime directory and Podman storage root
 
-- Status: Accepted
+- Status: Accepted, logout evidence simulated (S-04s; the exact path `/run/ginn/<uid>` was not run). The real logout run is pending T7.8.
 - Date: 2026-10-12
 - Amended: 2026-10-12 (R11). The Podman configuration finding is verified, the environment is an allowlist, the config files and the image tmpdir are Owned Paths, and the runtime root is checked for owner and mode. See Verification.
+- Amended: 2026-10-12 (D7). Status qualifier added. The logout evidence is the simulation in the addendum below, and the real logout run is pending T7.8. No decision changes.
 
 ## Context
 

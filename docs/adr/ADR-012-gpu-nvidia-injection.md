@@ -1,9 +1,10 @@
 # ADR-012: GPU and NVIDIA injection
 
-- Status: Accepted, for FR-046, and for the parts of FR-069 that S-06 ran: `nvidia-smi` in the realm showed host driver 595.104.02, with GLX offload, EGL and Vulkan. Pending T6.6: the CDI `env` field, and every item under "Did not run" below.
+- Status: Accepted for the FR-046 renderer check (runc) and the S-06 parts of FR-069. Audio (FR-046 AC-1), menu launch, crun and the CDI env field are pending T6.6 and T5.4. Each item under "Did not run" below names its closing task.
 - Date: 2026-10-12
 - Renumbered from ADR-008 on 2026-10-12, because ADR-008 went to session socket rebind. `spikes/results/S-06.md` section 7 still carries the heading "Recommendations for ADR-008". The spike file is owned elsewhere and is not edited here.
 - Amended: 2026-10-12 (D6). The status is set to what S-06 ran. The S-06 method is cited from its variant table. The catatonit fact is corrected, and DR-010 and FR-082 are added. No decision changes.
+- Amended: 2026-10-12 (D7). Status qualifier narrowed to the runc renderer check and the S-06 parts of FR-069, with the pending items and their tasks named. No decision changes.
 
 ## Context
 

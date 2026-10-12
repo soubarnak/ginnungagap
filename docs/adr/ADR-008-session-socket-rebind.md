@@ -1,10 +1,11 @@
 # ADR-008: Session socket rebind for long-running realms
 
-- Status: Accepted
+- Status: Accepted, simulated (S-04s, S-08s, S-08t; podman 5.8.8 and crun 1.30.1). The rebind order, the identity compare, the batch form and the EINVAL case are pending T7.8, with the real logout run.
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D3). The keep-id case is tested in simulation (S-08t). The decision is variant (b): the mount namespace only, entered through `podman unshare`.
 - Amended: 2026-10-12 (D5). The rebind order is rewritten in the Decision. The identity record, the compare-and-skip step and the batch form (several paths under one `setns`) are untested. T7.8 proves them.
 - Amended: 2026-10-12 (D6). Step 3.2 treats `EINVAL` from `umount2` as already unmounted, so a half-done rebind is recoverable on the next run. The duplicate exit-code paragraph is removed. The new case is untested, and T7.8 proves it.
+- Amended: 2026-10-12 (D7). Status qualifier added. The evidence is simulated. The real logout run and the untested steps are pending T7.8. No decision changes.
 
 ## Context
 

@@ -15,13 +15,14 @@ Options every realm carries. None adds a capability or a device.
 
 ## Basic
 
-FR-061 grants exactly: `~/Downloads` (read-write); the external drive mount roots `/run/media/$USER`, `/media` and `/mnt` (read-write); the display socket(s); the audio socket(s); the GPU device nodes; and the host fonts and timezone (read-only). The table lists the options that carry each grant, plus the NVIDIA items of FR-069 that need GPU permission. Each row is marked exercised or design-only. "Exercised" means a spike ran the option on the reference host, and the row names the spike and section. "Design-only" means no spike ran it. `security/caps.py` (T6.1) must produce exactly this set. T4.2 (`runtime/mounts.py`) builds the binds and T4.3 (`runtime/env.py`) builds the environment. The T6.1 argv test compares their combined output with this list.
+FR-061 grants exactly: `~/Downloads` (read-write); the external drive mount roots `/run/media/$USER`, `/media` and `/mnt` (read-write); the display socket(s); the audio socket(s); the GPU device nodes; and the host fonts and timezone (read-only). The table lists the options that carry each grant, plus the NVIDIA items of FR-069 that need GPU permission. One row, the X11 authority file, is not named by FR-061. It serves the display grant under FR-046 AC-2. Each row is marked exercised or design-only. "Exercised" means a spike ran the option on the reference host, and the row names the spike and section. "Design-only" means no spike ran it. `security/caps.py` (T6.1) must produce exactly this set. T4.2 (`runtime/mounts.py`) builds the binds and T4.3 (`runtime/env.py`) builds the environment. The T6.1 argv test compares their combined output with this list.
 
 | Item | Option | Grant | Evidence | Status |
 |---|---|---|---|---|
-| Downloads | `-v <home>/Downloads:<home>/Downloads`, read-write, same path | FR-061, FR-065 | none | design-only (T4.2). ADR-012 records that it was not run. |
-| Mount roots | `-v /run/media/$USER:/run/media/$USER`, `-v /media:/media` and `-v /mnt:/mnt`, read-write, same paths | FR-061, FR-065 | none | design-only (T4.2). Not run. |
+| Downloads | `-v <home>/Downloads:<home>/Downloads`, read-write, same path. When the host folder is missing, the bind is skipped and reported, and ginn does not create the folder (FR-064). | FR-061, FR-064, FR-065 | none | design-only (T4.2). ADR-012 records that it was not run. |
+| Mount roots | `-v /run/media/$USER:/run/media/$USER`, `-v /media:/media` and `-v /mnt:/mnt`, read-write, same paths, bound with `rslave` propagation so that drives mounted after the realm starts appear inside it | FR-061, FR-065 | none | design-only (T4.2). Not run. T4.2 also checks that the host mount propagates to the bind. |
 | Display socket | Bind `$XDG_RUNTIME_DIR/wayland-1` to `/run/user/<uid>/wayland-1`; bind `/tmp/.X11-unix`; `-e WAYLAND_DISPLAY -e DISPLAY` | FR-061 | S-06 section 2 (runc) | exercised. The Wayland EGL and X11 GLX renderer checks ran through these binds (S-06 section 3). |
+| X11 authority file | Bind the file that `XAUTHORITY` names, read-only, at the same path (FR-065), and pass `XAUTHORITY` with that path in the environment. Only when the host sets `XAUTHORITY`. | FR-046 AC-2. FR-061 names no authority file. | none. S-06 section 5 recommends the bind. `XAUTHORITY` is unset on the reference host (S-06 section 2), so no mount ran. | design-only (T4.3 and T6.1, on a real Xorg session). Without the bind, Xlib is expected to fall back to `$HOME/.Xauthority` in the Realm Home, where no file exists, and the X connection is expected to be refused (FR-046 AC-2). Not tested. |
 | Audio socket | Bind `$XDG_RUNTIME_DIR/pipewire-0` to `/run/user/<uid>/pipewire-0`; bind `pulse/native` | FR-061 | S-06 section 2 (runc) | exercised as binds only: both sockets were bound and visible. No connection was made, because the image has no `pactl`. |
 | GPU device nodes | `--device /dev/dri`, which exposes `card0`, `card1`, `renderD128` and `renderD129`, including the NVIDIA DRM nodes | FR-061 | S-06 sections 2 and 3 (runc) | exercised on runc. The AMD renderer checks ran. Pending crun (T6.6). |
 | Host fonts | `-v /usr/share/fonts:/usr/share/fonts:ro` | FR-061 | S-06 section 2 (runc) | exercised |
@@ -32,7 +33,6 @@ FR-061 grants exactly: `~/Downloads` (read-write); the external drive mount root
 Not in this set:
 
 - `--group-add keep-groups`. S-06 passed it on runc, and it had no effect there (S-06 section 2). ADR-012 leaves it undecided until M6 tests it under crun. It is not in the Basic set. The Development table lists it as an option of that tier.
-- `XAUTHORITY`. S-06 mounted the Xauthority file only when the host sets the variable. This host does not, so the mount was not run. FR-061 names no authority file, so it is not in the set.
 
 ## Development
 

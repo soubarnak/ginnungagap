@@ -1,9 +1,10 @@
 # ADR-007: Idle memory budget
 
-- Status: Accepted
+- Status: Accepted, services-off measured (S-05r). Services-on mitigation forms pending S-05s. Helpers pending T7.7, and xdg-dbus-proxy pending T6.5.
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D5). The attribution rule counts ginn's helpers. The S-05r PASS covers the realm and the catatonit pause only. The services-on mitigations are create-time mounts and environment, not files in realm /etc (CR-007). Those forms are unmeasured until S-05s. `xdg-dbus-proxy` has a per-realm lifetime. NFR-021 is placed in T7.7.
 - Amended: 2026-10-12 (D6). Mitigation (a) is the journald drop-in, mounted read-only. It replaces the tmpfs journal of D5. The S-05r content is the drop-in, measured as an image layer. The S-05s criterion is restated. Podman's mountpoint stubs are podman's writes (CR-007). The proxy claim is marked as not measured. No threshold or mitigation set changes.
+- Amended: 2026-10-12 (D7). Status qualifier added. The S-05s check now includes `systemctl show -p LoadState,ActiveState` for each masked unit, which must print `masked` and `inactive`, because an in-range median alone does not show that the masks took effect. No threshold or mitigation set changes.
 
 ## Context
 
@@ -40,7 +41,7 @@ Services-on realms carry three mitigations by default. This ADR calls them a+b+d
 - (b) Ten base units are masked. Each unit path under `/etc/systemd/system` (the list in `spikes/s05/masks-base.txt`) gets a bind mount of `/dev/null` on the create argv. The S-05r form was a symlink to `/dev/null` in an image layer. In the Debian image that S-05 ran, four of the ten units have no unit file, so their masks do nothing there: `systemd-udevd.service`, `systemd-udev-trigger.service`, `getty@tty1.service` and `e2scrub_all.timer` (S-05, mitigation section). The image was built from the same Dockerfile, rebuilt later; S-05r did not re-check the units. Where the image lacks a unit path, podman creates the mountpoint stub in the container layer. That write is podman's, not ginn's (CR-007).
 - (d) `SYSTEMD_LOG_LEVEL=warning` is passed as environment with `-e` on the create argv. S-05r ran this form (its environment variable, not a file).
 
-Verification S-05s before T7.3 checks two things. First, journald honours the mounted drop-in, and journald's computed maximum is recorded in the S-05s result. Second, the idle median is within ±1 MiB of 37.63 MiB, the S-05r a+b+d median. S-05s does not show that the `/dev/null` binds mask anything. The (b) effect measured in S-05 was -0.2 MiB, inside noise, so an in-range median does not prove the masks took effect. Fallback: in-realm files under CL-10. T7.3 does not ship these mitigations until S-05s passes or CL-10 is decided.
+Verification S-05s before T7.3 checks three things. First, journald honours the mounted drop-in, and journald's computed maximum is recorded in the S-05s result. Second, the idle median is within ±1 MiB of 37.63 MiB, the S-05r a+b+d median. Third, the masks took effect. `systemctl show -p LoadState,ActiveState <unit>` must print `masked` and `inactive` for each unit in `spikes/s05/masks-base.txt`. The (b) effect measured in S-05 was -0.2 MiB, inside noise, so an in-range median alone does not prove the masks took effect. Fallback: in-realm files under CL-10. T7.3 does not ship these mitigations until S-05s passes or CL-10 is decided.
 
 Masking `systemd-logind.service` (`spikes/s05/masks-logind.txt`) is not default. T7.7 tests it against the FR-080 apps first.
 
