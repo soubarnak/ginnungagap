@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07 part A image: Debian stable with rootless podman and its helpers, run as
+# the outer Development-tier stand-in. Built by spikes/s07_nested_containers.sh;
+# not a Realm image. The user "dev" (uid 1000) is the keep-id user the outer
+# container maps to the host user.
+#
+# useradd writes dev:100000:65536 into /etc/subuid. That range is not mapped inside
+# the outer container, so a nested newuidmap rejects it (S-07). The spike overwrites
+# /etc/subuid and /etc/subgid at run time; a realm image must do the same.
+FROM docker.io/library/debian:stable
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      podman fuse-overlayfs slirp4netns passt uidmap catatonit ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 1000 --create-home --shell /bin/bash dev
