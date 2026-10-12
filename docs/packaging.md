@@ -2,12 +2,13 @@
 
 ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`.
 
-Two packages are built from that template:
+One package is built from that template for now:
 
 - `ginn`: the CLI, with the Python package and the `ginn` command.
-- `ginn-gui`: the Control Plane GUI subpackage (GTK4 and libadwaita). It moves the GUI module, the desktop entry and the icons out of `ginn`.
 
-Both are built for `x86_64` (glibc) and `x86_64-musl` (NFR-062).
+The package is built for `x86_64` (glibc) and `x86_64-musl` (NFR-062).
+
+The `ginn-gui` subpackage (the Control Plane GUI, GTK4 and libadwaita) is deferred to M9 (FR-100..107). xbps-src rejects an empty subpackage, so it is added with the Control Plane, once `src/ginn/gui` exists.
 
 ## Install from the release repository
 
@@ -21,13 +22,15 @@ The packages are published as assets of each GitHub release, with signed reposit
    EOF
    ```
 
-2. Install the packages. The first install asks to import the release signing key. Compare the fingerprint it shows with the one below before you accept it:
+2. Install the package. The first install asks to import the release signing key. Compare the fingerprint it shows with the one below before you accept it:
 
    Release signing key fingerprint: `<FINGERPRINT: set at the first release>`
 
    ```sh
-   sudo xbps-install -S ginn ginn-gui
+   sudo xbps-install -S ginn
    ```
+
+   `ginn-gui` is not published yet. It arrives with the Control Plane (M9).
 
 3. Prepare the host once. This is a root step and it is idempotent:
 

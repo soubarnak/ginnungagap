@@ -21,8 +21,9 @@ SRCPKGS = REPO / "packaging" / "void" / "srcpkgs"
 TEMPLATE = SRCPKGS / "ginn" / "template"
 
 TOP_LEVEL_FIELD = re.compile(r'^([a-z_]+)=(.*)$')
-GUI_BLOCK = re.compile(r"^ginn-gui_package\(\) \{\n(.*?)^\}", re.MULTILINE | re.DOTALL)
-FIELD_IN_BLOCK = re.compile(r'^\s*depends="([^"]*)"', re.MULTILINE)
+GUI_DEFERRED_COMMENT = (
+    "# ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists."
+)
 CHECKSUM_VALUE = re.compile(r"^(@CHECKSUM@|[0-9a-f]{64})$")
 
 # Octal modes with the setuid (4), setgid (2) or both bits, as 4 digits, optionally with
@@ -42,13 +43,6 @@ def _template_fields() -> dict[str, str]:
         if match:
             fields[match.group(1)] = match.group(2).strip('"')
     return fields
-
-
-def _gui_block() -> str:
-    """Return the body of the ginn-gui_package() subpackage function."""
-    match = GUI_BLOCK.search(TEMPLATE.read_text(encoding="utf-8"))
-    assert match, "ginn-gui_package() not found in the template"
-    return match.group(1)
 
 
 def _project_version() -> str:
@@ -88,19 +82,12 @@ def test_template_builds_for_glibc_and_musl_x86_64() -> None:
 
 
 @pytest.mark.fr("AS-003")
-def test_gui_subpackage_pins_matching_ginn_version_and_gui_deps() -> None:
-    depends = FIELD_IN_BLOCK.search(_gui_block())
-    assert depends, "ginn-gui_package() sets no depends"
-    names = set(depends.group(1).split())
-    assert "ginn>=${version}_${revision}" in names
-    assert {"python3-gobject", "gtk4", "libadwaita"} <= names
-
-
-@pytest.mark.fr("AS-003")
-def test_ginn_gui_srcpkg_is_symlink_to_ginn() -> None:
-    link = SRCPKGS / "ginn-gui"
-    assert link.is_symlink(), "packaging/void/srcpkgs/ginn-gui must be a symlink"
-    assert os.readlink(link) == "ginn"
+def test_template_has_no_gui_subpackage_before_m9() -> None:
+    # xbps-src pkglint rejects an empty subpackage, so ginn-gui waits for src/ginn/gui (M9).
+    text = TEMPLATE.read_text(encoding="utf-8")
+    assert "ginn-gui_package" not in text
+    assert GUI_DEFERRED_COMMENT in text.splitlines()
+    assert not os.path.lexists(SRCPKGS / "ginn-gui"), "ginn-gui srcpkg returns with M9"
 
 
 @pytest.mark.fr("AS-003")

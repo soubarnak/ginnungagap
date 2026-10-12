@@ -31,6 +31,8 @@ FORBIDDEN_RE = re.compile(
 ALLOWED: dict[str, tuple[str, dict[str, int]]] = {
     "AGENTS.md": ("## Clean-room rules", {REF_CONTAINER: 1, REF_UPSTREAM: 2}),
     "README.md": ("## Design constraints", {REF_CONTAINER: 2, REF_UPSTREAM: 1}),
+    # The provenance scan job names the reference repositories once, in PROVENANCE_REPOS.
+    ".github/workflows/ci.yaml": ("PROVENANCE_REPOS", {REF_CONTAINER: 1, REF_UPSTREAM: 1}),
 }
 
 # The SRS quotes the reference projects by name, so it is not scanned.

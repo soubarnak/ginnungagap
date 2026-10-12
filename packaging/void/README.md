@@ -1,6 +1,6 @@
 # Void packaging
 
-`srcpkgs/ginn/template` is the xbps-src template for ginn. `srcpkgs/ginn-gui` is a symlink to it, following the void-packages convention for subpackages.
+`srcpkgs/ginn/template` is the xbps-src template for ginn. The `ginn-gui` subpackage is deferred to M9 (FR-100..107): xbps-src rejects an empty subpackage, so the subpackage and its `srcpkgs/ginn-gui` symlink arrive with `src/ginn/gui`.
 
 Build it locally from a void-packages checkout, as a normal user (xbps-src refuses root):
 

@@ -23,17 +23,4 @@ post_install() {
     vdoc README.md
 }
 
-ginn-gui_package() {
-    short_desc+=" - Control Plane GUI"
-    depends="ginn>=${version}_${revision} python3-gobject gtk4 libadwaita"
-    pkg_install() {
-        # vmove is fatal when the source is missing, and the GUI files only appear
-        # with milestone M9. Move the ones that exist; DESTDIR is the ginn destdir here.
-        local path
-        for path in usr/share/applications usr/share/icons "${py3_sitelib}/ginn/gui"; do
-            if [ -e "${DESTDIR}/${path}" ]; then
-                vmove "${path}"
-            fi
-        done
-    }
-}
+# ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists.
