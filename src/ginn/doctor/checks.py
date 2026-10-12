@@ -168,8 +168,8 @@ def _info(name: str, message: str) -> CheckResult:
     return CheckResult(name, Status.INFO, message)
 
 
-def _warn(name: str, message: str) -> CheckResult:
-    return CheckResult(name, Status.WARN, message)
+def _warn(name: str, message: str, *fixes: str) -> CheckResult:
+    return CheckResult(name, Status.WARN, message, fixes)
 
 
 def _fail(name: str, message: str, *fixes: str) -> CheckResult:
@@ -300,29 +300,128 @@ def _is_ginn_runsvdir(argv: list[str]) -> bool:
     return any(PurePosixPath(arg).parts[-2:] == ("ginn", "sv") for arg in argv[1:])
 
 
-def _user_runsvdir(p: Probe) -> int | None:
-    """The pid of the ginn supervisor's runsvdir that runs as the user, found in /proc, or None."""
+def _is_runsv_of(argv: list[str], service: str) -> bool:
+    """True for `runsv <service>`, the process that runit starts to supervise one service."""
+    return len(argv) >= 2 and PurePosixPath(argv[0]).name == "runsv" and argv[1] == service
+
+
+def _proc_entries(p: Probe) -> list[Path]:
+    """The numeric entries of the probe's /proc, in pid order. Empty when /proc cannot be listed."""
     proc = p.at("proc")
     try:
-        entries = sorted(os.listdir(proc))
+        names = sorted(os.listdir(proc))
+    except OSError:
+        return []
+    return [proc / name for name in names if name.isdigit()]
+
+
+def _argv_of(entry: Path) -> list[str] | None:
+    """The argv of one process, from its cmdline, or None when it cannot be read."""
+    try:
+        raw = (entry / "cmdline").read_bytes()
     except OSError:
         return None
-    for entry in entries:
-        if not entry.isdigit():
-            continue
-        status = _read(proc / entry / "status") or ""
-        uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
-        fields = uid_line.split()
-        if len(fields) < 2 or fields[1] != str(p.identity.uid):
-            continue
-        try:
-            raw = (proc / entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        argv = [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
-        if _is_ginn_runsvdir(argv):
-            return int(entry)
+    return [part.decode("utf-8", errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _ppid_of(entry: Path) -> int | None:
+    """The parent pid of one process, from /proc/<pid>/stat, or None.
+
+    The command name may hold spaces and parentheses, so the fields are read after the last ')'.
+    """
+    stat = _read(entry / "stat")
+    if stat is None or ")" not in stat:
+        return None
+    fields = stat.rsplit(")", 1)[1].split()
+    if len(fields) < 2 or not fields[1].isdigit():
+        return None
+    return int(fields[1])
+
+
+def _find_process(
+    p: Probe, wanted: Callable[[list[str]], bool], uid: int | None = None
+) -> int | None:
+    """The pid of the first process in /proc whose argv `wanted` accepts, or None.
+
+    With `uid`, only processes that run as that user are considered. Reads are made under the
+    probe root, so a test can fake /proc.
+    """
+    for entry in _proc_entries(p):
+        if uid is not None:
+            status = _read(entry / "status") or ""
+            uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
+            fields = uid_line.split()
+            if len(fields) < 2 or fields[1] != str(uid):
+                continue
+        argv = _argv_of(entry)
+        if argv is not None and wanted(argv):
+            return int(entry.name)
     return None
+
+
+def _child_argvs(p: Probe, parent: int) -> list[list[str]]:
+    """The argv of each child of `parent`, in pid order. Unreadable children are skipped."""
+    children: list[list[str]] = []
+    for entry in _proc_entries(p):
+        if _ppid_of(entry) != parent:
+            continue
+        argv = _argv_of(entry)
+        if argv is not None:
+            children.append(argv)
+    return children
+
+
+def _user_runsvdir(p: Probe) -> int | None:
+    """The pid of the ginn supervisor's runsvdir that runs as the user, found in /proc, or None."""
+    return _find_process(p, _is_ginn_runsvdir, uid=p.identity.uid)
+
+
+def _is_run_script(argv: list[str], service: str) -> bool:
+    """True for the run script of `service` as runsv starts it: `./run`, from the service directory.
+
+    runsv starts the script by its relative name, and the kernel passes that name to the shebang
+    interpreter, so it is an argument of the child's argv. The log script has the same argv until it
+    execs svlogd, so a log child can match for the moment before that exec.
+    """
+    return any(arg == "./run" or arg.endswith(f"/{service}/run") for arg in argv)
+
+
+def _service_up(p: Probe) -> bool:
+    """True when runit runs the service's run script, which is the state the supervisor waits in.
+
+    runit starts runsv for ginn-<user> as root, so only a root runsv counts. A runsv with no run
+    script as its child is not up. `sv down` leaves runsv running with no child. runsv also restarts
+    a run script that exited after a pause of about one second, so a check made in that second
+    sees no child and reports the service down. A rerun shows the state that holds.
+    """
+    service = _service_name(p)
+    pid = _find_process(p, lambda argv: _is_runsv_of(argv, service), uid=0)
+    if pid is None:
+        return False
+    return any(_is_run_script(argv, service) for argv in _child_argvs(p, pid))
+
+
+def _state_sv_dir(p: Probe) -> Path:
+    """The realm services directory, <home>/.local/state/ginn/sv, that the run script waits for.
+
+    setup's _render sets XDG_STATE_HOME to <home>/.local/state for the run script, whatever the
+    environment says, so doctor reads the same path (ADR-013 Decision 14).
+    """
+    return Path(p.identity.home) / ".local" / "state" / "ginn" / "sv"
+
+
+def _state_note(p: Probe) -> str:
+    """A note for a message when doctor's own XDG_STATE_HOME names another state directory.
+
+    OwnedPaths follows XDG_STATE_HOME, so ginn's own state may be there, and it is not the
+    directory that this check reads. Empty when XDG_STATE_HOME is unset or is the default.
+    """
+    base = p.env.get("XDG_STATE_HOME", "")
+    if not base or not os.path.isabs(base):
+        return ""
+    if Path(base) == Path(p.identity.home) / ".local" / "state":
+        return ""
+    return f" (doctor's XDG_STATE_HOME is {base}, so ginn's own state directory may be there)"
 
 
 def _settings(text: str, key: str) -> list[str]:
@@ -517,12 +616,49 @@ def check_runsvdir(p: Probe) -> CheckResult:
     name = "runsvdir"
     pid = _user_runsvdir(p)
     if pid is None:
+        return _runsvdir_down(p)
+    return _pass(name, f"ginn supervisor runsvdir (pid {pid}) runs for {p.identity.user}")
+
+
+def _runsvdir_down(p: Probe) -> CheckResult:
+    """The result for a supervisor runsvdir that is not running, by the state of the service.
+
+    A service that is not up (see `_service_up`) needs `sv up`, a FAIL. A service that is up, with
+    its realm services directory missing, is an idle supervisor, a WARN. Host Setup does not create
+    that directory, because it lies in the user's home, and the fix creates it as the user at 0700.
+    A path that is there but is not a directory, a file or a link, is a FAIL, because the run script
+    never finds the directory it waits for. Its fix removes the path and then creates the
+    directory. A real directory with the service up means runsvdir stopped, and `sv up` does
+    nothing to a running service, so the fix restarts the service (FAIL).
+
+    The first ginn command that runs podman creates the directory at 0700 (OwnedPaths.ensure), but
+    only when XDG_STATE_HOME is the default, so the message names a different XDG_STATE_HOME.
+    """
+    name = "runsvdir"
+    user = p.identity.user
+    down = f"the ginn supervisor (runsvdir on .../ginn/sv) is not running for {user}"
+    if not _service_up(p):
+        return _fail(name, down, _up_fix(p))
+    sv_dir = _state_sv_dir(p)
+    shown = p.show(sv_dir)
+    kind = _kind(sv_dir)
+    if kind is None:
+        return _warn(
+            name,
+            f"the ginn supervisor is idle for {user}: its service is up, and the supervisor is "
+            f"idle until the realm services directory {shown} exists; the first ginn command "
+            f"that runs podman creates it{_state_note(p)}",
+            f"mkdir -m 0700 -p {_quote(shown)}",
+        )
+    if kind != "dir":
         return _fail(
             name,
-            f"the ginn supervisor (runsvdir on .../ginn/sv) is not running for {p.identity.user}",
-            _up_fix(p),
+            f"{down}: its service is up, but {shown} is a {kind}, not a directory, so the run "
+            f"script does not find the directory it waits for{_state_note(p)}",
+            f"rm {_quote(shown)}",
+            f"mkdir -m 0700 -p {_quote(shown)}",
         )
-    return _pass(name, f"ginn supervisor runsvdir (pid {pid}) runs for {p.identity.user}")
+    return _fail(name, f"{down}, although its service is up; {RESTART_NOTE}", _restart_fix(p))
 
 
 def check_runit_dir(p: Probe) -> CheckResult:

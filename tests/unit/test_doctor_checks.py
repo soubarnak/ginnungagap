@@ -157,6 +157,191 @@ def test_runsvdir_of_another_user_does_not_count(host: Host) -> None:
     assert checks.check_runsvdir(host.probe()).status is Status.FAIL
 
 
+def _supervisor_gone(host: Host) -> None:
+    """The user's runsvdir is no longer in the process table: a shell stands in for it."""
+    _write(host.root / "proc/4242/status", f"Name:\tbash\nUid:\t{UID}\t{UID}\n")
+    _write(host.root / "proc/4242/cmdline", "bash\x00")
+
+
+RUN_SCRIPT_CHILD: tuple[str, ...] = ("/bin/sh", "./run")
+"""The argv that runsv gives the run script: the shebang interpreter, then `./run`."""
+
+
+def _service_up(
+    host: Host,
+    service: str = "ginn-alice",
+    *,
+    child: tuple[str, ...] | None = RUN_SCRIPT_CHILD,
+) -> None:
+    """runit's runsv for the service, as root, is in the process table, with `child` as its child.
+
+    `child` None leaves runsv with no child, which is what `sv down` leaves behind.
+    """
+    _write(host.root / "proc/5000/status", "Name:\trunsv\nUid:\t0\t0\t0\t0\n")
+    _write(host.root / "proc/5000/cmdline", f"runsv\x00{service}\x00")
+    _write(host.root / "proc/5000/stat", "5000 (runsv) S 1 5000 5000 0 -1\n")
+    if child is not None:
+        _write(host.root / "proc/5001/status", "Name:\tsh\nUid:\t0\t0\t0\t0\n")
+        _write(host.root / "proc/5001/cmdline", "".join(f"{arg}\x00" for arg in child))
+        _write(host.root / "proc/5001/stat", "5001 (sh) S 5000 5001 5001 0 -1\n")
+
+
+@pytest.mark.fr("FR-007")
+def test_runsvdir_down_with_the_service_down_is_fixed_by_sv_up(host: Host) -> None:
+    _supervisor_gone(host)
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.FAIL
+    assert result.message == (
+        "the ginn supervisor (runsvdir on .../ginn/sv) is not running for alice"
+    )
+    assert result.fixes == ("sudo sv up /var/service/ginn-alice",)
+
+
+@pytest.mark.fr("FR-007")
+@pytest.mark.parametrize(
+    "child",
+    [None, ("sleep", "100")],
+    ids=["no-child", "other-child"],
+)
+def test_runsv_without_its_run_script_is_down_and_gets_sv_up(
+    host: Host, child: tuple[str, ...] | None
+) -> None:
+    """A runsv with no run script as its child is not up: `sv down` leaves it running with no
+    child, and so does the second in which runsv waits to restart the script. The fix is `sv up`."""
+    _supervisor_gone(host)
+    _service_up(host, child=child)
+    (host.home / ".local/state/ginn/sv").mkdir(parents=True)
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.FAIL
+    assert result.message == (
+        "the ginn supervisor (runsvdir on .../ginn/sv) is not running for alice"
+    )
+    assert result.fixes == ("sudo sv up /var/service/ginn-alice",)
+
+
+@pytest.mark.fr("FR-007")
+def test_a_runsv_run_by_a_user_is_not_the_service_supervisor(host: Host) -> None:
+    """runit runs the service's runsv as root, so a runsv of the same name owned by the user does
+    not count as the service being up."""
+    _supervisor_gone(host)
+    _service_up(host)
+    _write(host.root / "proc/5000/status", f"Name:\trunsv\nUid:\t{UID}\t{UID}\t{UID}\t{UID}\n")
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.FAIL
+    assert result.fixes == ("sudo sv up /var/service/ginn-alice",)
+
+
+@pytest.mark.fr("FR-007")
+@pytest.mark.fr("FR-001")
+def test_runsvdir_down_with_the_service_up_and_no_state_dir_is_an_idle_warn(host: Host) -> None:
+    """The run script waits for <state>/ginn/sv, which Host Setup does not create. That is an
+    idle supervisor, so it is a WARN (CL-13: no FAIL right after setup). The fix creates the
+    directory as the user, at 0700, and does not restart the service."""
+    _supervisor_gone(host)
+    _service_up(host)
+    sv_dir = host.home / ".local/state/ginn/sv"
+    assert not sv_dir.exists()
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.WARN
+    assert "the ginn supervisor is idle" in result.message
+    assert "until the realm services directory" in result.message
+    assert str(sv_dir) in result.message
+    assert "the first ginn command that runs podman creates it" in result.message
+    assert "XDG_STATE_HOME" not in result.message
+    assert result.fixes == (f"mkdir -m 0700 -p {shlex.quote(str(sv_dir))}",)
+    assert not any("sv " in fix for fix in result.fixes)
+
+
+@pytest.mark.fr("FR-001")
+def test_idle_supervisor_leaves_the_whole_run_without_a_fail(host: Host) -> None:
+    """FR-001 AC-1 reads 'all checks passing' as no FAIL (CL-13). Right after setup, with the
+    service up and no state directory yet, no check fails."""
+    _supervisor_gone(host)
+    _service_up(host)
+    results = {result.name: result for result in checks.run_checks(host.probe())}
+    assert results["runsvdir"].status is Status.WARN
+    assert Status.FAIL not in {result.status for result in results.values()}
+
+
+@pytest.mark.fr("FR-007")
+def test_runsvdir_down_with_the_service_up_and_a_state_dir_restarts_the_service(
+    host: Host,
+) -> None:
+    _supervisor_gone(host)
+    _service_up(host)
+    (host.home / ".local/state/ginn/sv").mkdir(parents=True)
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.FAIL
+    assert result.message == (
+        "the ginn supervisor (runsvdir on .../ginn/sv) is not running for alice, although its "
+        f"service is up; {checks.RESTART_NOTE}"
+    )
+    assert result.fixes == ("sudo sv restart /var/service/ginn-alice",)
+
+
+@pytest.mark.fr("FR-007")
+@pytest.mark.parametrize("kind", ["file", "link"])
+def test_a_state_path_that_is_not_a_directory_fails_with_rm_then_mkdir(
+    host: Host, kind: str
+) -> None:
+    """A file or a dangling link where the directory should be is not the directory the run script
+    waits for, so it is a FAIL. The fix removes the path, then creates the directory."""
+    _supervisor_gone(host)
+    _service_up(host)
+    sv_dir = host.home / ".local/state/ginn/sv"
+    sv_dir.parent.mkdir(parents=True)
+    if kind == "file":
+        sv_dir.write_text("not a directory\n", encoding="utf-8")
+    else:
+        os.symlink(host.home / "nowhere", sv_dir)
+    result = checks.check_runsvdir(host.probe())
+    assert result.status is Status.FAIL
+    assert f"{sv_dir} is a {kind}, not a directory" in result.message
+    assert result.fixes == (
+        f"rm {shlex.quote(str(sv_dir))}",
+        f"mkdir -m 0700 -p {shlex.quote(str(sv_dir))}",
+    )
+
+
+@pytest.mark.fr("FR-007")
+def test_a_custom_xdg_state_home_is_named_but_does_not_move_the_checked_path(host: Host) -> None:
+    custom = host.home / "elsewhere"
+    _supervisor_gone(host)
+    _service_up(host)
+    env = {**host.probe().env, "XDG_STATE_HOME": str(custom)}
+    probe = dataclasses.replace(host.probe(), env=env)
+    result = checks.check_runsvdir(probe)
+    assert result.status is Status.WARN
+    assert f"doctor's XDG_STATE_HOME is {custom}, so ginn's own state directory" in result.message
+    assert result.fixes == (
+        f"mkdir -m 0700 -p {shlex.quote(str(host.home / '.local/state/ginn/sv'))}",
+    )
+
+
+@pytest.mark.fr("FR-007")
+def test_runsv_of_another_service_does_not_make_this_one_up(host: Host) -> None:
+    _supervisor_gone(host)
+    _service_up(host, service="ginn-bob")
+    result = checks.check_runsvdir(host.probe())
+    assert result.fixes == ("sudo sv up /var/service/ginn-alice",)
+
+
+@pytest.mark.fr("FR-007")
+def test_state_dir_fix_quotes_the_home_path(host: Host) -> None:
+    """The directory comes from the account's home, as setup's run script has it, so a home with a
+    space must come out quoted in the fix."""
+    spaced_home = host.home / "my home"
+    spaced_home.mkdir()
+    _supervisor_gone(host)
+    _service_up(host)
+    identity = dataclasses.replace(host.probe().identity, home=str(spaced_home))
+    probe = dataclasses.replace(host.probe(), identity=identity)
+    result = checks.check_runsvdir(probe)
+    assert result.status is Status.WARN
+    sv_dir = spaced_home / ".local" / "state" / "ginn" / "sv"
+    assert result.fixes == (f"mkdir -m 0700 -p {shlex.quote(str(sv_dir))}",)
+
+
 @pytest.mark.fr("FR-007")
 def test_runit_dir_missing_fails(host: Host) -> None:
     shutil.rmtree(host.root / "run/runit")

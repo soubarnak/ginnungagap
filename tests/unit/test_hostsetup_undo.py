@@ -44,6 +44,8 @@ from ginn.hostsetup.undo import (
     REASON_ORIGINAL_GONE,
     REASON_OTHER_LINES,
     REASON_PRE_EXISTING,
+    REASON_PRE_EXISTING_LINE,
+    REASON_PRE_EXISTING_LINE_ABSENT,
     REASON_PRE_PRESENT,
     REASON_RECORDS_DIR,
     REASON_RECORDS_EXTRA,
@@ -526,6 +528,83 @@ def test_an_admin_widened_line_after_setup_is_kept_as_differing_and_reported(
     assert _left(result) == [(SUBUID, f"{REASON_DIFFERING}: {widened}")]
     assert (root / SUBUID).read_text(encoding="utf-8") == widened + "\n"
     assert _without(_content(_snapshot(root)), SUBUID) == _without(before, SUBUID)
+
+
+PRE_EXISTING = "alice:100000:65536"
+"""A line the user held before setup. Its range is too small for setup, so setup appends another."""
+
+
+@pytest.mark.fr("FR-003")
+def test_a_line_the_user_held_before_setup_is_kept_and_reported_as_pre_existing(
+    tmp_path: Path,
+) -> None:
+    """Setup's line goes, and the user's own line from before setup stays. The report says so, and
+    it does not read as a conflict (ADR-013, Decision 15 (i))."""
+    root = _host(tmp_path)
+    _admin_lines(root, PRE_EXISTING + "\n")
+    before = _content(_snapshot(root))
+    _setup(root)
+    _service(root, "alice")
+    recorded = _record(root).subids
+    assert recorded is not None
+    assert recorded.uid.render() != PRE_EXISTING
+    result = _undo(root)
+    assert sorted(_left(result)) == sorted(
+        [
+            (SUBUID, f"{REASON_PRE_EXISTING_LINE}: {PRE_EXISTING}"),
+            (SUBGID, f"{REASON_PRE_EXISTING_LINE}: {PRE_EXISTING}"),
+        ]
+    )
+    assert (root / SUBUID).read_text(encoding="utf-8") == PRE_EXISTING + "\n"
+    assert _content(_snapshot(root)) == before
+
+
+@pytest.mark.fr("FR-003")
+def test_a_pre_existing_line_is_reported_as_such_when_setups_line_is_already_gone(
+    tmp_path: Path,
+) -> None:
+    """Setup's line was removed by hand before undo, so undo removes nothing and says so."""
+    root = _host(tmp_path)
+    _admin_lines(root, PRE_EXISTING + "\n")
+    _setup(root)
+    _service(root, "alice")
+    _admin_lines(root, PRE_EXISTING + "\n")
+    result = _undo(root)
+    assert sorted(_left(result)) == sorted(
+        [
+            (SUBUID, f"{REASON_PRE_EXISTING_LINE_ABSENT}: {PRE_EXISTING}"),
+            (SUBGID, f"{REASON_PRE_EXISTING_LINE_ABSENT}: {PRE_EXISTING}"),
+        ]
+    )
+    assert (root / SUBUID).read_text(encoding="utf-8") == PRE_EXISTING + "\n"
+
+
+@pytest.mark.fr("FR-003")
+def test_a_pre_setup_line_and_an_admin_edit_of_the_same_name_keep_their_own_reasons(
+    tmp_path: Path,
+) -> None:
+    """The user's line from before setup and an admin's later edit of the same name both stay in
+    the file. The pre-setup line gets its own reason, and the edit is reported as differing. Setup's
+    line is the one that goes (ADR-013 Decision 15 (i))."""
+    root = _host(tmp_path)
+    _admin_lines(root, PRE_EXISTING + "\n")
+    _setup(root)
+    _service(root, "alice")
+    recorded = _record(root).subids
+    assert recorded is not None
+    edited = f"alice:{recorded.uid.start + recorded.uid.count * 2}:{recorded.uid.count}"
+    _append_admin_line(root, edited)
+    result = _undo(root)
+    assert sorted(_left(result)) == sorted(
+        [
+            (SUBUID, f"{REASON_PRE_EXISTING_LINE}: {PRE_EXISTING}"),
+            (SUBUID, f"{REASON_DIFFERING}: {edited}"),
+            (SUBGID, f"{REASON_PRE_EXISTING_LINE}: {PRE_EXISTING}"),
+            (SUBGID, f"{REASON_DIFFERING}: {edited}"),
+        ]
+    )
+    assert (root / SUBUID).read_text(encoding="utf-8") == f"{PRE_EXISTING}\n{edited}\n"
+    assert (root / SUBGID).read_text(encoding="utf-8") == f"{PRE_EXISTING}\n{edited}\n"
 
 
 @pytest.mark.fr("FR-003")

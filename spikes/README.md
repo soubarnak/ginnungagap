@@ -35,4 +35,5 @@ Raw logs and temporary files stay out of the repository.
 - `Dockerfile.s01`: image for S-01 (Debian stable with systemd and dbus).
 - `results/S-01.md`: S-01 results and verdict.
 - `results/S-*.md`: results and verdict of every other spike, one file each.
+- `results/G1-host-setup-roundtrip.md`: G1, a real-host Host Setup round trip (setup, doctor, undo) at commit 4a3b508. It is a gate result, not a spike, and its verdict is PARTIAL.
 - `s09/`: S-09 teardown and cleanup logs and the root-command extract, with MAC and IP addresses redacted. `results/S-09.md` (Deviations) refers to them.

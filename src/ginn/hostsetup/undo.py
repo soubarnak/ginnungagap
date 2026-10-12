@@ -137,6 +137,10 @@ REASON_SHARED_BUSY = (
 REASON_PRE_PRESENT = "pre-image present"
 REASON_ADMIN_LINE = "admin line, present before setup, kept"
 REASON_DIFFERING = "differing line kept, not the recorded range"
+REASON_PRE_EXISTING_LINE = "the user's line from before setup kept, setup's appended line removed"
+REASON_PRE_EXISTING_LINE_ABSENT = (
+    "the user's line from before setup kept, setup's appended line was not in the file"
+)
 REASON_NOT_EMPTY = "ENOTEMPTY, the directory still holds entries that undo did not remove"
 REASON_BOOT = "boot changed since setup, so the cgroup state is gone; controllers left"
 REASON_BOOT_UNKNOWN = "boot id unknown, so cgroup controllers are not touched"
@@ -702,6 +706,9 @@ def _undo_subids(
     Setup's own exact line is removed when the line is absent from this record's pre-image. A line
     of the user that the pre-image holds is an admin line, and it is kept. The last record reports
     it. A same-name line with another range is kept and reported on every undo (Decision 15 (i)).
+    When the pre-image holds that line, it is the user's line from before setup. Its reason is
+    REASON_PRE_EXISTING_LINE, or REASON_PRE_EXISTING_LINE_ABSENT when setup's own line was already
+    gone. Any other same-name line is an admin edit or a widening, and it keeps REASON_DIFFERING.
     Returns the lines that were kept and reported, so step 4 does not report them again.
     """
     rel = entry.path
@@ -726,7 +733,12 @@ def _undo_subids(
         )
         for kept in removal.kept_differing:
             reported.add(kept)
-            ctx.leave(rel, f"{REASON_DIFFERING}: {kept.render()}")
+            if kept not in pre_lines:
+                ctx.leave(rel, f"{REASON_DIFFERING}: {kept.render()}")
+            elif removal.changed:
+                ctx.leave(rel, f"{REASON_PRE_EXISTING_LINE}: {kept.render()}")
+            else:
+                ctx.leave(rel, f"{REASON_PRE_EXISTING_LINE_ABSENT}: {kept.render()}")
     return reported
 
 
