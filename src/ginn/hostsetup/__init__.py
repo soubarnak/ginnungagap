@@ -6,5 +6,7 @@ Every module here is pure logic over a root directory prefix, so tests run under
 - subids: subordinate UID/GID ranges in etc/subuid and etc/subgid (AS-005)
 - cgroups: cgroup v2 delegation plan and verification (S-01)
 - runit_system: the system runit service that runs the user's runsvdir
+- record: the Host Setup Record, the paths Host Setup wrote with their pre-images (DR-009)
+- setup: Host Setup orchestration for one user (FR-001, FR-002)
 - _atomic: atomic replacement of small host files
 """

@@ -219,10 +219,13 @@ def ensure_single(
 ) -> tuple[Change, SubIdEntry]:
     """Make sure `user` holds one line of at least `size` IDs, and return that line.
 
-    Host Setup records one range per file, so unlike `ensure_range` the total of several lines
-    does not count. A line that matches by name (or by `str(uid)`) and holds at least `size` IDs
-    is kept as it is. Otherwise a full-size line is appended, placed by `allocate`. Runs under the
-    same lock as `ensure_range`.
+    Unlike `ensure_range`, which sums the counts of every matching line, this function never sums
+    lines. Host Setup records one range per file, so the total of several lines does not count:
+    two half-size lines do not satisfy it. A line that matches by name (or by `str(uid)`) and
+    holds at least `size` IDs is kept as it is. Otherwise a full-size line is appended above the
+    highest end, as `allocate` places it, so it overlaps no existing line. That is deliberate,
+    because FR-001 AC-1 needs one range of at least `size`. Runs under the same lock as
+    `ensure_range`.
     """
     _check_name(user)
     _check_size(size)
@@ -246,12 +249,18 @@ def ensure_exact(
     root_dir: Path,
     lock_timeout: float = LOCK_TIMEOUT_SECONDS,
 ) -> Change:
-    """Make sure the file holds `entry` as one line, and never choose another range.
+    """Make sure the file holds the range `entry` and never chooses another range.
 
-    Used on a repair, to reuse the range that the Host Setup Record stored. If the line is already
-    there, nothing is written. If another line overlaps the range, GINN-E-SUBID-CONFLICT is raised
-    and the file is left alone. Otherwise the line is appended under the lock that `ensure_range`
-    uses.
+    Used on a repair, to reuse the range that the Host Setup Record stored. Three outcomes:
+
+    - The exact line is already there. Nothing is written.
+    - Every line that overlaps the range is a same-name line that covers all of it, and at least
+      one exists. That is what happens when the admin widened the user's line. Nothing is written.
+      This is the only case where an overlap is accepted.
+    - Any other overlapping line is a conflict: another user's line, or a same-name line that
+      only partly overlaps. GINN-E-SUBID-CONFLICT is raised and the file is left alone.
+
+    Otherwise the line is appended under the lock that `ensure_range` uses.
     """
     _check_name(entry.name)
     _check_size(entry.count)
@@ -260,15 +269,23 @@ def ensure_exact(
         entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
         if entry in entries:
             return Change(before=before, after=before, changed=False)
+        covered = False
         for other in entries:
-            if other.count and other.start < entry.end and entry.start < other.end:
-                raise make(
-                    "GINN-E-SUBID-CONFLICT",
-                    start=entry.start,
-                    count=entry.count,
-                    user=entry.name,
-                    path=str(path),
-                )
+            if not (other.count and other.start < entry.end and entry.start < other.end):
+                continue
+            same_name = other.name == entry.name
+            if same_name and other.start <= entry.start and entry.end <= other.end:
+                covered = True
+                continue
+            raise make(
+                "GINN-E-SUBID-CONFLICT",
+                start=entry.start,
+                count=entry.count,
+                user=entry.name,
+                path=str(path),
+            )
+        if covered:
+            return Change(before=before, after=before, changed=False)
         after = _append_line(before, entry.render().encode("utf-8"))
         atomic_write(path, after, file_mode(path, DEFAULT_MODE))
         return Change(before=before, after=after, changed=True, added=entry)

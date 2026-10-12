@@ -31,7 +31,9 @@ from ginn.hostsetup.subids import (
     SubIdExhausted,
     SubIdLocked,
     allocate,
+    ensure_exact,
     ensure_range,
+    ensure_single,
     newuidmap_present,
     parse_entries,
 )
@@ -823,3 +825,129 @@ def test_subgid_has_its_own_lock_file(tmp_path: Path) -> None:
     assert subgid_lock.exists()
     assert not (subgid_lock.parent / "ginn-subuid.lock").exists()
     assert _names(etc) == ["subgid"]
+
+
+RECORDED = SubIdEntry("alice", 200000, MIN_SIZE)
+"""The range Host Setup recorded for alice. It spans 200000 to 724288, end exclusive."""
+
+
+@pytest.mark.fr("FR-001")
+def test_ensure_single_on_a_fresh_file_writes_one_full_size_line(tmp_path: Path) -> None:
+    path = _subuid(tmp_path)
+    change, entry = ensure_single(path, "alice", root_dir=tmp_path)
+    assert change.changed is True
+    assert change.before == b""
+    assert change.after == b"alice:100000:524288\n"
+    assert entry == SubIdEntry("alice", 100000, MIN_SIZE)
+    assert change.added == entry
+    assert path.read_bytes() == change.after
+    assert _mode(path) == 0o644
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-002")
+def test_ensure_single_adopts_an_existing_single_line_of_full_size(tmp_path: Path) -> None:
+    content = b"alice:300000:524288\n"
+    path = _subuid(tmp_path, content)
+    change, entry = ensure_single(path, "alice", root_dir=tmp_path)
+    assert change == Change(before=content, after=content, changed=False)
+    assert entry == SubIdEntry("alice", 300000, MIN_SIZE)
+    assert path.read_bytes() == content
+
+
+@pytest.mark.fr("FR-001")
+def test_ensure_single_adds_a_full_size_line_because_two_halves_do_not_count(
+    tmp_path: Path,
+) -> None:
+    # ensure_range would call these two halves enough (524288 in total). ensure_single does not.
+    content = b"alice:100000:262144\nalice:400000:262144\n"
+    path = _subuid(tmp_path, content)
+    change, entry = ensure_single(path, "alice", root_dir=tmp_path)
+    assert change.changed is True
+    assert entry == SubIdEntry("alice", 662144, MIN_SIZE)
+    assert change.added == entry
+    assert change.after == content + b"alice:662144:524288\n"
+    assert path.read_bytes() == change.after
+    for old in parse_entries(content.decode()):
+        assert entry.start >= old.end
+
+
+@pytest.mark.fr("FR-001")
+def test_ensure_single_docstring_states_that_lines_are_not_summed() -> None:
+    doc = ensure_single.__doc__ or ""
+    assert "Unlike `ensure_range`" in doc
+    assert "sums the counts" in doc
+    assert "two half-size lines do not satisfy it" in doc
+
+
+@pytest.mark.fr("FR-002")
+def test_ensure_exact_leaves_a_file_that_already_holds_the_recorded_line(tmp_path: Path) -> None:
+    content = b"root:100000:65536\nalice:200000:524288\n"
+    path = _subuid(tmp_path, content)
+    inode = _inode(path)
+    change = ensure_exact(path, RECORDED, root_dir=tmp_path)
+    assert change == Change(before=content, after=content, changed=False)
+    assert _inode(path) == inode
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-001")
+def test_ensure_exact_appends_the_recorded_line_when_it_is_missing(tmp_path: Path) -> None:
+    content = b"carol:1000000:524288\n"
+    path = _subuid(tmp_path, content)
+    change = ensure_exact(path, RECORDED, root_dir=tmp_path)
+    assert change.changed is True
+    assert change.added == RECORDED
+    assert change.after == content + b"alice:200000:524288\n"
+    assert path.read_bytes() == change.after
+    assert _names(path.parent) == ["subuid"]
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-002")
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(b"alice:100000:1048576\n", id="admin-widened-both-ways"),
+        pytest.param(b"alice:200000:524289\n", id="one-id-more-at-the-end"),
+        pytest.param(b"alice:199999:524289\n", id="one-id-more-below-the-start"),
+    ],
+)
+def test_ensure_exact_accepts_a_same_name_line_that_covers_the_recorded_range(
+    tmp_path: Path, line: bytes
+) -> None:
+    path = _subuid(tmp_path, line)
+    change = ensure_exact(path, RECORDED, root_dir=tmp_path)
+    assert change == Change(before=line, after=line, changed=False)
+    assert path.read_bytes() == line
+    assert _names(_lock_path(tmp_path, path).parent) == []
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(b"alice:150000:524288\n", id="same-name-partial-overlap"),
+        pytest.param(b"dave:150000:65536\n", id="another-user-overlap"),
+        pytest.param(
+            b"alice:100000:1048576\ndave:300000:1000\n",
+            id="another-user-overlap-beside-a-covering-line",
+        ),
+    ],
+)
+def test_ensure_exact_refuses_an_overlap_that_is_not_a_covering_same_name_line(
+    tmp_path: Path, content: bytes
+) -> None:
+    path = _subuid(tmp_path, content)
+    with pytest.raises(GinnError) as refused:
+        ensure_exact(path, RECORDED, root_dir=tmp_path)
+    assert refused.value.code == "GINN-E-SUBID-CONFLICT"
+    assert refused.value.exit_code == 4
+    assert refused.value.details == {
+        "start": RECORDED.start,
+        "count": RECORDED.count,
+        "user": "alice",
+        "path": str(path),
+    }
+    assert path.read_bytes() == content
+    assert _names(_lock_path(tmp_path, path).parent) == []

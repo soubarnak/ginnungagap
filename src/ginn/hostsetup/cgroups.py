@@ -55,7 +55,7 @@ class DelegationPlan:
     `enabled` maps each node to the controllers this call added there. `created` lists only the
     directories this call made. Directories that already existed are not listed, so undo never
     removes them. `root_refused` is True when the root's subtree_control write was refused with a
-    tolerated errno. The record keeps it, and `verify` reads it.
+    tolerated errno. `verify` does not read it. The caller passes its value in as `tolerated_root`.
     """
 
     uid: int
@@ -172,12 +172,13 @@ def delegate_user_tree(cgroup_root: Path, uid: int, gid: int) -> DelegationPlan:
 def verify(cgroup_root: Path, uid: int, *, tolerated_root: bool = False) -> Verification:
     """Check the delegated tree for `uid`. An empty `problems` list means it is fine.
 
-    `tolerated_root` is `DelegationPlan.root_refused` from the Host Setup Record. When it is True,
-    controllers the root did not enable are reported as warnings, because delegation accepted
-    that refusal. Every other gap is a problem. The supervisor leaf and its cgroup.procs and
-    cgroup.threads must be owned by root, so a leaf left user-owned by an older install is a
-    problem too. Each message names the path that is wrong. This is the check `ginn doctor`
-    uses (FR-007).
+    `tolerated_root` is supplied by the caller and is not read from the Host Setup Record. Doctor
+    (T3.6) derives it by reading the current root `cgroup.subtree_control`. When it is True,
+    controllers the root did not enable are reported as warnings, because a root refusal was
+    accepted at delegation (`DelegationPlan.root_refused`). Every other gap is a problem. The
+    supervisor leaf and its cgroup.procs and cgroup.threads must be owned by root, so a leaf left
+    user-owned by an older install is a problem too. Each message names the path that is wrong.
+    This is the check `ginn doctor` uses (FR-007).
     """
     if not (cgroup_root / "cgroup.controllers").exists():
         return Verification(problems=[f"{cgroup_root}: cgroup v2 is not mounted"])
