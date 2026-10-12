@@ -14,6 +14,7 @@ packages = ["fake-ca", "fake-locale-{lang}"]
 steps = [["fake-locale-gen", "{locale}"]]
 
 [verbs]
+refresh = ["fake-pm", "refresh"]
 install = ["fake-pm", "install", "{packages}"]
 remove = ["fake-pm", "remove", "{packages}"]
 upgrade = ["fake-pm", "upgrade"]

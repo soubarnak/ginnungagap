@@ -24,11 +24,13 @@ packages = ["ca-certificates", "locales"]
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 
 [verbs]
+# apt-get update fetches the package lists. The image ships none, so callers run this before
+# install, upgrade, check-updates, resolve and estimate.
+refresh = ["apt-get", "update"]
 # --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
 install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
 remove = ["apt-get", "--yes", "remove", "{packages}"]
-# Needs current package lists first. No verb here runs apt-get update; the caller must (not yet
-# specified).
+# Needs current package lists first: run `refresh` before this verb.
 upgrade = ["apt-get", "--yes", "--no-install-recommends", "upgrade"]
 # apt list --upgradable: the lists as last refreshed. apt warns on stderr that its CLI is unstable.
 check-updates = ["apt", "list", "--upgradable"]

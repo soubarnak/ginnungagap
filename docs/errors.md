@@ -29,6 +29,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | Code | Exit | Meaning | Remedy | Source |
 |---|---|---|---|---|
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |
+| `GINN-E-DISTRO-DATA` | 70 | shipped distro data {file} is invalid: {field} {rule} | the shipped distro data is invalid; reinstall ginn, or report a bug with this message | NFR-060 (ginn-defined; not an SRS code) |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |
 | `GINN-E-HOST-NOT-SET-UP` | 77 | Host Setup has not created the runtime directory {path} | run 'sudo ginn host-setup --user &lt;name&gt;', then retry | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged | run 'ginn integrity --ack', then retry the command | FR-006 AC-1 |

@@ -31,7 +31,6 @@ from typing import Final
 from ginn.errors import CATALOGUE, GinnError, make
 
 __all__ = [
-    "LANG_PLACEHOLDER",
     "SUPPORTED_SCHEMA",
     "VERIFIED_SIGNATURE_KINDS",
     "SignatureKind",
@@ -45,8 +44,6 @@ __all__ = [
 
 SUPPORTED_SCHEMA: Final = 1
 PACKAGED_NAME: Final = "trust.toml"
-LANG_PLACEHOLDER: Final = "{lang}"
-"""Stands for the host LANG in integration_packages. The distro loader fills it (FR-013, T2.13)."""
 
 
 class SignatureKind(StrEnum):
@@ -69,7 +66,6 @@ _HOST: Final = r"[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::[0-9]{1,5})?"
 _PATH_PART: Final = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _REPOSITORY_RE: Final = re.compile(rf"{_HOST}(?:/{_PATH_PART})+")
 _TAG_RE: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
-_PACKAGE_RE: Final = re.compile(r"[a-z0-9][a-z0-9._+-]*")
 _SIZE_FIELDS: Final = (
     "compressed_size_bytes",
     "estimated_installed_bytes",
@@ -83,7 +79,6 @@ _ENTRY_FIELDS: Final = frozenset(
         *_SIZE_FIELDS,
         "signature",
         "verified_on",
-        "integration_packages",
     }
 )
 
@@ -106,7 +101,6 @@ class TrustEntry:
     measured_installed_bytes: int
     signature: SignatureKind
     verified_on: dt.date
-    integration_packages: tuple[str, ...]
 
     @property
     def image(self) -> str:
@@ -292,27 +286,6 @@ def _date(value: object, where: str, source: str) -> dt.date:
     raise _invalid(source, problem)
 
 
-def _packages(value: object, where: str, source: str) -> tuple[str, ...]:
-    """Check package-name shape only. Braces are allowed only as the {lang} placeholder.
-
-    DR-003 patterns are not applied here, because they differ per package manager and the
-    placeholder is filled by the distro loader (T2.13).
-    """
-    label = _path(where, "integration_packages")
-    if not isinstance(value, list):
-        raise _invalid(source, f"{label} must be a list of package names")
-    names: list[str] = []
-    for item in value:
-        if not isinstance(item, str) or not _PACKAGE_RE.fullmatch(
-            item.replace(LANG_PLACEHOLDER, "")
-        ):
-            raise _invalid(source, f"{label} entry {item!r} is not a package name")
-        if item in names:
-            raise _invalid(source, f"{label} lists {item!r} twice")
-        names.append(item)
-    return tuple(names)
-
-
 def _entry(key: str, raw: object, source: str) -> TrustEntry:
     where = f"distro.{key}"
     if not _KEY_RE.fullmatch(key):
@@ -348,7 +321,4 @@ def _entry(key: str, raw: object, source: str) -> TrustEntry:
         measured_installed_bytes=measured,
         signature=_signature(_text(table, "signature", where, source), where, source),
         verified_on=_date(_field(table, "verified_on", where, source), where, source),
-        integration_packages=_packages(
-            _field(table, "integration_packages", where, source), where, source
-        ),
     )

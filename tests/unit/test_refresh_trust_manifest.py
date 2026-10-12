@@ -83,7 +83,6 @@ estimated_installed_bytes = 410379776
 measured_installed_bytes = 410385305
 signature = "sigstore-unverified"
 verified_on = "2026-10-12"
-integration_packages = []
 
 [distro.debian]
 image = "docker.io/library/debian:stable-slim"
@@ -94,7 +93,6 @@ estimated_installed_bytes = 81254400
 measured_installed_bytes = 81256893
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["ca-certificates", "locales"]
 """
 
 

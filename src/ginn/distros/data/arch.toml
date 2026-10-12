@@ -22,9 +22,11 @@ packages = []
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 
 [verbs]
-# --needed skips packages already installed. No --refresh: the sync databases must be current
-# before this runs. The image ships none, and no verb here refreshes them (the caller must; not yet
-# specified).
+# -Syu, not -Sy. Arch does not support partial upgrades, so the sync databases are never refreshed
+# without a full upgrade. The image ships no sync databases, so callers run this before install.
+refresh = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+# --needed skips packages already installed. No --refresh: run `refresh` first, which brings the
+# sync databases current.
 install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
 # No --recursive: pacman refuses to remove a package that another installed package needs.
 remove = ["pacman", "--remove", "--noconfirm", "{packages}"]

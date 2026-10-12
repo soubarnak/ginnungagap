@@ -1,4 +1,4 @@
-# Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, FR-013, AS-024, NFR-008, NFR-SEC-004).
+# Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, AS-024, NFR-008, NFR-SEC-004).
 #
 # Read-only at runtime. This file ships with ginn and ginn never writes it (DR-040). It changes
 # only through the refresh procedure in spikes/results/S-10.md (section 6).
@@ -22,10 +22,9 @@
 # verification material. No signature kind counts as verified yet (VERIFIED_SIGNATURE_KINDS in
 # manifest.py is empty). "none" = no signature found.
 #
-# integration_packages (FR-013): packages missing from the pulled base image, which must be
-# added. Presence was checked in S-10b. "{lang}" is replaced from the host LANG at create time
-# (en_US.UTF-8 gives "en"). Locale generation steps that are not packages are in each table's
-# comment. The loader (T2.13) must implement the substitution and the steps.
+# The Integration Package Set (FR-013) is not here. Each distribution's packages and locale steps
+# are in src/ginn/distros/data/<distro>.toml, the single source (R9). The Missing lines in each
+# table's comment record what the pulled image lacks.
 #
 # verified_on: date the S-10 and S-10b facts for this entry were collected.
 
@@ -50,7 +49,6 @@ estimated_installed_bytes = 410379776
 measured_installed_bytes = 410385305
 signature = "sigstore-unverified"
 verified_on = "2026-10-12"
-integration_packages = []
 
 [distro.debian]
 # Debian stable, minimal variant (CR-007, Q-004). `stable` tracks the current release (AS-024).
@@ -68,7 +66,6 @@ estimated_installed_bytes = 81254400
 measured_installed_bytes = 81256893
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["ca-certificates", "locales"]
 
 [distro.fedora]
 # Fedora 44, minimal image (CR-007, Q-004: official minimal image). Pulled image: VERSION_ID 44,
@@ -90,7 +87,6 @@ estimated_installed_bytes = 140837888
 measured_installed_bytes = 140839859
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["glibc-langpack-{lang}"]
 
 [distro.kali]
 # Kali rolling (current channel). Pulled image: VERSION_ID 2026.3, VERSION_CODENAME kali-rolling,
@@ -108,4 +104,3 @@ estimated_installed_bytes = 125312512
 measured_installed_bytes = 125316242
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["ca-certificates", "locales"]

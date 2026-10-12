@@ -3,8 +3,8 @@
 
 Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some codes are
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
-GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122) and GINN-E-HOST-NOT-SET-UP (DR-010). `source`
-cites the requirement that defines the failure.
+GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP (DR-010) and
+GINN-E-DISTRO-DATA (NFR-060). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -245,6 +245,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         summary="internal error; this is a bug",
         remedy="re-run with --verbose and report the output",
         source="NFR-040",
+    ),
+    ErrorSpec(
+        code="GINN-E-DISTRO-DATA",
+        exit_code=70,
+        summary="shipped distro data {file} is invalid: {field} {rule}",
+        remedy="the shipped distro data is invalid; reinstall ginn, or report a bug with this "
+        "message",
+        source="NFR-060 (ginn-defined; not an SRS code)",
     ),
 )
 

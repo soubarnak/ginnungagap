@@ -50,7 +50,7 @@ This decision deviates from DR-010, which names `$XDG_RUNTIME_DIR/ginn`. The dev
 - Code must not create runtime state outside the runtime root. The podman tmpdir and runroot sit under it.
 - Every podman argv carries `--root`, `--runroot`, `--tmpdir` and `--runtime`. A test checks every call (`tests/unit/test_podman_cli.py`).
 - `ginn host-setup` and `ginn doctor` can run before `/run/ginn/<uid>` exists. The refusal must not stop them. T3.4 and T3.6 must catch it and report it. This ADR does not build that.
-- A missing `crun` makes every podman call fail. The packaging template (`packaging/void/srcpkgs/ginn/template`) lists `runc` and not `crun`, so it must be corrected before a real run.
+- A missing `crun` makes every podman call fail. The packaging template (`packaging/void/srcpkgs/ginn/template`) listed `runc` and not `crun`. R8 (0d7e52e) corrected it, so the template now declares `crun`.
 - Follow-up: SRS clarification CL-1; spike S-04 confirms that the runtime root survives logout; the first task that drives real podman through `PodmanCli` writes ginn's `containers.conf` and `storage.conf` (TODO in `podman/cli.py`) and verifies the missing-file behaviour.
 - The error catalogue has no code for "Host Setup has not created the runtime directory". GINN-E-USAGE is used for now. A dedicated code is requested for the errors owner (T2.14).
 

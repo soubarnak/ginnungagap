@@ -8,17 +8,25 @@ distribution for the tests. `available()` leaves it out unless asked.
 Placeholders use the errors.py convention. `{name}` is replaced, and `{{` and `}}` are literal
 braces. Three names are defined, each valid in one place only:
 - `{packages}` in a verb, as a whole element. It splices one argv element per package name. Names
-  are never split, joined or re-parsed, so shell characters stay inside one element.
+  are never split, joined or re-parsed, so shell characters stay inside one element. A verb with no
+  `{packages}` element takes no packages, and `argv()` refuses them.
 - `{lang}` in `integration.packages`. It is the language part of the host LANG (en_US.UTF-8
   gives `en`).
 - `{locale}` in `integration.steps`. It is the language and territory of the host LANG (en_US).
 
-A distribution with no locale data to generate (LANG unset, `C`, `POSIX` or `C.UTF-8`) gets no
-entries that use `{lang}` or `{locale}`. Nothing here runs a command. Callers hand `argv()` to a
-subprocess as a list (NFR-SEC-005).
+Every distribution defines every verb in `Verb`. `refresh` loads the current package metadata.
+Callers run `refresh` before `install`, `upgrade`, `check-updates`, `resolve` and `estimate` on a
+fresh image, because the official images ship no package lists. On Arch, `refresh` is a full
+sync-and-upgrade (-Syu), because Arch does not support refreshing the databases without upgrading.
 
-Shipped data that fails validation raises GINN-E-INTERNAL, because it is a ginn bug. An unknown
-distribution name, or a host LANG that cannot be used, raises GINN-E-OPTION-INVALID.
+A host LANG with no locale data to generate (unset, empty, `C`, `POSIX` or `C.UTF-8`) gets no
+entries that use `{lang}` or `{locale}`. A host LANG that is set but is not a UTF-8 locale name
+gets the same, and the realm uses C.UTF-8. The SRS has no rule that refuses such a LANG (FR-013),
+so nothing is raised; `IntegrationSet.fallback_reason` says why. Nothing here runs a command.
+Callers hand `argv()` to a subprocess as a list (NFR-SEC-005).
+
+Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
+distribution name raises GINN-E-OPTION-INVALID.
 """
 
 import re
@@ -40,10 +48,11 @@ DATA_PACKAGE: Final = "ginn.distros"
 DATA_DIR: Final = "data"
 TEST_DISTRO: Final = "_test"
 PACKAGES_ELEMENT: Final = "{packages}"
+C_UTF8: Final = "C.UTF-8"
 
 _ID_RE: Final = re.compile(r"_?[a-z][a-z0-9-]{0,31}")
 _LOCALE_RE: Final = re.compile(r"(?P<lang>[a-z]{2,3})(?:_(?P<territory>[A-Z]{2}))?\.(?i:utf-?8)")
-_C_LOCALE_RE: Final = re.compile(r"(?:C|POSIX)(?:\..*)?")
+_C_LOCALE_RE: Final = re.compile(r"C|POSIX|C\.(?i:utf-?8)")
 _SAMPLE: Final[dict[str, str]] = {"lang": "xx", "locale": "xx_XX"}
 _TOP_KEYS: Final = frozenset(
     {
@@ -62,6 +71,7 @@ _TOP_KEYS: Final = frozenset(
 class Verb(StrEnum):
     """The package-manager verbs every distribution defines (FR-040, FR-041)."""
 
+    REFRESH = "refresh"
     INSTALL = "install"
     REMOVE = "remove"
     UPGRADE = "upgrade"
@@ -92,10 +102,17 @@ class Integration:
 
 @dataclass(frozen=True)
 class IntegrationSet:
-    """The Integration Package Set for one host locale, with placeholders filled in."""
+    """The Integration Package Set for one host locale, with placeholders filled in.
+
+    `lang` is the LANG value the realm gets: the host LANG when it is usable, else C.UTF-8.
+    `fallback_reason` is set when the host LANG is set and cannot be used (FR-013). The caller
+    prints it. Nothing is refused.
+    """
 
     packages: tuple[str, ...]
     steps: tuple[tuple[str, ...], ...]
+    lang: str
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,15 +137,19 @@ class DistroDef:
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
 
-        Raises GINN-E-USAGE when the verb takes packages and none are given. Raises
-        GINN-E-PKG-NAME-INVALID for an empty name or one with a NUL byte. Package names are not
-        checked against DR-003 here; callers pass validated names (domain.packages).
+        Raises GINN-E-USAGE when the verb takes packages and none are given, and when packages are
+        given to a verb that takes none. Raises GINN-E-PKG-NAME-INVALID for an empty name or one
+        with a NUL byte. Package names are not checked against DR-003 here; callers pass validated
+        names (domain.packages).
         """
         if isinstance(packages, str):
             raise TypeError("packages must be a sequence of names, not one str")
         template = self.verbs[verb]
-        if PACKAGES_ELEMENT in template and not packages:
+        takes_packages = PACKAGES_ELEMENT in template
+        if takes_packages and not packages:
             raise make("GINN-E-USAGE", detail=f"verb {verb.value} needs at least one package")
+        if packages and not takes_packages:
+            raise make("GINN-E-USAGE", detail=f"verb {verb.value} takes no packages")
         out: list[str] = []
         for element in template:
             if element == PACKAGES_ELEMENT:
@@ -140,11 +161,11 @@ class DistroDef:
     def integration_set(self, lang_env: str | None) -> IntegrationSet:
         """Return the Integration Package Set for a host LANG value (FR-013).
 
-        Entries that use a placeholder with no host value (C, POSIX, C.UTF-8, unset) are dropped.
-        A rendered package name that fails the distribution's name pattern is a data bug, and
-        raises GINN-E-INTERNAL.
+        Entries that use a placeholder with no host value are dropped: that covers unset, C,
+        POSIX, C.UTF-8 and a LANG that cannot be used. A rendered package name that fails the
+        distribution's name pattern is a data bug, and raises GINN-E-DISTRO-DATA.
         """
-        locale = host_locale(lang_env, self.id)
+        locale, fallback_reason = host_locale(lang_env)
         values: dict[str, str] = {}
         if locale is not None:
             values = {"lang": locale.lang, "locale": locale.name}
@@ -154,7 +175,7 @@ class DistroDef:
                 continue
             name = _render(template, values)
             if self.name_pattern.fullmatch(name) is None:
-                raise _internal(
+                raise _data_error(
                     self.source, "integration.packages", f"{name!r} fails package_name_regex"
                 )
             packages.append(name)
@@ -162,23 +183,29 @@ class DistroDef:
         for step in self.integration.steps:
             if all(_field_names(element) <= frozenset(values) for element in step):
                 steps.append(tuple(_render(element, values) for element in step))
-        return IntegrationSet(tuple(packages), tuple(steps))
+        lang = lang_env if lang_env and fallback_reason is None else C_UTF8
+        return IntegrationSet(tuple(packages), tuple(steps), lang, fallback_reason)
 
 
-def host_locale(lang_env: str | None, distro: str) -> HostLocale | None:
-    """Reduce a host LANG value to `HostLocale`, or return None when no locale data is needed.
+def host_locale(lang_env: str | None) -> tuple[HostLocale | None, str | None]:
+    """Reduce a host LANG value for the templates. Return (locale, fallback_reason).
 
-    Accepted values have a UTF-8 codeset, for example `en_US.UTF-8` or `de_DE.utf8`. Unset, empty,
-    `C`, `POSIX` and `C.UTF-8` return None. Anything else raises GINN-E-OPTION-INVALID.
+    `locale` is None when no locale data is generated: LANG is unset or empty, or it is C, POSIX or
+    C.UTF-8. Accepted UTF-8 values give their language and territory, for example en_US.UTF-8 gives
+    en_US and de_DE.utf8 gives de_DE. `fallback_reason` is set only when LANG is set and is not a
+    UTF-8 locale name. It names the value and says that the realm uses C.UTF-8.
     """
     if not lang_env or _C_LOCALE_RE.fullmatch(lang_env):
-        return None
+        return None, None
     match = _LOCALE_RE.fullmatch(lang_env)
     if match is None:
-        raise make("GINN-E-OPTION-INVALID", option=f"LANG={lang_env}", distro=distro)
+        return None, (
+            f"host LANG {lang_env!r} is not a UTF-8 locale name such as en_US.UTF-8; "
+            "the realm uses C.UTF-8 and gets no locale data"
+        )
     lang = match["lang"]
     territory = match["territory"]
-    return HostLocale(lang, f"{lang}_{territory}" if territory else lang)
+    return HostLocale(lang, f"{lang}_{territory}" if territory else lang), None
 
 
 def available(*, include_test: bool = False) -> tuple[str, ...]:
@@ -196,7 +223,7 @@ def available(*, include_test: bool = False) -> tuple[str, ...]:
 def load(name: str) -> DistroDef:
     """Load the shipped definition for `name` (a distribution ID, or `_test`).
 
-    Raises GINN-E-OPTION-INVALID for a name with no data file, and GINN-E-INTERNAL when the file
+    Raises GINN-E-OPTION-INVALID for a name with no data file, and GINN-E-DISTRO-DATA when the file
     fails validation or its `id` differs from its file name.
     """
     if not isinstance(name, str) or _ID_RE.fullmatch(name) is None:
@@ -207,7 +234,7 @@ def load(name: str) -> DistroDef:
     source = f"{DATA_PACKAGE}/{DATA_DIR}/{name}.toml"
     definition = parse_text(entry.read_text(encoding="utf-8"), source)
     if definition.id != name:
-        raise _internal(source, "id", f"{definition.id!r} must equal the file name {name!r}")
+        raise _data_error(source, "id", f"{definition.id!r} must equal the file name {name!r}")
     return definition
 
 
@@ -221,14 +248,14 @@ def parse_text(text: str, source: str) -> DistroDef:
     try:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
-        raise _internal(source, "toml", str(exc)) from None
+        raise _data_error(source, "toml", str(exc)) from None
     return from_mapping(raw, source)
 
 
 def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> DistroDef:
     """Validate a parsed distribution table and build a `DistroDef`.
 
-    The first broken rule raises GINN-E-INTERNAL. Its details carry `file`, `field` and `rule`.
+    The first broken rule raises GINN-E-DISTRO-DATA. Its details carry `file`, `field` and `rule`.
     """
     reader = _Reader(source)
     _only_keys(reader, raw, _TOP_KEYS, "top level")
@@ -285,13 +312,13 @@ def _verbs(reader: "_Reader", value: object) -> dict[Verb, tuple[str, ...]]:
 
 
 class _Reader:
-    """Checks one raw table. Each broken rule raises GINN-E-INTERNAL naming the field."""
+    """Checks one raw table. Each broken rule raises GINN-E-DISTRO-DATA naming the field."""
 
     def __init__(self, source: str) -> None:
         self.source = source
 
     def fail(self, field: str, rule: str) -> GinnError:
-        return _internal(self.source, field, rule)
+        return _data_error(self.source, field, rule)
 
     def text(self, value: object, field: str) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -397,13 +424,13 @@ def _unknown(name: object) -> GinnError:
     return make("GINN-E-OPTION-INVALID", option=f"--distro={name}", distro="any")
 
 
-def _internal(source: str, field: str, rule: str) -> GinnError:
-    err = make("GINN-E-INTERNAL")
-    err.details.update(file=source, field=field, rule=rule)
-    return err
+def _data_error(source: str, field: str, rule: str) -> GinnError:
+    """Return GINN-E-DISTRO-DATA: shipped data broke a rule. The details name the file and field."""
+    return make("GINN-E-DISTRO-DATA", file=source, field=field, rule=rule)
 
 
 __all__ = [
+    "C_UTF8",
     "DATA_DIR",
     "DATA_PACKAGE",
     "PACKAGES_ELEMENT",

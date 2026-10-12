@@ -3,9 +3,9 @@
 FR-041, NFR-SEC-005.
 
 The shipped files are checked as data: their Integration Package Set against S-10 (the distro TOML
-is the single source for it; trust.toml's copy is a duplicate to be removed later), their verbs
-for non-interactive and signature-preserving flags, and their name patterns against
-domain.packages. The `_test` fixture and renamed copies prove that a new distribution
+is the single source for it; the Trust Manifest holds no copy since R9), their verbs for
+non-interactive and signature-preserving flags, their `refresh` verb, and their name patterns
+against domain.packages. The `_test` fixture and renamed copies prove that a new distribution
 needs no code change. Every validation rule in loader.py has a test that breaks it.
 """
 
@@ -139,7 +139,7 @@ def test_a_file_whose_id_differs_from_its_name_is_refused(
     monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
     with pytest.raises(GinnError) as info:
         load("arch")
-    assert info.value.code == "GINN-E-INTERNAL"
+    assert info.value.code == "GINN-E-DISTRO-DATA"
     assert info.value.details["field"] == "id"
 
 
@@ -214,14 +214,16 @@ def test_integration_set_for_en_us_matches_the_s10_findings(
 
 
 @pytest.mark.fr("FR-013")
-@pytest.mark.parametrize("lang", [None, "", "C", "POSIX", "C.UTF-8"])
+@pytest.mark.parametrize("lang", [None, "", "C", "POSIX", "C.UTF-8", "C.utf8"])
 def test_c_and_unset_locales_drop_every_locale_entry(lang: str | None) -> None:
     debian = load("debian").integration_set(lang)
     assert debian.packages == ("ca-certificates", "locales")
     assert debian.steps == ()
+    assert debian.fallback_reason is None
     fedora = load("fedora").integration_set(lang)
     assert fedora.packages == ()
     assert fedora.steps == ()
+    assert fedora.fallback_reason is None
 
 
 @pytest.mark.fr("FR-013")
@@ -233,19 +235,46 @@ def test_other_locales_substitute_the_language_and_the_locale_name() -> None:
 
 @pytest.mark.fr("FR-013")
 @pytest.mark.parametrize(
-    "lang", ["en_US.ISO-8859-1", "en_US", "EN_us.UTF-8", "en_US.UTF-8@euro", "en_US.UTF-8\n"]
+    "lang",
+    [
+        "en_US.ISO-8859-1",
+        "en_US",
+        "EN_us.UTF-8",
+        "en_US.UTF-8@euro",
+        "en_US.UTF-8\n",
+        "C.ISO-8859-1",
+    ],
 )
-def test_host_locales_that_cannot_be_used_are_refused(lang: str) -> None:
-    with pytest.raises(GinnError) as info:
-        load("debian").integration_set(lang)
-    _expect("GINN-E-OPTION-INVALID", 2)(info.value)
+def test_host_locales_that_cannot_be_used_fall_back_to_c_utf8_with_a_reason(lang: str) -> None:
+    result = load("debian").integration_set(lang)
+    assert result.lang == "C.UTF-8"
+    assert result.packages == ("ca-certificates", "locales")
+    assert result.steps == ()
+    assert result.fallback_reason is not None
+    assert repr(lang) in result.fallback_reason
+    assert "C.UTF-8" in result.fallback_reason
+
+
+@pytest.mark.fr("FR-013")
+def test_a_usable_host_lang_is_the_realm_lang_with_no_fallback() -> None:
+    for lang in ("en_US.UTF-8", "de_DE.utf8", "C", "POSIX", "C.UTF-8"):
+        result = load("debian").integration_set(lang)
+        assert result.lang == lang, lang
+        assert result.fallback_reason is None, lang
+    unset = load("arch").integration_set(None)
+    assert unset.lang == "C.UTF-8"
+    assert unset.fallback_reason is None
 
 
 @pytest.mark.fr("FR-013")
 def test_host_locale_reduces_lang_to_language_and_territory() -> None:
-    assert host_locale("en_US.UTF-8", "arch") == HostLocale("en", "en_US")
-    assert host_locale("de.UTF-8", "arch") == HostLocale("de", "de")
-    assert host_locale("C.UTF-8", "arch") is None
+    assert host_locale("en_US.UTF-8") == (HostLocale("en", "en_US"), None)
+    assert host_locale("de.UTF-8") == (HostLocale("de", "de"), None)
+    assert host_locale("C.UTF-8") == (None, None)
+    assert host_locale(None) == (None, None)
+    locale, reason = host_locale("en_US")
+    assert locale is None
+    assert reason is not None and "en_US" in reason
 
 
 # ---- shipped data: FR-040, FR-041, FR-012 verbs ----------------------------------------------
@@ -287,7 +316,8 @@ def test_dry_run_verbs_never_carry_a_yes_flag(name: str) -> None:
 def test_no_verb_disables_a_native_signature_check(name: str) -> None:
     definition = load(name)
     for verb in Verb:
-        text = " ".join(definition.argv(verb, ["gimp"])).lower()
+        packages = ["gimp"] if verb in PACKAGE_VERBS else []
+        text = " ".join(definition.argv(verb, packages)).lower()
         for token in SIGNATURE_BYPASS:
             assert token not in text, (name, verb, token)
 
@@ -347,6 +377,51 @@ def test_a_verb_without_packages_needs_none() -> None:
         "--sysupgrade",
         "--noconfirm",
     ]
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
+@pytest.mark.parametrize(
+    "verb", [Verb.REFRESH, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.LIST_EXPLICIT]
+)
+def test_packages_given_to_a_verb_that_takes_none_are_refused(name: str, verb: Verb) -> None:
+    with pytest.raises(GinnError) as info:
+        load(name).argv(verb, ["gimp"])
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == f"verb {verb.value} takes no packages"
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_refresh_is_a_package_manager_command(name: str) -> None:
+    argv = load(name).argv(Verb.REFRESH)
+    assert argv and argv[0] in PKG_MANAGERS, (name, argv)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("debian", ["apt-get", "update"]),
+        ("kali", ["apt-get", "update"]),
+        ("fedora", ["dnf", "makecache"]),
+    ],
+)
+def test_refresh_fetches_the_metadata_each_manager_needs(name: str, expected: list[str]) -> None:
+    assert load(name).argv(Verb.REFRESH) == expected
+
+
+@pytest.mark.fr("FR-040")
+def test_arch_refresh_is_a_full_upgrade_and_install_never_refreshes() -> None:
+    # Arch does not support partial upgrades, so -Sy alone is never the refresh (Arch Wiki).
+    arch = load("arch")
+    refresh = arch.argv(Verb.REFRESH)
+    assert refresh == ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+    assert refresh == arch.argv(Verb.UPGRADE)
+    install = arch.argv(Verb.INSTALL, ["gimp"])
+    assert "--refresh" not in install
+    assert "--sysupgrade" not in install
+    assert [e for e in install if e.startswith("-") and not e.startswith("--")] == []
 
 
 @pytest.mark.fr("DR-003")
@@ -435,6 +510,7 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("integration step uses {lang}", _set("integration", "steps", value=[["x", "{lang}"]])),
     ("integration step is empty", _set("integration", "steps", value=[[]])),
     ("integration steps is not a list", _set("integration", "steps", value="x")),
+    ("verbs missing refresh", _del("verbs", "refresh")),
     ("verbs missing remove", _del("verbs", "remove")),
     ("verbs has an unknown verb", _set("verbs", "check_updates", value=["x"])),
     ("verb is an empty list", _set("verbs", "upgrade", value=[])),
@@ -461,11 +537,30 @@ def test_malformed_data_is_refused_with_the_field_and_rule_in_details(
     with pytest.raises(GinnError) as info:
         from_mapping(raw, source="fixture.toml")
     err = info.value
-    assert err.code == "GINN-E-INTERNAL", label
+    assert err.code == "GINN-E-DISTRO-DATA", label
     assert err.exit_code == 70
     assert err.details["file"] == "fixture.toml"
     assert isinstance(err.details["field"], str)
     assert isinstance(err.details["rule"], str)
+
+
+@pytest.mark.fr("NFR-040")
+@pytest.mark.fr("NFR-060")
+def test_distro_data_error_names_the_file_field_and_rule() -> None:
+    raw = _base()
+    _del("verbs", "refresh")(raw)
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    err = info.value
+    assert err.message == (
+        "shipped distro data fixture.toml is invalid: verbs missing key(s): refresh"
+    )
+    assert err.remedy.startswith("the shipped distro data is invalid; reinstall ginn")
+    assert err.details == {
+        "file": "fixture.toml",
+        "field": "verbs",
+        "rule": "missing key(s): refresh",
+    }
 
 
 @pytest.mark.fr("NFR-060")
@@ -474,10 +569,10 @@ def test_the_unbroken_fixture_validates() -> None:
 
 
 @pytest.mark.fr("NFR-040")
-def test_toml_syntax_errors_are_refused_as_internal_errors() -> None:
+def test_toml_syntax_errors_are_refused_as_distro_data_errors() -> None:
     with pytest.raises(GinnError) as info:
         parse_text("schema = ", "broken.toml")
-    assert info.value.code == "GINN-E-INTERNAL"
+    assert info.value.code == "GINN-E-DISTRO-DATA"
     assert info.value.details["field"] == "toml"
 
 

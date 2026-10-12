@@ -30,7 +30,6 @@ estimated_installed_bytes = 410379776
 measured_installed_bytes = 410385305
 signature = "sigstore-unverified"
 verified_on = "2026-10-12"
-integration_packages = []
 
 [distro.debian]
 image = "docker.io/library/debian:stable-slim"
@@ -41,7 +40,6 @@ estimated_installed_bytes = 81254400
 measured_installed_bytes = 81256893
 signature = "none"
 verified_on = "2026-10-12"
-integration_packages = ["ca-certificates", "locales"]
 """
 
 ENTRY_FIELDS = (
@@ -53,7 +51,6 @@ ENTRY_FIELDS = (
     "measured_installed_bytes",
     "signature",
     "verified_on",
-    "integration_packages",
 )
 
 
@@ -143,9 +140,6 @@ def test_entry_fields_parse_to_typed_values() -> None:
     assert entry.digest == f"sha256:{A}"
     assert entry.compressed_size_bytes == 139248529
     assert entry.verified_on == dt.date(2026, 10, 12)
-    assert entry.integration_packages == ()
-    debian = _base_manifest().entry("debian")
-    assert debian.integration_packages == ("ca-certificates", "locales")
 
 
 @pytest.mark.fr("FR-011")
@@ -338,34 +332,12 @@ def test_verified_on_accepts_an_unquoted_toml_date() -> None:
     assert parse(text, "test-manifest").entry("arch").verified_on == dt.date(2026, 10, 12)
 
 
+@pytest.mark.fr("FR-013")
 @pytest.mark.fr("DR-040")
-@pytest.mark.parametrize(
-    ("value", "fragment"),
-    [
-        ('"ca-certificates"', "must be a list of package names"),
-        ('["{user}"]', "entry '{user}' is not a package name"),
-        ('["Locales"]', "entry 'Locales' is not a package name"),
-        ('[""]', "entry '' is not a package name"),
-        ("[1]", "entry 1 is not a package name"),
-        ('["locales", "locales"]', "lists 'locales' twice"),
-    ],
-)
-def test_integration_packages_must_be_package_names(value: str, fragment: str) -> None:
-    text = _edited(
-        'integration_packages = ["ca-certificates", "locales"]', f"integration_packages = {value}"
-    )
-    _expect_invalid(text, fragment)
-
-
-@pytest.mark.fr("DR-040")
-def test_integration_packages_accept_the_lang_placeholder() -> None:
-    text = _edited(
-        'integration_packages = ["ca-certificates", "locales"]',
-        'integration_packages = ["glibc-langpack-{lang}"]',
-    )
-    assert parse(text, "test-manifest").entry("debian").integration_packages == (
-        "glibc-langpack-{lang}",
-    )
+def test_integration_packages_is_refused_because_the_distro_toml_owns_it() -> None:
+    # The Integration Package Set lives only in src/ginn/distros/data/<distro>.toml (FR-013).
+    text = _edited('signature = "none"', 'signature = "none"\nintegration_packages = []')
+    _expect_invalid(text, "distro.debian has unknown key(s): integration_packages")
 
 
 @pytest.mark.fr("DR-040")

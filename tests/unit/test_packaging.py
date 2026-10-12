@@ -21,7 +21,7 @@ REPO = Path(__file__).resolve().parents[2]
 SRCPKGS = REPO / "packaging" / "void" / "srcpkgs"
 TEMPLATE = SRCPKGS / "ginn" / "template"
 
-TOP_LEVEL_FIELD = re.compile(r'^([a-z_]+)=(.*)$')
+TOP_LEVEL_FIELD = re.compile(r"^([a-z_]+)=(.*)$")
 GUI_DEFERRED_COMMENT = (
     "# ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists."
 )

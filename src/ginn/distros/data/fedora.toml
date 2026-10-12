@@ -24,6 +24,10 @@ packages = ["glibc-langpack-{lang}"]
 steps = []
 
 [verbs]
+# makecache fetches metadata for every enabled repository. dnf5 treats missing or expired metadata
+# as stale, so this is the refresh callers run before install, upgrade, check-updates, resolve and
+# estimate on a fresh image.
+refresh = ["dnf", "makecache"]
 # install_weak_deps=False: only hard dependencies are installed (FR-040, CR-007).
 install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", "{packages}"]
 remove = ["dnf", "--assumeyes", "remove", "{packages}"]

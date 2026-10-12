@@ -1,6 +1,6 @@
 # Packaging ginn for Void Linux
 
-ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`. It declares `runc` as the OCI runtime until ADR-003 decides between runc and crun. The package installs `README.md` and `NOTICE` as documentation.
+ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`. It declares `crun` as the OCI runtime (ADR-004; corrected in R8, 0d7e52e). The package installs `README.md` and `NOTICE` as documentation.
 
 One package is built from that template for now:
 
