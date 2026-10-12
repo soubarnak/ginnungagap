@@ -92,6 +92,10 @@ class CreateHooks:
     `exists`, `mountinfo` and `helper` are the probes and paths that runtime/ reads. `manifest`
     replaces the packaged Trust Manifest. `on_step` runs after each journal step, so a caller can
     show progress (AS-018), or a test can inject a failure there.
+
+    `integrate` False skips the refresh, the Integration Package Set and its steps, and records the
+    `integrated` step with nothing run. Only the host gate sets it (T4.9, Gate 3: no package
+    install and no refresh in a test realm). The CLI never sets it, so every real create refreshes.
     """
 
     disk_free: Callable[[Path], int] = _free_bytes
@@ -101,6 +105,7 @@ class CreateHooks:
     helper: str | None = None
     manifest: TrustManifest | None = None
     on_step: Callable[[str], None] | None = None
+    integrate: bool = True
 
 
 @dataclass(frozen=True)

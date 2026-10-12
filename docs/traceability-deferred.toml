@@ -64,7 +64,7 @@ reason = "unit tests (T4.4) create two realms of one distribution, with separate
 id = "FR-016"
 milestone = "M4"
 partial = true
-reason = "unit tests on the fake podman cover start (the container starts, grants attach, the record reads running), the idempotent start and stop, the crash restart, a failed attach that stops the realm again and leaves it stopped, the refusal of an unknown realm and of a DR-020 state, the stop timeout of 30 s, the services-on and tier refusals, a failed podman start, a stop that fails with the realm failed, a crash between the started and attached steps, a podman error that is never read as stopped, and a stop that asks podman for a stopped record (T4.5, ops/lifecycle.py); the start-to-running time of NFR-005 and the real stop are proven on a Void host (T4.9)"
+reason = "unit tests on the fake podman cover start (the container starts, grants attach, the record reads running), the idempotent start and stop, the crash restart, a failed attach that stops the realm again and leaves it stopped, the refusal of an unknown realm and of a DR-020 state, the stop timeout of 30 s, the services-on and tier refusals, a failed podman start, a stop that fails with the realm failed, a crash between the started and attached steps, a podman error that is never read as stopped, and a stop that asks podman for a stopped record (T4.5, ops/lifecycle.py); the start-to-running time of NFR-005 (20 cycles, p95 0.107 s) and the services-off stop (0.05 s with --init, exit 143; 30 s and exit 137 without it) were measured on a Void host with debian (T4.9, tests/integration/test_lifecycle_real.py)"
 
 [[deferred]]
 id = "FR-017"
@@ -76,7 +76,7 @@ reason = "auto-start on enter and exec is unit-tested on FakePodman (T4.6, runti
 id = "FR-019"
 milestone = "M4"
 partial = true
-reason = "unit tests on the fake podman (T4.7, ops/delete.py, test_ops_delete.py) cover: the stop of a running realm, and a failed graceful stop that is noted and followed by rm --force; the removal of the containers, the image and the record; a failed rmi that keeps the image, with a note, and lets the delete finish; a shared image kept when another container shows it by digest, id or name; a container with no image name skipped, with a note; an absent container tolerated; the purge of the Realm Home with and without confirmation; a homes directory or realm home that is a link, refused before the record moves; a mount point refused before the record moves, found in the mount table (at or below the home) and by the mount id of each directory the walk opens (a bind mount from the same file system keeps its st_dev, so st_dev alone does not catch it); a tree deeper than the limit refused; a mount table or a mount id that cannot be read refused (fail closed); a mount that appears after the check stopped before the walk enters it; a read-only owned directory, an unreadable owned directory and an inner symlink, with the symlink target kept; an entry the user does not own stopping the purge with GINN-E-HOME-UNSAFE, with its filename in the details and a remedy that depends on the reason; an interrupted delete at every journal step settled by recovery and by a GinnError, and a delete refused before recovery; the audit entries; and the refusals. AC-2 needs the `ginn delete --purge-home` confirmation in the CLI (T4.11) and a host run (M4 host run). The exported entries, the Install Manifest and the supervision entry have no code yet (M5, M7)"
+reason = "unit tests on the fake podman (T4.7, ops/delete.py, test_ops_delete.py) cover: the stop of a running realm, and a failed graceful stop that is noted and followed by rm --force; the removal of the containers, the image and the record; a failed rmi that keeps the image, with a note, and lets the delete finish; a shared image kept when another container shows it by digest, id or name; a container with no image name skipped, with a note; an absent container tolerated; the purge of the Realm Home with and without confirmation; a homes directory or realm home that is a link, refused before the record moves; a mount point refused before the record moves, found in the mount table (at or below the home) and by the mount id of each directory the walk opens (a bind mount from the same file system keeps its st_dev, so st_dev alone does not catch it); a tree deeper than the limit refused; a mount table or a mount id that cannot be read refused (fail closed); a mount that appears after the check stopped before the walk enters it; a read-only owned directory, an unreadable owned directory and an inner symlink, with the symlink target kept; an entry the user does not own stopping the purge with GINN-E-HOME-UNSAFE, with its filename in the details and a remedy that depends on the reason; an interrupted delete at every journal step settled by recovery and by a GinnError, and a delete refused before recovery; the audit entries; and the refusals. AC-2 needs the `ginn delete --purge-home` confirmation in the CLI (T4.11). The host run of the purge refusal and its podman unshare remedy passed on debian (T4.9). The exported entries, the Install Manifest and the supervision entry have no code yet (M5, M7)"
 
 [[deferred]]
 id = "FR-020"
@@ -172,7 +172,7 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-061"
 milestone = "M6"
 partial = true
-reason = "the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), the attach executor and the helper's argv are unit-tested on a fake helper (T4.10), and the table comparison closes in T6.1; T4.6 passes the proxy names as `--env NAME` only, so no value reaches an argument (unit-tested on FakePodman and on the replay shim, test_runtime_enter and test_podman_cli)"
+reason = "the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9: socket, directory and file attach, read-only, the recursive read-only on a child mount, the busy directory and the EBUSY case are measured in tests/integration/test_lifecycle_real.py, see spikes/results/T4.9-lifecycle-real.md), the attach executor and the helper's argv are unit-tested on a fake helper (T4.10), and the table comparison closes in T6.1; T4.6 passes the proxy names as `--env NAME` only, so no value reaches an argument (unit-tested on FakePodman and on the replay shim, test_runtime_enter and test_podman_cli)"
 
 [[deferred]]
 id = "FR-062"
@@ -188,7 +188,7 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-064"
 milestone = "M6"
 partial = true
-reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), the skip at start, the retry at enter and the forced unmount of a vanished source are unit-tested on a fake helper (T4.10); a missing source keeps its realm path, and a refused grant is never retried; the RealmRecord.share_skipped field is written at each start by T4.5 (ops/lifecycle.py, from attach.share_skipped), and status shows it (unit-tested in test_ops_lifecycle on the fake); the host run that shows the skip in ginn status needs a Void host (T4.9); enter rebuilds the share list when a grant changed (T4.6, test_runtime_enter: a source that appears is attached and its skip is removed, and one that vanishes is skipped)"
+reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), the skip at start, the retry at enter and the forced unmount of a vanished source are unit-tested on a fake helper (T4.10); a missing source keeps its realm path, and a refused grant is never retried; the RealmRecord.share_skipped field is written at each start by T4.5 (ops/lifecycle.py, from attach.share_skipped), and status shows it (unit-tested in test_ops_lifecycle on the fake); the host run that shows the skip in ginn status is not run yet; the T4.9 gate attaches a host drive and finds it missing from the store namespace (FAIL, escalated to ADR-008); enter rebuilds the share list when a grant changed (T4.6, test_runtime_enter: a source that appears is attached and its skip is removed, and one that vanishes is skipped)"
 
 [[deferred]]
 id = "FR-065"
@@ -200,7 +200,7 @@ reason = "identical paths are unit-tested in the T4.2 create and attach plans; a
 id = "FR-066"
 milestone = "M6"
 partial = true
-reason = "the re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode is held until the host identity changes, a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach is T4.9; the list is recomputed and saved on the record at each start by T4.5 (ops/lifecycle.py, unit-tested), and status reports the restart_required flag, which only the M6 tier and permission change sets; the change of the grant list at the next start is M6; enter re-attaches only a changed grant, under the realm lock, saves the record only when it changed, and a failed re-attach fails that enter and leaves the realm running (T4.6, test_runtime_enter)"
+reason = "the re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode is held until the host identity changes, a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach ran in T4.9 on debian (a changed source is re-attached with the init pid unchanged, a busy directory detaches with MNT_DETACH, and a drive mounted in the store namespace reaches the realm; a drive mounted on the host does not, see the T4.9 result file); the list is recomputed and saved on the record at each start by T4.5 (ops/lifecycle.py, unit-tested), and status reports the restart_required flag, which only the M6 tier and permission change sets; the change of the grant list at the next start is M6; enter re-attaches only a changed grant, under the realm lock, saves the record only when it changed, and a failed re-attach fails that enter and leaves the realm running (T4.6, test_runtime_enter)"
 
 [[deferred]]
 id = "FR-067"
@@ -228,7 +228,7 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 id = "FR-082"
 milestone = "M4"
 partial = true
-reason = "the services-off create argv carries --init, a keep-alive entrypoint and no systemd option (T4.1); no systemd process inside a running realm needs a Void host (T4.9)"
+reason = "the services-off create argv carries --init, a keep-alive entrypoint and no systemd option (T4.1); no systemd process inside a running realm was measured on a Void host with debian only (T4.9, test_f_no_systemd_process_and_minimal_init: PID 1 is podman-init, and no systemd); arch and fedora are not run, so the requirement stays partial"
 
 [[deferred]]
 id = "FR-083"
@@ -311,12 +311,13 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 id = "NFR-004"
 milestone = "M4"
 partial = true
-reason = "the podman calls of the enter hot path are unit-tested (T4.6, test_runtime_enter): a running realm with no host change costs one podman ps, makes no write and no helper call, and the pre-check itself makes no podman call. The enter path runs one listing per enter, in place of the record pid and /proc check of ADR-010, as ADR-010's amendment of 2026-10-13 records; the p95 of 100 launches with the listing and the pre-check included, on crun, is measured on a Void host (T4.9)"
+reason = "the podman calls of the enter hot path are unit-tested (T4.6, test_runtime_enter): a running realm with no host change costs one podman ps, makes no write and no helper call, and the pre-check itself makes no podman call. The enter path runs one listing per enter, in place of the record pid and /proc check of ADR-010, as ADR-010's amendment of 2026-10-13 records. On a Void host with debian (T4.9, reported run) the p95 of 100 enters on crun, in-process from runtime/enter.py with the pre-check and the listing, was 129.1 ms at 1-minute load 5 to 8. One loaded run (load 24) measured 453 ms; it predates the session isolation and the hiding of the real mount roots, so the number depends on an idle host and NFR-004 is not closed by it. The CLI import (T4.11) is not in the number, so the CLI path is still open"
 
 [[deferred]]
 id = "NFR-005"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the start time of a stopped realm was measured on a Void host with debian over 20 cycles (T4.9, tests/integration/test_lifecycle_real.py, p95 0.107 s); NFR-005 asks for 50 cycles per distribution, so arch and fedora are not run and the requirement is partial"
 
 [[deferred]]
 id = "NFR-006"
@@ -326,7 +327,8 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 [[deferred]]
 id = "NFR-007"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the create was timed once on a Void host with debian, zero packages and no refresh, with the image removed first so that the pull is inside the number (T4.9, tests/integration/test_lifecycle_real.py, test_c_create_timing: 4.76 s); NFR-007 asks for three runs per distribution with the packages on a 100 Mbps link, which the gate does not run (Gate 3), so the requirement is partial"
 
 [[deferred]]
 id = "NFR-008"

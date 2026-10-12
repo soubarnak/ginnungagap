@@ -381,6 +381,47 @@ def test_the_locale_steps_follow_the_host_lang(
 
 
 @pytest.mark.fr("FR-013")
+def test_integrate_false_runs_no_refresh_and_no_package_step(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The host gate's seam (T4.9, Gate 3): no refresh, no integration package, no locale step."""
+    result = create_realm(
+        env,
+        fake,
+        request(home),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, integrate=False),
+    )
+    assert result.record.state == RealmState.STOPPED
+    assert not any("apt-get" in argv or "localedef" in argv for argv in execs(fake))
+    assert not any("install" in argv or "update" in argv for argv in execs(fake))
+
+
+@pytest.mark.fr("FR-013")
+def test_integrate_false_reports_no_locale_note_even_for_an_unusable_lang(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """With integrate=False the locale note is not set: no locale step was decided or run."""
+    result = create_realm(
+        env,
+        fake,
+        request(home, host_env={"LANG": "en.UTF-8"}),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, integrate=False),
+    )
+    assert result.locale_note is None
+    assert not any("localedef" in argv for argv in execs(fake))
+
+
+@pytest.mark.fr("FR-013")
 def test_an_unusable_host_lang_is_reported_and_the_create_goes_on(
     env: OpEnv,
     fake: ScriptedPodman,

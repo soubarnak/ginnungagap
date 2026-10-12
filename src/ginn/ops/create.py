@@ -343,6 +343,10 @@ class _Create:
     def _integrate(self) -> None:
         definition = self._plan.definition
         integration = definition.integration_set(self._request.host_env.get("LANG"))
+        if not self._hooks.integrate:
+            # Test seam (CreateHooks.integrate, T4.9): no refresh, no package and no step runs.
+            self._step("integrated")
+            return
         self._locale_note = integration.fallback_reason
         self._exec(definition.argv(Verb.REFRESH), step="refresh", package=True)
         if integration.packages:
