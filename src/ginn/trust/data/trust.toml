@@ -1,0 +1,76 @@
+# Ginnungagap Trust Manifest, version 1 (DR-040, FR-011, FR-013, AS-024, NFR-SEC-004).
+#
+# Read-only at runtime. This file ships with ginn and ginn never writes it (DR-040). It changes
+# only through the refresh procedure in spikes/results/S-10.md.
+#
+# digest (FR-011): the linux/amd64 PLATFORM manifest digest, not the index (manifest-list)
+# digest. An index digest changes whenever another architecture or an attestation is rebuilt,
+# which would force a refresh with no change on x86_64. Each table's comment gives the index
+# digest for traceability.
+#
+# compressed_size_bytes: sum of layer sizes in the platform manifest.
+# estimated_installed_bytes: sum of uncompressed layer tar sizes (gzip ISIZE trailer). It covers
+# the base image only. The Integration Package Set and --with packages are added by the install
+# estimate, and FR-121 applies its 1.10 factor on top.
+#
+# signature: "sigstore" = cosign keyless signature found, ECDSA check passed, payload pins this
+# digest (Fulcio chain and Rekor inclusion not checked). "none" = no signature found.
+#
+# integration_packages (FR-013): CA certificates and locale data. "{lang}" is replaced from the
+# host LANG at create time. The loader (T2.13) must implement this substitution.
+#
+# verified_on: date the S-10 facts for this entry were collected.
+
+schema = 1
+
+[distro.arch]
+# Official Arch Linux channel on quay.io, built by the Arch project's CI (archlinux-docker).
+# Not the Docker Hub mirror docker.io/library/archlinux:base: that index (sha256:4e77cf2e...)
+# is one week older and carries no signature.
+# Single manifest, so index digest == platform digest.
+image = "quay.io/archlinux/archlinux:base"
+digest = "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93"
+compressed_size_bytes = 139248529
+estimated_installed_bytes = 410379776
+signature = "sigstore"
+verified_on = "2026-10-12"
+# Locale data: no package verified; glibc generates locales with locale-gen (M4 check).
+integration_packages = ["ca-certificates"]
+
+[distro.debian]
+# Debian stable, minimal variant (CR-007, Q-004). Tracks the current Debian stable release (AS-024).
+# Docker Hub official image, index sha256:eb593cf2...; no cosign signature found.
+# Codename behind "stable" not confirmed (needs /etc/os-release from a pulled layer).
+image = "docker.io/library/debian:stable-slim"
+digest = "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+compressed_size_bytes = 29843347
+estimated_installed_bytes = 81254400
+signature = "none"
+verified_on = "2026-10-12"
+integration_packages = ["ca-certificates", "locales"]
+
+[distro.fedora]
+# Current Fedora release, 44 (AS-024). `latest` and `44` are the same digest on
+# registry.fedoraproject.org and quay.io/fedora, and Docker Hub latest equals 44 too.
+# Index sha256:1b8544582f97...; the same index is served by quay.io/fedora/fedora:latest.
+# Fedora 45 is not used: its GA status is not verified. Refresh to 45 once it is GA.
+# No cosign signature found. Lookaside signatures not found (registry extensions endpoint 404).
+image = "registry.fedoraproject.org/fedora:44"
+digest = "sha256:05e3c351a7e762aca8fb067a9a92c1f775a7c4fbb1382c97cdd87bd6fb5b162c"
+compressed_size_bytes = 71969746
+estimated_installed_bytes = 190937088
+signature = "none"
+verified_on = "2026-10-12"
+integration_packages = ["ca-certificates", "glibc-langpack-{lang}"]
+
+[distro.kali]
+# Kali rolling (current). Docker Hub official image, index sha256:02f5d6c0...; no cosign
+# signature found. AS-024 does not cover Kali: this channel is a proposal for the SRS author.
+# kali-last-release is pinned to the 2026.3 branch and would not move until a new tag.
+image = "docker.io/kalilinux/kali-rolling:latest"
+digest = "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54"
+compressed_size_bytes = 52909587
+estimated_installed_bytes = 125312512
+signature = "none"
+verified_on = "2026-10-12"
+integration_packages = ["ca-certificates", "locales"]
