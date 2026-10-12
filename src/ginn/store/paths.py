@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Owned Paths (DR-010, DR-021, FR-005): every location ginn may write after Host Setup.
+"""Owned Paths (DR-010, FR-005, FR-025): every location ginn may write after Host Setup.
 
 Roots, from the environment (XDG Base Directory spec; empty or relative values count as unset):
 - data    = $XDG_DATA_HOME/ginn      (default ~/.local/share/ginn)
@@ -25,9 +25,10 @@ The runtime directory, the default one or the override, is checked on every `fro
 whole. Only `ginn-*.desktop` files in it are owned (`desktop_entry_glob`). It is therefore left out
 of `all_owned_roots()`. DR-004 forbids it through its own AS-011 rule.
 
-`ensure()` creates every owned directory with mode 0700 (DR-021, NFR-SEC-009). It tightens
-existing owned directories that grant group or other access and reports each one through a
-callback. It prints nothing.
+`ensure()` creates every owned directory except the runtime directory itself, with mode 0700
+(FR-025, DR-010). It tightens existing owned directories that grant group or other access and
+reports each one through a callback. It never creates or changes the runtime directory, which
+must already exist (`check_runtime_dir`). It prints nothing.
 
 `ensure_config()` writes ginn's own containers.conf and storage.conf for Podman (ADR-004). Podman
 fails when a file named by CONTAINERS_CONF or CONTAINERS_STORAGE_CONF is missing, so these are
@@ -73,15 +74,16 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
 
     The temporary file comes from mkstemp in the same directory, so its name is unique to this
     call. Two writers never share one, and a stale file left by an earlier run is never opened.
-    The file is fchmod'ed to 0600 before the data goes in, so no mode from an earlier file carries
-    over. If any step fails, the temporary file is removed and the error is raised. The old file
-    at `path` is then unchanged.
+    mkstemp creates the file with mode 0600 before the umask is applied. A umask only clears bits,
+    so the final mode is 0600 under any umask that keeps the owner bits. If the write, the fsync or
+    the rename fails, the temporary file is removed, the error is raised, and the old file at
+    `path` is unchanged. A failed directory fsync is raised after the rename, so the new file is
+    already in place.
     """
     fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(name)
     try:
         try:
-            os.fchmod(fd, OWNED_FILE_MODE)
             _write_all(fd, data)
             os.fsync(fd)
         finally:
@@ -301,12 +303,14 @@ class OwnedPaths:
         return "ginn-*.desktop"
 
     def owned_directories(self) -> list[Path]:
-        """Every owned directory, parents before children, without duplicates."""
+        """Every owned directory that `ensure()` creates, parents before children, no duplicates.
+
+        The runtime directory is left out: Host Setup creates it, and `check_runtime_dir` checks it.
+        """
         ordered = [
             self.data,
             self.config,
             self.state,
-            self.runtime,
             self.podman_root,
             self.podman_runroot,
             self.podman_tmpdir,
@@ -343,11 +347,15 @@ class OwnedPaths:
         return sorted(self.applications_dir.glob(self.desktop_entry_glob))
 
     def ensure(self, on_tighten: Callable[[str], None] | None = None) -> None:
-        """Create every owned directory with mode 0700 and tighten any that are more open.
+        """Create every owned directory except the runtime one, with mode 0700, and tighten others.
 
+        A missing runtime directory raises GINN-E-HOST-NOT-SET-UP and nothing is created. Without
+        that check, creating a child would also create the runtime directory, with the default
+        mode. The owner and mode of the runtime directory are checked by `check_runtime_dir`.
         `on_tighten` gets one line per directory whose group or other bits were removed. Missing
         non-owned parents (for example ~/.local/share) are created with the default mode.
         """
+        _require_runtime_present(self.runtime)
         for directory in self.owned_directories():
             _ensure_dir(directory, on_tighten)
 
@@ -365,6 +373,19 @@ class OwnedPaths:
         _write_owned_file(self.podman_storage_conf, storage.encode("utf-8"))
 
 
+def _require_runtime_present(runtime: Path) -> None:
+    """Refuse a runtime directory that is missing, or is not a real directory (ADR-004).
+
+    lstat, so a symbolic link is refused. Owner and mode are left to `check_runtime_dir`.
+    """
+    try:
+        mode = os.lstat(runtime).st_mode
+    except FileNotFoundError:
+        raise make("GINN-E-HOST-NOT-SET-UP", path=str(runtime)) from None
+    if not stat.S_ISDIR(mode):
+        raise OSError(f"runtime directory {runtime} is not a real directory; refusing to use it")
+
+
 def _ensure_dir(directory: Path, on_tighten: Callable[[str], None] | None) -> None:
     if directory.is_symlink():
         # chmod would follow the link and change a directory ginn does not own.
@@ -378,4 +399,4 @@ def _ensure_dir(directory: Path, on_tighten: Callable[[str], None] | None) -> No
         return
     os.chmod(directory, OWNED_DIR_MODE)
     if current & _GROUP_OTHER_BITS and on_tighten is not None:
-        on_tighten(f"tightened {directory} from {current:03o} to {OWNED_DIR_MODE:03o} (DR-021)")
+        on_tighten(f"tightened {directory} from {current:03o} to {OWNED_DIR_MODE:03o} (FR-025)")

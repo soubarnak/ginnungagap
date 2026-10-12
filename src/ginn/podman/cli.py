@@ -176,7 +176,8 @@ class PodmanCli:
     Build it with `from_paths`, the documented constructor. It takes Owned Paths and derives every
     location from them. `history` keeps the full argv of every call, in order, for tests and
     diagnostics. `tightened` keeps one line for each owned directory that a call tightened from a
-    wider mode (DR-021), in the order they happened. The CLI prints them; this class prints nothing.
+    wider mode (FR-025), in the order they happened. A CLI layer is planned to print them; this
+    class prints nothing.
     """
 
     @classmethod
@@ -289,6 +290,12 @@ class PodmanCli:
         HOME passes through, so podman still resolves registries.conf and policy.json by its own
         defaults, and those include the user's ~/.config/containers/. ginn does not pin them here.
         Pinning CONTAINERS_REGISTRIES_CONF and the signature policy path is T4.4 work.
+
+        Proxy decision. The proxy variables pass through here only so that a pull behind a proxy
+        works (see `_PASSTHROUGH_ENV`). They are not stored in container config. T4.1 passes
+        `--http-proxy=false` on `podman create`, and T4.3 injects the proxy variables at exec and
+        launch from the session env. So the container config holds no proxy secrets and no stale
+        proxy, and a changed proxy applies at the next exec or launch.
         """
         env = {key: value for key, value in os.environ.items() if _passes(key)}
         env["XDG_RUNTIME_DIR"] = str(self.runtime_root)
@@ -326,12 +333,14 @@ class PodmanCli:
         An adapter from `from_paths` first checks the runtime root, then makes the owned
         directories and ginn's config files, so a call never fails only because they are not
         there yet. The runtime check runs first and is the same check `OwnedPaths.from_env`
-        makes. `ensure()` would create a missing runtime root and chmod a wrong-mode one, and
-        ADR-004 forbids both, so a missing or unsafe root is refused here. Both steps are
+        makes. `ensure()` never creates or changes the runtime root (it refuses a missing one),
+        so this check is what refuses a wrong owner or mode (ADR-004). Both steps are
         idempotent: what is already right is not rewritten. A directory wider than 0700 is
-        tightened, and the change is appended to `tightened` (DR-021). It is not printed here.
+        tightened, and the change is appended to `tightened` (FR-025). It is not printed here.
         """
         if self.owned_paths is not None:
+            # The process uid. OwnedPaths does not keep the uid that from_env was given, and
+            # PodmanCli has no uid of its own, so there is no other source to use here.
             check_runtime_dir(self.owned_paths.runtime, os.getuid())
             try:
                 self.owned_paths.ensure(on_tighten=self.tightened.append)

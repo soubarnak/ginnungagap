@@ -101,7 +101,8 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 [[deferred]]
 id = "FR-025"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
 
 [[deferred]]
 id = "FR-026"

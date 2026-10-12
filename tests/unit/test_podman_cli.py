@@ -520,7 +520,7 @@ def test_a_fresh_tree_needs_no_setup_before_a_from_paths_call(shim: Path, tmp_pa
     assert len(logged(shim)) == 1
 
 
-@pytest.mark.fr("DR-021")
+@pytest.mark.fr("FR-025")
 def test_a_wider_owned_directory_is_tightened_and_recorded_without_printing(
     shim: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

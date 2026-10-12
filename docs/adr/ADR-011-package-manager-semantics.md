@@ -16,7 +16,7 @@ FR-013 limits the Integration Package Set to CA certificates and locale data. NF
 
 Before this ADR, `refresh` was `pacman -Syu` on Arch, and the loader told callers to refresh before install, check-updates, resolve and estimate. On Arch that upgrades the whole realm on an install, or on a Control Plane check. That breaks FR-023 AC-1 and FR-040 AC-1. The `remove` verb relied on each manager's default, which the spec does not state.
 
-This ADR takes the next free number. ADR-007 is reserved for the S-05 spike, and ADR-010 is reserved for the launch path.
+This ADR takes the next free number. ADR-007 is the idle memory budget (S-05), and ADR-010 is reserved for the launch path.
 
 Ranked characteristics (SRS section 4), in order: performance efficiency, host integrity and isolation, recoverability, interoperability, usability. Host integrity decides the refresh question: a realm's packages must not change without an update command. Recoverability decides the removal question: removing one package must not silently remove others.
 
@@ -77,13 +77,15 @@ The Arch check-updates is a list of four steps. The loader runs none of them. Th
 
 The caller removes `<tmpdir>` after the last step, whether or not a step failed. Removal must delete the `local` link and must not follow it.
 
-Exit statuses (observed, see Context): step 3 exits 0 on success. Step 4 exits 0 with the upgradable packages on stdout. It exits 1 with blank stdout when nothing is upgradable, and its stderr is empty or holds only lines that start with `warning:`. It exits 1 with another message on stderr when it cannot run, for example with no sync database. The caller applies `arch_check_status()` in `loader.py`, which returns one of three results:
+Exit statuses (observed, see Context): step 3 exits 0 on success. Step 4 exits 0 with the upgradable packages on stdout. It exits 1 with blank stdout when nothing is upgradable, and its stderr is empty or holds only lines that start with `warning:`. It exits 1 with another message on stderr when it cannot run. A missing sync database is expected to print a `warning:` line, `database file for <repo> does not exist`, which by its prefix alone looks like the nothing-to-upgrade case. That wording is not yet observed on a host (M4), so the fail-closed rule below matches it by pattern. The caller applies `arch_check_status()` in `loader.py`, which returns one of three results:
 
 - updates: step 4 exits 0 with a package on stdout. Exit 0 with blank stdout is an error.
-- no updates: step 3 exits 0, step 4 exits 1, stdout is blank, and every non-blank stderr line starts with `warning:`.
-- error: any other result, including a failed step 3 and exit 1 with any other stderr line.
+- no updates: step 3 exits 0, step 4 exits 1, stdout is blank, every non-blank stderr line starts with `warning:`, and no stderr line matches `check_fatal_warning_regex`.
+- error: any other result, including a failed step 3, a stderr line that matches `check_fatal_warning_regex` whatever step 4 exited with, and exit 1 with any other stderr line.
 
-The loader records the statuses in the TOML comments, not as data, because they are observed and not documented. The rule is code, not a schema key, and `arch_check_status()` is the one place it is written. M4 confirms the statuses in a realm before the Control Plane relies on them.
+The rule fails closed. A `warning:` line is not proof of no updates when it says that a repository was not read. The patterns for such lines are data: `check_fatal_warning_regex` in `arch.toml` holds `database file for .* does not exist`. The loader reads the list, and `arch_check_status()` takes it as an argument, so no pattern is written in Python. A new pacman warning that means a repository was skipped goes in that list, with a test.
+
+The loader records the exit statuses in the TOML comments, not as data, because they are observed and not documented. The status rule is code, and `arch_check_status()` is the one place it is written. The fatal-warning patterns are data, because they are text that the manager prints and that a new manager version may change. M4 confirms the statuses and the patterns in a realm before the Control Plane relies on them.
 
 Rules that follow from the table:
 
@@ -147,7 +149,7 @@ Negative, and what the code must and must not do:
 - A Debian or Kali full upgrade can remove packages (see Decision).
 - The Fedora check forces a metadata download each time the Control Plane opens. FR-024 runs the check on open only, so the cost is one download per open.
 - Every value in `stale_metadata_regex` is runtime text. It is checked against sample lines, and it must be verified in M4 on a real host.
-- The check's exit statuses are observed, not documented. The Control Plane must use `arch_check_status()`, which maps exit 1 to "no updates" only when stdout is blank, every non-blank stderr line starts with `warning:`, and step 3 succeeded.
+- The check's exit statuses are observed, not documented. The Control Plane must use `arch_check_status()`, which maps exit 1 to "no updates" only when stdout is blank, every non-blank stderr line starts with `warning:`, no stderr line matches a fatal-warning pattern, and step 3 succeeded.
 - pacman prefixes its warnings with `warning:`, so the no-sync-database case in Context may match the warning-only rule. The rule is safe only because step 3 must succeed first, which should leave a sync database in the scratch directory. M4 must confirm that no path with a successful step 3 reaches that warning, or narrow the rule.
 - Whether ginn's realm lock covers the check is open. The check takes no lock on the realm's pacman database, because the scratch `--dbpath` has its own lock. So a check can run while `ginn update` runs, and it can read a `local` database that the update is writing. The ops layer does not exist yet, so no caller takes the realm lock for the check. This must be decided before the Control Plane runs the check.
 - The cleanup of `<tmpdir>` must delete the `local` link, not follow it. Following it would delete the realm's installed-package database.

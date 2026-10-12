@@ -689,7 +689,49 @@ def test_check_updates_is_refused_as_one_argv() -> None:
 def test_arch_check_status_treats_exit_1_as_no_updates_only_with_warning_only_stderr(
     sync_exit: int, query_exit: int, stdout: str, stderr: str, expected: UpdateStatus
 ) -> None:
-    assert arch_check_status(sync_exit, query_exit, stdout, stderr) is expected
+    fatal = load("arch").check_fatal_warnings
+    assert arch_check_status(sync_exit, query_exit, stdout, stderr, fatal) is expected
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.parametrize(
+    ("sync_exit", "query_exit", "stdout", "stderr"),
+    [
+        # Exit 1 with only warning: lines reads as "no updates", unless one says a database is gone.
+        (0, 1, "", "warning: database file for 'core' does not exist (use 'pacman -Sy')\n"),
+        (0, 1, "", "warning: one\nwarning: database file for 'extra' does not exist\n"),
+        # The same line makes the check an error when the query lists packages (exit 0).
+        (0, 0, "gimp 2.10-1 -> 2.10-2\n", "warning: database file for 'core' does not exist\n"),
+        # A failed sync is an error, whatever the query reports.
+        (1, 1, "", "warning: database file for 'core' does not exist\n"),
+    ],
+)
+def test_arch_check_status_fails_closed_on_a_missing_sync_database(
+    sync_exit: int, query_exit: int, stdout: str, stderr: str
+) -> None:
+    fatal = load("arch").check_fatal_warnings
+    assert arch_check_status(sync_exit, query_exit, stdout, stderr, fatal) is UpdateStatus.ERROR
+
+
+@pytest.mark.fr("FR-024")
+def test_plain_warning_lines_still_mean_no_updates_under_the_shipped_data() -> None:
+    # The pattern is specific: another warning: line, even about the same database, is not fatal.
+    fatal = load("arch").check_fatal_warnings
+    stderr = "warning: database file for 'core' is locked\nwarning: something else\n"
+    assert arch_check_status(0, 1, "", stderr, fatal) is UpdateStatus.NONE
+
+
+@pytest.mark.fr("NFR-060")
+def test_the_fatal_warning_list_is_optional_data_that_the_loader_reads() -> None:
+    assert from_mapping(_base(), source="fixture.toml").check_fatal_warnings == ()
+    assert load("debian").check_fatal_warnings == ()
+    assert [p.pattern for p in load("arch").check_fatal_warnings] == [
+        "database file for .* does not exist"
+    ]
+    raw = _base()
+    raw["check_fatal_warning_regex"] = ["repository .* was skipped"]
+    definition = from_mapping(raw, source="fixture.toml")
+    assert [p.pattern for p in definition.check_fatal_warnings] == ["repository .* was skipped"]
 
 
 @pytest.mark.fr("FR-024")
@@ -800,12 +842,13 @@ def test_remove_check_names_are_checked_like_every_package_verb(name: str) -> No
 @pytest.mark.parametrize("name", ["arch", "_test"])
 def test_remove_check_is_optional_and_absent_where_removal_is_native(name: str) -> None:
     # Arch refuses dependents natively, so it needs no dry run. The fixture omits the verb.
+    # Asking for it anyway is a ginn bug (callers check has_remove_check), so it is GINN-E-INTERNAL.
     definition = load(name)
     assert definition.has_remove_check is False
     with pytest.raises(GinnError) as info:
         definition.argv(Verb.REMOVE_CHECK, ["gimp"])
-    _expect("GINN-E-USAGE", 2)(info.value)
-    assert info.value.message == f"verb remove-check is not defined for {name}"
+    _expect("GINN-E-INTERNAL", 70)(info.value)
+    assert info.value.details["detail"] == f"verb remove-check is not defined for {name}"
 
 
 @pytest.mark.fr("FR-041")
@@ -1020,6 +1063,12 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("signature regex does not compile", _set("signature_error_regex", value="(")),
     ("stale metadata regex missing", _del("stale_metadata_regex")),
     ("stale metadata regex does not compile", _set("stale_metadata_regex", value="(")),
+    ("fatal warning list is a string", _set("check_fatal_warning_regex", value="database")),
+    ("fatal warning list has an empty item", _set("check_fatal_warning_regex", value=[""])),
+    (
+        "fatal warning regex does not compile",
+        _set("check_fatal_warning_regex", value=["database ("]),
+    ),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),

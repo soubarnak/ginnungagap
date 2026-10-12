@@ -22,6 +22,7 @@ braces. Four names are defined, each valid in one place only:
 Every distribution defines every verb in `Verb` except two. `check-updates` is a list of steps, run
 in order, and `check_updates()` returns them. `remove-check` is optional: a distribution that omits
 it has no removal pre-check, and `DistroDef.has_remove_check` says whether it defines one (ADR-011).
+A caller that asks for it anyway gets GINN-E-INTERNAL: callers check `has_remove_check` first.
 Every other verb is one argv. `refresh`
 loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
 lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
@@ -46,6 +47,10 @@ list (NFR-SEC-005).
 
 `stale_metadata` matches the package manager's output when the local metadata no longer matches the
 mirror (ADR-011). The ops layer maps a match to the remedy.
+
+`check_fatal_warning_regex` is optional and defaults to an empty list. It lists warnings that make
+the Arch check-updates fail closed: `arch_check_status()` returns error when a stderr line matches
+one, so a missing sync database is never read as "no updates" (ADR-011).
 
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
 distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
@@ -92,6 +97,8 @@ _TOP_KEYS: Final = frozenset(
         "verbs",
     }
 )
+# Optional top-level keys. A file may omit them, and the loader then uses the default.
+_OPTIONAL_TOP_KEYS: Final = frozenset({"check_fatal_warning_regex"})
 
 
 class Verb(StrEnum):
@@ -167,7 +174,9 @@ class DistroDef:
     `name_pattern` is matched with fullmatch, by argv() and by the Integration Package Set.
     `signature_error` and `stale_metadata` are matched with search against the package manager's
     output (FR-012, ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before
-    (ADR-011).
+    (ADR-011). `check_fatal_warnings` are matched with search against each stderr line of the
+    check-updates query, and a match makes the check fail closed (ADR-011). It is empty when the
+    data omits the key.
     """
 
     id: str
@@ -181,13 +190,16 @@ class DistroDef:
     integration: Integration
     verbs: Mapping[Verb, tuple[str, ...]]
     check_steps: tuple[tuple[str, ...], ...]
+    check_fatal_warnings: tuple[re.Pattern[str], ...] = ()
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
 
-        Raises GINN-E-USAGE when the verb takes packages and none are given, when packages are
-        given to a verb that takes none, and when the data does not define the verb (remove-check
-        on a distribution without it). Every package name must fullmatch `name_pattern` (DR-003),
+        Raises GINN-E-USAGE when the verb takes packages and none are given, and when packages are
+        given to a verb that takes none. Raises GINN-E-INTERNAL when the data does not define the
+        verb. Only remove-check can be missing, on a distribution without it, and callers check
+        `has_remove_check` first, so this is a ginn bug. Every package name must fullmatch
+        `name_pattern` (DR-003),
         or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
         a leading `-`, so a name that passes can never be read as an option. domain.packages checks
         AS-027 first; this check is the second line of defence. check-updates is not one argv, so
@@ -201,7 +213,9 @@ class DistroDef:
             )
         template = self.verbs.get(verb)
         if template is None:
-            raise make("GINN-E-USAGE", detail=f"verb {verb.value} is not defined for {self.id}")
+            err = make("GINN-E-INTERNAL")
+            err.details["detail"] = f"verb {verb.value} is not defined for {self.id}"
+            raise err
         takes_packages = PACKAGES_ELEMENT in template
         if takes_packages and not packages:
             raise make("GINN-E-USAGE", detail=f"verb {verb.value} needs at least one package")
@@ -289,20 +303,30 @@ _WARNING_PREFIX: Final = "warning:"
 
 
 def arch_check_status(
-    sync_exit: int, query_exit: int, query_stdout: str, query_stderr: str
+    sync_exit: int,
+    query_exit: int,
+    query_stdout: str,
+    query_stderr: str,
+    fatal_warnings: Sequence[re.Pattern[str]],
 ) -> UpdateStatus:
     """Return what the Arch check-updates steps found, from their results (FR-024, ADR-011).
 
     The caller runs step 3 (the scratch sync) and step 4 (the query), then passes their exit
-    statuses and output here. Nothing is run. The statuses are observed, not documented, so any
-    result that matches no rule below is an error, never "no updates":
+    statuses and output here, with `DistroDef.check_fatal_warnings` from the Arch data. Nothing is
+    run. The statuses are observed, not documented, so any result that matches no rule below is an
+    error, never "no updates":
     - step 3 exits 0, or the result is an error;
+    - a stderr line of step 4 matches a fatal-warning pattern: error, whatever step 4 exited with.
+      A missing sync database means a repository was not compared, so an empty result proves
+      nothing;
     - step 4 exits 0 with a package on stdout: updates. Blank stdout is an error;
     - step 4 exits 1, stdout is blank, and every non-blank stderr line starts with `warning:`:
       no updates. Empty stderr also counts;
     - anything else is an error.
     """
     if sync_exit != 0:
+        return UpdateStatus.ERROR
+    if _has_fatal_line(fatal_warnings, query_stderr):
         return UpdateStatus.ERROR
     if query_exit == 0:
         return UpdateStatus.UPDATES if query_stdout.strip() else UpdateStatus.ERROR
@@ -314,6 +338,11 @@ def arch_check_status(
 def _only_warnings(stderr: str) -> bool:
     """True when every non-blank line of `stderr` starts with `warning:`."""
     return all(line.startswith(_WARNING_PREFIX) for line in stderr.splitlines() if line.strip())
+
+
+def _has_fatal_line(patterns: Sequence[re.Pattern[str]], stderr: str) -> bool:
+    """True when any pattern matches any line of `stderr`."""
+    return any(pattern.search(line) for line in stderr.splitlines() for pattern in patterns)
 
 
 _CACHE: dict[tuple[str, str], DistroDef] = {}
@@ -420,7 +449,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     The first broken rule raises GINN-E-DISTRO-DATA. Its details carry `file`, `field` and `rule`.
     """
     reader = _Reader(source)
-    _only_keys(reader, raw, _TOP_KEYS, "top level")
+    _only_keys(reader, raw, _TOP_KEYS, "top level", _OPTIONAL_TOP_KEYS)
     if type(raw["schema"]) is not int or raw["schema"] != SCHEMA:
         raise reader.fail("schema", f"must be the integer {SCHEMA}")
     distro_id = reader.text(raw["id"], "id")
@@ -433,6 +462,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     name_pattern = reader.regex(raw["package_name_regex"], "package_name_regex")
     signature_error = reader.regex(raw["signature_error_regex"], "signature_error_regex")
     stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
+    fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs, check_steps = _verbs(reader, raw["verbs"])
@@ -448,7 +478,16 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         integration=integration,
         verbs=MappingProxyType(verbs),
         check_steps=check_steps,
+        check_fatal_warnings=fatal_warnings,
     )
+
+
+def _fatal_warnings(reader: "_Reader", value: object) -> tuple[re.Pattern[str], ...]:
+    """Compile the optional fatal-warning patterns: a list of regular expressions, maybe empty."""
+    field = "check_fatal_warning_regex"
+    if not isinstance(value, list):
+        raise reader.fail(field, "must be a list of regular expressions")
+    return tuple(reader.regex(item, field) for item in value)
 
 
 def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:

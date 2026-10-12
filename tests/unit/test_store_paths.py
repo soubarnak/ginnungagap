@@ -297,7 +297,7 @@ def test_only_ginn_desktop_entries_in_applications_are_owned(tmp_path: Path) -> 
 
 
 @pytest.mark.fr("DR-010")
-@pytest.mark.fr("DR-021")
+@pytest.mark.fr("FR-025")
 def test_ensure_creates_every_owned_directory_with_mode_0700(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     paths.ensure()
@@ -305,11 +305,39 @@ def test_ensure_creates_every_owned_directory_with_mode_0700(tmp_path: Path) -> 
         assert directory.is_dir(), directory
         assert directory.stat().st_mode & 0o777 == 0o700, directory
     assert paths.podman_tmpdir in paths.owned_directories()
+    # The runtime directory is Host Setup's, not ensure()'s (see the two tests below).
+    assert paths.runtime not in paths.owned_directories()
 
     # A second run changes nothing and reports nothing.
     reports: list[str] = []
     paths.ensure(on_tighten=reports.append)
     assert reports == []
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("FR-025")
+def test_ensure_leaves_the_runtime_directory_mode_alone(tmp_path: Path) -> None:
+    # Owner and mode of the runtime directory are checked by check_runtime_dir. ensure() neither
+    # tightens it nor reports it.
+    paths = _paths(tmp_path)
+    paths.runtime.chmod(0o755)
+    reports: list[str] = []
+    paths.ensure(on_tighten=reports.append)
+    assert _mode(paths.runtime) == 0o755
+    assert reports == []
+
+
+@pytest.mark.fr("DR-010")
+def test_ensure_refuses_a_missing_runtime_directory_and_creates_nothing(tmp_path: Path) -> None:
+    # Creating a child would also create the runtime directory, with the default mode. It must not.
+    paths = _paths(tmp_path)
+    paths.runtime.rmdir()
+    with pytest.raises(GinnError) as excinfo:
+        paths.ensure()
+    assert excinfo.value.code == "GINN-E-HOST-NOT-SET-UP"
+    assert excinfo.value.details == {"path": str(paths.runtime)}
+    assert not paths.runtime.exists()
+    assert not paths.data.exists()
 
 
 @pytest.mark.fr("CR-006")
@@ -324,7 +352,7 @@ def test_image_tmp_is_an_owned_directory_on_disk_under_data(tmp_path: Path) -> N
     assert _mode(paths.image_tmp) == 0o700
 
 
-@pytest.mark.fr("DR-021")
+@pytest.mark.fr("FR-025")
 def test_ensure_tightens_open_directories_and_reports_each_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

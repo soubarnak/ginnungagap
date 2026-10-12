@@ -13,9 +13,12 @@ Limit files such as memory.max stay root-owned, so the user cannot raise its own
 
 NOTE: there is deliberately no leaf for `ginn start` or `podman start`. A session process cannot
 move itself into <root>/ginn/<uid>/...: cgroup v2 migration needs write access to cgroup.procs of
-the common ancestor, which is the cgroup root here, and that file is root-owned. So podman run and
-start for services-on realms must be routed through the supervisor, which already runs inside the
-delegated tree. That routing is to be designed in T3.4 and M7.
+the common ancestor, which is the cgroup root here, and that file is root-owned. The placement is
+made once, by the Host Setup run script (hostsetup/runit_system.py, step 3). As root, the script
+writes its own pid into <root>/ginn/<uid>/supervisor/cgroup.procs, then execs runsvdir, so every
+service that runsvdir starts is in the delegated subtree. A services-on realm is started only
+through the supervisor, with `--cgroup-parent /ginn/<uid>/<realm>` (ADR-003). `move_self_to` does
+the same write for a given leaf. Only tests call it today.
 
 All kernel I/O goes through `_read_text`, `_write_control` and `_make_dir`. Tests replace these to
 emulate cgroupfs, because cgroupfs semantics (accumulating `+ctrl` writes, auto-created

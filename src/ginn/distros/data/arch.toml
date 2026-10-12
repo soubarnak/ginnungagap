@@ -9,7 +9,8 @@
 # S-10b (spikes/results/S-10.md section 7): pacman 137 packages; ca-certificates present; en_US.UTF-8
 # absent, with its sources present under /usr/share/i18n. S-10b did not record the sync database or
 # /var/lib/pacman/local; M4 checks both in a fresh realm. Not verified on a host (M4): every verb, the
-# locale step, the check-updates steps and their exit statuses (ADR-011), the stale metadata text.
+# locale step, the check-updates steps and their exit statuses (ADR-011), the stale metadata text and
+# the missing-database warning text.
 schema = 1
 id = "arch"
 trust_key = "arch"
@@ -21,6 +22,13 @@ signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted
 # ADR-011: a sync database older than the mirror's packages fails the download with a 404. Runtime
 # text, not verified until M4. The remedy is `ginn update <realm>`, the one full upgrade.
 stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL returned error: 404'
+# ADR-011: a stderr line of the check-updates query that matches one of these makes the check fail
+# closed (error), whatever the exit status. Matched with search, one line at a time. Without a sync
+# database, pacman is expected to print `warning: database file for <repo> does not exist`. That
+# line would otherwise read as "no updates", because it starts with `warning:`. Caveat: the wording
+# is not in pacman(8), and it is not yet observed on a host. M4 confirms it in a realm. Add a
+# pattern here, not in Python, when another pacman warning means a repository was skipped.
+check_fatal_warning_regex = ['database file for .* does not exist']
 # ADR-011: no verb refreshes first. The sync database moves only with a full upgrade (`upgrade`),
 # because Arch does not support partial upgrades (Arch Wiki, System maintenance).
 refresh_before = []
@@ -62,7 +70,9 @@ upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
 # the sync step exits 0 on success. The query exits 0 with the upgradable packages on stdout. It
 # exits 1 with nothing on stdout, and with nothing or only `warning:` lines on stderr, when nothing
 # is upgradable. It exits 1 with another message on stderr when it cannot run. The caller applies
-# arch_check_status() in loader.py to these results. M4 confirms these in a realm.
+# arch_check_status() in loader.py to these results. A stderr line that matches
+# check_fatal_warning_regex is an error, whatever the exit status (ADR-011). M4 confirms these in a
+# realm.
 check-updates = [
     ["mkdir", "{tmpdir}"],
     ["ln", "-s", "-T", "/var/lib/pacman/local", "{tmpdir}/local"],
