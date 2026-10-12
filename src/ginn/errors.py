@@ -95,7 +95,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=77,
         summary="runtime directory {path} does not exist",
         remedy="run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user "
-        "<name>'; otherwise check 'sv status ginn-<user>'",
+        "<name>'; otherwise check 'sudo sv status ginn-<user>'",
         source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
@@ -104,7 +104,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
         summary="runtime directory {path} must be a real directory owned by uid {uid} with mode "
         "0700; found {found}",
         remedy="run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn "
-        "host-setup --user <name>'; otherwise check 'sv status ginn-<user>'",
+        "host-setup --user <name>'; otherwise check 'sudo sv status ginn-<user>'",
         source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

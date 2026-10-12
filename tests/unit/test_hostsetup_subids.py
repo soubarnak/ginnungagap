@@ -298,7 +298,8 @@ def test_a_lock_left_by_a_dead_process_is_reclaimed_without_waiting(tmp_path: Pa
     _age(lock, 60)
     change = ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
     assert change.changed is True
-    assert _names(path.parent) == ["subuid"]
+    # The reclaim gate is left in place by design; it is an empty, harmless file.
+    assert _names(path.parent) == ["subuid", "subuid.lock.reclaim"]
 
 
 @pytest.mark.fr("FR-001")
@@ -345,7 +346,7 @@ def test_a_waiter_that_judged_a_lock_stale_does_not_remove_its_successor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, successor: str
 ) -> None:
     # Two waiters judge the same crashed lock stale. The first reclaims it and a new holder takes
-    # the path. The second reaches its own unlink only after that, and must leave the new lock.
+    # the path. The second reaches the reclaim gate only after that, and must leave the new lock.
     # "dead-pid" writes the same bytes as the crashed lock, so only the inode and mtime differ.
     path = _subuid(tmp_path, SAMPLE)
     lock = _lock_path(path)
@@ -353,7 +354,7 @@ def test_a_waiter_that_judged_a_lock_stale_does_not_remove_its_successor(
     lock.write_text(f"{dead}\n")
     _age(lock, 60)
     fresh = f"{os.getpid()}\n" if successor == "live" else f"{dead}\n"
-    real_reclaim = subids._reclaim_if_unchanged
+    real_reclaim = subids._reclaim_stale
 
     def interleaved_reclaim(target: Path, seen: subids._LockIdentity) -> bool:
         staged = lock.with_name(f"{lock.name}.first")
@@ -361,10 +362,115 @@ def test_a_waiter_that_judged_a_lock_stale_does_not_remove_its_successor(
         os.replace(staged, lock)
         return real_reclaim(target, seen)
 
-    monkeypatch.setattr(subids, "_reclaim_if_unchanged", interleaved_reclaim)
+    monkeypatch.setattr(subids, "_reclaim_stale", interleaved_reclaim)
     with pytest.raises(SubIdLocked):
         ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
     assert lock.read_text() == fresh
+    assert path.read_bytes() == SAMPLE
+
+
+ROUNDS = 10
+
+
+@pytest.mark.fr("FR-001")
+def test_two_reclaimers_of_one_stale_lock_run_the_critical_section_one_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both waiters judged the same crashed lock stale. Each takes the reclaim gate before it
+    # re-reads, so the second one must see the first one's fresh lock and back off.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text(f"{_dead_pid()}\n")
+    _age(lock, 60)
+    judged = subids._read_lock(lock)
+    assert judged is not None
+    real_locked = subids._reclaim_locked
+    guard = threading.Lock()
+    inside = 0
+    peak = 0
+
+    def traced(target: Path, seen: subids._LockIdentity) -> bool:
+        nonlocal inside, peak
+        with guard:
+            inside += 1
+            peak = max(peak, inside)
+        # A pause long enough for an unserialised second reclaimer to enter the section.
+        time.sleep(0.05)
+        try:
+            return real_locked(target, seen)
+        finally:
+            with guard:
+                inside -= 1
+
+    monkeypatch.setattr(subids, "_reclaim_locked", traced)
+    barrier = threading.Barrier(2)
+    outcomes: list[bool] = []
+
+    def reclaim() -> None:
+        barrier.wait()
+        outcomes.append(subids._reclaim_stale(lock, judged))
+
+    threads = [threading.Thread(target=reclaim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert peak == 1
+    assert sorted(outcomes) == [False, True]
+    assert lock.read_text() == f"{os.getpid()}\n"
+    assert _mode(lock.with_name(f"{lock.name}.reclaim")) == 0o600
+
+
+@pytest.mark.fr("FR-001")
+def test_threads_entering_the_lock_over_a_stale_lock_never_overlap(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    dead = _dead_pid()
+    guard = threading.Lock()
+    occupancy = {"now": 0, "peak": 0}
+    failures: list[BaseException] = []
+
+    def contend(barrier: threading.Barrier) -> None:
+        try:
+            barrier.wait()
+            with subids._lock(path, 10.0):
+                with guard:
+                    occupancy["now"] += 1
+                    occupancy["peak"] = max(occupancy["peak"], occupancy["now"])
+                time.sleep(0.01)
+                with guard:
+                    occupancy["now"] -= 1
+        except BaseException as exc:
+            failures.append(exc)
+
+    for _ in range(ROUNDS):
+        lock.write_text(f"{dead}\n")
+        _age(lock, 60)
+        barrier = threading.Barrier(2)
+        threads = [threading.Thread(target=contend, args=(barrier,)) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+
+    assert failures == []
+    assert occupancy["peak"] == 1
+    assert not lock.exists()
+
+
+@pytest.mark.fr("FR-001")
+def test_a_symbolic_link_in_place_of_the_reclaim_gate_is_refused(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text(f"{_dead_pid()}\n")
+    _age(lock, 60)
+    elsewhere = tmp_path / "elsewhere"
+    lock.with_name(f"{lock.name}.reclaim").symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert not elsewhere.exists()
+    assert lock.exists()
     assert path.read_bytes() == SAMPLE
 
 

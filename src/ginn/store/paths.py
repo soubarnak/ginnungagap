@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,14 +71,17 @@ def fsync_dir(directory: Path) -> None:
 def write_bytes_atomic(path: Path, data: bytes) -> None:
     """Write `data` to `path`: temporary file, fsync, rename, directory fsync (DR-035).
 
-    The temporary file is `path.with_suffix(".tmp")` in the same directory, created with mode
-    0600. If the write or the rename fails, the temporary file is removed and the error is raised.
-    The old file at `path` is then unchanged.
+    The temporary file comes from mkstemp in the same directory, so its name is unique to this
+    call. Two writers never share one, and a stale file left by an earlier run is never opened.
+    The file is fchmod'ed to 0600 before the data goes in, so no mode from an earlier file carries
+    over. If any step fails, the temporary file is removed and the error is raised. The old file
+    at `path` is then unchanged.
     """
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, OWNED_FILE_MODE)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(name)
     try:
         try:
+            os.fchmod(fd, OWNED_FILE_MODE)
             _write_all(fd, data)
             os.fsync(fd)
         finally:

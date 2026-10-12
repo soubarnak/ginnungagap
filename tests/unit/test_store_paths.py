@@ -7,13 +7,15 @@ are exercised by passing a different uid, or by changing the directory's mode.
 
 import os
 import stat
+import threading
 import tomllib
 from pathlib import Path
 
 import pytest
 
 from ginn.errors import GinnError
-from ginn.store.paths import OwnedPaths
+from ginn.store import paths as store_paths
+from ginn.store.paths import OwnedPaths, write_bytes_atomic
 
 UID = os.getuid()
 
@@ -427,3 +429,74 @@ def test_ensure_config_refuses_a_symbolic_link_in_place_of_a_config_file(tmp_pat
     with pytest.raises(OSError, match="symbolic link"):
         paths.ensure_config()
     assert outside.read_text(encoding="utf-8") == "keep me"
+
+
+ROUNDS = 20
+
+
+def _names(directory: Path) -> list[str]:
+    return sorted(entry.name for entry in directory.iterdir())
+
+
+@pytest.mark.fr("DR-035")
+def test_a_stale_temporary_file_neither_changes_the_mode_nor_is_used(tmp_path: Path) -> None:
+    # The fixed name the old writer used, with the mode a stale 0644 file would keep.
+    target = tmp_path / "containers.conf"
+    stale = tmp_path / "containers.tmp"
+    stale.write_bytes(b"stale")
+    stale.chmod(0o644)
+
+    write_bytes_atomic(target, b"fresh\n")
+
+    assert target.read_bytes() == b"fresh\n"
+    assert _mode(target) == 0o600
+    assert stale.read_bytes() == b"stale"
+    assert _mode(stale) == 0o644
+
+
+@pytest.mark.fr("DR-035")
+def test_two_concurrent_writers_never_leave_an_empty_or_mixed_file(tmp_path: Path) -> None:
+    target = tmp_path / "realm.json"
+    payloads = [b"A" * 65_536, b"B" * 65_536]
+    write_bytes_atomic(target, payloads[0])
+    barrier = threading.Barrier(len(payloads))
+    failures: list[BaseException] = []
+
+    def writer(data: bytes) -> None:
+        try:
+            barrier.wait()
+            for _ in range(ROUNDS):
+                write_bytes_atomic(target, data)
+                # Each replace is atomic, so a reader sees one whole payload, never a mix or empty.
+                assert target.read_bytes() in payloads
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(data,)) for data in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(60)
+
+    assert failures == []
+    assert target.read_bytes() in payloads
+    assert _mode(target) == 0o600
+    assert _names(tmp_path) == ["realm.json"]
+
+
+@pytest.mark.fr("DR-035")
+def test_a_failed_rename_removes_the_temporary_file_and_keeps_the_old_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "containers.conf"
+    target.write_bytes(b"old\n")
+
+    def refuse(source: str, destination: str) -> None:
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(store_paths.os, "replace", refuse)
+    with pytest.raises(OSError, match="rename refused"):
+        write_bytes_atomic(target, b"new\n")
+
+    assert target.read_bytes() == b"old\n"
+    assert _names(tmp_path) == ["containers.conf"]

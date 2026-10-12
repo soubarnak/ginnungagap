@@ -13,6 +13,7 @@ a settings file and then runs the shim. The tests change the settings with `use_
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from collections.abc import Callable
@@ -58,6 +59,15 @@ LEAKED_ENV = {
     "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
     "GINN_UNRELATED_SECRET": "not-for-podman",
 }
+# Proxy variables pass through, so a pull behind a proxy still reaches the registry (CR-006).
+PROXY_ENV = {
+    "HTTP_PROXY": "http://proxy.example:3128",
+    "HTTPS_PROXY": "http://proxy.example:3128",
+    "NO_PROXY": "localhost,127.0.0.1",
+    "http_proxy": "http://proxy.example:3128",
+    "https_proxy": "http://proxy.example:3128",
+    "no_proxy": "localhost,127.0.0.1",
+}
 # Parent variables that pass through. PATH stays as it is: subprocess finds `podman` with it.
 PASSED_ENV = {
     "HOME": "/home/tester",
@@ -66,6 +76,7 @@ PASSED_ENV = {
     "LOGNAME": "tester",
     "LANG": "en_GB.UTF-8",
     "LC_ALL": "en_GB.UTF-8",
+    **PROXY_ENV,
 }
 PINNED_ENV = {"XDG_RUNTIME_DIR", "CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF", "TMPDIR"}
 SETTINGS_ENV = "GINN_FAKE_PODMAN_SETTINGS"
@@ -160,10 +171,28 @@ def host_paths(tmp_path: Path) -> OwnedPaths:
 
 
 def configured_paths(tmp_path: Path) -> OwnedPaths:
-    """Owned Paths with ginn's containers.conf and storage.conf written, as a command does."""
+    """Owned Paths with the owned directories and ginn's config files in place."""
     paths = host_paths(tmp_path)
+    paths.ensure()
     paths.ensure_config()
     return paths
+
+
+def explicit_cli(paths: OwnedPaths) -> PodmanCli:
+    """The explicit constructor. It has no Owned Paths, so it never writes ginn's config files."""
+    return PodmanCli(
+        paths.podman_root,
+        paths.podman_runroot,
+        tmpdir=paths.podman_tmpdir,
+        image_tmp=paths.image_tmp,
+        containers_conf=paths.podman_containers_conf,
+        storage_conf=paths.podman_storage_conf,
+        runtime_root=paths.runtime,
+    )
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
 
 
 def make_cli(tmp_path: Path, verbose: Verbose | None = None) -> PodmanCli:
@@ -360,16 +389,92 @@ def test_image_downloads_use_the_owned_image_tmp_on_disk(
 @pytest.mark.fr("DR-010")
 @pytest.mark.fr("NFR-040")
 @pytest.mark.parametrize("config", ["containers.conf", "storage.conf"])
-def test_a_missing_ginn_config_file_refuses_the_call_before_podman_runs(
+def test_the_explicit_constructor_refuses_a_missing_config_file_before_podman_runs(
     shim: Path, tmp_path: Path, config: str
 ) -> None:
     paths = configured_paths(tmp_path)
-    cli = PodmanCli.from_paths(paths)
+    cli = explicit_cli(paths)
     missing = paths.config / config
     missing.unlink()
     err = expect_error(cli.info)
     assert err.code == "GINN-E-INTERNAL"
     assert str(missing) in str(err.details["detail"])
+    assert cli.history == []
+    assert logged(shim) == []
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("NFR-040")
+def test_from_paths_writes_missing_config_files_before_each_call(
+    shim: Path, tmp_path: Path
+) -> None:
+    paths = host_paths(tmp_path)
+    paths.ensure()
+    assert not paths.podman_containers_conf.exists()
+    assert not paths.podman_storage_conf.exists()
+    cli = PodmanCli.from_paths(paths)
+    cli.info()
+    assert _mode(paths.podman_containers_conf) == 0o600
+    assert _mode(paths.podman_storage_conf) == 0o600
+    # A file removed later is written again before the next call, and the call succeeds.
+    paths.podman_storage_conf.unlink()
+    cli.info()
+    assert paths.podman_storage_conf.exists()
+    assert len(logged(shim)) == 2
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("CR-006")
+def test_from_paths_refuses_a_symbolic_link_in_place_of_a_config_file_and_writes_nothing(
+    shim: Path, tmp_path: Path
+) -> None:
+    paths = host_paths(tmp_path)
+    paths.ensure()
+    outside = tmp_path / "outside.conf"
+    paths.podman_containers_conf.parent.mkdir(parents=True, exist_ok=True)
+    paths.podman_containers_conf.symlink_to(outside)
+    cli = PodmanCli.from_paths(paths)
+    err = expect_error(cli.info)
+    assert err.code == "GINN-E-INTERNAL"
+    assert "symbolic link" in str(err.details["detail"])
+    assert cli.history == []
+    assert logged(shim) == []
+    assert not outside.exists()
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("CR-006")
+@pytest.mark.parametrize(
+    "damage",
+    ["config-symlink", "config-directory", "tmpdir-missing", "tmpdir-symlink", "tmpdir-file"],
+)
+def test_a_config_file_or_tmpdir_that_is_not_a_plain_path_refuses_the_call(
+    shim: Path, tmp_path: Path, damage: str
+) -> None:
+    paths = configured_paths(tmp_path)
+    cli = explicit_cli(paths)
+    if damage == "config-symlink":
+        target = paths.podman_containers_conf
+        copy = tmp_path / "copy.conf"
+        copy.write_bytes(target.read_bytes())
+        target.unlink()
+        target.symlink_to(copy)
+    elif damage == "config-directory":
+        target = paths.podman_containers_conf
+        target.unlink()
+        target.mkdir()
+    else:
+        target = paths.image_tmp
+        target.rmdir()
+        if damage == "tmpdir-symlink":
+            real = tmp_path / "real-tmp"
+            real.mkdir()
+            target.symlink_to(real)
+        elif damage == "tmpdir-file":
+            target.write_text("not a directory", encoding="utf-8")
+    err = expect_error(cli.info)
+    assert err.code == "GINN-E-INTERNAL"
+    assert str(target) in str(err.details["detail"])
     assert cli.history == []
     assert logged(shim) == []
 
@@ -389,6 +494,7 @@ def test_session_and_supervisor_podman_both_see_the_one_runtime_root(
     for parent_xdg in (str(runtime), "/run/user/1000"):
         env = {"HOME": home, "XDG_RUNTIME_DIR": parent_xdg}
         paths = OwnedPaths.from_env(env, system_run=system_run)
+        paths.ensure()
         paths.ensure_config()
         PodmanCli.from_paths(paths).info()
     assert [env["XDG_RUNTIME_DIR"] for env in seen if env is not None] == [

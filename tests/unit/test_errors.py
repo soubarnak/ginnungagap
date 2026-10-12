@@ -195,7 +195,7 @@ def test_host_not_set_up_names_doctor_then_host_setup_then_the_supervisor() -> N
     assert err.message == "runtime directory /run/ginn/1000 does not exist"
     assert err.remedy.startswith("run 'ginn doctor'; if Host Setup has not run")
     assert "sudo ginn host-setup --user <name>" in err.remedy
-    assert "sv status ginn-<user>" in err.remedy
+    assert "sudo sv status ginn-<user>" in err.remedy
     assert "\n" not in err.remedy
 
 

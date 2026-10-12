@@ -7,11 +7,14 @@ file are never rewritten. A user who already holds at least `size` IDs in total 
 which makes a second run a no-op (FR-002). The read-modify-replace runs under `<name>.lock` next to
 the file (etc/subuid.lock, etc/subgid.lock), so two Host Setup runs cannot both append (FR-001).
 The lock file holds its holder's PID. A lock whose PID is gone and whose file is old enough is
-left behind by a crash, so it is reclaimed instead of blocking every later run.
+left behind by a crash, so it is reclaimed instead of blocking every later run. Reclaiming runs
+under `<name>.lock.reclaim`, a sidecar file held with flock, so two waiters cannot both unlink the
+same stale lock (see `_reclaim_stale`).
 """
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import stat
@@ -210,35 +213,42 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
     holds the creator's PID. A second caller retries every LOCK_POLL_SECONDS until `timeout`,
     then raises SubIdLocked and leaves the other holder's file in place. An empty or unreadable
     lock counts as held, because it may be a creator that has not written its PID yet. A stale
-    lock (see `_is_stale`) is reclaimed through `_reclaim_if_unchanged`, at most once per call,
-    and the caller tries again. The file this call created is removed on exit, including when
-    the body raises.
+    lock (see `_is_stale`) is reclaimed at most once per call, through `_reclaim_stale`. When that
+    call creates the new lock itself, this caller holds it at once. The file this call created is
+    removed on exit, including when the body raises.
     """
     lock = path.with_name(f"{path.name}.lock")
     deadline = time.monotonic() + timeout
-    reclaimed = False
+    tried_reclaim = False
     while True:
-        try:
-            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            seen = _read_lock(lock)
-            if seen is not None and not reclaimed and _is_stale(seen):
-                reclaimed = _reclaim_if_unchanged(lock, seen)
-                if reclaimed:
-                    continue
-            if time.monotonic() >= deadline:
-                pid = None if seen is None else seen.pid
-                holder = f" (pid {pid})" if pid is not None else ""
-                raise SubIdLocked(f"{lock} is held by another process{holder}") from None
-            time.sleep(LOCK_POLL_SECONDS)
+        if _create_lock(lock):
+            break
+        seen = _read_lock(lock)
+        if seen is not None and not tried_reclaim and _is_stale(seen):
+            tried_reclaim = True
+            if _reclaim_stale(lock, seen):
+                break
             continue
-        break
+        if time.monotonic() >= deadline:
+            pid = None if seen is None else seen.pid
+            holder = f" (pid {pid})" if pid is not None else ""
+            raise SubIdLocked(f"{lock} is held by another process{holder}")
+        time.sleep(LOCK_POLL_SECONDS)
     try:
-        with os.fdopen(fd, "w", encoding="ascii") as handle:
-            handle.write(f"{os.getpid()}\n")
         yield
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _create_lock(lock: Path) -> bool:
+    """Create `lock` exclusively, write this process's PID into it. False if it already exists."""
+    try:
+        fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="ascii") as handle:
+        handle.write(f"{os.getpid()}\n")
+    return True
 
 
 def _read_lock(lock: Path) -> _LockIdentity | None:
@@ -286,26 +296,47 @@ def _is_stale(seen: _LockIdentity) -> bool:
     return False
 
 
-def _reclaim_if_unchanged(lock: Path, seen: _LockIdentity) -> bool:
-    """Unlink `lock` only if it is still the file `seen` describes. Return True when unlinked.
+def _reclaim_stale(lock: Path, seen: _LockIdentity) -> bool:
+    """Reclaim the stale lock that `seen` describes. Return True when this call now holds the lock.
 
-    `seen` was judged stale earlier. Another waiter may have reclaimed the lock since, and a new
-    holder may own the path now, so the lock is read again and every field of the identity
-    (device, inode, mtime_ns and PID) must match before the unlink. Two gaps remain. They are
-    accepted rather than closed:
+    The race this closes: two waiters judge the same crashed lock stale. Without a gate, the
+    first one re-reads it, unlinks it and creates its own lock. The second one had re-read the
+    crashed lock before that, so it still unlinks, and removes the first one's fresh lock. Two
+    callers then hold the lock at once.
 
-    - PID reuse: once the recorded holder has died, an unrelated process may take its PID, and
-      the stale lock then looks held. The caller waits and times out, which is the safe side.
-    - POSIX has no compare-and-unlink, so the re-read and the unlink are separate system calls.
-      A reclaimer can remove a newer lock only if, inside that gap, the dead PID has been reused,
-      the inode has been reused and mtime_ns matches. Closing that fully needs an atomic
-      rename-and-verify scheme, which is more machinery than a one-time host setup needs.
+    Every reclaimer therefore takes the gate, `<lock>.reclaim`, with flock(LOCK_EX) before it
+    re-reads the lock. The sidecar is opened with O_NOFOLLOW, so a symbolic link in its place is
+    refused. The gate is not removed after use: an empty file is harmless, and removing it would
+    reopen the race. See `_reclaim_locked` for what runs under the gate.
+    """
+    gate_path = lock.with_name(f"{lock.name}.reclaim")
+    gate = os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        return _reclaim_locked(lock, seen)
+    finally:
+        os.close(gate)
+
+
+def _reclaim_locked(lock: Path, seen: _LockIdentity) -> bool:
+    """Runs under the reclaim gate. Unlink `lock` if it is still `seen`, then create a new one.
+
+    The re-read compares every field of the identity: device, inode, mtime_ns and PID. If any of
+    them differs, another caller reclaimed or replaced the lock after `seen` was taken, so it is
+    left alone and this call returns False. Otherwise the stale lock is unlinked and this call
+    creates the new lock while it still holds the gate. Other reclaimers cannot touch that lock,
+    because they must take the gate first. A caller that is not reclaiming can still win the
+    O_EXCL race for the path. Then this call returns False and leaves that lock alone.
+
+    One gap remains, and it is accepted: PID reuse. After the holder dies, an unrelated process
+    may take its PID, and the stale lock then looks held. The caller waits and times out, which is
+    the safe side.
     """
     now = _read_lock(lock)
     if now is None or now != seen:
         return False
     lock.unlink(missing_ok=True)
-    return True
+    return _create_lock(lock)
 
 
 def _append_line(before: bytes, line: bytes) -> bytes:
