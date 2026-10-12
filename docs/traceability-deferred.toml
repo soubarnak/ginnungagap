@@ -33,7 +33,7 @@ reason = "the fingerprint, baseline, pending change, acknowledgement and ginn in
 id = "FR-007"
 milestone = "M3"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
+reason = "every doctor check with its PASS and FAIL cases, the text and JSON report and the exit codes are unit-tested under a fake host (T3.6, T3.7); AC-1 and AC-2 need ginn doctor run as the user on a Void host, at the M3 gate; the readiness wording of AC-1 is CL-13"
 
 [[deferred]]
 id = "FR-010"
@@ -200,7 +200,8 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 [[deferred]]
 id = "FR-069"
 milestone = "M6"
-reason = "not covered yet; the roadmap assigns its test to M6"
+partial = true
+reason = "AC-2 (NVIDIA on musl is informational) is unit-tested through the doctor check (T3.6); AC-1 needs an NVIDIA glibc host and runs in M6"
 
 [[deferred]]
 id = "FR-080"
@@ -357,7 +358,8 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 [[deferred]]
 id = "NFR-041"
 milestone = "M3"
-reason = "not covered yet; the roadmap assigns its test to M3"
+partial = true
+reason = "DEP-1 (podman and its helpers: crun, conmon, newuidmap, newgidmap, and pasta or slirp4netns), DEP-2 (cgroup v2, user namespaces, overlay or FUSE), DEP-6 (runit supervision) and each Host Setup item have checks, and every FAIL names a fix (unit-tested, T3.6, T3.7). DEP-4 and DEP-5 (network) are outside doctor's scope. DEP-3 is covered only by the elogind config check (ADR-004). The checklist audit against a real Void host runs at the M3 gate"
 
 [[deferred]]
 id = "NFR-043"

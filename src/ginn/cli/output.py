@@ -4,7 +4,9 @@
 Stream contract:
 - stdout carries the result only. In text mode it is the rendered text. In JSON mode it is one
   JSON object. On failure stdout is empty. `--help` and `--version` are exempt: argparse writes
-  their text to stdout even in JSON mode (IR-010). Output does not render them.
+  their text to stdout even in JSON mode (IR-010). Output does not render them. `ginn doctor` is
+  the one exception to "stdout is empty on failure": it prints its report and then fails with
+  GINN-E-DOCTOR-FAILED, because FR-007 AC-1 needs the fix command in the output.
 - stderr in text mode: a failure or warning is `CODE: message` then `  fix: remedy`; verbose
   lines are plain text.
 - stderr in JSON mode: every line is one JSON object. Verbose lines are `{"verbose": "..."}`.

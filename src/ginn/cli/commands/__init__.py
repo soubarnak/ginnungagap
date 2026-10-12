@@ -42,7 +42,7 @@ class CommandSpec(NamedTuple):
     run: RunHook
 
 
-COMMAND_MODULES: tuple[str, ...] = ("host_setup", "integrity")
+COMMAND_MODULES: tuple[str, ...] = ("host_setup", "integrity", "doctor")
 
 
 def _load_spec(short_name: str) -> CommandSpec:

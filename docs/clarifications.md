@@ -17,6 +17,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
 | CL-10 | Create-time mitigations for services-on realms | CR-007, FR-013, NFR-003, FR-080 | open, for SRS v1.1 (needed only if S-05s fails) |
 | CL-11 | Host Setup undo when a path is shared, or its state is gone | FR-003 | open, for SRS v1.1; the plan proceeds under the proposed wording |
+| CL-13 | Doctor readiness: "all checks passing" and the disk thresholds | FR-001, FR-007 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -108,3 +109,12 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - How ginn works now: ADR-013 Decision 15 reverses setup's change instead of writing bytes back. Subid lines are removed by exact match (i). Root controllers are disabled only for the last record, and only in the same boot (ii). Shared directories are removed only when their pre-image is absent and they are empty (iii). Undo prints each path it leaves, and why. The register does not claim that AC-1 holds as written.
 - Evidence: ADR-013 Decisions 6, 15 and 17. The shared record followed the eighth review (MJ1), which showed that per-user records lost shared pre-images when users were undone out of order. The cases above follow from the same rules. No undo has run on a host yet.
 - Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds on the assumption that the proposed wording is accepted, and T3.5 is built to it.
+
+## CL-13: doctor readiness: "all checks passing" and the disk thresholds
+
+- Requirement IDs: FR-001 (AC-1), FR-007 (AC-2).
+- Issue: FR-001 AC-1 says that `ginn doctor`, run as the user after Host Setup, "reports all checks passing". FR-007 AC-2 says that every check reports PASS on a fully configured host. Some healthy states cannot report PASS without a change ginn should not make: the podman config that ginn writes at its first podman call is absent on a host where no realm exists yet (doctor writes nothing, so it cannot write the config), and a root that does not enable a cgroup controller is tolerated by ADR-013 Decision 14. Some thresholds that doctor uses have no SRS number: free disk under 2 GiB fails the check, and under 10 GiB warns.
+- Proposed wording: "FR-001 AC-1: 'all checks passing' means that no doctor check reports FAIL; WARN and INFO results are allowed." The disk thresholds of 2 GiB (FAIL) and 10 GiB (WARN) are stated as ginn-defined values, and the SRS does not set them.
+- How ginn works now: `ginn doctor` exits 1 only when a check reports FAIL (GINN-E-DOCTOR-FAILED). WARN and INFO exit 0 and are printed with their reason. A fully configured host reports PASS on every check, and a test pins that (`tests/unit/test_doctor_checks.py`). The 2 GiB and 10 GiB values are named as ginn-defined in `src/ginn/doctor/checks.py`.
+- Evidence: unit tests under a fake host (T3.6, T3.7). The real-host run at the M3 gate has not happened yet, so AC-1 and AC-2 are unproven on a Void host.
+- Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds under the proposed wording, and T3.6 and T3.7 are built to it.
