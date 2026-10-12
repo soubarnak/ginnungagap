@@ -151,6 +151,30 @@ id = "FR-001"
 reason = "planned"
 """
 
+DEFERRED_FR001_PARTIAL = """\
+[[deferred]]
+id = "FR-001"
+milestone = "M3"
+partial = true
+reason = "unit tests run; the host run is deferred"
+"""
+
+DEFERRED_FR001_NOT_PARTIAL = """\
+[[deferred]]
+id = "FR-001"
+milestone = "M3"
+partial = false
+reason = "planned"
+"""
+
+DEFERRED_PARTIAL_NOT_BOOLEAN = """\
+[[deferred]]
+id = "FR-001"
+milestone = "M3"
+partial = "yes"
+reason = "planned"
+"""
+
 
 SKIPPED_AND_XFAIL = """\
 import sys
@@ -413,6 +437,43 @@ def test_check_fails_when_a_deferred_id_gains_a_test(tmp_path: Path) -> None:
     result = _run(root, "--check")
     assert result.returncode == 1
     assert "FR-001 has tests but is still deferred for M3" in result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_partial_deferred_entry_may_keep_its_tests(tmp_path: Path) -> None:
+    root = _tree(tmp_path, COVERED, deferred=DEFERRED_FR001_PARTIAL)
+    assert _run(root, "--write").returncode == 0
+    result = _run(root, "--check")
+    assert result.returncode == 0, result.stderr
+    assert "traceability: ok" in result.stdout
+    assert "(partial: 1)" in result.stdout
+    rendered = (root / "docs" / "traceability.md").read_text(encoding="utf-8")
+    assert "| FR-001 | First | Must | `tests/unit/test_mini.py` (1) | partial (M3) |" in rendered
+
+
+@pytest.mark.fr("NFR-061")
+def test_non_partial_deferred_entry_with_tests_fails_even_when_explicit(tmp_path: Path) -> None:
+    root = _tree(tmp_path, COVERED, deferred=DEFERRED_FR001_NOT_PARTIAL)
+    assert _run(root, "--write").returncode == 0
+    result = _run(root, "--check")
+    assert result.returncode == 1
+    assert "FR-001 has tests but is still deferred for M3" in result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_partial_entry_without_a_test_fails(tmp_path: Path) -> None:
+    root = _tree(tmp_path, NFR_ONLY, deferred=DEFERRED_FR001_PARTIAL)
+    result = _run(root, "--check")
+    assert result.returncode == 1
+    assert "FR-001 is marked partial but has no test" in result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_partial_must_be_true_or_false(tmp_path: Path) -> None:
+    root = _tree(tmp_path, COVERED, deferred=DEFERRED_PARTIAL_NOT_BOOLEAN)
+    result = _run(root, "--check")
+    assert result.returncode == 1
+    assert "partial must be true or false" in result.stderr
 
 
 @pytest.mark.fr("NFR-061")

@@ -28,10 +28,16 @@ Modes:
   --write (default)  render docs/traceability.md
   --check            exit 1 on: a marker ID outside the ID families or not defined by the SRS;
                      a test with no fr marker; a Must FR or NFR with no counted test and no entry
-                     in docs/traceability-deferred.toml; a deferred entry that has a counted test,
-                     lacks a milestone or names an ID that is not a Must FR or NFR; a
-                     docs/traceability.md that is not the current render
+                     in docs/traceability-deferred.toml; a deferred entry that has a counted test
+                     unless it sets `partial = true`; a `partial = true` entry with no counted
+                     test; a deferred entry that lacks a milestone, has a non-boolean `partial`,
+                     or names an ID that is not a Must FR or NFR; a docs/traceability.md that is
+                     not the current render
   --root DIR         repository root (default: the parent of tools/)
+
+A deferred entry with `partial = true` is an ID whose unit-level tests can run (their markers
+count) while its host-only or end-to-end acceptance proof is still deferred. Its status in
+docs/traceability.md is `partial (Mx)`, and it is also counted in the deferred total.
 
 Run as `python3 -I tools/traceability.py`. Standard library only.
 """
@@ -75,11 +81,28 @@ class Requirement(NamedTuple):
     priority: str | None
 
 
+class Deferral(NamedTuple):
+    """A deferred entry: the milestone that owns the proof, and whether some tests already exist."""
+
+    milestone: str
+    partial: bool
+
+
 class Model(NamedTuple):
     reqs: dict[str, Requirement]
     markers: dict[str, list[str]]
-    deferred: dict[str, str]
+    deferred: dict[str, Deferral]
     unmarked: list[str]
+
+
+class Counts(NamedTuple):
+    """Must FR and NFR by status. `deferred` includes `partial`, which is a subset of it."""
+
+    total: int
+    covered: int
+    partial: int
+    deferred: int
+    missing: int
 
 
 class Scan(NamedTuple):
@@ -395,13 +418,13 @@ def collect_markers(tests_dir: Path) -> dict[str, list[str]]:
 
 
 def _is_must(req: Requirement | None) -> bool:
-    return (
-        req is not None and req.priority == "Must" and req.id.startswith(TRACKED_PREFIXES)
-    )
+    return req is not None and req.priority == "Must" and req.id.startswith(TRACKED_PREFIXES)
 
 
-def load_deferred(path: Path, reqs: dict[str, Requirement]) -> tuple[dict[str, str], list[str]]:
-    """Return {requirement ID: milestone} from the deferred file, and its structural problems."""
+def load_deferred(
+    path: Path, reqs: dict[str, Requirement]
+) -> tuple[dict[str, Deferral], list[str]]:
+    """Return {requirement ID: Deferral} from the deferred file, and its structural problems."""
     if not path.exists():
         return {}, []
     data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -409,7 +432,7 @@ def load_deferred(path: Path, reqs: dict[str, Requirement]) -> tuple[dict[str, s
     if not isinstance(entries, list):
         return {}, [f"{DEFERRED_NAME}: 'deferred' must be a list of [[deferred]] tables"]
     errors: list[str] = []
-    deferred: dict[str, str] = {}
+    deferred: dict[str, Deferral] = {}
     for number, entry in enumerate(entries, start=1):
         label = f"{DEFERRED_NAME} entry {number}"
         if not isinstance(entry, dict):
@@ -417,15 +440,18 @@ def load_deferred(path: Path, reqs: dict[str, Requirement]) -> tuple[dict[str, s
             continue
         req_id = entry.get("id")
         milestone = entry.get("milestone")
+        partial = entry.get("partial", False)
         if not isinstance(req_id, str) or not _is_must(reqs.get(req_id)):
             errors.append(f"{label}: {req_id!r} is not a Must FR or NFR in {SRS_NAME}")
         if not isinstance(milestone, str) or MILESTONE.fullmatch(milestone) is None:
             errors.append(f"{label} ({req_id}): milestone is missing or not of the form M<n>")
+        if not isinstance(partial, bool):
+            errors.append(f"{label} ({req_id}): partial must be true or false")
         if not isinstance(req_id, str) or not isinstance(milestone, str):
             continue
         if req_id in deferred:
             errors.append(f"{label}: {req_id} is listed more than once")
-        deferred[req_id] = milestone
+        deferred[req_id] = Deferral(milestone, partial is True)
     return deferred, errors
 
 
@@ -442,20 +468,23 @@ def load(root: Path) -> tuple[Model, list[str]]:
 
 
 def _status(req_id: str, model: Model) -> str:
+    deferral = model.deferred.get(req_id)
     if model.markers.get(req_id):
+        if deferral is not None and deferral.partial:
+            return f"partial ({deferral.milestone})"
         return "covered"
-    milestone = model.deferred.get(req_id)
-    if milestone:
-        return f"deferred ({milestone})"
+    if deferral is not None:
+        return f"deferred ({deferral.milestone})"
     return "MISSING"
 
 
-def _counts(model: Model) -> tuple[int, int, int, int]:
-    """Return (Must total, covered, deferred, missing) over Must FR and NFR."""
+def _counts(model: Model) -> Counts:
+    """Return the Must FR and NFR totals by status."""
     statuses = [_status(r.id, model) for r in model.reqs.values() if _is_must(r)]
     covered = statuses.count("covered")
     missing = statuses.count("MISSING")
-    return len(statuses), covered, len(statuses) - covered - missing, missing
+    partial = sum(1 for status in statuses if status.startswith("partial"))
+    return Counts(len(statuses), covered, partial, len(statuses) - covered - missing, missing)
 
 
 def _tests_cell(items: list[str]) -> str:
@@ -467,7 +496,7 @@ def _tests_cell(items: list[str]) -> str:
 
 def render(model: Model) -> str:
     """Return the text of docs/traceability.md. Deterministic: no timestamps, sorted by ID."""
-    total, covered, deferred, missing = _counts(model)
+    counts = _counts(model)
     lines = [
         "<!-- Generated by tools/traceability.py --write. Do not edit by hand. -->",
         "",
@@ -477,12 +506,15 @@ def render(model: Model) -> str:
         "status (NFR-061, Appendix C).",
         "",
         "- `covered`: at least one test that can run carries the marker.",
+        "- `partial (Mx)`: such tests exist, but the acceptance proof that needs a host or an "
+        "end-to-end run is still deferred to Mx (`partial = true` in "
+        "`docs/traceability-deferred.toml`).",
         "- `deferred (Mx)`: no such test yet; `docs/traceability-deferred.toml` names the "
         "milestone.",
         "- `MISSING`: no such test and not deferred. Must items with this status fail `--check`.",
         "",
-        f"Must requirements: {total}. Covered: {covered}. Deferred: {deferred}. "
-        f"Missing: {missing}.",
+        f"Must requirements: {counts.total}. Covered: {counts.covered}. "
+        f"Deferred: {counts.deferred} (partial: {counts.partial}). Missing: {counts.missing}.",
         "",
         "| ID | Title | Priority | Tests | Status |",
         "|---|---|---|---|---|",
@@ -506,14 +538,21 @@ def check(root: Path) -> tuple[Model, list[str]]:
         if not _is_must(req):
             continue
         has_test = bool(model.markers.get(req.id))
-        milestone = model.deferred.get(req.id)
-        if has_test and milestone:
+        deferral = model.deferred.get(req.id)
+        if deferral is None:
+            if not has_test:
+                errors.append(f"{req.id} is Must but has no test and is not in {DEFERRED_NAME}")
+        elif has_test and not deferral.partial:
             errors.append(
-                f"{req.id} has tests but is still deferred for {milestone}: "
-                f"remove its entry from {DEFERRED_NAME}"
+                f"{req.id} has tests but is still deferred for {deferral.milestone}: "
+                f"remove its entry from {DEFERRED_NAME}, or set partial = true if only part of "
+                "its proof is deferred"
             )
-        elif not has_test and not milestone:
-            errors.append(f"{req.id} is Must but has no test and is not in {DEFERRED_NAME}")
+        elif deferral.partial and not has_test:
+            errors.append(
+                f"{req.id} is marked partial but has no test: "
+                f"remove partial = true from {DEFERRED_NAME}"
+            )
     for item in model.unmarked:
         errors.append(f"{item} has no fr marker: name the requirement it proves (AGENTS.md)")
     doc = root / DOC_NAME
@@ -542,10 +581,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"error: {error}", file=sys.stderr)
                 print(f"traceability: {len(errors)} problem(s)", file=sys.stderr)
                 return 1
-            total, covered, deferred, missing = _counts(model)
+            counts = _counts(model)
             print(
-                f"traceability: ok. Must: {total}, covered: {covered}, "
-                f"deferred: {deferred}, missing: {missing}"
+                f"traceability: ok. Must: {counts.total}, covered: {counts.covered}, "
+                f"deferred: {counts.deferred} (partial: {counts.partial}), "
+                f"missing: {counts.missing}"
             )
             return 0
         model, errors = load(args.root)

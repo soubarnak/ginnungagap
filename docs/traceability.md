@@ -5,22 +5,23 @@
 Every FR and NFR in `GINN-SRS-001-v1.0.md`, the tests whose `fr` marker names it, and its status (NFR-061, Appendix C).
 
 - `covered`: at least one test that can run carries the marker.
+- `partial (Mx)`: such tests exist, but the acceptance proof that needs a host or an end-to-end run is still deferred to Mx (`partial = true` in `docs/traceability-deferred.toml`).
 - `deferred (Mx)`: no such test yet; `docs/traceability-deferred.toml` names the milestone.
 - `MISSING`: no such test and not deferred. Must items with this status fail `--check`.
 
-Must requirements: 85. Covered: 4. Deferred: 81. Missing: 0.
+Must requirements: 85. Covered: 4. Deferred: 81 (partial: 15). Missing: 0.
 
 | ID | Title | Priority | Tests | Status |
 |---|---|---|---|---|
-| FR-001 | One-time Host Setup | Must | 0 | deferred (M3) |
-| FR-002 | Host Setup idempotent | Must | 0 | deferred (M3) |
+| FR-001 | One-time Host Setup | Must | `tests/unit/test_hostsetup_cgroups.py` (11), `tests/unit/test_hostsetup_runit.py` (22), `tests/unit/test_hostsetup_subids.py` (19) | partial (M3) |
+| FR-002 | Host Setup idempotent | Must | `tests/unit/test_hostsetup_subids.py` (3) | partial (M3) |
 | FR-003 | Host Setup undo | Should | 0 | MISSING |
 | FR-004 | No host package management | Must | `tests/unit/test_fr004_no_xbps.py` (6) | covered |
 | FR-005 | Host write confinement | Must | 0 | deferred (M10) |
 | FR-006 | Host integrity check | Must | 0 | deferred (M3) |
-| FR-007 | Doctor | Must | 0 | deferred (M3) |
+| FR-007 | Doctor | Must | `tests/unit/test_hostsetup_cgroups.py` (11), `tests/unit/test_hostsetup_subids.py` (1) | partial (M3) |
 | FR-010 | Create realm | Must | 0 | deferred (M4) |
-| FR-011 | Image verification | Must | 0 | deferred (M4) |
+| FR-011 | Image verification | Must | `tests/unit/test_fake_podman.py` (2), `tests/unit/test_podman_cli.py` (5), `tests/unit/test_podman_createspec.py` (1) | partial (M4) |
 | FR-012 | Native package signatures always enforced | Must | 0 | deferred (M4) |
 | FR-013 | Integration Package Set | Must | 0 | deferred (M4) |
 | FR-014 | Kali "everything" option | Should | 0 | MISSING |
@@ -58,10 +59,10 @@ Must requirements: 85. Covered: 4. Deferred: 81. Missing: 0.
 | FR-068 | Filtered session D-Bus | Should | 0 | MISSING |
 | FR-069 | NVIDIA host driver injection | Must | 0 | deferred (M6) |
 | FR-080 | Services mode on | Must | 0 | deferred (M7) |
-| FR-081 | runit supervision of services-on realms | Must | 0 | deferred (M7) |
+| FR-081 | runit supervision of services-on realms | Must | `tests/unit/test_hostsetup_runit.py` (22) | partial (M7) |
 | FR-082 | Services mode off | Must | 0 | deferred (M4) |
 | FR-083 | Toggle services mode | Must | 0 | deferred (M7) |
-| FR-084 | Autostart | Should | 0 | MISSING |
+| FR-084 | Autostart | Should | `tests/unit/test_hostsetup_runit.py` (1) | covered |
 | FR-085 | Docker daemon in realm | Should | 0 | MISSING |
 | FR-100 | Realm dashboard | Must | 0 | deferred (M9) |
 | FR-101 | Create realm wizard | Must | 0 | deferred (M9) |
@@ -71,13 +72,13 @@ Must requirements: 85. Covered: 4. Deferred: 81. Missing: 0.
 | FR-105 | Unprivileged GUI | Must | 0 | deferred (M9) |
 | FR-106 | CLI parity | Must | 0 | deferred (M9) |
 | FR-107 | Progress and cancel | Should | 0 | MISSING |
-| FR-120 | Network failure | Must | 0 | deferred (M8) |
+| FR-120 | Network failure | Must | `tests/unit/test_fake_podman.py` (2), `tests/unit/test_podman_cli.py` (4) | partial (M8) |
 | FR-121 | Disk space precheck | Must | 0 | deferred (M8) |
-| FR-122 | Interrupted operations | Must | 0 | deferred (M8) |
-| FR-123 | One change at a time per realm | Must | 0 | deferred (M8) |
-| FR-124 | Audit Log | Must | 0 | deferred (M2) |
-| FR-125 | Log viewer | Should | 0 | MISSING |
-| NFR-001 | ginn processes when no realm is running | Must | 0 | deferred (M10) |
+| FR-122 | Interrupted operations | Must | `tests/unit/test_store_journal.py` (6) | partial (M8) |
+| FR-123 | One change at a time per realm | Must | `tests/unit/test_store_locks.py` (4) | partial (M8) |
+| FR-124 | Audit Log | Must | `tests/unit/test_store_audit.py` (5) | partial (M2) |
+| FR-125 | Log viewer | Should | `tests/unit/test_store_audit.py` (3) | covered |
+| NFR-001 | ginn processes when no realm is running | Must | `tests/unit/test_hostsetup_runit.py` (1) | partial (M10) |
 | NFR-002 | Host memory for an idle running realm, services off | Must | 0 | deferred (M10) |
 | NFR-003 | Host memory for an idle running realm, services on | Must | 0 | deferred (M7) |
 | NFR-004 | Added launch latency, app in already-running realm | Must | 0 | deferred (M10) |
@@ -91,27 +92,27 @@ Must requirements: 85. Covered: 4. Deferred: 81. Missing: 0.
 | NFR-020 | Realms per user | Should | 0 | MISSING |
 | NFR-021 | Concurrently running realms | Should | 0 | MISSING |
 | NFR-022 | Control Plane load time | Should | 0 | MISSING |
-| NFR-030 | Crash safety | Must | 0 | deferred (M8) |
+| NFR-030 | Crash safety | Must | `tests/unit/test_store_journal.py` (4) | partial (M8) |
 | NFR-031 | Rebuild atomicity | Must | 0 | deferred (M8) |
 | NFR-032 | Rebuild time | Should | 0 | MISSING |
 | NFR-033 | Supervised restart | Must | 0 | deferred (M7) |
-| NFR-040 | Error reporting | Must | `tests/unit/test_cli_smoke.py` (3), `tests/unit/test_errors.py` (15) | covered |
+| NFR-040 | Error reporting | Must | `tests/unit/test_cli_smoke.py` (3), `tests/unit/test_errors.py` (15), `tests/unit/test_podman_cli.py` (5) | covered |
 | NFR-041 | Doctor coverage | Must | 0 | deferred (M3) |
-| NFR-042 | Diagnostic verbosity | Should | `tests/unit/test_cli_smoke.py` (4) | covered |
-| NFR-043 | Audit completeness | Must | 0 | deferred (M2) |
+| NFR-042 | Diagnostic verbosity | Should | `tests/unit/test_cli_smoke.py` (4), `tests/unit/test_podman_cli.py` (2) | covered |
+| NFR-043 | Audit completeness | Must | `tests/unit/test_store_audit.py` (2) | partial (M2) |
 | NFR-050 | First realm via GUI | Should | 0 | MISSING |
 | NFR-051 | Keyboard and screen reader | Should | 0 | MISSING |
 | NFR-052 | CLI help | Must | `tests/unit/test_cli_smoke.py` (2) | covered |
 | NFR-060 | Distribution definitions as data | Must | 0 | deferred (M2) |
-| NFR-061 | Automated test coverage | Must | `tests/unit/test_traceability.py` (23) | covered |
+| NFR-061 | Automated test coverage | Must | `tests/unit/test_fake_podman.py` (10), `tests/unit/test_podman_cli.py` (3), `tests/unit/test_traceability.py` (27) | covered |
 | NFR-062 | Portability | Must | 0 | deferred (M10) |
 | NFR-063 | Clean-room provenance | Must | 0 | deferred (M10) |
-| NFR-SEC-001 | Realms always run rootless. No realm is ever started in privileged mode, in any tier. | Must | 0 | deferred (M4) |
+| NFR-SEC-001 | Realms always run rootless. No realm is ever started in privileged mode, in any tier. | Must | `tests/unit/test_fake_podman.py` (1), `tests/unit/test_podman_cli.py` (1), `tests/unit/test_podman_createspec.py` (5) | partial (M4) |
 | NFR-SEC-002 | Capabilities added beyond the runtime's rootless defaults are limited to: raw-socket capability for Kali (own network namespace only) and the enumerated set required by Development-tier nested containers and `/dev/kvm`. The enumerated set is fixed in the HLD and tested. | Must | 0 | deferred (M6) |
 | NFR-SEC-003 | ginn ships no setuid or setgid executables of its own. | Must | 0 | deferred (M10) |
 | NFR-SEC-004 | Images are used only if they match the Trust Manifest; package-manager signature checks are never disabled. | Must | 0 | deferred (M4) |
-| NFR-SEC-005 | All user input is validated at entry against DR-001…DR-005; invalid values are rejected before any side effect. Package names and paths are passed as single arguments, never through a shell. | Must | 0 | deferred (M2) |
-| NFR-SEC-006 | Never-shareable paths (DR-004) cannot be shared in any tier, including Custom. | Must | 0 | deferred (M6) |
+| NFR-SEC-005 | All user input is validated at entry against DR-001…DR-005; invalid values are rejected before any side effect. Package names and paths are passed as single arguments, never through a shell. | Must | `tests/property/test_names.py` (2), `tests/property/test_packages.py` (2), `tests/unit/test_domain_names.py` (6), `tests/unit/test_domain_packages.py` (9), `tests/unit/test_podman_cli.py` (1), `tests/unit/test_podman_createspec.py` (2) | partial (M2) |
+| NFR-SEC-006 | Never-shareable paths (DR-004) cannot be shared in any tier, including Custom. | Must | `tests/property/test_paths.py` (1), `tests/unit/test_domain_paths.py` (21) | partial (M6) |
 | NFR-SEC-007 | Agent Proxy never transfers private key material into a realm. | Must | 0 | deferred (M6) |
 | NFR-SEC-008 | Audit Log is append-only from ginn's side and not reachable from any realm (it lives in Owned Paths, which are never shareable). | Must | 0 | deferred (M10) |
 | NFR-SEC-009 | The Control Plane ↔ backend channel accepts only peers running as the same host user. | Must | 0 | deferred (M9) |

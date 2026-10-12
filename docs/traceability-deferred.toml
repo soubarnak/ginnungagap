@@ -1,16 +1,21 @@
-# Must FR and NFR requirements with no automated test yet (NFR-061, Appendix C).
-# Each entry names the roadmap milestone (docs/roadmap.md) that owns the proving test.
+# Must FR and NFR requirements with no automated test yet, or only unit-level tests (NFR-061,
+# Appendix C). Each entry names the roadmap milestone (docs/roadmap.md) that owns the proving test.
+# `partial = true` marks an ID whose unit-level tests can run while its host-only or end-to-end
+# acceptance proof is still deferred to that milestone. Only a partial entry may keep tests.
 # tools/traceability.py --check fails when an entry lacks a milestone, names an ID that is not
-# a Must FR or NFR, or has gained a test (delete the entry then).
+# a Must FR or NFR, or has gained a test without `partial = true` (delete the entry if the tests
+# prove the whole requirement).
 
 [[deferred]]
 id = "FR-001"
 milestone = "M3"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M3"
 
 [[deferred]]
 id = "FR-002"
 milestone = "M3"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M3"
 
 [[deferred]]
@@ -26,6 +31,7 @@ reason = "not covered yet; the roadmap assigns its test to T3.8 (M3)"
 [[deferred]]
 id = "FR-007"
 milestone = "M3"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M3"
 
 [[deferred]]
@@ -36,6 +42,7 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 [[deferred]]
 id = "FR-011"
 milestone = "M4"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M4"
 
 [[deferred]]
@@ -196,6 +203,7 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 [[deferred]]
 id = "FR-081"
 milestone = "M7"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M7"
 
 [[deferred]]
@@ -241,6 +249,7 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 [[deferred]]
 id = "FR-120"
 milestone = "M8"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M8"
 
 [[deferred]]
@@ -251,21 +260,25 @@ reason = "not covered yet; the roadmap assigns its test to M8"
 [[deferred]]
 id = "FR-122"
 milestone = "M8"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M8"
 
 [[deferred]]
 id = "FR-123"
 milestone = "M8"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M8"
 
 [[deferred]]
 id = "FR-124"
 milestone = "M2"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M2"
 
 [[deferred]]
 id = "NFR-001"
 milestone = "M10"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M10"
 
 [[deferred]]
@@ -321,6 +334,7 @@ reason = "not covered yet; the roadmap assigns its test to M3"
 [[deferred]]
 id = "NFR-030"
 milestone = "M8"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M8"
 
 [[deferred]]
@@ -341,6 +355,7 @@ reason = "not covered yet; the roadmap assigns its test to M3"
 [[deferred]]
 id = "NFR-043"
 milestone = "M2"
+partial = true
 reason = "audit completeness: the audit writer (T2.9) is where the one-entry-per-op property is first testable; the suite-wide count closes later"
 
 [[deferred]]
@@ -361,6 +376,7 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 [[deferred]]
 id = "NFR-SEC-001"
 milestone = "M4"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M4"
 
 [[deferred]]
@@ -381,11 +397,13 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 [[deferred]]
 id = "NFR-SEC-005"
 milestone = "M2"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M2"
 
 [[deferred]]
 id = "NFR-SEC-006"
 milestone = "M6"
+partial = true
 reason = "not covered yet; the roadmap assigns its test to M6"
 
 [[deferred]]
