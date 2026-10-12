@@ -1,0 +1,91 @@
+#!/bin/sh
+# ginn supervisor service for alice (FR-001, FR-081, FR-084). Written by ginn host-setup.
+# Runs as root under runsv. It creates the runtime directory and the delegated cgroup leaves
+# (spike S-01), moves itself into the supervisor leaf, waits for the state directory, then drops
+# to alice and execs runsvdir. Every value below was rendered at setup time.
+set -eu
+
+PATH=/usr/bin:/bin
+export PATH
+
+USER_NAME=alice
+GROUP_NAME=alice
+UID_NUM=1000
+GID_NUM=1000
+HOME_DIR=/home/alice
+RUNTIME_DIR=/run/ginn/1000
+STATE_HOME=/home/alice/.local/state
+DATA_HOME=/home/alice/.local/share
+CONFIG_HOME=/home/alice/.config
+SV_DIR=/home/alice/.local/state/ginn/sv
+CONTROLLERS='cpu cpuset io memory pids'
+
+log() {
+    printf '%s\n' "ginn-supervisor: $*" >&2
+}
+
+# enable_controllers DIR writes +CTRL, one write per controller, for each controller that DIR
+# offers and does not have yet. It mirrors enable_controllers() in hostsetup/cgroups.py.
+enable_controllers() {
+    offered=$(cat "$1/cgroup.controllers") || return 1
+    enabled=$(cat "$1/cgroup.subtree_control") || return 1
+    for ctrl in $CONTROLLERS; do
+        case " $offered " in
+            *" $ctrl "*) ;;
+            *) continue ;;
+        esac
+        case " $enabled " in
+            *" $ctrl "*) continue ;;
+        esac
+        if ! printf '+%s\n' "$ctrl" > "$1/cgroup.subtree_control"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# 1. Runtime directory (ADR-004): owned by the user, mode 0700.
+mkdir -p "$RUNTIME_DIR"
+chown "$UID_NUM:$GID_NUM" "$RUNTIME_DIR"
+chmod 0700 "$RUNTIME_DIR"
+
+# 2. Delegated cgroup subtree. cgroupfs does not survive a reboot, so this runs on every start.
+if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+    log "cgroup v2 is not mounted at /sys/fs/cgroup"
+    exit 1
+fi
+if ! enable_controllers /sys/fs/cgroup; then
+    log "could not enable controllers at /sys/fs/cgroup; continuing without them"
+fi
+mkdir -p /sys/fs/cgroup/ginn
+if ! enable_controllers /sys/fs/cgroup/ginn; then
+    log "could not enable controllers at /sys/fs/cgroup/ginn"
+    exit 1
+fi
+mkdir -p /sys/fs/cgroup/ginn/1000/supervisor /sys/fs/cgroup/ginn/1000/cli
+if ! enable_controllers /sys/fs/cgroup/ginn/1000; then
+    log "could not enable controllers at /sys/fs/cgroup/ginn/1000"
+    exit 1
+fi
+chown 1000:1000 /sys/fs/cgroup/ginn/1000 /sys/fs/cgroup/ginn/1000/cgroup.procs /sys/fs/cgroup/ginn/1000/cgroup.threads /sys/fs/cgroup/ginn/1000/cgroup.subtree_control
+chown 1000:1000 /sys/fs/cgroup/ginn/1000/supervisor /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs /sys/fs/cgroup/ginn/1000/supervisor/cgroup.threads
+chown 1000:1000 /sys/fs/cgroup/ginn/1000/cli /sys/fs/cgroup/ginn/1000/cli/cgroup.procs /sys/fs/cgroup/ginn/1000/cli/cgroup.threads
+
+# 3. Move this process into the supervisor leaf. The exec below keeps the PID and the cgroup.
+printf '%s\n' "$$" > /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs
+
+# 4. Wait for the state directory, for example an encrypted home that is not mounted yet.
+waited=0
+while [ ! -d "$SV_DIR" ]; do
+    if [ "$waited" -ge 60 ]; then
+        log "$SV_DIR missing after 60 s; exiting so runsv restarts this service"
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+# 5. Drop to the user and run its runit supervisor. chpst -u clears the supplementary groups.
+exec chpst -u "$USER_NAME:$GROUP_NAME" env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+XDG_STATE_HOME="$STATE_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_CONFIG_HOME="$CONFIG_HOME" \
+GINN_RUNTIME_DIR="$RUNTIME_DIR" runsvdir -P "$SV_DIR"

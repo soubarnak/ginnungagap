@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs after runsvdir exits. The cgroup leaves persist, and run recreates what is missing.
+exit 0

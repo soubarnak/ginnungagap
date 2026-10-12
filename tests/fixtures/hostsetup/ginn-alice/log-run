@@ -1,0 +1,30 @@
+#!/bin/sh
+# Log service for the ginn supervisor of alice (FR-081). Runs as root. It creates the log
+# directory as alice, then drops to alice for svlogd.
+set -eu
+
+PATH=/usr/bin:/bin
+export PATH
+
+USER_NAME=alice
+GROUP_NAME=alice
+SV_DIR=/home/alice/.local/state/ginn/sv
+LOG_DIR=/home/alice/.local/state/ginn/log/supervisor
+
+log() {
+    printf '%s\n' "ginn-supervisor-log: $*" >&2
+}
+
+# The same wait as run, so nothing is created under a state home that is not mounted yet.
+waited=0
+while [ ! -d "$SV_DIR" ]; do
+    if [ "$waited" -ge 60 ]; then
+        log "$SV_DIR missing after 60 s; exiting so runsv restarts this service"
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+chpst -u "$USER_NAME:$GROUP_NAME" mkdir -p "$LOG_DIR"
+exec chpst -u "$USER_NAME:$GROUP_NAME" svlogd -tt "$LOG_DIR"
