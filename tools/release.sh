@@ -3,9 +3,10 @@
 #
 # Release helper for the ginn Void package (T0.6, AS-003, NFR-SEC-003).
 #
-#   check                      template version, tag and clean working tree before a release
+#   check                      template version equal to the pyproject version, no tag yet, clean tree
 #   checksum URL_OR_FILE       write the sha256 of the release tarball into the template
-#   repo BINPKGS_DIR OUT_DIR   sign the ginn packages and build the signed repository in OUT_DIR
+#   repo BINPKGS_DIR OUT_DIR   sign the ginn packages and build the signed repository in OUT_DIR,
+#                              one signed index per architecture found in BINPKGS_DIR
 #   cut                        run check, create the annotated tag v<version>, print next steps
 #
 # The signing key is read from GINN_SIGNING_KEY. Keys are never committed; *.pem and
@@ -16,6 +17,8 @@ here=$(cd "$(dirname "$0")/.." && pwd)
 template="$here/packaging/void/srcpkgs/ginn/template"
 placeholder='@CHECKSUM@'
 signer='Bongbetic <soubarna@live.in>'
+# Temporary download directory. Global, so the EXIT trap set by cmd_checksum can read it.
+tmp=""
 
 die() {
     echo "release.sh: $*" >&2
@@ -27,6 +30,13 @@ template_field() {
     awk -F= -v key="$1" '$1 == key { gsub(/"/, "", $2); print $2; exit }' "$template"
 }
 
+# Target architecture encoded in a package file name: ginn-VERSION_REV.ARCH.xbps.
+pkg_arch() {
+    local base=${1##*/}
+    base=${base%.xbps}
+    printf '%s\n' "${base##*.}"
+}
+
 project_version() {
     python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' \
         "$here/pyproject.toml"
@@ -36,9 +46,9 @@ cmd_check() {
     local tv pv
     tv=$(template_field version)
     pv=$(project_version)
-    # The package version is the project version without the .dev0 development marker.
-    if [ "$tv" != "${pv%.dev0}" ]; then
-        die "template version $tv differs from pyproject version ${pv%.dev0}"
+    # A release uses the exact project version, so a .dev0 marker in pyproject.toml fails here.
+    if [ "$tv" != "$pv" ]; then
+        die "template version $tv differs from pyproject version $pv (cut releases without .dev0)"
     fi
     if git -C "$here" rev-parse --quiet --verify "refs/tags/v$tv" >/dev/null; then
         die "tag v$tv already exists"
@@ -51,7 +61,7 @@ cmd_check() {
 
 cmd_checksum() {
     local src=${1:?usage: release.sh checksum URL_OR_FILE}
-    local file sum tmp=""
+    local file sum
     if [[ "$src" == https://* ]]; then
         tmp=$(mktemp -d)
         trap 'rm -rf -- "$tmp"' EXIT
@@ -84,11 +94,21 @@ cmd_repo() {
     for pkg in "$out"/ginn*.xbps; do
         xbps-rindex --sign-pkg --signedby "$signer" --privkey "$key" "$pkg"
     done
+    # xbps keeps one repodata index per architecture, selected by XBPS_TARGET_ARCH.
+    # Index each package under its own architecture, then sign every index found.
+    local archs=() arch
     for pkg in "$out"/ginn*.xbps; do
-        xbps-rindex -a "$pkg"
+        arch=$(pkg_arch "$pkg")
+        XBPS_TARGET_ARCH=$arch xbps-rindex -a "$pkg"
+        case " ${archs[*]} " in
+            *" $arch "*) ;;
+            *) archs+=("$arch") ;;
+        esac
     done
-    xbps-rindex --sign --signedby "$signer" --privkey "$key" "$out"
-    echo "signed repository: $out ($count package(s))"
+    for arch in "${archs[@]}"; do
+        XBPS_TARGET_ARCH=$arch xbps-rindex --sign --signedby "$signer" --privkey "$key" "$out"
+    done
+    echo "signed repository: $out ($count package(s), architectures: ${archs[*]})"
 }
 
 cmd_cut() {

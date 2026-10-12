@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+# Actions are pinned to commit SHAs. The comment after each SHA names the tag it was resolved
+# from. TODO(T0.9b follow-up): re-resolve the SHAs whenever an action version changes.
+
 jobs:
   test:
     name: test (${{ matrix.libc }})
@@ -22,11 +25,9 @@ jobs:
           - libc: musl
             image: ghcr.io/void-linux/void-musl-full:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install podman on the runner
-        run: sudo apt-get install -y --no-install-recommends podman
       - name: Run the suite as a non-root user in the Void container
         env:
           IMAGE: ${{ matrix.image }}
@@ -41,34 +42,42 @@ jobs:
           cp -a /src /home/tester/ginn
           chown -R tester /home/tester/ginn
           git config --system --add safe.directory /home/tester/ginn
-          su -l tester -c 'cd ~/ginn && python3 -m pytest -q --cov=ginn --cov-report=term-missing --cov-fail-under=80 && ruff check src tests tools && python3 -m mypy src/ginn && python3 tools/gen_errors_doc.py --check && if [ -f tools/traceability.py ]; then python3 tools/traceability.py --check; fi'
+          su -l tester -c 'cd ~/ginn && python3 -m pytest -q --cov=ginn --cov-report=term-missing --cov-fail-under=80 && ruff check src tests tools && python3 -m mypy src/ginn && python3 tools/gen_errors_doc.py --check && python3 tools/traceability.py --check' </dev/null
           CONTAINER
 
   provenance:
     name: provenance scan (NFR-063)
     runs-on: ubuntu-latest
-    continue-on-error: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Scan the source against the reference sources
         env:
+          # TODO(T0.9b follow-up): add a shell-era pin for the second reference. Its upstream
+          # publishes no tags, so a human must choose a commit SHA first (docs/provenance.md).
           PROVENANCE_REPOS: "https://github.com/89luca89/distrobox https://github.com/anatase-org/spaces"
+          PROVENANCE_REPORT_DIR: ${{ runner.temp }}/provenance-report
         run: bash tools/provenance-scan.sh
+      - name: Upload the provenance report
+        # The report shows reference code. It is for human triage only (docs/provenance.md).
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: provenance-report
+          path: ${{ runner.temp }}/provenance-report
+          if-no-files-found: warn
 
   package:
     name: xbps package (x86_64 glibc)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Install podman on the runner
-        run: sudo apt-get install -y --no-install-recommends podman
       - name: Build the ginn package in the Void container
         run: |
           mkdir -p "$RUNNER_TEMP/binpkgs"
@@ -88,11 +97,11 @@ jobs:
           chown -R builder /home/builder/ginnungagap /home/builder/void-packages
           git config --system --add safe.directory /home/builder/ginnungagap
           git config --system --add safe.directory /home/builder/void-packages
-          su -l builder -c 'cd ~/ginnungagap && GINN_LOCAL_SOURCE=1 tools/xbps-build.sh ~/void-packages'
+          su -l builder -c 'cd ~/ginnungagap && GINN_LOCAL_SOURCE=1 tools/xbps-build.sh ~/void-packages' </dev/null
           cp /home/builder/void-packages/hostdir/binpkgs/ginn*.xbps /out/
           CONTAINER
       - name: Upload the ginn packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ginn-xbps-x86_64-glibc
           path: ${{ runner.temp }}/binpkgs/ginn*.xbps

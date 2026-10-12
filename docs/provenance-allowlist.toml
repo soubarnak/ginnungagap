@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provenance allowlist (NFR-063). Read docs/provenance.md before you change this file.
+#
+# An entry is added only by a human reviewer, after reading the HTML report outside this
+# repository and deciding that the matched code is a false positive or an accepted idiom.
+# Agents must not add entries. Every entry needs all four fields:
+#
+# [[allow]]
+# path        = "src/ginn/example.py"   # relative to the repository root
+# reason      = "why the match is not copied code"
+# reviewed_by = "name of the human reviewer"
+# date        = "YYYY-MM-DD"            # date of the review

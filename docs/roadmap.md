@@ -75,7 +75,7 @@ Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test 
 - T0.3 `errors.py` + `tools/gen_errors_doc.py` -> `docs/errors.md`; test: every `GINN-[EW]-*` code in the SRS exists in the catalogue.
 - T0.4 `.github/workflows/ci.yaml`: pytest as non-root on `void-glibc` and `void-musl` containers, ruff, mypy, coverage >= 80 % non-GUI, traceability check, provenance job.
 - T0.5 `tools/traceability.py`; `fr` marker registered in `pyproject.toml`; fails when a Must FR has no test.
-- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux; subpackage `ginn-gui`), `tools/xbps-build.sh`, `tools/release.sh` designed from public xbps-src docs: build the package, sign repodata with a locally held key, publish the repository as GitHub release assets.
+- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman runc conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux; `ginn-gui` subpackage deferred to M9 (T9.9)), `tools/xbps-build.sh`, `tools/release.sh` designed from public xbps-src docs: build the package, sign repodata with a locally held key, publish the repository as GitHub release assets.
 - T0.7 `tests/shims/xbps-fail/` PATH shim; `test_fr004_no_xbps.py` asserts no `xbps-*` call during the suite (FR-004).
 - T0.8 ADR-001 Python + GTK4/libadwaita, ADR-002 podman CLI over REST, ADR template.
 

@@ -6,6 +6,26 @@ Placeholders in braces, such as `{name}`, are filled in at run time.
 
 Exit status 125 is not used by any code below. `ginn exec` returns the inner command's exit status, so ginn-side failures of `exec` and `enter` exit 125 instead (IR-011, FR-049).
 
+## Exit statuses
+
+| Exit | Meaning |
+|---|---|
+| 0 | success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions. |
+| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED |
+| 2 | input validation: usage, names, options, paths |
+| 3 | not found: GINN-E-NO-SUCH-REALM |
+| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change |
+| 65 | data error (EX_DATAERR): image or package signature not verified |
+| 69 | network failure |
+| 70 | internal error (EX_SOFTWARE) |
+| 73 | not enough disk space |
+| 75 | realm busy (EX_TEMPFAIL) |
+| 77 | Host Setup must run as root (EX_NOPERM) |
+| 125 | reserved; see EXEC_GINN_FAILURE |
+| 130 | interrupted by the user |
+
+## Codes
+
 | Code | Exit | Meaning | Remedy | Source |
 |---|---|---|---|---|
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |

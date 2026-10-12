@@ -5,20 +5,8 @@ Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry, plus
 codes GINN-E-USAGE, GINN-E-INTERRUPTED and GINN-E-INTERNAL. `source` cites the requirement that
 defines the failure.
 
-Exit statuses, by category:
-    0    success. GINN-W-* warnings also keep 0: they are notices, not exceptions.
-    1    operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED
-    2    input validation: usage, names, options, paths
-    3    not found: GINN-E-NO-SUCH-REALM
-    4    conflict with existing state: name taken, undo refused, unacknowledged host change
-    65   data error (EX_DATAERR): image or package signature not verified
-    69   network failure
-    70   internal error (EX_SOFTWARE)
-    73   not enough disk space
-    75   realm busy (EX_TEMPFAIL)
-    77   Host Setup must run as root (EX_NOPERM)
-    125  reserved; see EXEC_GINN_FAILURE
-    130  interrupted by the user
+Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
+appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
 
 Summaries and remedies may hold {placeholders} that `make()` and `warn()` fill. A literal brace
 is written as {{ or }}. `make()` and `warn()` reject missing and unexpected placeholder names.
@@ -40,9 +28,11 @@ No catalogue entry uses it.
 class GinnError(Exception):
     """A failure with a catalogue code, a one-line remedy and a non-zero process exit status.
 
-    Exit status 0 belongs to warnings, which are not exceptions, so it raises ValueError here
-    (use `warn()`). `details` holds the values that filled the placeholders; the JSON error
-    object carries them.
+    `code` must be in CATALOGUE, and `exit_code` must equal the catalogue value. The one
+    exception is EXEC_GINN_FAILURE (125), which `ginn exec` and `ginn enter` use to remap their
+    own failures. Exit status 0 belongs to warnings, which are not exceptions, so it raises
+    ValueError here (use `warn()`). `details` holds the values that filled the placeholders; the
+    JSON error object carries them.
     """
 
     def __init__(
@@ -53,9 +43,15 @@ class GinnError(Exception):
         exit_code: int = 1,
         details: Mapping[str, object] | None = None,
     ) -> None:
-        catalogued = CATALOGUE.get(code)
-        if exit_code == 0 or (catalogued is not None and catalogued.exit_code == 0):
+        if exit_code == 0:
             raise ValueError(f"{code} is a warning (exit 0); use warn(), not an exception")
+        spec = CATALOGUE.get(code)
+        if spec is None:
+            raise ValueError(f"{code} is not in the error catalogue")
+        if spec.exit_code == 0:
+            raise ValueError(f"{code} is a warning (exit 0); use warn(), not an exception")
+        if exit_code not in (spec.exit_code, EXEC_GINN_FAILURE):
+            raise ValueError(f"{code} exits {spec.exit_code} in the catalogue, not {exit_code}")
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
@@ -237,6 +233,23 @@ _SPECS: tuple[ErrorSpec, ...] = (
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
+
+EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
+    (0, "success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions."),
+    (1, "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED"),
+    (2, "input validation: usage, names, options, paths"),
+    (3, "not found: GINN-E-NO-SUCH-REALM"),
+    (4, "conflict with existing state: name taken, undo refused, unacknowledged host change"),
+    (65, "data error (EX_DATAERR): image or package signature not verified"),
+    (69, "network failure"),
+    (70, "internal error (EX_SOFTWARE)"),
+    (73, "not enough disk space"),
+    (75, "realm busy (EX_TEMPFAIL)"),
+    (77, "Host Setup must run as root (EX_NOPERM)"),
+    (EXEC_GINN_FAILURE, "reserved; see EXEC_GINN_FAILURE"),
+    (130, "interrupted by the user"),
+)
+"""Exit statuses by category, in ascending order (NFR-040, IR-010, IR-011)."""
 
 
 def placeholders(text: str) -> frozenset[str]:

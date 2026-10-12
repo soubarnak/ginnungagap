@@ -31,11 +31,12 @@ HEADER = (
 )
 
 
-def _load_specs() -> list[ErrorSpec]:
+def _load() -> tuple[list[ErrorSpec], tuple[tuple[int, str], ...]]:
+    """Return the catalogue entries and the exit-status categories from src/ginn/errors.py."""
     sys.path.insert(0, str(ROOT / "src"))
-    from ginn.errors import CATALOGUE
+    from ginn.errors import CATALOGUE, EXIT_CATEGORIES
 
-    return list(CATALOGUE.values())
+    return list(CATALOGUE.values()), EXIT_CATEGORIES
 
 
 def _cell(text: str) -> str:
@@ -48,8 +49,21 @@ def _template(text: str) -> str:
     return text.replace("{{", "{").replace("}}", "}")
 
 
-def render(specs: Iterable[ErrorSpec]) -> str:
-    """Return the full text of docs/errors.md for the given entries, sorted by code."""
+def _exit_table(categories: Iterable[tuple[int, str]]) -> str:
+    """Render the exit-status categories as a two-column table."""
+    rows = ["| Exit | Meaning |", "|---|---|"]
+    rows.extend(f"| {status} | {_cell(meaning)} |" for status, meaning in categories)
+    return "\n".join(rows) + "\n"
+
+
+def render(specs: Iterable[ErrorSpec], categories: Iterable[tuple[int, str]]) -> str:
+    """Return the text of docs/errors.md: the exit categories, then the catalogue by code."""
+    specs = list(specs)
+    categories = list(categories)
+    listed = {status for status, _meaning in categories}
+    unlisted = sorted({spec.exit_code for spec in specs} - listed)
+    if unlisted:
+        raise ValueError(f"catalogue exit statuses {unlisted} are missing from EXIT_CATEGORIES")
     rows = ["| Code | Exit | Meaning | Remedy | Source |", "|---|---|---|---|---|"]
     for spec in sorted(specs, key=lambda item: item.code):
         # The code is inside a code span, so it is not escaped.
@@ -61,7 +75,14 @@ def render(specs: Iterable[ErrorSpec]) -> str:
             _cell(spec.source),
         ]
         rows.append("| " + " | ".join(cells) + " |")
-    return HEADER + "\n".join(rows) + "\n"
+    return (
+        HEADER
+        + "## Exit statuses\n\n"
+        + _exit_table(categories)
+        + "\n## Codes\n\n"
+        + "\n".join(rows)
+        + "\n"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -77,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
         help="exit 1 if docs/errors.md is out of date; write nothing",
     )
     args = parser.parse_args(argv)
-    text = render(_load_specs())
+    specs, categories = _load()
+    text = render(specs, categories)
     if args.check:
         current = TARGET.read_text(encoding="utf-8") if TARGET.exists() else ""
         if current != text:

@@ -1,6 +1,6 @@
 # Packaging ginn for Void Linux
 
-ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`.
+ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`. It declares `runc` as the OCI runtime until ADR-003 decides between runc and crun. The package installs `README.md` and `NOTICE` as documentation.
 
 One package is built from that template for now:
 
@@ -60,29 +60,30 @@ The template checksum must match the source archive. Without `GINN_LOCAL_SOURCE=
 The CI workflow (`.github/workflows/ci.yaml`) runs these jobs on every push to `void` and on every pull request:
 
 - `test`: the unit suite, ruff, mypy and coverage on the Void glibc and musl containers (NFR-061, NFR-062).
-- `provenance`: the code-similarity scan against the reference sources (NFR-063). It needs the reference URLs in the `PROVENANCE_REPOS` environment value of that job.
+- `provenance`: the code-similarity scan against the reference sources (NFR-063). It reads the reference URLs from `PROVENANCE_REPOS` in that job. It uploads the `provenance-report` artifact even when the gate fails. The report shows reference code, so it is for human triage only. See `docs/provenance.md`.
 - `package`: builds the glibc package with `tools/xbps-build.sh` inside a privileged Void container, as a non-root user, and uploads the `.xbps` files as a workflow artifact. The privileged container matches the Void project's own CI. It builds from HEAD (`GINN_LOCAL_SOURCE=1`) because the release tag may not exist yet. The musl target is not built in CI yet.
 
-To run the provenance scan locally, pass the reference URLs yourself:
+To run the provenance scan locally, pass the reference URLs yourself. An entry is `URL` or `URL@REF`, where `REF` is a branch, tag or commit SHA:
 
 ```sh
-PROVENANCE_REPOS="<reference-url> <reference-url>" tools/provenance-scan.sh
+PROVENANCE_REPOS="<reference-url>[@REF] <reference-url>[@REF]" \
+    PROVENANCE_REPORT_DIR="$HOME/provenance-report" tools/provenance-scan.sh
 ```
 
-The scan prints the commit of each reference. It exits non-zero on any match. It writes the HTML report only when `PROVENANCE_REPORT` is set, and that report shows reference code, so do not publish it.
+The scan prints a table of every scanned file and the commit of each reference. It exits 1 when a file is over the gate and 2 on a configuration error. It copies the HTML report to `PROVENANCE_REPORT_DIR` only when that variable is set, and the report shows reference code, so do not publish it. Details are in `docs/provenance.md`.
 
 ## Release procedure
 
-Versions follow the project version in `pyproject.toml`. The package version is the same version without the `.dev0` marker.
+Versions follow the project version in `pyproject.toml`. The package version is that version exactly, so a release cannot carry the `.dev0` marker.
 
-1. Set the release version in `pyproject.toml` (for example `0.1.0`) and update the template `version=` to match. Commit.
+1. Set the release version in `pyproject.toml` without `.dev0` (for example `0.1.0`) and update the template `version=` to match. Commit.
 2. Check the release state:
 
    ```sh
    tools/release.sh check
    ```
 
-   It fails when the template and `pyproject.toml` versions differ, when the tag already exists, or when the working tree has changes.
+   It fails when the template and `pyproject.toml` versions differ (a `.dev0` marker counts as a difference), when the tag already exists, or when the working tree has changes.
 
 3. Tag the release:
 
@@ -103,7 +104,7 @@ Versions follow the project version in `pyproject.toml`. The package version is 
    GINN_MUSL=1 tools/xbps-build.sh ~/void-packages
    ```
 
-6. Sign the packages and build the repository. The key is never committed, and `*.pem` and `*.key` are ignored by git:
+6. Sign the packages and build the repository. The script indexes each package under its own architecture and signs the repository index once per architecture found in the binaries directory. The key is never committed, and `*.pem` and `*.key` are ignored by git:
 
    ```sh
    GINN_SIGNING_KEY=/secure/path/ginn-release.pem \

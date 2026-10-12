@@ -33,7 +33,7 @@ if [ -z "$version" ]; then
     exit 2
 fi
 
-# Copy the templates. ginn-gui is a symlink to ginn and is copied as a link.
+# Copy the templates.
 cp -a "$template_src/." "$void/srcpkgs/"
 template="$void/srcpkgs/ginn/template"
 

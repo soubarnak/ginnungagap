@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parse arguments, dispatch to a command and render failures (IR-010, IR-011, NFR-052).
 
-Each failure exits with the status of its error-catalogue entry (see ginn.errors): 0 success;
-1 operational failure; 2 input validation; 3 not found; 4 conflict; 65 data error; 69 network;
-70 internal error; 73 disk space; 75 realm busy; 77 Host Setup must run as root; 125 reserved for
-ginn-side failures of `exec` and `enter`; 130 interrupted.
+Each failure exits with the status of its error-catalogue entry. The exit-status categories are
+listed in ginn.errors.EXIT_CATEGORIES.
 
 Missing and unknown commands are detected before argparse runs, so their message text does not
-depend on the Python version.
+depend on the Python version. Help and version flags count only before `--`. After `--` every
+token is a positional, so the first token after `--` is the command candidate when no command
+name comes before it.
 """
 
 import argparse
@@ -23,6 +23,7 @@ from ginn.cli.output import Output
 from ginn.errors import GinnError, make
 
 HELP_OR_VERSION = frozenset({"-h", "--help", "--version"})
+ROOT_FLAGS = frozenset({"--json", "--verbose"})
 MAIN_EPILOG = "Example: ginn --version"
 _HELP_FORMAT = argparse.RawDescriptionHelpFormatter
 
@@ -119,6 +120,21 @@ def _first_positional(tokens: Sequence[str]) -> str | None:
     return None
 
 
+def _first_after_separator(tokens: Sequence[str]) -> str | None:
+    """Return the first token after `--`, or None when there is none."""
+    if "--" not in tokens:
+        return None
+    rest = tokens[tokens.index("--") + 1 :]
+    return rest[0] if rest else None
+
+
+def _reject_unknown_root_option(before: Sequence[str]) -> None:
+    """Report an unknown root option before the missing-command error."""
+    for word in before:
+        if word.startswith("-") and word != "-" and word not in ROOT_FLAGS:
+            raise make("GINN-E-USAGE", detail=f"unknown option '{word}'")
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     """Run one ginn invocation and return the process exit status.
 
@@ -133,8 +149,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         parser = build_parser()
         names = {spec.name: spec for spec in registry.COMMANDS}
-        first = _first_positional(tokens)
-        if first is None and HELP_OR_VERSION.isdisjoint(tokens):
+        first = _first_positional(before_sep)
+        if first is None:
+            first = _first_after_separator(tokens)
+        if first is None and HELP_OR_VERSION.isdisjoint(before_sep):
+            _reject_unknown_root_option(before_sep)
             if not out.json_mode:
                 parser.print_help(sys.stderr)
             raise make("GINN-E-USAGE", detail="missing command")
