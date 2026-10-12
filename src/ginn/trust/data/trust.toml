@@ -16,8 +16,11 @@
 # packages are added by the install estimate, and FR-121 applies its 1.10 factor on top. NFR-008
 # caps a realm at the official image size plus 200 MiB.
 #
-# signature: "sigstore" = cosign keyless signature found, ECDSA check passed, payload pins this
-# digest (Fulcio chain and Rekor inclusion not checked). "none" = no signature found.
+# signature: "sigstore-unverified" = cosign keyless signature found, ECDSA check passed, payload
+# pins this digest. The Fulcio chain, the certificate identity against the publisher's signing
+# policy and Rekor inclusion were NOT verified (S-10 section 3), so this is recorded metadata, not
+# verification material. No signature kind counts as verified yet (VERIFIED_SIGNATURE_KINDS in
+# manifest.py is empty). "none" = no signature found.
 #
 # integration_packages (FR-013): packages missing from the pulled base image, which must be
 # added. Presence was checked in S-10b. "{lang}" is replaced from the host LANG at create time
@@ -45,7 +48,7 @@ digest = "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e9
 compressed_size_bytes = 139248529
 estimated_installed_bytes = 410379776
 measured_installed_bytes = 410385305
-signature = "sigstore"
+signature = "sigstore-unverified"
 verified_on = "2026-10-12"
 integration_packages = []
 
