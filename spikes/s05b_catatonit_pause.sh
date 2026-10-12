@@ -8,23 +8,23 @@
 # do_pause). helper_binaries_dir and init_path do not reach it. With neither path present,
 # the pause is podman's own binary (comm "podman pause").
 #
-#   spikes/s05b_catatonit_pause.sh prepare    extract Debian's catatonit into the scratch bin dir
-#   spikes/s05b_catatonit_pause.sh probe      stop the spike pause, start a fresh one, report its comm and exe
-#   spikes/s05b_catatonit_pause.sh knobs      stop the spike pause, retry with [engine] init_path set, report comm
-#   spikes/s05b_catatonit_pause.sh teardown   remove spike containers, images and storage, stop the spike pause
+#   XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s05b-xrd spikes/s05b_catatonit_pause.sh prepare   extract Debian's catatonit into the scratch bin dir
+#   ... probe      stop the spike pause, start a fresh one, report its comm, exe and XDG
+#   ... knobs      stop the spike pause, retry with [engine] init_path set, report comm
+#   ... teardown   remove spike containers, images and storage, stop the spike pause
 #
 # Environment:
+#   XDG_RUNTIME_DIR must equal the spike dir /run/user/<uid>/ginn-spike-s05b-xrd, or the script refuses.
 #   GINN_S05B_OUT   scratch dir for bin, conf and logs (default ~/.cache/ginn-spike/s05b)
 #
-# Storage is the spike's own: root ~/.local/share/ginn-spike-s05b/podman, runroot
-# /run/user/<uid>/ginn-spike-s05b, and XDG_RUNTIME_DIR /run/user/<uid>/ginn-spike-s05b/xdg.
-# Podman reads and writes the rootless pause.pid under $XDG_RUNTIME_DIR/libpod/tmp, not under
-# --tmpdir, so XDG_RUNTIME_DIR is set to the spike's own directory. The user's default storage and
-# /run/user/<uid>/libpod are never touched. The only process the script stops is the spike pause,
-# found by the exact pid in its own pause.pid, after its environ shows the spike XDG_RUNTIME_DIR.
+# Podman's rootless pause.pid lives under $XDG_RUNTIME_DIR/libpod/tmp, and --tmpdir does not move it.
+# So every podman call runs with XDG_RUNTIME_DIR pinned to the spike dir. Without the pin, podman joins
+# the user's own pause process. The script never signals a pause process unless its pid comes from the
+# spike's pause.pid and its environ shows XDG_RUNTIME_DIR equal to the spike dir.
 set -euo pipefail
 
 UIDN=$(id -u)
+SPIKE_XRD="/run/user/$UIDN/ginn-spike-s05b-xrd"
 OUT="${GINN_S05B_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s05b}"
 BIN="$OUT/bin"
 CONF="$OUT/conf"
@@ -32,15 +32,23 @@ LOG="$OUT/logs"
 DEBIAN=docker.io/library/debian:stable
 ROOT="$HOME/.local/share/ginn-spike-s05b/podman"
 RUNROOT="/run/user/$UIDN/ginn-spike-s05b"
-SXDG="$RUNROOT/xdg"
-TMPD="$SXDG/libpod/tmp"
+TMPD="$SPIKE_XRD/libpod/tmp"
 PIDF="$TMPD/pause.pid"
-export XDG_RUNTIME_DIR="$SXDG"
 PM=(podman --root "$ROOT" --runroot "$RUNROOT" --tmpdir "$TMPD")
 
 log() { mkdir -p "$LOG"; printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$LOG/run.log" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-pm() { "${PM[@]}" "$@"; }
+
+require_xdg() {
+  [[ ${XDG_RUNTIME_DIR:-} == "$SPIKE_XRD" ]] \
+    || die "refusing: XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-unset}', must be $SPIKE_XRD"
+}
+
+# The only way podman runs in this script. Guard first, then pin XDG_RUNTIME_DIR for the call.
+pm() {
+  require_xdg
+  env XDG_RUNTIME_DIR="$SPIKE_XRD" "${PM[@]}" "$@"
+}
 
 write_confs() {
   mkdir -p "$BIN" "$CONF" "$LOG"
@@ -59,10 +67,13 @@ CONF_EOF
 
 use_conf() { export CONTAINERS_CONF="$CONF/$1"; }
 
-make_dirs() { mkdir -p -m 700 "$RUNROOT" "$TMPD"; }
+make_dirs() { mkdir -p -m 700 "$SPIKE_XRD" "$RUNROOT" "$TMPD"; }
 
 # pid recorded in the spike's own pause.pid, empty when there is none
 pause_pid() { if [[ -r $PIDF ]]; then cat "$PIDF"; fi; }
+
+# XDG_RUNTIME_DIR line of a process environ, or a marker when unreadable
+xdg_of() { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep '^XDG_RUNTIME_DIR=' || echo 'XDG_RUNTIME_DIR=(unreadable)'; }
 
 # Stop one pause pid if it belongs to the spike. Returns 1 when it refuses or survives.
 stop_spike_pause() {
@@ -70,8 +81,8 @@ stop_spike_pause() {
   [[ -n $p ]] || return 0
   kill -0 "$p" 2>/dev/null || return 0
   env_txt=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null) || env_txt=""
-  if ! grep -qx "XDG_RUNTIME_DIR=$SXDG" <<<"$env_txt"; then
-    log "pid $p environ has no XDG_RUNTIME_DIR=$SXDG, not stopped"
+  if ! grep -qx "XDG_RUNTIME_DIR=$SPIKE_XRD" <<<"$env_txt"; then
+    log "pid $p environ is not the spike XDG, not stopped"
     return 1
   fi
   kill -TERM "$p"
@@ -80,15 +91,20 @@ stop_spike_pause() {
   log "stopped spike pause pid $p"
 }
 
-pause_report() { # pid, prints comm, exe and argv of the spike pause
-  local p=$1
+# Report the spike pause, then every uid podman pause with its XDG (read only, nothing signalled).
+pause_report() {
+  local p=$1 q tag
   log "spike pause pid=$p comm='$(ps -o comm= -p "$p" | sed 's/ *$//')' exe=$(readlink "/proc/$p/exe")"
-  ps -o pid=,ppid=,comm=,args=,rss= -p "$p" | tee -a "$LOG/run.log" >&2
+  xdg_of "$p" | grep -qx "XDG_RUNTIME_DIR=$SPIKE_XRD" || die "pause $p does not carry the spike XDG"
+  for q in $(ps -u "$UIDN" -o pid=,comm= | awk '$2=="podman" && $3=="pause" {print $1}'); do
+    if [[ $q == "$p" ]]; then tag=spike; else tag=other; fi
+    log "  pause pid $q [$tag] $(xdg_of "$q")"
+  done
 }
 
 cmd_prepare() {
-  write_confs; make_dirs; use_conf containers.conf
-  log "versions: $(podman --version), $(crun --version | head -1), conmon $(conmon --version | head -1)"
+  write_confs; use_conf containers.conf
+  log "versions: $(pm --version), $(crun --version | head -1), $(conmon --version | head -1)"
   if [[ ! -x $BIN/catatonit ]]; then
     pm pull -q "$DEBIAN" >"$LOG/pull.txt" 2>&1 || die "pull failed, see $LOG/pull.txt"
     pm run --rm -v "$BIN:/out" "$DEBIAN" sh -c \
@@ -100,7 +116,7 @@ cmd_prepare() {
 }
 
 cmd_probe() {
-  write_confs; make_dirs; use_conf containers.conf
+  write_confs; use_conf containers.conf
   local p; p=$(pause_pid)
   if [[ -n $p ]]; then stop_spike_pause "$p" || die "could not stop old spike pause $p"; fi
   pm run --rm "$DEBIAN" true >"$LOG/probe.txt" 2>&1 || die "podman run failed, see $LOG/probe.txt"
@@ -109,7 +125,7 @@ cmd_probe() {
 }
 
 cmd_knobs() {
-  write_confs; make_dirs; use_conf containers-initpath.conf
+  write_confs; use_conf containers-initpath.conf
   local p; p=$(pause_pid)
   if [[ -n $p ]]; then stop_spike_pause "$p" || die "could not stop spike pause $p"; fi
   pm run --rm "$DEBIAN" true >"$LOG/knobs.txt" 2>&1 || die "podman run failed, see $LOG/knobs.txt"
@@ -118,9 +134,9 @@ cmd_knobs() {
 }
 
 cmd_teardown() {
-  write_confs; make_dirs; use_conf containers.conf
+  write_confs; use_conf containers.conf
   local p; p=$(pause_pid)
-  # A live pause keeps podman from spawning a new one for unshare. Start one if none is alive.
+  # A live pause keeps unshare from spawning a new one. Start one if none is alive.
   if [[ -z $p ]] || ! kill -0 "$p" 2>/dev/null; then pm unshare true >/dev/null 2>&1 || true; p=$(pause_pid); fi
   if [[ -d $ROOT || -d $RUNROOT ]]; then
     pm rm -af >/dev/null 2>&1 || true
@@ -128,17 +144,28 @@ cmd_teardown() {
     pm unshare rm -rf "$ROOT" "$RUNROOT" >/dev/null 2>&1 || true
   fi
   stop_spike_pause "$p" || log "spike pause $p left running, check by hand"
-  rm -rf "$ROOT" "$RUNROOT" 2>/dev/null || log "storage removal incomplete"
+  rm -rf "$ROOT" "$RUNROOT" "$SPIKE_XRD" 2>/dev/null || log "storage removal incomplete"
   rmdir "$(dirname "$ROOT")" 2>/dev/null || true
-  local left
-  left=$(ps -u "$UIDN" -o pid=,comm= | awk '$2 ~ /^podman/ {print $1}' || true)
-  log "podman processes after teardown (uid $UIDN): $(echo ${left:-none})"
+  local q
+  for q in $(ps -u "$UIDN" -o pid=,comm= | awk '$2=="podman" && $3=="pause" {print $1}'); do
+    log "pause pid $q remains [$(xdg_of "$q")]"
+  done
+  log "teardown done"
 }
 
-case ${1:-} in
-  prepare) cmd_prepare ;;
-  probe) cmd_probe ;;
-  knobs) cmd_knobs ;;
-  teardown) cmd_teardown ;;
-  *) die "usage: $0 prepare|probe|knobs|teardown" ;;
-esac
+main() {
+  case ${1:-} in
+    prepare|probe|knobs|teardown) ;;
+    *) die "usage: XDG_RUNTIME_DIR=$SPIKE_XRD $0 prepare|probe|knobs|teardown" ;;
+  esac
+  require_xdg
+  make_dirs
+  case $1 in
+    prepare) cmd_prepare ;;
+    probe) cmd_probe ;;
+    knobs) cmd_knobs ;;
+    teardown) cmd_teardown ;;
+  esac
+}
+
+main "$@"
