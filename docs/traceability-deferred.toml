@@ -38,7 +38,8 @@ reason = "every doctor check with its PASS and FAIL cases, the text and JSON rep
 [[deferred]]
 id = "FR-010"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the Basic, services-off create argv is golden-tested and never privileged (T4.1); the create itself, the realm user, the rollback and the AC-1 installed-package list need ops/create.py and a Void host (T4.4, T4.9)"
 
 [[deferred]]
 id = "FR-011"
@@ -108,7 +109,8 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 [[deferred]]
 id = "FR-026"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the golden argv proves --network host for non-Kali realms (T4.1); the Kali pasta network and NET_RAW land in T10.1, and Kali is refused until then"
 
 [[deferred]]
 id = "FR-040"
@@ -152,7 +154,7 @@ reason = "the session env and the display, audio and authority attach plan are u
 id = "FR-048"
 milestone = "M4"
 partial = true
-reason = "the Realm Home mount at the host home path is unit-tested (T4.2); echo $HOME and ls ~ inside the realm need a Void host (T4.6, T4.9)"
+reason = "the Realm Home mount at the host home path is unit-tested in the create argv (T4.1) and the mount plan (T4.2); echo $HOME and ls ~ inside the realm need a Void host (T4.6, T4.9)"
 
 [[deferred]]
 id = "FR-049"
@@ -168,7 +170,7 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-061"
 milestone = "M6"
 partial = true
-reason = "the Basic binds, devices and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), and the table comparison closes in T6.1"
+reason = "the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), and the table comparison closes in T6.1"
 
 [[deferred]]
 id = "FR-062"
@@ -222,7 +224,8 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 [[deferred]]
 id = "FR-082"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the services-off create argv carries --init, a keep-alive entrypoint and no systemd option (T4.1); no systemd process inside a running realm needs a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-083"
@@ -407,7 +410,8 @@ reason = "not covered yet; the M10 package job scans the built .xbps for setuid 
 [[deferred]]
 id = "NFR-SEC-004"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "realm_spec takes its image from the Trust Manifest; RealmSpec refuses a tag (T4.1). The pull by digest, the verification and the package-manager signature checks need ops/create.py and a Void host (T4.4, T4.9)"
 
 [[deferred]]
 id = "NFR-SEC-005"

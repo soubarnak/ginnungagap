@@ -91,6 +91,7 @@ class CreateSpec:
     init: bool = False
     init_path: str | None = None
     systemd: str | None = None
+    http_proxy: bool | None = None
     cgroupns: str | None = None
     cgroup_parent: str | None = None
     stop_signal: str | None = None
@@ -104,12 +105,14 @@ class CreateSpec:
     tmpfs: list[str] = field(default_factory=list)
     cdi_devices: list[str] = field(default_factory=list)
     entrypoint_argv: list[str] = field(default_factory=list)
+    command: list[str] = field(default_factory=list)
 
     def to_argv(self) -> list[str]:
         """Return the `podman create` argv (without the podman binary or global flags).
 
         The order is fixed and env and labels are sorted, so equal specs give equal argv. The
-        entrypoint is passed as a JSON array to `--entrypoint`, and the image comes last.
+        entrypoint is passed as a JSON array to `--entrypoint`. The image comes next, and the
+        command, when set, follows the image as separate arguments.
         """
         _check_spec(self)
         argv = ["create", "--name", self.name]
@@ -117,6 +120,9 @@ class CreateSpec:
         _opt(argv, "--user", self.user)
         _opt(argv, "--userns", self.userns)
         argv += ["--network", self.network]
+        if self.http_proxy is not None:
+            # False keeps the host's proxy variables out of the realm (T4.1, ADR-004 amendment).
+            argv.append(f"--http-proxy={'true' if self.http_proxy else 'false'}")
         _opt(argv, "--cgroupns", self.cgroupns)
         _opt(argv, "--cgroup-parent", self.cgroup_parent)
         if self.systemd is not None:
@@ -144,6 +150,7 @@ class CreateSpec:
         if self.entrypoint_argv:
             argv += ["--entrypoint", json.dumps(self.entrypoint_argv)]
         argv.append(self.image_digest_ref)
+        argv += self.command
         _refuse_privileged(argv, self.caps_add)
         return argv
 

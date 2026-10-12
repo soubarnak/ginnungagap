@@ -230,3 +230,20 @@ def test_shell_metacharacters_stay_inside_one_argument() -> None:
     index = argv.index(value)
     assert argv[index - 1] == "--env"
     assert argv.count(value) == 1
+
+
+@pytest.mark.fr("FR-061")
+def test_http_proxy_renders_only_when_set() -> None:
+    """Unset keeps podman's default. False keeps the host's proxy variables out (T4.1)."""
+    assert "--http-proxy=false" in basic_spec(http_proxy=False).to_argv()
+    assert "--http-proxy=true" in basic_spec(http_proxy=True).to_argv()
+    unset = basic_spec(http_proxy=None).to_argv()
+    assert not any(arg.startswith("--http-proxy") for arg in unset)
+
+
+@pytest.mark.fr("FR-082")
+def test_command_follows_the_image_and_is_absent_when_unset() -> None:
+    """The command is separate arguments after the image. Unset, the argv ends at the image."""
+    argv = basic_spec(entrypoint_argv=["sleep"], command=["infinity"]).to_argv()
+    assert argv[-4:] == ["--entrypoint", '["sleep"]', DIGEST, "infinity"]
+    assert basic_spec().to_argv()[-1] == DIGEST
