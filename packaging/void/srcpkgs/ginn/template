@@ -1,0 +1,39 @@
+# Template file for 'ginn'
+pkgname=ginn
+version=0.1.0
+revision=1
+build_style=python3-pep517
+hostmakedepends="python3-setuptools python3-wheel"
+depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux"
+checkdepends="python3-pytest python3-hypothesis"
+# The release tarball has no git metadata, so the repo hygiene test cannot run here.
+# CI runs it on the checkout.
+make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
+short_desc="Per-distribution realms on rootless Podman for Void Linux"
+maintainer="Bongbetic <soubarna@live.in>"
+license="Apache-2.0"
+homepage="https://github.com/soubarnak/ginnungagap"
+distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
+checksum=@CHECKSUM@
+archs="x86_64 x86_64-musl"
+
+post_install() {
+    # Apache-2.0 section 4(a) requires recipients to get a copy of the license.
+    vlicense LICENSE
+    vdoc README.md
+}
+
+ginn-gui_package() {
+    short_desc+=" - Control Plane GUI"
+    depends="ginn>=${version}_${revision} python3-gobject gtk4 libadwaita"
+    pkg_install() {
+        # vmove is fatal when the source is missing, and the GUI files only appear
+        # with milestone M9. Move the ones that exist; DESTDIR is the ginn destdir here.
+        local path
+        for path in usr/share/applications usr/share/icons "${py3_sitelib}/ginn/gui"; do
+            if [ -e "${DESTDIR}/${path}" ]; then
+                vmove "${path}"
+            fi
+        done
+    }
+}

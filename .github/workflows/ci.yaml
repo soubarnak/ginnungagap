@@ -1,0 +1,97 @@
+name: ci
+
+on:
+  push:
+    branches: [void]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.libc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - libc: glibc
+            image: ghcr.io/void-linux/void-glibc-full:latest
+          - libc: musl
+            image: ghcr.io/void-linux/void-musl-full:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install podman on the runner
+        run: sudo apt-get install -y --no-install-recommends podman
+      - name: Run the suite as a non-root user in the Void container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          sudo podman run --rm -i -v "$GITHUB_WORKSPACE:/src:ro" "$IMAGE" sh -s <<'CONTAINER'
+          set -eu
+          xbps-install -Syu -y xbps </dev/null
+          xbps-install -yu </dev/null
+          xbps-install -y python3 python3-pytest python3-pytest-cov python3-hypothesis python3-mypy ruff git shadow </dev/null
+          useradd -m tester
+          # Copy the checkout so the mounted host tree keeps its owner.
+          cp -a /src /home/tester/ginn
+          chown -R tester /home/tester/ginn
+          git config --system --add safe.directory /home/tester/ginn
+          su -l tester -c 'cd ~/ginn && python3 -m pytest -q --cov=ginn --cov-report=term-missing --cov-fail-under=80 && ruff check src tests tools && python3 -m mypy src/ginn && python3 tools/gen_errors_doc.py --check && if [ -f tools/traceability.py ]; then python3 tools/traceability.py --check; fi'
+          CONTAINER
+
+  provenance:
+    name: provenance scan (NFR-063)
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Scan the source against the reference sources
+        env:
+          PROVENANCE_REPOS: "https://github.com/89luca89/distrobox https://github.com/anatase-org/spaces"
+        run: bash tools/provenance-scan.sh
+
+  package:
+    name: xbps package (x86_64 glibc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install podman on the runner
+        run: sudo apt-get install -y --no-install-recommends podman
+      - name: Build the ginn package in the Void container
+        run: |
+          mkdir -p "$RUNNER_TEMP/binpkgs"
+          sudo podman run --rm -i --privileged -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/binpkgs:/out" ghcr.io/void-linux/void-glibc-full:latest sh -s <<'CONTAINER'
+          set -eu
+          xbps-install -Syu -y xbps </dev/null
+          xbps-install -yu </dev/null
+          xbps-install -y git shadow </dev/null
+          useradd -m builder
+          # xbps-src refuses root and builds in a user namespace, so run it as builder.
+          # The container is privileged for the same reason as the Void project's own CI.
+          cp -a /src /home/builder/ginnungagap
+          git clone --depth 1 https://github.com/void-linux/void-packages.git /home/builder/void-packages
+          printf 'XBPS_CHROOT_CMD=uchroot\n' >> /home/builder/void-packages/etc/conf
+          chown -R builder /home/builder/ginnungagap /home/builder/void-packages
+          git config --system --add safe.directory /home/builder/ginnungagap
+          git config --system --add safe.directory /home/builder/void-packages
+          su -l builder -c 'cd ~/ginnungagap && GINN_LOCAL_SOURCE=1 tools/xbps-build.sh ~/void-packages'
+          cp /home/builder/void-packages/hostdir/binpkgs/ginn*.xbps /out/
+          CONTAINER
+      - name: Upload the ginn packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ginn-xbps-x86_64-glibc
+          path: ${{ runner.temp }}/binpkgs/ginn*.xbps
+          if-no-files-found: error
