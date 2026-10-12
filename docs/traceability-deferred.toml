@@ -95,7 +95,8 @@ reason = "not covered yet; the roadmap assigns its test to T8.3 (M8)"
 [[deferred]]
 id = "FR-023"
 milestone = "M8"
-reason = "not covered yet; the roadmap assigns its test to M8"
+partial = true
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
 
 [[deferred]]
 id = "FR-025"

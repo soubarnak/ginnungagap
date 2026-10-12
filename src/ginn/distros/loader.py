@@ -19,8 +19,10 @@ braces. Four names are defined, each valid in one place only:
 - `{tmpdir}` in the `check-updates` steps, as a whole element or inside one. It is the scratch
   directory the caller passes to `check_updates()`: an absolute path that does not exist yet.
 
-Every distribution defines every verb in `Verb`. `check-updates` is the exception: it is a list of
-steps, run in order, and `check_updates()` returns them. Every other verb is one argv. `refresh`
+Every distribution defines every verb in `Verb` except two. `check-updates` is a list of steps, run
+in order, and `check_updates()` returns them. `remove-check` is optional: a distribution that omits
+it has no removal pre-check, and `DistroDef.has_remove_check` says whether it defines one (ADR-011).
+Every other verb is one argv. `refresh`
 loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
 lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
 refreshes what it needs:
@@ -93,16 +95,31 @@ _TOP_KEYS: Final = frozenset(
 
 
 class Verb(StrEnum):
-    """The package-manager verbs every distribution defines (FR-040, FR-041)."""
+    """The package-manager verbs (FR-040, FR-041). Every distribution defines each one except
+    check-updates (a list of steps) and remove-check (optional, ADR-011)."""
 
     REFRESH = "refresh"
     INSTALL = "install"
     REMOVE = "remove"
+    REMOVE_CHECK = "remove-check"
     UPGRADE = "upgrade"
     CHECK_UPDATES = "check-updates"
     LIST_EXPLICIT = "list-explicit"
     RESOLVE = "resolve"
     ESTIMATE = "estimate"
+
+
+# The verb keys a distribution file must define, and the one it may omit (see the Verb docstring).
+_OPTIONAL_VERB_KEYS: Final = frozenset({Verb.REMOVE_CHECK.value})
+_REQUIRED_VERB_KEYS: Final = frozenset(verb.value for verb in Verb) - _OPTIONAL_VERB_KEYS
+
+
+class UpdateStatus(StrEnum):
+    """What the Arch check-updates steps found (FR-024, ADR-011)."""
+
+    UPDATES = "updates"
+    NONE = "none"
+    ERROR = "error"
 
 
 @dataclass(frozen=True)
@@ -145,7 +162,8 @@ class DistroDef:
 
     `trust_key` names a table in the Trust Manifest. Only its non-emptiness is checked here (T2.14
     checks it against the manifest). `verbs` maps each Verb except check-updates to its argv
-    template. `check_steps` is the check-updates step list, one argv template per step.
+    template, and holds remove-check only where the data defines it. `check_steps` is the
+    check-updates step list, one argv template per step.
     `name_pattern` is matched with fullmatch, by argv() and by the Integration Package Set.
     `signature_error` and `stale_metadata` are matched with search against the package manager's
     output (FR-012, ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before
@@ -167,8 +185,9 @@ class DistroDef:
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
 
-        Raises GINN-E-USAGE when the verb takes packages and none are given, and when packages are
-        given to a verb that takes none. Every package name must fullmatch `name_pattern` (DR-003),
+        Raises GINN-E-USAGE when the verb takes packages and none are given, when packages are
+        given to a verb that takes none, and when the data does not define the verb (remove-check
+        on a distribution without it). Every package name must fullmatch `name_pattern` (DR-003),
         or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
         a leading `-`, so a name that passes can never be read as an option. domain.packages checks
         AS-027 first; this check is the second line of defence. check-updates is not one argv, so
@@ -180,7 +199,9 @@ class DistroDef:
             raise make(
                 "GINN-E-USAGE", detail="verb check-updates is a list of steps; use check_updates()"
             )
-        template = self.verbs[verb]
+        template = self.verbs.get(verb)
+        if template is None:
+            raise make("GINN-E-USAGE", detail=f"verb {verb.value} is not defined for {self.id}")
         takes_packages = PACKAGES_ELEMENT in template
         if takes_packages and not packages:
             raise make("GINN-E-USAGE", detail=f"verb {verb.value} needs at least one package")
@@ -193,6 +214,11 @@ class DistroDef:
             else:
                 out.append(_render(element, {}))
         return out
+
+    @property
+    def has_remove_check(self) -> bool:
+        """True when the data defines remove-check, the removal dry run (ADR-011)."""
+        return Verb.REMOVE_CHECK in self.verbs
 
     @property
     def check_updates_needs_tmpdir(self) -> bool:
@@ -257,6 +283,37 @@ class DistroDef:
             err.details["rule"] = f"must match {self.name_pattern.pattern} for {self.id} (DR-003)"
             raise err
         return raw
+
+
+_WARNING_PREFIX: Final = "warning:"
+
+
+def arch_check_status(
+    sync_exit: int, query_exit: int, query_stdout: str, query_stderr: str
+) -> UpdateStatus:
+    """Return what the Arch check-updates steps found, from their results (FR-024, ADR-011).
+
+    The caller runs step 3 (the scratch sync) and step 4 (the query), then passes their exit
+    statuses and output here. Nothing is run. The statuses are observed, not documented, so any
+    result that matches no rule below is an error, never "no updates":
+    - step 3 exits 0, or the result is an error;
+    - step 4 exits 0 with a package on stdout: updates. Blank stdout is an error;
+    - step 4 exits 1, stdout is blank, and every non-blank stderr line starts with `warning:`:
+      no updates. Empty stderr also counts;
+    - anything else is an error.
+    """
+    if sync_exit != 0:
+        return UpdateStatus.ERROR
+    if query_exit == 0:
+        return UpdateStatus.UPDATES if query_stdout.strip() else UpdateStatus.ERROR
+    if query_exit == 1 and not query_stdout.strip() and _only_warnings(query_stderr):
+        return UpdateStatus.NONE
+    return UpdateStatus.ERROR
+
+
+def _only_warnings(stderr: str) -> bool:
+    """True when every non-blank line of `stderr` starts with `warning:`."""
+    return all(line.startswith(_WARNING_PREFIX) for line in stderr.splitlines() if line.strip())
 
 
 _CACHE: dict[tuple[str, str], DistroDef] = {}
@@ -431,13 +488,16 @@ def _verbs(
     reader: "_Reader", value: object
 ) -> tuple[dict[Verb, tuple[str, ...]], tuple[tuple[str, ...], ...]]:
     table = reader.table(value, "verbs")
-    _only_keys(reader, table, frozenset(v.value for v in Verb), "verbs")
+    _only_keys(reader, table, _REQUIRED_VERB_KEYS, "verbs", _OPTIONAL_VERB_KEYS)
     allowed = frozenset({"packages"})
-    verbs = {
-        Verb(key): reader.argv(table[key], f"verbs.{key}", allowed, allowed)
-        for key in table
-        if key != Verb.CHECK_UPDATES.value
-    }
+    verbs: dict[Verb, tuple[str, ...]] = {}
+    for key in table:
+        if key == Verb.CHECK_UPDATES.value:
+            continue
+        argv = reader.argv(table[key], f"verbs.{key}", allowed, allowed)
+        if key == Verb.REMOVE_CHECK.value and PACKAGES_ELEMENT not in argv:
+            raise reader.fail(f"verbs.{key}", "must include {packages} as one element")
+        verbs[Verb(key)] = argv
     return verbs, _check_steps(reader, table[Verb.CHECK_UPDATES.value])
 
 
@@ -527,9 +587,14 @@ class _Reader:
 
 
 def _only_keys(
-    reader: _Reader, table: Mapping[str, object], expected: frozenset[str], field: str
+    reader: _Reader,
+    table: Mapping[str, object],
+    expected: frozenset[str],
+    field: str,
+    optional: frozenset[str] = frozenset(),
 ) -> None:
-    unknown = sorted(set(table) - expected)
+    """Refuse a key outside `expected` and `optional`, and a missing key from `expected`."""
+    unknown = sorted(set(table) - expected - optional)
     if unknown:
         raise reader.fail(field, f"unknown key(s): {', '.join(unknown)}")
     missing = sorted(expected - set(table))
@@ -596,7 +661,9 @@ __all__ = [
     "HostLocale",
     "Integration",
     "IntegrationSet",
+    "UpdateStatus",
     "Verb",
+    "arch_check_status",
     "available",
     "clear_cache",
     "distro_fixtures_enabled",

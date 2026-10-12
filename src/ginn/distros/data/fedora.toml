@@ -23,7 +23,7 @@ signature_error_regex = '(?i)gpg check failed|public key for .* is not installed
 # until M4.
 stale_metadata_regex = 'Status code: 404'
 # ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
-# check-updates forces a refresh, so no verb needs one first.
+# check-updates and upgrade force a refresh, so no verb needs one first.
 refresh_before = []
 
 [integration]
@@ -37,9 +37,16 @@ refresh = ["dnf", "--refresh", "makecache"]
 # install_weak_deps=False: only hard dependencies are installed (FR-040, CR-007).
 install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", "{packages}"]
 # dnf5 also removes now-unneeded dependencies (clean_requirements_on_remove, default on). It does
-# not refuse packages that need the named one: the ops layer pre-checks that (ADR-011).
+# not refuse packages that need the named one: the ops layer pre-checks that with remove-check.
 remove = ["dnf", "--assumeyes", "remove", "{packages}"]
-upgrade = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
+# remove-check is the dry run the ops layer reads before remove (ADR-011, FR-041). --assumeno prints
+# the transaction and changes nothing. dnf exits 1 after the no answer, as for resolve (above).
+# --no-autoremove keeps unneeded dependencies out of the list, so it holds the named packages and
+# the packages that need them. Output format is not verified until M4.
+remove-check = ["dnf", "--assumeno", "--no-autoremove", "remove", "{packages}"]
+# Full upgrade (FR-023 AC-2). --refresh forces fresh metadata before the upgrade, so it works from
+# the mirror's current metadata and not from metadata up to 48 hours old (dnf5.conf(5), ADR-011).
+upgrade = ["dnf", "--refresh", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
 # --refresh forces fresh metadata, so the check the Control Plane runs reflects the mirror (FR-024).
 # check-upgrade exits 100 when updates exist and 0 when none. A one-step list (see arch.toml).
 check-updates = [["dnf", "--refresh", "check-upgrade"]]

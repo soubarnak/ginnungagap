@@ -64,20 +64,26 @@ The `upgrade` verb is the native full upgrade that FR-023 AC-2 names. Its argv, 
 |---|---|
 | arch | `pacman --sync --refresh --sysupgrade --noconfirm` |
 | debian, kali | `apt-get --yes --no-install-recommends dist-upgrade` |
-| fedora | `dnf --assumeyes --setopt=install_weak_deps=False upgrade` (no package named, so every installed package with a newer version) |
+| fedora | `dnf --refresh --assumeyes --setopt=install_weak_deps=False upgrade` (no package named, so every installed package with a newer version; `--refresh` forces current metadata, so the upgrade does not work from metadata up to 48 hours old) |
 
 `dist-upgrade`, not `upgrade`: apt's plain upgrade leaves a package at its installed version when the new version needs a dependency that is not installed, so it is not a full upgrade (apt-get(8)).
 
 The Arch check-updates is a list of four steps. The loader runs none of them. The caller runs them in order, and stops at the first failure:
 
-1. `mkdir -p <tmpdir>`. The caller chooses a path that does not exist yet.
-2. `ln -s /var/lib/pacman/local <tmpdir>/local`. The installed-package database is read through a link.
+1. `mkdir <tmpdir>`, without `-p`. The caller chooses a path whose parent exists and whose last element does not. A leftover path fails this step, so the check stops and never writes into an old directory.
+2. `ln -s -T /var/lib/pacman/local <tmpdir>/local`. The installed-package database is read through a link. `-T` makes `<tmpdir>/local` the link itself, so `ln` never links inside a directory it finds there, and it fails when the name exists.
 3. `pacman --sync --refresh --dbpath <tmpdir> --logfile /dev/null`. This syncs a scratch copy of the repository databases. It has `--refresh` without `--sysupgrade`, which is allowed only here, because it refreshes the scratch copy and changes no installed package.
 4. `pacman --query --upgrades --dbpath <tmpdir>`. This lists the installed packages that the scratch copy shows as out of date.
 
 The caller removes `<tmpdir>` after the last step, whether or not a step failed. Removal must delete the `local` link and must not follow it.
 
-Exit statuses (observed, see Context): step 3 exits 0 on success. Step 4 exits 0 with the upgradable packages on stdout. It exits 1 with nothing on stdout or stderr when nothing is upgradable. It exits 1 with a message on stderr when it cannot run, for example with no sync database. The caller treats exit 1 as "no updates" only when stderr is empty and step 3 succeeded. Any other failure is an error. The loader records these in the TOML comments, not as data, because they are observed and not documented. M4 confirms them in a realm.
+Exit statuses (observed, see Context): step 3 exits 0 on success. Step 4 exits 0 with the upgradable packages on stdout. It exits 1 with blank stdout when nothing is upgradable, and its stderr is empty or holds only lines that start with `warning:`. It exits 1 with another message on stderr when it cannot run, for example with no sync database. The caller applies `arch_check_status()` in `loader.py`, which returns one of three results:
+
+- updates: step 4 exits 0 with a package on stdout. Exit 0 with blank stdout is an error.
+- no updates: step 3 exits 0, step 4 exits 1, stdout is blank, and every non-blank stderr line starts with `warning:`.
+- error: any other result, including a failed step 3 and exit 1 with any other stderr line.
+
+The loader records the statuses in the TOML comments, not as data, because they are observed and not documented. The rule is code, not a schema key, and `arch_check_status()` is the one place it is written. M4 confirms the statuses in a realm before the Control Plane relies on them.
 
 Rules that follow from the table:
 
@@ -100,15 +106,15 @@ Removal. `remove` never removes a package the user did not name. The only except
 
 | Distribution | Native `remove` argv | Packages that need the named one | Unneeded dependencies | Refusal before the real run (T5.3) |
 |---|---|---|---|---|
-| arch | `pacman --remove --noconfirm` (no `--recursive`, no `--cascade`) | refused by pacman, natively | left in place | none needed |
-| debian, kali | `apt-get --yes remove` | removed by apt-get | left in place (no `--auto-remove`) | run `apt-get --simulate remove <names>`; refuse if it lists any name not requested |
-| fedora | `dnf --assumeyes remove` | removed by dnf5 | removed by dnf5 (`clean_requirements_on_remove`) | run `dnf --assumeno --no-autoremove remove <names>`; refuse if it lists any name not requested |
+| arch | `pacman --remove --noconfirm` (no `--recursive`, no `--cascade`) | refused by pacman, natively | left in place | none needed; the data omits `remove-check` |
+| debian, kali | `apt-get --yes remove` | removed by apt-get | left in place (no `--auto-remove`) | run `remove-check` (`apt-get --simulate remove <names>`); refuse if it lists any name not requested |
+| fedora | `dnf --assumeyes remove` | removed by dnf5 | removed by dnf5 (`clean_requirements_on_remove`) | run `remove-check` (`dnf --assumeno --no-autoremove remove <names>`); refuse if it lists any name not requested |
 
-The pre-check for dnf adds `--no-autoremove`, so its list holds only the named packages and their dependents. The real run keeps dnf's default cleaning, which the rule permits. The pre-check is a dry run, so a refusal changes nothing. `--no-remove` is not used: it aborts on the named removal too (apt-get(8)). No `Verb` member is added for the pre-check: every distribution file and several tests iterate the closed `Verb` set, and T5.3 owns the pre-check.
+The pre-check for dnf adds `--no-autoremove`, so its list holds only the named packages and their dependents. The real run keeps dnf's default cleaning, which the rule permits. The pre-check is a dry run, so a refusal changes nothing. `--no-remove` is not used: it aborts on the named removal too (apt-get(8)). `remove-check` is a `Verb` member that the data may omit. Arch and the test fixture omit it, and Debian, Kali and Fedora define it. When the data defines it, the loader requires `{packages}` as one element. Every other verb stays required, so a new distribution still defines each of them. T5.3 owns the ops-side use of the dry run and the parsing of its output.
 
 The `upgrade` verb is not `remove`, and FR-041 does not cover it. A Debian or Kali full upgrade can remove a package to resolve a dependency (apt-get(8)). That is the native full upgrade FR-023 AC-2 names. The Control Plane should show such removals before the update runs. That is an ops-layer item for M8, not decided here.
 
-Data and code. The distribution definitions carry `stale_metadata_regex` and `refresh_before` as required keys. The check-updates steps are a required key too, a list of argv lists. `verbs` holds every other verb, and `check_updates(tmpdir)` returns the steps with `{tmpdir}` filled in. The loader refuses a file that lacks a required key, lists `refresh` in `refresh_before`, repeats a verb, or puts `{tmpdir}` in any verb other than check-updates. The creation rule is not in the data: it is the same for every distribution, so the docstring and this ADR carry it. `SCHEMA` stays 1: the data ships with the code, so the keys change together, and an older file fails loudly with "missing key(s)". The loader caches a successful load per data directory, and `clear_cache()` empties the cache. The test switch `GINN_TEST_DISTROS=1` is the only way to load a fixture (a name that starts with `_`).
+Data and code. The distribution definitions carry `stale_metadata_regex` and `refresh_before` as required keys. The check-updates steps are a required key too, a list of argv lists. `verbs` holds every other verb, and `check_updates(tmpdir)` returns the steps with `{tmpdir}` filled in. The loader refuses a file that lacks a required key, lists `refresh` in `refresh_before`, repeats a verb, or puts `{tmpdir}` in any verb other than check-updates. `remove-check` is the one optional verb key, and `DistroDef.has_remove_check` reports whether the data defines it. The creation rule is not in the data: it is the same for every distribution, so the docstring and this ADR carry it. `SCHEMA` stays 1: the data ships with the code, so the keys change together, and an older file fails loudly with "missing key(s)". The loader caches a successful load per data directory, and `clear_cache()` empties the cache. The test switch `GINN_TEST_DISTROS=1` is the only way to load a fixture (a name that starts with `_`).
 
 ## Alternatives considered
 
@@ -125,8 +131,8 @@ Data and code. The distribution definitions carry `stale_metadata_regex` and `re
 - dnf remove with `--no-autoremove` in the real run. Rejected: dnf5 remove(8) has no flag that refuses dependents, so the flag would not give the rule. It only changes the cleaning, and the rule permits the default.
 - Fedora check-updates after `dnf makecache`. Rejected: makecache does not download when the metadata has not expired (dnf5 makecache(8)), so it does not force a fresh view. The global `--refresh` does.
 - Fedora refresh before install. Rejected: dnf5 refreshes expired metadata itself (dnf5.conf(5)). An extra refresh adds network use and changes nothing.
-- A `Verb` member for the removal pre-check. Rejected for now: it would add a required argv to every distribution file and every test that iterates the verbs, before T5.3 decides the exact form.
-- A schema key for exit statuses. Rejected for now: the statuses are observed on one host, and a field would encode values that are not verified. They stay in the TOML comments until M4 confirms them.
+- A required `Verb` member for the removal pre-check. Rejected: it would add a required argv to every distribution file and every test that iterates the verbs. Revised: `remove-check` is a `Verb` member that the data may omit, so Arch and the fixture do not change (see the Decision).
+- A schema key for exit statuses. Rejected: the statuses are observed on one host, and a field would encode values that are not verified. The rule is one pure function, `arch_check_status()`, not a key. M4 confirms it before the Control Plane uses it.
 - Bumping `SCHEMA` for the new keys. Rejected: see the Decision.
 
 ## Consequences
@@ -141,7 +147,9 @@ Negative, and what the code must and must not do:
 - A Debian or Kali full upgrade can remove packages (see Decision).
 - The Fedora check forces a metadata download each time the Control Plane opens. FR-024 runs the check on open only, so the cost is one download per open.
 - Every value in `stale_metadata_regex` is runtime text. It is checked against sample lines, and it must be verified in M4 on a real host.
-- The check's exit statuses are observed, not documented. The Control Plane must not map exit 1 to "no updates" unless stderr is empty and step 3 succeeded.
+- The check's exit statuses are observed, not documented. The Control Plane must use `arch_check_status()`, which maps exit 1 to "no updates" only when stdout is blank, every non-blank stderr line starts with `warning:`, and step 3 succeeded.
+- pacman prefixes its warnings with `warning:`, so the no-sync-database case in Context may match the warning-only rule. The rule is safe only because step 3 must succeed first, which should leave a sync database in the scratch directory. M4 must confirm that no path with a successful step 3 reaches that warning, or narrow the rule.
+- Whether ginn's realm lock covers the check is open. The check takes no lock on the realm's pacman database, because the scratch `--dbpath` has its own lock. So a check can run while `ginn update` runs, and it can read a `local` database that the update is writing. The ops layer does not exist yet, so no caller takes the realm lock for the check. This must be decided before the Control Plane runs the check.
 - The cleanup of `<tmpdir>` must delete the `local` link, not follow it. Following it would delete the realm's installed-package database.
 - The loader cannot check that `<tmpdir>` does not exist yet, or that it is inside the realm. The caller must make both true.
 
@@ -151,15 +159,18 @@ M4 must confirm, in a realm, before the Control Plane relies on the check:
 - The exit statuses of the four steps, and that `sync/` is created by step 3.
 - Whether a fresh Arch image has a sync database and what its package lists are.
 - The locale step on Arch, which runs `localedef` and not the `locale-gen` that S-10b ran.
+- (a) Whether the scratch `--sync --refresh --dbpath` writes the GnuPG lock or the trust database when database signatures are checked. The GnuPG home is `GPGDir` in pacman.conf, which `--dbpath` does not move, so a write there would land in the realm outside `{tmpdir}`.
+- (b) Whether pacman 7's `DownloadUser` sandbox can write into the root-created `{tmpdir}`. If it cannot, step 3 fails, and the check reports an error. Test with the default setting and with `DownloadUser` set.
+- (c) The scratch database lock means a check does not wait for a running `ginn update`. Confirm that the check neither blocks nor reads a half-written `local` database, and decide whether ginn's realm lock covers the check (see Consequences).
 
 ## Requirement IDs
 
 | ID | How this ADR bears on it |
 |---|---|
 | FR-013 | The Arch Integration Package Set is `ca-certificates`, which the image already ships, so the set adds no package. The creation rule is recorded under CL-9. |
-| FR-023 | Only the `upgrade` verb changes installed packages on each distribution, and it is the native full upgrade: `pacman -Syu`, `apt-get dist-upgrade`, `dnf upgrade`. Refresh, install, resolve, estimate and check-updates never do. The proving test for the update command is M8. |
-| FR-024 | Check-updates changes nothing in the realm's package database on any distribution. Arch runs a scratch-database check (M4 confirms the realm's files are unchanged). Debian and Kali read the lists only. Fedora forces a metadata refresh only. |
+| FR-023 | Only the `upgrade` verb changes installed packages on each distribution, and it is the native full upgrade: `pacman -Syu`, `apt-get dist-upgrade`, `dnf --refresh upgrade`. Refresh, install, resolve, estimate and check-updates never do. Unit tests pin each argv. The proving test for the update command is M8. |
+| FR-024 | Check-updates changes nothing in the realm's package database on any distribution. Arch runs a scratch-database check, and `arch_check_status()` maps its results (M4 confirms the realm's files are unchanged). Debian and Kali read the lists only. Fedora forces a metadata refresh only. |
 | FR-040 | Install never upgrades installed packages, and Arch install uses the sync database as the last full upgrade left it. A stale Arch database fails install with a 404; the remedy is `ginn update`. |
-| FR-041 | Remove names only the requested packages. Arch refuses dependents natively. Debian, Kali and Fedora are pre-checked by ops (T5.3). |
-| NFR-060 | Refresh rules, check-updates steps, stale-metadata patterns and removal mechanisms are data per distribution. A new distribution needs a file, not code. |
+| FR-041 | Remove names only the requested packages. Arch refuses dependents natively. Debian, Kali and Fedora define `remove-check`, the dry run that ops reads before remove (T5.3). |
+| NFR-060 | Refresh rules, check-updates steps, stale-metadata patterns, removal mechanisms and the optional `remove-check` verb are data per distribution. A new distribution needs a file, not code. |
 | CR-007 | The creation rule keeps realm contents to the official image's packages, the Integration Package Set and the requested packages. The full upgrade at creation changes their versions, not their sources. Wording is open under CL-9. |

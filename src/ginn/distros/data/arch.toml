@@ -42,24 +42,30 @@ refresh = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
 # so it never upgrades the realm (FR-040 AC-1, ADR-011).
 install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
 # No --recursive and no --cascade: pacman refuses to remove a package that another installed package
-# needs. A refusal is the native form of the dependents rule (ADR-011).
+# needs. A refusal is the native form of the dependents rule (ADR-011). So Arch omits remove-check:
+# the ops layer needs no dry run before remove here.
 remove = ["pacman", "--remove", "--noconfirm", "{packages}"]
 # --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade (FR-023).
 upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
 # check-updates is a list of steps, run in order by the caller, and none of them writes the realm's
 # sync database. --dbpath sets the whole database directory (pacman(8)), so every step that uses
-# pacman reads or writes only under {tmpdir}. The caller chooses a path that does not exist yet,
-# and removes it after the last step whether or not a step failed. Removal must delete the `local`
-# link, not follow it into /var/lib/pacman/local. --logfile keeps the realm's pacman log unchanged.
+# pacman reads or writes only under {tmpdir}. The caller chooses a path whose parent exists and
+# whose last element does not, and removes it after the last step whether or not a step failed.
+# Removal must delete the `local` link, not follow it into /var/lib/pacman/local. --logfile keeps
+# the realm's pacman log unchanged.
+# Step 1 is mkdir without -p, so it fails when {tmpdir} exists and a leftover path stops the check.
+# Step 2 is ln with -T, so {tmpdir}/local is the link itself: ln never links inside a directory it
+# finds there, and it fails when the name exists.
 # The sync step has --refresh without --sysupgrade. That is allowed here only, because it refreshes
 # the scratch copy and never a full upgrade (ADR-011).
 # Exit statuses, observed in a scratch probe and not in pacman(8), which documents none (ADR-011):
 # the sync step exits 0 on success. The query exits 0 with the upgradable packages on stdout. It
-# exits 1 with nothing on stdout or stderr when nothing is upgradable, and 1 with a message on
-# stderr when it cannot run, for example with no sync database. M4 confirms these in a realm.
+# exits 1 with nothing on stdout, and with nothing or only `warning:` lines on stderr, when nothing
+# is upgradable. It exits 1 with another message on stderr when it cannot run. The caller applies
+# arch_check_status() in loader.py to these results. M4 confirms these in a realm.
 check-updates = [
-    ["mkdir", "-p", "{tmpdir}"],
-    ["ln", "-s", "/var/lib/pacman/local", "{tmpdir}/local"],
+    ["mkdir", "{tmpdir}"],
+    ["ln", "-s", "-T", "/var/lib/pacman/local", "{tmpdir}/local"],
     ["pacman", "--sync", "--refresh", "--dbpath", "{tmpdir}", "--logfile", "/dev/null"],
     ["pacman", "--query", "--upgrades", "--dbpath", "{tmpdir}"],
 ]

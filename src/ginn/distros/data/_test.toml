@@ -20,6 +20,7 @@ steps = [["fake-locale-gen", "{locale}"]]
 [verbs]
 refresh = ["fake-pm", "refresh"]
 install = ["fake-pm", "install", "{packages}"]
+# No remove-check: the fixture omits it, so the optional-verb path stays tested (ADR-011).
 remove = ["fake-pm", "remove", "{packages}"]
 upgrade = ["fake-pm", "upgrade"]
 check-updates = [["fake-pm", "check"]]

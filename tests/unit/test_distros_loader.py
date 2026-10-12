@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Distribution data and loader: NFR-060 (data only), DR-003, DR-005, FR-012, FR-013, FR-024,
-FR-040, FR-041, NFR-SEC-005.
+"""Distribution data and loader: NFR-060 (data only), DR-003, DR-005, FR-012, FR-013, FR-023,
+FR-024, FR-040, FR-041, NFR-SEC-005.
 
 The shipped files are checked as data: their Integration Package Set against S-10 (the distro TOML
 is the single source for it), their verbs for non-interactive and signature-preserving flags, their
@@ -25,7 +25,9 @@ from ginn.distros.loader import (
     TEST_SWITCH_ENV,
     DistroDef,
     HostLocale,
+    UpdateStatus,
     Verb,
+    arch_check_status,
     available,
     clear_cache,
     distro_fixtures_enabled,
@@ -50,6 +52,9 @@ DR003_PATTERNS = {
     "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
 }
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
+# Distributions whose data defines remove-check (ADR-011). Arch refuses dependents natively, and the
+# fixture omits the verb to keep the optional path tested.
+REMOVE_CHECK_DISTROS = ("debian", "fedora", "kali")
 PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
 # Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
 # mkdir and links the installed-package database into it with ln (arch.toml).
@@ -126,9 +131,12 @@ def _every_argv(name: str) -> list[tuple[str, list[str]]]:
     definition = load(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
-        if verb is not Verb.CHECK_UPDATES:
-            packages = ["gimp"] if verb in PACKAGE_VERBS else []
-            out.append((verb.value, definition.argv(verb, packages)))
+        if verb is Verb.CHECK_UPDATES:
+            continue
+        if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
+            continue
+        packages = ["gimp"] if verb in (*PACKAGE_VERBS, Verb.REMOVE_CHECK) else []
+        out.append((verb.value, definition.argv(verb, packages)))
     for index, step in enumerate(_check_steps_of(name)):
         out.append((f"check-updates[{index}]", step))
     return out
@@ -167,7 +175,10 @@ def test_each_shipped_distribution_loads_with_every_verb() -> None:
         assert definition.id == name
         assert definition.trust_key == name
         assert definition.shell == "/bin/bash"
-        assert set(definition.verbs) == set(Verb) - {Verb.CHECK_UPDATES}
+        expected = set(Verb) - {Verb.CHECK_UPDATES}
+        if name not in REMOVE_CHECK_DISTROS:
+            expected.discard(Verb.REMOVE_CHECK)
+        assert set(definition.verbs) == expected, name
         assert definition.check_steps
 
 
@@ -502,6 +513,7 @@ def test_refresh_before_lists_only_the_verbs_a_metadata_refresh_makes_safe(
 
 
 @pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-023")
 def test_arch_never_refreshes_the_sync_database_outside_a_full_upgrade() -> None:
     # Arch does not support partial upgrades, so -Sy alone is never a refresh (Arch Wiki). The one
     # exception is the check-updates scratch copy, which the tests below pin to --dbpath.
@@ -529,11 +541,30 @@ def test_arch_install_uses_the_sync_database_as_the_last_full_upgrade_left_it() 
 @pytest.mark.fr("FR-024")
 def test_arch_check_updates_is_four_steps_against_a_scratch_database() -> None:
     assert _check_steps_of("arch") == [
-        ["mkdir", "-p", CHECK_TMP],
-        ["ln", "-s", "/var/lib/pacman/local", f"{CHECK_TMP}/local"],
+        ["mkdir", CHECK_TMP],
+        ["ln", "-s", "-T", "/var/lib/pacman/local", f"{CHECK_TMP}/local"],
         ["pacman", "--sync", "--refresh", "--dbpath", CHECK_TMP, "--logfile", "/dev/null"],
         ["pacman", "--query", "--upgrades", "--dbpath", CHECK_TMP],
     ]
+
+
+@pytest.mark.fr("FR-024")
+def test_no_check_step_uses_mkdir_dash_p_so_a_leftover_path_fails_closed() -> None:
+    # mkdir -p succeeds on an existing directory, so a leftover path would pass step 1 and let the
+    # later steps write into it. Without -p, mkdir fails and the check stops (ADR-011).
+    for name in SHIPPED:
+        for step in _check_steps_of(name):
+            if step[0] == "mkdir":
+                assert "-p" not in step and "--parents" not in step, (name, step)
+
+
+@pytest.mark.fr("FR-024")
+def test_arch_link_step_carries_dash_t_so_ln_never_links_inside_a_directory() -> None:
+    # Without -T, ln treats an existing directory named `local` as the target and creates the link
+    # inside it. With -T the link is the name itself, and ln fails when that name exists.
+    link = _check_steps_of("arch")[1]
+    assert link[0] == "ln"
+    assert "-T" in link, link
 
 
 @pytest.mark.fr("FR-024")
@@ -623,7 +654,63 @@ def test_check_updates_is_refused_as_one_argv() -> None:
     assert info.value.message == "verb check-updates is a list of steps; use check_updates()"
 
 
+@pytest.mark.fr("FR-024")
+@pytest.mark.parametrize(
+    ("sync_exit", "query_exit", "stdout", "stderr", "expected"),
+    [
+        # Step 4 exits 0 with the upgradable packages on stdout.
+        (0, 0, "gimp 2.10-1 -> 2.10-2\n", "", UpdateStatus.UPDATES),
+        (0, 0, "gimp 2.10-1 -> 2.10-2\n", "warning: unrelated\n", UpdateStatus.UPDATES),
+        # Step 4 exits 1 with blank stdout: nothing is upgradable. Stderr empty or warnings only.
+        (0, 1, "", "", UpdateStatus.NONE),
+        (0, 1, "", "warning: something\n", UpdateStatus.NONE),
+        (0, 1, "", "warning: one\nwarning: two\n", UpdateStatus.NONE),
+        (0, 1, "  \n", "\nwarning: one\n   \n", UpdateStatus.NONE),
+        # Blank stdout on exit 0 is not a list of updates.
+        (0, 0, "", "", UpdateStatus.ERROR),
+        (0, 0, "  \n", "", UpdateStatus.ERROR),
+        # Exit 1 with an error line, even mixed with warnings, is an error.
+        (0, 1, "", "error: could not open database\n", UpdateStatus.ERROR),
+        (0, 1, "", "warning: one\nerror: two\n", UpdateStatus.ERROR),
+        (0, 1, "", "Warning: capitalised is not warning:\n", UpdateStatus.ERROR),
+        (0, 1, "", " warning: indented\n", UpdateStatus.ERROR),
+        # Exit 1 with stdout is not "no updates".
+        (0, 1, "gimp 2.10-1 -> 2.10-2\n", "", UpdateStatus.ERROR),
+        (0, 1, "gimp 2.10-1 -> 2.10-2\n", "warning: one\n", UpdateStatus.ERROR),
+        # Any other query exit status is an error.
+        (0, 2, "", "", UpdateStatus.ERROR),
+        (0, 127, "", "", UpdateStatus.ERROR),
+        # The sync step must succeed, whatever step 4 reports.
+        (1, 0, "gimp 2.10-1 -> 2.10-2\n", "", UpdateStatus.ERROR),
+        (1, 1, "", "", UpdateStatus.ERROR),
+        (2, 1, "", "warning: one\n", UpdateStatus.ERROR),
+    ],
+)
+def test_arch_check_status_treats_exit_1_as_no_updates_only_with_warning_only_stderr(
+    sync_exit: int, query_exit: int, stdout: str, stderr: str, expected: UpdateStatus
+) -> None:
+    assert arch_check_status(sync_exit, query_exit, stdout, stderr) is expected
+
+
+@pytest.mark.fr("FR-024")
+def test_update_status_has_exactly_three_outcomes() -> None:
+    assert {status.value for status in UpdateStatus} == {"updates", "none", "error"}
+
+
+@pytest.mark.fr("FR-023")
+def test_fedora_upgrade_refreshes_the_metadata_first_and_upgrades_every_installed_package() -> None:
+    # --refresh is a dnf5 global option: it forces a metadata refresh before the upgrade.
+    assert load("fedora").argv(Verb.UPGRADE) == [
+        "dnf",
+        "--refresh",
+        "--assumeyes",
+        "--setopt=install_weak_deps=False",
+        "upgrade",
+    ]
+
+
 @pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-023")
 @pytest.mark.parametrize("name", ["debian", "kali"])
 def test_apt_upgrade_is_the_full_upgrade_dist_upgrade(name: str) -> None:
     # FR-023 AC-2 names the native full upgrade. A plain apt upgrade leaves a package at its
@@ -648,6 +735,7 @@ def test_arch_creation_refresh_is_the_full_upgrade_and_its_set_is_ca_certificate
 
 
 @pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-023")
 @pytest.mark.parametrize("name", SHIPPED)
 @pytest.mark.parametrize("verb", [Verb.INSTALL, Verb.RESOLVE, Verb.ESTIMATE])
 def test_install_resolve_and_estimate_never_upgrade_the_realm(name: str, verb: Verb) -> None:
@@ -673,6 +761,66 @@ def test_remove_names_only_the_requested_package(name: str, expected: list[str])
 @pytest.mark.parametrize("name", SHIPPED)
 def test_remove_never_widens_the_removal_with_autoremove_or_cascade(name: str) -> None:
     assert not REMOVE_WIDENERS & set(load(name).argv(Verb.REMOVE, ["gimp"]))
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("debian", ["apt-get", "--simulate", "remove", "gimp"]),
+        ("kali", ["apt-get", "--simulate", "remove", "gimp"]),
+        ("fedora", ["dnf", "--assumeno", "--no-autoremove", "remove", "gimp"]),
+    ],
+)
+def test_remove_check_is_the_dry_run_that_names_only_the_requested_package(
+    name: str, expected: list[str]
+) -> None:
+    assert load(name).argv(Verb.REMOVE_CHECK, ["gimp"]) == expected
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("name", REMOVE_CHECK_DISTROS)
+def test_remove_check_changes_nothing_and_never_answers_yes(name: str) -> None:
+    argv = load(name).argv(Verb.REMOVE_CHECK, ["gimp"])
+    assert not YES_FLAGS & set(argv), (name, argv)
+    assert "--simulate" in argv or "--assumeno" in argv, (name, argv)
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("name", REMOVE_CHECK_DISTROS)
+def test_remove_check_names_are_checked_like_every_package_verb(name: str) -> None:
+    for raw in [*NAMES, "-x", "--foo"]:
+        with pytest.raises(GinnError) as info:
+            load(name).argv(Verb.REMOVE_CHECK, ["gimp", raw])
+        _expect("GINN-E-PKG-NAME-INVALID", 2)(info.value)
+        assert info.value.details["name"] == raw
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("name", ["arch", "_test"])
+def test_remove_check_is_optional_and_absent_where_removal_is_native(name: str) -> None:
+    # Arch refuses dependents natively, so it needs no dry run. The fixture omits the verb.
+    definition = load(name)
+    assert definition.has_remove_check is False
+    with pytest.raises(GinnError) as info:
+        definition.argv(Verb.REMOVE_CHECK, ["gimp"])
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == f"verb remove-check is not defined for {name}"
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("name", REMOVE_CHECK_DISTROS)
+def test_shipped_distributions_that_define_remove_check_report_it(name: str) -> None:
+    assert load(name).has_remove_check is True
+
+
+@pytest.mark.fr("NFR-060")
+def test_a_definition_may_add_remove_check_and_the_loader_runs_it() -> None:
+    raw = _base()
+    raw["verbs"]["remove-check"] = ["fake-pm", "check", "{packages}"]
+    definition = from_mapping(raw, source="fixture.toml")
+    assert definition.has_remove_check is True
+    assert definition.argv(Verb.REMOVE_CHECK, ["gimp"]) == ["fake-pm", "check", "gimp"]
 
 
 @pytest.mark.fr("FR-040")
@@ -923,6 +1071,20 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("verb has a stray closing brace", _set("verbs", "upgrade", value=["fake-pm}"])),
     ("verb has a positional field", _set("verbs", "upgrade", value=["fake-pm", "{}"])),
     ("verb has a format spec", _set("verbs", "upgrade", value=["fake-pm", "{packages:>3}"])),
+    (
+        "remove-check takes no packages",
+        _set("verbs", "remove-check", value=["fake-pm", "check"]),
+    ),
+    ("remove-check is an empty list", _set("verbs", "remove-check", value=[])),
+    ("remove-check is a list of lists", _set("verbs", "remove-check", value=[["fake-pm"]])),
+    (
+        "remove-check uses {tmpdir}",
+        _set("verbs", "remove-check", value=["fake-pm", "{tmpdir}"]),
+    ),
+    (
+        "remove-check embeds {packages} in a string",
+        _set("verbs", "remove-check", value=["fake-pm", "--name={packages}"]),
+    ),
 ]
 
 

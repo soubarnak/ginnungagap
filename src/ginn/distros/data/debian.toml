@@ -36,8 +36,12 @@ refresh = ["apt-get", "update"]
 install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
 # No --no-remove: apt-get aborts on any removal, including the named package. No --auto-remove:
 # apt-get leaves unneeded dependencies alone. apt-get also removes packages that need the named one;
-# the ops layer pre-checks that with --simulate (ADR-011).
+# the ops layer pre-checks that with remove-check (ADR-011).
 remove = ["apt-get", "--yes", "remove", "{packages}"]
+# remove-check is the dry run the ops layer reads before remove (ADR-011, FR-041). --simulate changes
+# nothing (apt-get(8)). It lists the packages a removal would take, so the ops layer refuses any name
+# it did not request. Output format is not verified until M4.
+remove-check = ["apt-get", "--simulate", "remove", "{packages}"]
 # Full upgrade (FR-023 AC-2). dist-upgrade, not upgrade: a plain upgrade leaves a package at its
 # installed version when the new version needs a dependency that is not installed yet, and
 # dist-upgrade installs that dependency. dist-upgrade may also remove a package to resolve a
