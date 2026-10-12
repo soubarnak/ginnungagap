@@ -27,10 +27,12 @@ ARCH = DistroId("arch")
 
 
 def _paths(tmp_path: Path) -> OwnedPaths:
-    # from_env refuses a missing runtime directory (ADR-004), so create Host Setup's one.
-    (tmp_path / "no-run" / "ginn" / "1000").mkdir(parents=True, mode=0o700)
+    # from_env refuses a missing runtime directory (ADR-004), so create Host Setup's one. It is
+    # 0700 and owned by the test user, which from_env checks.
+    uid = os.getuid()
+    (tmp_path / "no-run" / "ginn" / str(uid)).mkdir(parents=True, mode=0o700)
     paths = OwnedPaths.from_env(
-        {"HOME": str(tmp_path / "home")}, uid=1000, system_run=tmp_path / "no-run"
+        {"HOME": str(tmp_path / "home")}, uid=uid, system_run=tmp_path / "no-run"
     )
     paths.ensure()
     return paths
@@ -384,3 +386,65 @@ def test_delete_is_refused_from_every_state_that_does_not_lead_to_removal(
         store.delete(RealmName("arch"))
 
     assert record_file.read_bytes() == before
+
+
+@pytest.mark.fr("FR-122")
+def test_delete_cannot_remove_a_corrupt_record(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    store = RealmStore(paths, clock=FakeClock())
+    record_file = paths.realms / "arch.json"
+    record_file.write_text("{not json", encoding="utf-8")
+    # delete() loads first, so a corrupt record is reported and kept. remove_corrupt is the way out.
+    with pytest.raises(GinnError) as excinfo:
+        store.delete(RealmName("arch"))
+    assert excinfo.value.code == "GINN-E-INTERNAL"
+    assert record_file.exists()
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize(
+    "content",
+    ["{not json", "[1, 2]", '{"schema_version": 2}', '{"schema_version": 1}'],
+)
+def test_remove_corrupt_removes_a_record_that_does_not_parse(tmp_path: Path, content: str) -> None:
+    paths = _paths(tmp_path)
+    store = RealmStore(paths, clock=FakeClock())
+    record_file = paths.realms / "arch.json"
+    record_file.write_text(content, encoding="utf-8")
+
+    store.remove_corrupt(RealmName("arch"))
+
+    assert not record_file.exists()
+    assert store.list_names() == []
+
+
+@pytest.mark.fr("FR-122")
+def test_remove_corrupt_removes_a_record_that_breaks_the_dr020_rule(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    store = RealmStore(paths, clock=FakeClock())
+    data = _record(state=RealmState.STOPPED).to_json()
+    # DR-020: an updating realm must name the state it returns to, and this record names none.
+    data["state"] = RealmState.UPDATING.value
+    record_file = paths.realms / "arch.json"
+    record_file.write_text(json.dumps(data), encoding="utf-8")
+
+    store.remove_corrupt(RealmName("arch"))
+
+    assert not record_file.exists()
+
+
+@pytest.mark.fr("FR-122")
+def test_remove_corrupt_refuses_a_record_that_loads(tmp_path: Path) -> None:
+    store = RealmStore(_paths(tmp_path), clock=FakeClock())
+    store.save(_record("arch", state=RealmState.STOPPED))
+    with pytest.raises(ValueError, match="delete"):
+        store.remove_corrupt(RealmName("arch"))
+    assert store.load(RealmName("arch")).state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-122")
+def test_remove_corrupt_on_a_missing_realm_is_no_such_realm(tmp_path: Path) -> None:
+    store = RealmStore(_paths(tmp_path), clock=FakeClock())
+    with pytest.raises(GinnError) as excinfo:
+        store.remove_corrupt(RealmName("ghost"))
+    assert excinfo.value.code == "GINN-E-NO-SUCH-REALM"

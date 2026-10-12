@@ -3,8 +3,9 @@
 
 Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some codes are
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
-GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP (DR-010) and
-GINN-E-DISTRO-DATA (NFR-060). `source` cites the requirement that defines the failure.
+GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
+GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-DISTRO-DATA (NFR-060) and GINN-E-TRUST-DATA
+(DR-040). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -92,8 +93,18 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec(
         code="GINN-E-HOST-NOT-SET-UP",
         exit_code=77,
-        summary="Host Setup has not created the runtime directory {path}",
-        remedy="run 'sudo ginn host-setup --user <name>', then retry",
+        summary="runtime directory {path} does not exist",
+        remedy="run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user "
+        "<name>'; otherwise check 'sv status ginn-<user>'",
+        source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-RUNTIME-DIR-UNSAFE",
+        exit_code=77,
+        summary="runtime directory {path} must be a real directory owned by uid {uid} with mode "
+        "0700; found {found}",
+        remedy="run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn "
+        "host-setup --user <name>'; otherwise check 'sv status ginn-<user>'",
         source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
@@ -221,9 +232,10 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-E-RECOVERY-PENDING",
         exit_code=4,
         summary="realm '{realm}' has an interrupted {op} that was never recovered",
-        remedy="run 'ginn create --resume {realm}' if the operation was a create, "
-        "or 'ginn delete {realm}'",
-        source="FR-122 (ginn-defined; not an SRS code)",
+        remedy="if the interrupted {op} was a create, run 'ginn create --resume {realm}' or "
+        "'ginn delete {realm}'; otherwise run 'ginn doctor' and retry the {op}, and do not delete "
+        "the realm",
+        source="FR-122, NFR-030 (ginn-defined wording; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-USAGE",
@@ -253,6 +265,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="the shipped distro data is invalid; reinstall ginn, or report a bug with this "
         "message",
         source="NFR-060 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-TRUST-DATA",
+        exit_code=70,
+        summary="shipped trust data {source} is invalid: {problem}",
+        remedy="the shipped trust data is invalid; reinstall ginn, or report a bug with this "
+        "message",
+        source="DR-040 (ginn-defined; not an SRS code)",
     ),
 )
 

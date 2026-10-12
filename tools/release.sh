@@ -91,6 +91,10 @@ cmd_repo() {
         count=$((count + 1))
     done
     [ "$count" -gt 0 ] || die "no ginn*.xbps packages in $bins"
+    # A release ships only when every Must requirement is covered or deferred (NFR-061).
+    if ! python3 -I "$here/tools/traceability.py" --check; then
+        die "traceability check failed; fix the markers or docs/traceability-deferred.toml first"
+    fi
     # Render the traceability matrix and ship it with the packages (NFR-061, Appendix C).
     # It is generated and not committed, so it is rendered here before it is copied.
     python3 -I "$here/tools/traceability.py" --write

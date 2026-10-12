@@ -13,8 +13,8 @@ major release is a rebuild (FR-021), so `image` changes only at a refresh.
 
 Errors come from the catalogue (NFR-040). A distro with no entry is an image that cannot be
 verified: GINN-E-IMAGE-UNVERIFIED (FR-011). A manifest that does not validate is a defect in ginn's
-own data: GINN-E-INTERNAL, with the reason in the message. That summary has no placeholder, so the
-error is built with GinnError directly.
+own shipped data: GINN-E-TRUST-DATA (exit 70, the same shape as GINN-E-DISTRO-DATA), with the
+source and the reason in the details.
 """
 
 import datetime as dt
@@ -28,7 +28,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Final
 
-from ginn.errors import CATALOGUE, GinnError, make
+from ginn.errors import GinnError, make
 
 __all__ = [
     "SUPPORTED_SCHEMA",
@@ -188,15 +188,12 @@ def pull_reference(key: str, manifest: TrustManifest | None = None) -> str:
 
 
 def _invalid(source: str, problem: str) -> GinnError:
-    """Return GINN-E-INTERNAL for a manifest that cannot be used. It is a defect in ginn's data."""
-    spec = CATALOGUE["GINN-E-INTERNAL"]
-    return GinnError(
-        spec.code,
-        f"trust manifest {source} is invalid: {problem}",
-        spec.remedy,
-        spec.exit_code,
-        details={"source": source, "problem": problem},
-    )
+    """Return GINN-E-TRUST-DATA for a manifest that cannot be used. It is a defect in ginn's data.
+
+    The problems are whole sentences, so the error carries `source` and `problem` and not the
+    separate field and rule that GINN-E-DISTRO-DATA carries.
+    """
+    return make("GINN-E-TRUST-DATA", source=source, problem=problem)
 
 
 def _path(where: str, name: str) -> str:

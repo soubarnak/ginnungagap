@@ -67,7 +67,7 @@ def _edited(old: str, new: str) -> str:
 def _expect_invalid(text: str, fragment: str) -> None:
     with pytest.raises(GinnError) as info:
         parse(text, "test-manifest")
-    assert info.value.code == "GINN-E-INTERNAL"
+    assert info.value.code == "GINN-E-TRUST-DATA"
     assert info.value.exit_code == 70
     assert fragment in info.value.message, info.value.message
 
@@ -332,7 +332,6 @@ def test_verified_on_accepts_an_unquoted_toml_date() -> None:
     assert parse(text, "test-manifest").entry("arch").verified_on == dt.date(2026, 10, 12)
 
 
-@pytest.mark.fr("FR-013")
 @pytest.mark.fr("DR-040")
 def test_integration_packages_is_refused_because_the_distro_toml_owns_it() -> None:
     # The Integration Package Set lives only in src/ginn/distros/data/<distro>.toml (FR-013).
@@ -349,7 +348,7 @@ def test_invalid_toml_is_rejected() -> None:
 def test_load_file_reports_an_unreadable_path() -> None:
     with pytest.raises(GinnError) as info:
         load_file(Path("/nonexistent/trust-manifest-for-tests.toml"))
-    assert info.value.code == "GINN-E-INTERNAL"
+    assert info.value.code == "GINN-E-TRUST-DATA"
     assert "cannot be read" in info.value.message
 
 

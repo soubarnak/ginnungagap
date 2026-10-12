@@ -2,10 +2,17 @@
 """The podman command line behind the Podman adapter (ADR-002, IR-020, NFR-042).
 
 Every call runs one `podman` process with an argv list (NFR-SEC-005). Every call carries the
-global flags --root, --runroot, --tmpdir and --runtime, so ginn's storage, tmpdir and OCI runtime
-never fall back to the user's own Podman (DR-010, ADR-004). The subprocess environment pins
-CONTAINERS_CONF and CONTAINERS_STORAGE_CONF to ginn's files, so the user's configuration is not
-read. Output that ginn parses is requested with `--format json`. Before each run, the full argv is
+global flags --remote=false, --root, --runroot, --tmpdir and --runtime, so ginn's storage, tmpdir
+and OCI runtime never fall back to the user's own Podman (DR-010, ADR-004). --remote=false is a
+guard of its own: podman(1) makes --remote default to true when CONTAINER_HOST is set.
+
+The subprocess environment is an allowlist (CR-006, DR-010), not a copy of the parent's: PATH,
+HOME, TERM, USER, LOGNAME, LANG and LC_*, plus ginn's pins. XDG_RUNTIME_DIR is the runtime root,
+CONTAINERS_CONF and CONTAINERS_STORAGE_CONF are ginn's files (written by OwnedPaths.ensure_config),
+and TMPDIR is the image tmpdir on disk. Nothing else reaches podman, so a user's containers.conf,
+storage settings and remote-connection variables are not read.
+
+Output that ginn parses is requested with `--format json`. Before each run, the full argv is
 passed to `verbose` as one shell-quoted line, so a user can copy it and run it by hand (NFR-042).
 
 Failures map to catalogue codes here and nowhere else (NFR-040):
@@ -33,6 +40,7 @@ from ginn.podman.adapter import (
     with_network_retry,
 )
 from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
+from ginn.store.paths import OwnedPaths
 
 _NETWORK_PATTERNS: Final = (
     re.compile(r"dial tcp", re.IGNORECASE),
@@ -56,6 +64,15 @@ PODMAN_ERROR_EXIT: Final = 125
 DEFAULT_OCI_RUNTIME: Final = "crun"
 """OCI runtime passed as `--runtime` on every call (IR-020, ADR-004). crun is the runtime the
 spikes validate, and keep-groups works only with it."""
+_PASSTHROUGH_ENV: Final = frozenset({"PATH", "HOME", "TERM", "USER", "LOGNAME", "LANG"})
+_PASSTHROUGH_PREFIXES: Final = ("LC_",)
+"""The only parent environment variables that reach podman (CR-006). Everything else is dropped:
+CONTAINER_HOST, CONTAINER_CONNECTION, CONTAINER_SSHKEY, STORAGE_DRIVER, STORAGE_OPTS,
+CONTAINERS_CONF_OVERRIDE and the rest of the user's Podman configuration."""
+
+
+def _passes(key: str) -> bool:
+    return key in _PASSTHROUGH_ENV or key.startswith(_PASSTHROUGH_PREFIXES)
 
 
 def _matches(patterns: Sequence[re.Pattern[str]], text: str) -> bool:
@@ -116,8 +133,41 @@ def _first(op: str, obj: object) -> Mapping[str, object]:
 class PodmanCli:
     """Implements the Podman adapter with the podman command line.
 
-    `history` keeps the full argv of every call, in order, for tests and diagnostics.
+    Build it with `from_paths`, the documented constructor. It takes Owned Paths and derives every
+    location from them. `history` keeps the full argv of every call, in order, for tests and
+    diagnostics.
     """
+
+    @classmethod
+    def from_paths(
+        cls,
+        paths: OwnedPaths,
+        *,
+        binary: str = "podman",
+        oci_runtime: str = DEFAULT_OCI_RUNTIME,
+        cdi_spec_dir: Path | None = None,
+        verbose: Callable[[str], None] | None = None,
+    ) -> "PodmanCli":
+        """Build the adapter from Owned Paths (ADR-004, DR-010). Callers use this constructor.
+
+        Root and runroot come from the data and runtime roots, the tmpdir is the runtime's
+        podman-tmp, TMPDIR is the image tmpdir on disk, and CONTAINERS_CONF and
+        CONTAINERS_STORAGE_CONF are ginn's own files. Run `OwnedPaths.ensure_config()` before the
+        first call; `_require_config` refuses to run podman while those files are missing.
+        """
+        return cls(
+            paths.podman_root,
+            paths.podman_runroot,
+            tmpdir=paths.podman_tmpdir,
+            image_tmp=paths.image_tmp,
+            containers_conf=paths.podman_containers_conf,
+            storage_conf=paths.podman_storage_conf,
+            runtime_root=paths.runtime,
+            binary=binary,
+            oci_runtime=oci_runtime,
+            cdi_spec_dir=cdi_spec_dir,
+            verbose=verbose,
+        )
 
     def __init__(
         self,
@@ -125,6 +175,7 @@ class PodmanCli:
         runroot: Path,
         *,
         tmpdir: Path,
+        image_tmp: Path,
         containers_conf: Path,
         storage_conf: Path,
         runtime_root: Path,
@@ -133,11 +184,13 @@ class PodmanCli:
         cdi_spec_dir: Path | None = None,
         verbose: Callable[[str], None] | None = None,
     ) -> None:
-        """`tmpdir` is required: without it podman uses the user's own libpod tmpdir.
+        """Prefer `from_paths`. This constructor takes every location explicitly.
+
+        `tmpdir` is required: without it podman uses the user's own libpod tmpdir. `image_tmp` is
+        required for the same reason: without it podman downloads into /var/tmp (CR-006).
 
         `containers_conf` and `storage_conf` are the files CONTAINERS_CONF and
-        CONTAINERS_STORAGE_CONF point to. The files are not written yet. Until the task that
-        renders them lands, podman gets paths that do not exist (see the TODO below).
+        CONTAINERS_STORAGE_CONF point to. `OwnedPaths.ensure_config()` writes them.
 
         `runtime_root` is ginn's single runtime root, /run/ginn/<uid> (ADR-004). Podman reads
         XDG_RUNTIME_DIR for its rootless state, so every call gets this value, whatever the
@@ -146,6 +199,7 @@ class PodmanCli:
         self.root = root
         self.runroot = runroot
         self.tmpdir = tmpdir
+        self.image_tmp = image_tmp
         self.containers_conf = containers_conf
         self.storage_conf = storage_conf
         self.runtime_root = runtime_root
@@ -159,6 +213,7 @@ class PodmanCli:
         """Global flags come before the subcommand. --cdi-spec-dir is global (S-06)."""
         flags = [
             self.binary,
+            "--remote=false",
             "--root",
             str(self.root),
             "--runroot",
@@ -173,28 +228,40 @@ class PodmanCli:
         return flags
 
     def _env(self) -> dict[str, str]:
-        """The environment of one podman call (ADR-004).
+        """The environment of one podman call: the allowlist, plus ginn's pins (ADR-004, CR-006).
 
-        XDG_RUNTIME_DIR is set to ginn's runtime root, so podman's rootless state (and any default
-        tmpdir it might pick) lands in ginn's directory, not the session's /run/user/<uid>.
-        CONTAINERS_CONF replaces the system and user containers.conf files (containers.conf(5)).
-        CONTAINERS_CONF_OVERRIDE is removed, because podman loads that file last even when
-        CONTAINERS_CONF is set, which would bring the user's settings back.
-
-        TODO(T4.4): the first task that drives real podman through PodmanCli must write these two
-        files under the config root, or the pins point at missing files. Podman's docs say builtin
-        defaults apply when no containers.conf exists, but that is not verified for
-        CONTAINERS_CONF with a missing file. Verify it in that task.
+        XDG_RUNTIME_DIR is the runtime root, so podman's rootless state (and any default tmpdir it
+        might pick) lands in ginn's directory, not the session's /run/user/<uid>. CONTAINERS_CONF
+        and CONTAINERS_STORAGE_CONF replace the system and user files (containers.conf(5)) and
+        point at the files ensure_config writes. TMPDIR is the image tmpdir on disk. Every other
+        parent variable is dropped, including CONTAINERS_CONF_OVERRIDE, which podman loads last
+        even when CONTAINERS_CONF is set.
         """
-        env = dict(os.environ)
-        env.pop("CONTAINERS_CONF_OVERRIDE", None)
+        env = {key: value for key, value in os.environ.items() if _passes(key)}
         env["XDG_RUNTIME_DIR"] = str(self.runtime_root)
         env["CONTAINERS_CONF"] = str(self.containers_conf)
         env["CONTAINERS_STORAGE_CONF"] = str(self.storage_conf)
+        env["TMPDIR"] = str(self.image_tmp)
         return env
+
+    def _require_config(self) -> None:
+        """Refuse to run podman while ginn's containers.conf or storage.conf is missing.
+
+        Podman 5.8 exits 1 when a path named by CONTAINERS_CONF or CONTAINERS_STORAGE_CONF does
+        not exist (checked 2026-10-12, ADR-004), so every call would fail. ginn writes these files
+        with OwnedPaths.ensure_config(). A missing file means that step did not run for this
+        process, or the file was removed since. That is a ginn fault, so it is GINN-E-INTERNAL,
+        and the detail names the path.
+        """
+        for path in (self.containers_conf, self.storage_conf):
+            if not path.is_file():
+                raise _internal(
+                    f"podman config {path} is missing; OwnedPaths.ensure_config() writes it"
+                )
 
     def _prepare(self, args: Sequence[str]) -> list[str]:
         """Build the full argv, record it, and echo it to `verbose` before it runs (NFR-042)."""
+        self._require_config()
         argv = [*self._global_flags(), *args]
         self.history.append(argv)
         if self.verbose is not None:

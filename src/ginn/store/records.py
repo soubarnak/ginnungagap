@@ -10,7 +10,6 @@ load-modify-save, because flock conflicts even between descriptors in one proces
 """
 
 import json
-import os
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -30,7 +29,7 @@ from ginn.domain import (
 )
 from ginn.errors import GinnError, make
 from ginn.store._time import parse_utc, utc_from_epoch, utc_iso
-from ginn.store.paths import OwnedPaths
+from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
 
 _PREVIOUS_BOUND: frozenset[RealmState] = frozenset({RealmState.UPDATING, RealmState.REBUILDING})
 _RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.RUNNING})
@@ -38,26 +37,8 @@ _RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.R
 
 
 def write_json_atomic(path: Path, obj: object) -> None:
-    """Write `obj` as JSON to `path`: temporary file, fsync, rename, directory fsync (DR-035).
-
-    The temporary file is `path.with_suffix(".tmp")` in the same directory, created with mode
-    0600. If the write or the rename fails, the temporary file is removed and the error is raised.
-    The old file at `path` is then unchanged.
-    """
-    data = (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    tmp = path.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        try:
-            _write_all(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        os.replace(tmp, path)
-    except BaseException:
-        _unlink_quiet(tmp)
-        raise
-    _fsync_dir(path.parent)
+    """Write `obj` as JSON to `path` atomically, with the DR-035 steps of `write_bytes_atomic`."""
+    write_bytes_atomic(path, (json.dumps(obj, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
 
 def read_json(path: Path, schema_version: int) -> dict[str, Any]:
@@ -78,37 +59,10 @@ def read_json(path: Path, schema_version: int) -> dict[str, Any]:
     return parsed
 
 
-def fsync_dir(directory: Path) -> None:
-    """Flush a directory entry change (rename, create, unlink) to disk."""
-    _fsync_dir(directory)
-
-
 def _corrupt(path: Path, reason: str) -> GinnError:
     err = make("GINN-E-INTERNAL")
     err.details.update({"path": str(path), "reason": reason})
     return err
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        view = view[written:]
-
-
-def _fsync_dir(directory: Path) -> None:
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _unlink_quiet(path: Path) -> None:
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def _str(value: object) -> str:
@@ -286,7 +240,33 @@ class RealmStore:
             path.unlink()
         except FileNotFoundError:
             raise make("GINN-E-NO-SUCH-REALM", realm=name.value) from None
-        _fsync_dir(path.parent)
+        fsync_dir(path.parent)
+
+    def remove_corrupt(self, name: RealmName) -> None:
+        """Remove a record file that does not parse, so a damaged realm can be recovered (FR-122).
+
+        `delete()` loads the record first, so a corrupt record can never be deleted through it.
+        This is the recovery path for that case. The file goes only when `load` fails with
+        GINN-E-INTERNAL, which is what a corrupt record gives. A record that loads raises
+        ValueError: a valid realm is removed with `delete()`, which checks DR-020. A corrupt
+        record has no readable state, so DR-020 cannot be checked here. Callers hold the realm
+        lock, and write the audit entry for the removal.
+        """
+        path = self._file(name)
+        if not path.is_file():
+            raise make("GINN-E-NO-SUCH-REALM", realm=name.value)
+        try:
+            self.load(name)
+        except GinnError as exc:
+            if exc.code != "GINN-E-INTERNAL":
+                raise
+        else:
+            raise ValueError("the record loads: remove a valid realm with delete(), not this")
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            raise make("GINN-E-NO-SUCH-REALM", realm=name.value) from None
+        fsync_dir(path.parent)
 
     def set_state(self, name: RealmName, new_state: Target) -> RealmRecord:
         """Move the realm to `new_state` if DR-020 allows it, then save and return the record.
@@ -313,6 +293,7 @@ class RealmStore:
 __all__ = [
     "RealmRecord",
     "RealmStore",
+    "fsync_dir",
     "read_json",
     "write_json_atomic",
 ]

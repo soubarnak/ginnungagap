@@ -142,7 +142,7 @@ def test_unchanged_digests_pass_check_and_write_nothing(
     assert capsys.readouterr().out.count("unchanged") == 2
 
 
-@pytest.mark.fr("FR-011")
+@pytest.mark.fr("DR-040")
 def test_moved_digest_fails_check_and_writes_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -194,7 +194,7 @@ def test_write_with_nothing_moved_leaves_the_file_alone(tmp_path: Path) -> None:
     assert path.read_bytes() == before
 
 
-@pytest.mark.fr("FR-011")
+@pytest.mark.fr("DR-040")
 def test_index_without_an_amd64_manifest_is_refused(tmp_path: Path) -> None:
     arm_only = json.dumps(
         {
@@ -215,7 +215,7 @@ def test_index_without_an_amd64_manifest_is_refused(tmp_path: Path) -> None:
     assert path.read_bytes() == before
 
 
-@pytest.mark.fr("FR-011")
+@pytest.mark.fr("DR-040")
 def test_single_manifest_for_another_architecture_is_refused(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path, arch=ARCH_DIGEST, debian=DEBIAN_NEW)
     arm = {"Digest": ARCH_DIGEST, "Architecture": "arm64", "Os": "linux"}
@@ -223,7 +223,7 @@ def test_single_manifest_for_another_architecture_is_refused(tmp_path: Path) -> 
     assert code == tool.EXIT_ERROR
 
 
-@pytest.mark.fr("FR-011")
+@pytest.mark.fr("DR-040")
 def test_single_manifest_digest_that_disagrees_with_skopeo_is_refused(tmp_path: Path) -> None:
     path = _write_manifest(tmp_path, arch=ARCH_DIGEST, debian=DEBIAN_NEW)
     other = {"Digest": "sha256:" + "9" * 64, "Architecture": "amd64", "Os": "linux"}

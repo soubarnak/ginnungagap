@@ -23,8 +23,10 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[OwnedPath
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Host Setup leaves the runtime directory 0700 and owned by the user; from_env checks that.
+    (tmp_path / "runtime").mkdir(mode=0o700)
     monkeypatch.setenv("GINN_RUNTIME_DIR", str(tmp_path / "runtime"))
-    resolved = OwnedPaths.from_env(uid=1000)
+    resolved = OwnedPaths.from_env(uid=os.getuid())
     resolved.ensure()
     yield resolved
 

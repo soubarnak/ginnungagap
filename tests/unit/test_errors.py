@@ -43,9 +43,11 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-REALM-BUSY": 75,
     "GINN-E-SETUP-ROOT": 77,
     "GINN-E-HOST-NOT-SET-UP": 77,
+    "GINN-E-RUNTIME-DIR-UNSAFE": 77,
     "GINN-E-INTERRUPTED": 130,
     "GINN-E-INTERNAL": 70,
     "GINN-E-DISTRO-DATA": 70,
+    "GINN-E-TRUST-DATA": 70,
     "GINN-E-RECOVERY-PENDING": 4,
     "GINN-W-HOST-CHANGED": 0,
     "GINN-W-REPLAY-MISSING": 0,
@@ -175,6 +177,46 @@ def test_name_invalid_keeps_the_realm_name_pattern_literal() -> None:
 @pytest.mark.fr("NFR-040")
 def test_placeholders_skip_escaped_braces() -> None:
     assert placeholders("pattern {{0,31}} and {name}") == frozenset({"name"})
+
+
+@pytest.mark.fr("FR-122")
+def test_recovery_pending_offers_resume_only_for_a_create() -> None:
+    create = make("GINN-E-RECOVERY-PENDING", realm="arch", op="create")
+    assert "run 'ginn create --resume arch' or 'ginn delete arch'" in create.remedy
+    update = make("GINN-E-RECOVERY-PENDING", realm="arch", op="update")
+    assert "otherwise run 'ginn doctor' and retry the update" in update.remedy
+    assert "do not delete the realm" in update.remedy
+    assert update.exit_code == 4
+
+
+@pytest.mark.fr("DR-010")
+def test_host_not_set_up_names_doctor_then_host_setup_then_the_supervisor() -> None:
+    err = make("GINN-E-HOST-NOT-SET-UP", path="/run/ginn/1000")
+    assert err.message == "runtime directory /run/ginn/1000 does not exist"
+    assert err.remedy.startswith("run 'ginn doctor'; if Host Setup has not run")
+    assert "sudo ginn host-setup --user <name>" in err.remedy
+    assert "sv status ginn-<user>" in err.remedy
+    assert "\n" not in err.remedy
+
+
+@pytest.mark.fr("DR-010")
+def test_runtime_dir_unsafe_names_the_path_owner_and_mode() -> None:
+    err = make("GINN-E-RUNTIME-DIR-UNSAFE", path="/run/ginn/1000", uid="1000", found="mode 755")
+    assert err.code == "GINN-E-RUNTIME-DIR-UNSAFE"
+    assert err.exit_code == 77
+    assert err.message == (
+        "runtime directory /run/ginn/1000 must be a real directory owned by uid 1000 with mode "
+        "0700; found mode 755"
+    )
+
+
+@pytest.mark.fr("DR-040")
+def test_trust_data_names_the_source_and_the_problem() -> None:
+    err = make("GINN-E-TRUST-DATA", source="trust.toml", problem="schema 2 is not supported")
+    assert err.code == "GINN-E-TRUST-DATA"
+    assert err.exit_code == 70
+    assert err.message == "shipped trust data trust.toml is invalid: schema 2 is not supported"
+    assert err.details == {"source": "trust.toml", "problem": "schema 2 is not supported"}
 
 
 @pytest.mark.fr("NFR-040")

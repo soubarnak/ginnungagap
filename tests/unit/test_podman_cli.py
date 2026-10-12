@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PodmanCli: verbose echo, digest-only pulls, retries, error mapping, and the replay shim.
+"""PodmanCli: verbose echo, digest-only pulls, retries, error mapping, env allowlist, replay shim.
 
-Most tests run the real PodmanCli against tests/fakes/podman_bin/podman on PATH. The shim replays
+Most tests run the real PodmanCli against tests/fakes/podman_bin/podman. The shim replays
 captured fixtures and never runs a real podman, so these tests need no container runtime.
+
+PodmanCli passes podman only an allowlist of the parent environment (CR-006), so the shim cannot
+read its settings from the test process. A wrapper named `podman` comes first on PATH. It sources
+a settings file and then runs the shim. The tests change the settings with `use_cases` and
+`use_fixture_dir`, which write that file.
 """
 
 import json
 import os
 import shlex
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,6 +24,7 @@ import pytest
 from ginn.errors import GinnError
 from ginn.podman.adapter import CreateSpec, Podman, RetryHook
 from ginn.podman.cli import PodmanCli
+from ginn.store.paths import OwnedPaths
 
 REPO = Path(__file__).resolve().parents[2]
 SHIM_DIR = REPO / "tests" / "fakes" / "podman_bin"
@@ -37,47 +44,130 @@ NETWORK_STDERR = (
     "pinging container registry: received unexpected HTTP status: 503 Service Unavailable",
     "toomanyrequests: 429 Too Many Requests",
 )
+# Parent variables that a user's own Podman setup reads. None may reach podman (CR-006, DR-010).
+LEAKED_ENV = {
+    "CONTAINER_HOST": "unix:///run/user/1000/podman/podman.sock",
+    "CONTAINER_CONNECTION": "remote-box",
+    "CONTAINER_SSHKEY": "/home/user/.ssh/id_ed25519",
+    "STORAGE_DRIVER": "vfs",
+    "STORAGE_OPTS": "overlay.mountopt=nodev",
+    "CONTAINERS_CONF_OVERRIDE": "/home/user/override.conf",
+    "CONTAINERS_REGISTRIES_CONF": "/home/user/registries.conf",
+    "XDG_CONFIG_HOME": "/home/user/.config-alt",
+    "XDG_DATA_HOME": "/home/user/.data-alt",
+    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+    "GINN_UNRELATED_SECRET": "not-for-podman",
+}
+# Parent variables that pass through. PATH stays as it is: subprocess finds `podman` with it.
+PASSED_ENV = {
+    "HOME": "/home/tester",
+    "TERM": "xterm-256color",
+    "USER": "tester",
+    "LOGNAME": "tester",
+    "LANG": "en_GB.UTF-8",
+    "LC_ALL": "en_GB.UTF-8",
+}
+PINNED_ENV = {"XDG_RUNTIME_DIR", "CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF", "TMPDIR"}
+SETTINGS_ENV = "GINN_FAKE_PODMAN_SETTINGS"
 Verbose = Callable[[str], None]
+
+
+def _read_settings(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        name, _, quoted = line.removeprefix("export ").partition("=")
+        values[name] = shlex.split(quoted)[0]
+    return values
+
+
+def _write_settings(path: Path, values: dict[str, str]) -> None:
+    text = "".join(f"export {name}={shlex.quote(value)}\n" for name, value in values.items())
+    path.write_text(text, encoding="utf-8")
+
+
+def _set_shim(name: str, value: str | None) -> None:
+    """Set one shim variable for the next call, or unset it when `value` is None."""
+    path = Path(os.environ[SETTINGS_ENV])
+    values = _read_settings(path)
+    if value is None:
+        values.pop(name, None)
+    else:
+        values[name] = value
+    _write_settings(path, values)
 
 
 @pytest.fixture
 def shim(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Put the replay shim first on PATH, replay the captured fixtures, and return its log."""
+    """Put the podman wrapper for the replay shim first on PATH, and return the shim's log."""
     log = tmp_path / "shim.jsonl"
-    monkeypatch.setenv("PATH", os.pathsep.join([str(SHIM_DIR), os.environ.get("PATH", "")]))
-    monkeypatch.setenv("GINN_FAKE_PODMAN_FIXTURES", str(FIXTURES))
-    monkeypatch.setenv("GINN_FAKE_PODMAN_LOG", str(log))
-    monkeypatch.delenv("GINN_FAKE_PODMAN_CASE", raising=False)
+    settings = tmp_path / "shim-settings.sh"
+    bin_dir = tmp_path / "shim-bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "podman"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f". {shlex.quote(str(settings))}\n"
+        f'exec {shlex.quote(sys.executable)} {shlex.quote(str(SHIM_DIR / "podman"))} "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]))
+    # The test process only. PodmanCli never passes this name to podman.
+    monkeypatch.setenv(SETTINGS_ENV, str(settings))
+    _write_settings(
+        settings,
+        {"GINN_FAKE_PODMAN_FIXTURES": str(FIXTURES), "GINN_FAKE_PODMAN_LOG": str(log)},
+    )
     return log
 
 
-def use_cases(monkeypatch: pytest.MonkeyPatch, cases: str) -> None:
+def use_cases(cases: str) -> None:
     """Map shim route keys to fixture cases, as `key=case,key=case`."""
-    monkeypatch.setenv("GINN_FAKE_PODMAN_CASE", cases)
+    _set_shim("GINN_FAKE_PODMAN_CASE", cases)
 
 
-def use_fixture_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cases: dict[str, Any]) -> None:
+def use_fixture_dir(tmp_path: Path, cases: dict[str, Any]) -> None:
     """Replay the given envelopes from a private fixture directory, with no case mapping."""
     directory = tmp_path / "cases"
     directory.mkdir()
     for name, body in cases.items():
         (directory / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
-    monkeypatch.setenv("GINN_FAKE_PODMAN_FIXTURES", str(directory))
-    monkeypatch.delenv("GINN_FAKE_PODMAN_CASE", raising=False)
+    _set_shim("GINN_FAKE_PODMAN_FIXTURES", str(directory))
+    _set_shim("GINN_FAKE_PODMAN_CASE", None)
 
 
-def pinned(tmp_path: Path) -> dict[str, Any]:
-    """The required keyword arguments: ginn's tmpdir, runtime root and pinned config files."""
-    return {
-        "tmpdir": tmp_path / "tmp",
-        "containers_conf": tmp_path / "containers.conf",
-        "storage_conf": tmp_path / "storage.conf",
-        "runtime_root": tmp_path / "runtime",
-    }
+def spy_env(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str] | None]:
+    """Record the `env` argument of every subprocess.run call, and run each call as usual."""
+    seen: list[dict[str, str] | None] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.append(kwargs.get("env"))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", spy)
+    return seen
+
+
+def host_paths(tmp_path: Path) -> OwnedPaths:
+    """Owned Paths under tmp_path, with the runtime root laid out as Host Setup leaves it.
+
+    The runtime directory is /run/ginn/<uid> under tmp_path, mode 0700 and owned by the test user.
+    """
+    system_run = tmp_path / "run"
+    (system_run / "ginn" / str(os.getuid())).mkdir(parents=True, mode=0o700, exist_ok=True)
+    return OwnedPaths.from_env({"HOME": str(tmp_path / "home")}, system_run=system_run)
+
+
+def configured_paths(tmp_path: Path) -> OwnedPaths:
+    """Owned Paths with ginn's containers.conf and storage.conf written, as a command does."""
+    paths = host_paths(tmp_path)
+    paths.ensure_config()
+    return paths
 
 
 def make_cli(tmp_path: Path, verbose: Verbose | None = None) -> PodmanCli:
-    return PodmanCli(tmp_path / "root", tmp_path / "runroot", verbose=verbose, **pinned(tmp_path))
+    return PodmanCli.from_paths(configured_paths(tmp_path), verbose=verbose)
 
 
 def logged(log: Path) -> list[dict[str, Any]]:
@@ -87,13 +177,15 @@ def logged(log: Path) -> list[dict[str, Any]]:
 
 
 def global_flags(tmp_path: Path) -> list[str]:
+    paths = host_paths(tmp_path)
     return [
+        "--remote=false",
         "--root",
-        str(tmp_path / "root"),
+        str(paths.podman_root),
         "--runroot",
-        str(tmp_path / "runroot"),
+        str(paths.podman_runroot),
         "--tmpdir",
-        str(tmp_path / "tmp"),
+        str(paths.podman_tmpdir),
         "--runtime",
         "crun",
     ]
@@ -120,7 +212,7 @@ def test_verbose_gets_the_exact_argv_before_podman_runs(shim: Path, tmp_path: Pa
 def test_verbose_line_splits_back_to_the_same_argv(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    use_cases(monkeypatch, "exec=exec-ok")
+    use_cases("exec=exec-ok")
     lines: list[str] = []
     cli = make_cli(tmp_path, lines.append)
     cli.exec(CONTAINER, ["sh", "-c", "echo 'a b' && printf '%s\\n' \"$HOME\""])
@@ -130,24 +222,19 @@ def test_verbose_line_splits_back_to_the_same_argv(
 
 
 @pytest.mark.fr("IR-020")
-def test_global_flags_come_before_the_subcommand(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cli = PodmanCli(
-        tmp_path / "root",
-        tmp_path / "runroot",
-        cdi_spec_dir=tmp_path / "cdi",
-        **pinned(tmp_path),
-    )
+def test_global_flags_come_before_the_subcommand(shim: Path, tmp_path: Path) -> None:
+    paths = configured_paths(tmp_path)
+    cli = PodmanCli.from_paths(paths, cdi_spec_dir=tmp_path / "cdi")
     cli.info()
     argv = cli.history[0]
     assert argv[1:] == [
+        "--remote=false",
         "--root",
-        str(tmp_path / "root"),
+        str(paths.podman_root),
         "--runroot",
-        str(tmp_path / "runroot"),
+        str(paths.podman_runroot),
         "--tmpdir",
-        str(tmp_path / "tmp"),
+        str(paths.podman_tmpdir),
         "--runtime",
         "crun",
         "--cdi-spec-dir",
@@ -158,14 +245,29 @@ def test_global_flags_come_before_the_subcommand(
     ]
 
 
+@pytest.mark.fr("IR-020")
+def test_remote_mode_is_forced_off_even_when_container_host_is_set(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # podman(1): a set CONTAINER_HOST makes --remote default to true. The flag overrides that.
+    monkeypatch.setenv("CONTAINER_HOST", "unix:///run/user/1000/podman/podman.sock")
+    cli = make_cli(tmp_path)
+    cli.info()
+    assert cli.history[0][1] == "--remote=false"
+    assert logged(shim)[0]["argv"][0] == "--remote=false"
+
+
 @pytest.mark.fr("DR-010")
-def test_tmpdir_is_required_so_podman_never_uses_the_users_libpod_tmp(tmp_path: Path) -> None:
+def test_tmpdir_and_image_tmp_are_required_so_podman_never_uses_the_users_tmp(
+    tmp_path: Path,
+) -> None:
     with pytest.raises(TypeError):
         PodmanCli(  # type: ignore[call-arg]
             tmp_path / "root",
             tmp_path / "runroot",
             containers_conf=tmp_path / "containers.conf",
             storage_conf=tmp_path / "storage.conf",
+            runtime_root=tmp_path / "runtime",
         )
 
 
@@ -173,7 +275,8 @@ def test_tmpdir_is_required_so_podman_never_uses_the_users_libpod_tmp(tmp_path: 
 def test_every_call_carries_root_runroot_tmpdir_and_runtime(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    use_cases(monkeypatch, "exec=exec-ok,image-exists=image-exists-absent")
+    use_cases("exec=exec-ok,image-exists=image-exists-absent")
+    flags = global_flags(tmp_path)
     cli = make_cli(tmp_path)
     cli.info()
     cli.ps()
@@ -185,54 +288,90 @@ def test_every_call_carries_root_runroot_tmpdir_and_runtime(
     assert len(cli.history) == 7
     for argv in cli.history:
         assert argv[0] == "podman"
-        assert argv[1:9] == global_flags(tmp_path), argv
+        assert argv[1 : 1 + len(flags)] == flags, argv
     # The shim logs the argv without the program name.
-    assert [entry["argv"][0:8] for entry in logged(shim)] == [global_flags(tmp_path)] * 7
+    assert [entry["argv"][0 : len(flags)] for entry in logged(shim)] == [flags] * 7
 
 
 @pytest.mark.fr("IR-020")
 def test_runtime_defaults_to_crun_and_is_configurable(shim: Path, tmp_path: Path) -> None:
-    cli = make_cli(tmp_path)
+    paths = configured_paths(tmp_path)
+    cli = PodmanCli.from_paths(paths)
     cli.info()
     assert cli.history[0][cli.history[0].index("--runtime") + 1] == "crun"
 
-    runc = PodmanCli(
-        tmp_path / "root", tmp_path / "runroot", oci_runtime="runc", **pinned(tmp_path)
-    )
+    runc = PodmanCli.from_paths(paths, oci_runtime="runc")
     runc.info()
     assert runc.history[0][runc.history[0].index("--runtime") + 1] == "runc"
 
     with pytest.raises(ValueError, match="oci runtime"):
-        PodmanCli(tmp_path / "root", tmp_path / "runroot", oci_runtime="-crun", **pinned(tmp_path))
+        PodmanCli.from_paths(paths, oci_runtime="-crun")
 
 
 @pytest.mark.fr("DR-010")
-def test_user_containers_and_storage_configuration_are_not_read(
+@pytest.mark.fr("CR-006")
+def test_user_podman_settings_in_the_parent_environment_never_reach_podman(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[dict[str, str] | None] = []
-    real_run = subprocess.run
-
-    def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs.get("env"))
-        return real_run(argv, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", spy)
-    monkeypatch.setenv("CONTAINERS_CONF_OVERRIDE", str(tmp_path / "user-override.conf"))
+    seen = spy_env(monkeypatch)
+    for name, value in LEAKED_ENV.items():
+        monkeypatch.setenv(name, value)
+    for name, value in PASSED_ENV.items():
+        monkeypatch.setenv(name, value)
     # A login session exports its own runtime directory. Podman must not see it.
     monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1000")
-    cli = make_cli(tmp_path)
+    paths = configured_paths(tmp_path)
+    cli = PodmanCli.from_paths(paths)
     cli.info()
-    use_cases(monkeypatch, "exec=exec-ok")
+    use_cases("exec=exec-ok")
     cli.exec_interactive(CONTAINER, ["true"])
 
     assert len(seen) == 2
     for env in seen:
         assert env is not None
-        assert env["CONTAINERS_CONF"] == str(tmp_path / "containers.conf")
-        assert env["CONTAINERS_STORAGE_CONF"] == str(tmp_path / "storage.conf")
-        assert "CONTAINERS_CONF_OVERRIDE" not in env
+        for name in LEAKED_ENV:
+            assert name not in env, name
+        assert env["XDG_RUNTIME_DIR"] == str(paths.runtime)
+        assert env["CONTAINERS_CONF"] == str(paths.podman_containers_conf)
+        assert env["CONTAINERS_STORAGE_CONF"] == str(paths.podman_storage_conf)
+        assert env["TMPDIR"] == str(paths.image_tmp)
         assert env["PATH"] == os.environ["PATH"]
+        for name, value in PASSED_ENV.items():
+            assert env[name] == value, name
+        allowed = PINNED_ENV | set(PASSED_ENV) | {"PATH"}
+        assert all(name in allowed or name.startswith("LC_") for name in env), sorted(env)
+
+
+@pytest.mark.fr("CR-006")
+def test_image_downloads_use_the_owned_image_tmp_on_disk(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = spy_env(monkeypatch)
+    paths = configured_paths(tmp_path)
+    PodmanCli.from_paths(paths).info()
+    env = seen[0]
+    assert env is not None
+    assert env["TMPDIR"] == str(paths.image_tmp)
+    # Images are large, so the directory is on disk under the data root, not on tmpfs under runtime.
+    assert paths.image_tmp.is_relative_to(paths.data)
+    assert not paths.image_tmp.is_relative_to(paths.runtime)
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("NFR-040")
+@pytest.mark.parametrize("config", ["containers.conf", "storage.conf"])
+def test_a_missing_ginn_config_file_refuses_the_call_before_podman_runs(
+    shim: Path, tmp_path: Path, config: str
+) -> None:
+    paths = configured_paths(tmp_path)
+    cli = PodmanCli.from_paths(paths)
+    missing = paths.config / config
+    missing.unlink()
+    err = expect_error(cli.info)
+    assert err.code == "GINN-E-INTERNAL"
+    assert str(missing) in str(err.details["detail"])
+    assert cli.history == []
+    assert logged(shim) == []
 
 
 @pytest.mark.fr("DR-033")
@@ -240,30 +379,25 @@ def test_user_containers_and_storage_configuration_are_not_read(
 def test_session_and_supervisor_podman_both_see_the_one_runtime_root(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seen: list[dict[str, str] | None] = []
-    real_run = subprocess.run
-
-    def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs.get("env"))
-        return real_run(argv, **kwargs)
-
-    monkeypatch.setattr(subprocess, "run", spy)
-    runtime_root = tmp_path / "run" / "ginn" / "1000"
+    seen = spy_env(monkeypatch)
+    system_run = tmp_path / "run"
+    runtime = system_run / "ginn" / str(os.getuid())
+    runtime.mkdir(parents=True, mode=0o700)
+    home = str(tmp_path / "home")
     # The supervisor exports XDG_RUNTIME_DIR=/run/ginn/<uid>; a session exports /run/user/<uid>.
     # Both must reach podman as the same runtime root.
-    for parent_xdg in (str(runtime_root), "/run/user/1000"):
-        monkeypatch.setenv("XDG_RUNTIME_DIR", parent_xdg)
-        PodmanCli(
-            tmp_path / "root",
-            tmp_path / "runroot",
-            **{**pinned(tmp_path), "runtime_root": runtime_root},
-        ).info()
+    for parent_xdg in (str(runtime), "/run/user/1000"):
+        env = {"HOME": home, "XDG_RUNTIME_DIR": parent_xdg}
+        paths = OwnedPaths.from_env(env, system_run=system_run)
+        paths.ensure_config()
+        PodmanCli.from_paths(paths).info()
     assert [env["XDG_RUNTIME_DIR"] for env in seen if env is not None] == [
-        str(runtime_root),
-        str(runtime_root),
+        str(runtime),
+        str(runtime),
     ]
     assert len(logged(shim)) == 2
-    assert all(entry["argv"][0:8] == global_flags(tmp_path) for entry in logged(shim))
+    flags = global_flags(tmp_path)
+    assert all(entry["argv"][0 : len(flags)] == flags for entry in logged(shim))
 
 
 @pytest.mark.fr("FR-011")
@@ -278,25 +412,22 @@ def test_pull_by_tag_is_refused_before_podman_runs(shim: Path, tmp_path: Path) -
 
 
 @pytest.mark.fr("FR-011")
-def test_pull_by_digest_then_inspects_the_image(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-ok,image-inspect=image-inspect-alpine")
+def test_pull_by_digest_then_inspects_the_image(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-ok,image-inspect=image-inspect-alpine")
     cli = make_cli(tmp_path)
     image = cli.pull(DIGEST_REF)
     assert image.id == ALPINE_ID
     assert image.digest == DIGEST
+    flags = global_flags(tmp_path)
     assert cli.history == [
-        ["podman", *global_flags(tmp_path), "pull", "--quiet", DIGEST_REF],
-        ["podman", *global_flags(tmp_path), "image", "inspect", "--format", "json", DIGEST_REF],
+        ["podman", *flags, "pull", "--quiet", DIGEST_REF],
+        ["podman", *flags, "image", "inspect", "--format", "json", DIGEST_REF],
     ]
 
 
 @pytest.mark.fr("FR-011")
-def test_digest_mismatch_fixture_maps_to_image_unverified(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-digest-mismatch")
+def test_digest_mismatch_fixture_maps_to_image_unverified(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-digest-mismatch")
     err = expect_error(lambda: make_cli(tmp_path).pull(DIGEST_REF))
     assert err.code == "GINN-E-IMAGE-UNVERIFIED"
     assert err.exit_code == 65
@@ -306,10 +437,8 @@ def test_digest_mismatch_fixture_maps_to_image_unverified(
 
 
 @pytest.mark.fr("FR-120")
-def test_network_pull_fixture_maps_to_network(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-network-error")
+def test_network_pull_fixture_maps_to_network(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-network-error")
     err = expect_error(lambda: make_cli(tmp_path).pull(DIGEST_REF))
     assert err.code == "GINN-E-NETWORK"
     assert err.exit_code == 69
@@ -319,10 +448,8 @@ def test_network_pull_fixture_maps_to_network(
 
 
 @pytest.mark.fr("NFR-040")
-def test_unknown_container_fixture_maps_to_internal(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "container-inspect=container-inspect-missing")
+def test_unknown_container_fixture_maps_to_internal(shim: Path, tmp_path: Path) -> None:
+    use_cases("container-inspect=container-inspect-missing")
     err = expect_error(lambda: make_cli(tmp_path).inspect("nonexist"))
     assert err.code == "GINN-E-INTERNAL"
     assert err.exit_code == 70
@@ -332,21 +459,20 @@ def test_unknown_container_fixture_maps_to_internal(
 
 @pytest.mark.fr("NFR-040")
 def test_image_exists_is_false_for_exit_one_and_true_for_exit_zero(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    shim: Path, tmp_path: Path
 ) -> None:
-    use_cases(monkeypatch, "image-exists=image-exists-absent")
+    use_cases("image-exists=image-exists-absent")
     assert make_cli(tmp_path).image_exists(DIGEST_REF) is False
-    use_fixture_dir(monkeypatch, tmp_path, {"image-exists": {"exit": 0}})
+    use_fixture_dir(tmp_path, {"image-exists": {"exit": 0}})
     assert make_cli(tmp_path).image_exists(DIGEST_REF) is True
 
 
 @pytest.mark.fr("FR-120")
 @pytest.mark.parametrize("line", NETWORK_STDERR)
 def test_registry_and_network_messages_map_to_network(
-    line: str, shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    line: str, shim: Path, tmp_path: Path
 ) -> None:
     use_fixture_dir(
-        monkeypatch,
         tmp_path,
         {"pull": {"stdout": "", "stderr": f"Error: pinging registry: {line}\n", "exit": 125}},
     )
@@ -355,11 +481,8 @@ def test_registry_and_network_messages_map_to_network(
 
 
 @pytest.mark.fr("NFR-040")
-def test_network_text_with_another_exit_status_is_internal(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_network_text_with_another_exit_status_is_internal(shim: Path, tmp_path: Path) -> None:
     use_fixture_dir(
-        monkeypatch,
         tmp_path,
         {"pull": {"stdout": "", "stderr": "Error: dial tcp: i/o timeout\n", "exit": 1}},
     )
@@ -368,12 +491,9 @@ def test_network_text_with_another_exit_status_is_internal(
 
 
 @pytest.mark.fr("NFR-040")
-def test_status_code_inside_a_digest_is_not_an_http_status(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_status_code_inside_a_digest_is_not_an_http_status(shim: Path, tmp_path: Path) -> None:
     hexdigest = "sha256:" + "a503" + "0" * 60
     use_fixture_dir(
-        monkeypatch,
         tmp_path,
         {"exec": {"stdout": "", "stderr": f"Error: no blob {hexdigest}\n", "exit": 125}},
     )
@@ -382,10 +502,8 @@ def test_status_code_inside_a_digest_is_not_an_http_status(
 
 
 @pytest.mark.fr("FR-120")
-def test_retry_hook_runs_three_times_then_network_error(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-network-error")
+def test_retry_hook_runs_three_times_then_network_error(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-network-error")
     seen: list[tuple[int, str]] = []
 
     def hook(attempt: int, err: GinnError) -> bool:
@@ -399,10 +517,8 @@ def test_retry_hook_runs_three_times_then_network_error(
 
 
 @pytest.mark.fr("FR-120")
-def test_retry_hook_returning_false_stops_after_one_attempt(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-network-error")
+def test_retry_hook_returning_false_stops_after_one_attempt(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-network-error")
     calls: list[int] = []
 
     def hook(attempt: int, err: GinnError) -> bool:
@@ -416,10 +532,8 @@ def test_retry_hook_returning_false_stops_after_one_attempt(
 
 
 @pytest.mark.fr("FR-011")
-def test_digest_mismatch_is_never_retried(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "pull=pull-digest-mismatch")
+def test_digest_mismatch_is_never_retried(shim: Path, tmp_path: Path) -> None:
+    use_cases("pull=pull-digest-mismatch")
     calls: list[int] = []
 
     def hook(attempt: int, err: GinnError) -> bool:
@@ -449,20 +563,16 @@ def test_ps_passes_label_filters_and_parses_both_containers(shim: Path, tmp_path
 
 
 @pytest.mark.fr("IR-020")
-def test_inspect_parses_the_container_fixture(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "container-inspect=container-inspect-alpine")
+def test_inspect_parses_the_container_fixture(shim: Path, tmp_path: Path) -> None:
+    use_cases("container-inspect=container-inspect-alpine")
     container = make_cli(tmp_path).inspect(CONTAINER)
     assert container.name == "t211-alpine"
     assert container.image == "docker.io/library/alpine:3"
 
 
 @pytest.mark.fr("FR-011")
-def test_create_returns_id_and_refuses_privileged_spec(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "create=create-ok")
+def test_create_returns_id_and_refuses_privileged_spec(shim: Path, tmp_path: Path) -> None:
+    use_cases("create=create-ok")
     cli = make_cli(tmp_path)
     spec = CreateSpec(name="ginn-arch-g1", image_digest_ref=DIGEST_REF, network="host")
     assert cli.create(spec) == CONTAINER
@@ -485,10 +595,8 @@ def test_create_refuses_privileged_spec_before_podman_runs(shim: Path, tmp_path:
 
 
 @pytest.mark.fr("NFR-SEC-005")
-def test_exec_builds_an_argv_list_with_option_terminator(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_cases(monkeypatch, "exec=exec-ok")
+def test_exec_builds_an_argv_list_with_option_terminator(shim: Path, tmp_path: Path) -> None:
+    use_cases("exec=exec-ok")
     result = make_cli(tmp_path).exec(
         CONTAINER,
         ["sh", "-c", "echo hi"],
@@ -513,10 +621,8 @@ def test_exec_builds_an_argv_list_with_option_terminator(
 
 
 @pytest.mark.fr("IR-011")
-def test_exec_interactive_returns_the_inner_status(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    use_fixture_dir(monkeypatch, tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
+def test_exec_interactive_returns_the_inner_status(shim: Path, tmp_path: Path) -> None:
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
     assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"]) == 7
     result = make_cli(tmp_path).exec(CONTAINER, ["false"], capture=False)
     assert (result.exit_code, result.stdout, result.stderr) == (7, "", "")
@@ -542,11 +648,10 @@ def test_top_and_logs_are_parsed_from_the_captured_output(shim: Path, tmp_path: 
 def test_exec_exit_125_is_podman_failure_not_the_command_status(
     shim: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     stderr: str,
     code: str,
 ) -> None:
-    use_fixture_dir(monkeypatch, tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": 125}})
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": 125}})
     err = expect_error(lambda: make_cli(tmp_path).exec(CONTAINER, ["true"]))
     assert err.code == code
     assert err.details["op"] == "exec"
@@ -556,12 +661,10 @@ def test_exec_exit_125_is_podman_failure_not_the_command_status(
 @pytest.mark.fr("IR-011")
 @pytest.mark.parametrize("status", [126, 127])
 def test_exec_passes_the_command_status_126_and_127_through(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+    shim: Path, tmp_path: Path, status: int
 ) -> None:
     stderr = "OCI runtime exec failed: not executable\n"
-    use_fixture_dir(
-        monkeypatch, tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": status}}
-    )
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": status}})
     result = make_cli(tmp_path).exec(CONTAINER, ["/bin/x"])
     assert (result.exit_code, result.stdout, result.stderr) == (status, "", stderr)
 
@@ -580,9 +683,9 @@ def test_cp_from_refuses_a_destination_that_is_not_absolute(
 
 @pytest.mark.fr("NFR-SEC-005")
 def test_cp_from_with_an_absolute_destination_passes_container_and_paths_as_argv(
-    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    shim: Path, tmp_path: Path
 ) -> None:
-    use_fixture_dir(monkeypatch, tmp_path, {"cp": {"stdout": "", "stderr": "", "exit": 0}})
+    use_fixture_dir(tmp_path, {"cp": {"stdout": "", "stderr": "", "exit": 0}})
     dst = tmp_path / "hosts-copy"
     make_cli(tmp_path).cp_from(CONTAINER, "/etc/hosts", dst)
     argv = logged(shim)[0]["argv"]
@@ -592,9 +695,7 @@ def test_cp_from_with_an_absolute_destination_passes_container_and_paths_as_argv
 @pytest.mark.fr("NFR-040")
 def test_missing_binary_maps_to_internal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
-    cli = PodmanCli(
-        tmp_path / "root", tmp_path / "runroot", binary="ginn-no-such-podman", **pinned(tmp_path)
-    )
+    cli = PodmanCli.from_paths(configured_paths(tmp_path), binary="ginn-no-such-podman")
     err = expect_error(cli.info)
     assert err.code == "GINN-E-INTERNAL"
     assert "cannot run ginn-no-such-podman" in str(err.details["detail"])
