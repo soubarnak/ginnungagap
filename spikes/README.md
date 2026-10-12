@@ -7,7 +7,7 @@ Spikes are short, host-only experiments that retire technical risks before the d
 - A Void Linux host with rootless Podman. Spikes are not run in CI.
 - `sudo` for root steps. Only a spike's root step (for example writing cgroup controllers under `/sys/fs/cgroup/ginn`) runs as root. Each root step is a separate, small invocation of the spike script, and every host write is logged.
 - Network access for pulling base images on the first run.
-- About 1 GiB of free memory and swap headroom. Spikes check headroom before each step and stop if it is too low.
+- At least 256 MiB of MemAvailable. S-01 checks this before each step and stops below it.
 
 ## Running a spike
 
