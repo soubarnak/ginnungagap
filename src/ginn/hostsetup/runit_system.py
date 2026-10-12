@@ -3,12 +3,18 @@
 
 Host Setup renders etc/sv/ginn-<user>/{run,finish,log/run} and links it into var/service, so the
 system runit starts it at boot. `run` runs as root. It creates /run/ginn/<uid>, creates the
-delegated cgroup leaves (the same writes as cgroups.delegate_user_tree, S-01), moves itself into
+delegated cgroup leaf (the same writes as cgroups.delegate_user_tree, S-01), moves itself into
 the supervisor leaf, waits for the user's state directory, then drops to the user and execs
 runsvdir. runsvdir is the process that stays resident, and NFR-001 allows it 1 MiB RSS.
 
-Every value is rendered at setup time, so the scripts run no account lookups (no getent).
-Each value is quoted with shlex.quote because the scripts run as root.
+The drop uses `setpriv --reuid --regid --init-groups`, not `chpst -u user:group`. chpst drops every
+supplementary group, so realms would lose video, render, audio, input and kvm (/dev/kvm and GPU
+nodes). setpriv loads the user's groups from the account database each time this service starts,
+so a group added after Host Setup applies from the next start of the service.
+
+Every numeric value is rendered at setup time, and no group name is used. The scripts never look
+up accounts themselves (no getent). Each value is quoted with shlex.quote because the scripts run
+as root.
 
 Golden files for the rendered scripts are in tests/fixtures/hostsetup/ginn-alice/.
 """
@@ -20,12 +26,11 @@ import re
 import shlex
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from ginn.hostsetup._atomic import atomic_write
 from ginn.hostsetup.cgroups import (
-    CLI_LEAF,
     CONTROLLERS,
     DEFAULT_CGROUP_ROOT,
     GINN_DIR,
@@ -52,18 +57,30 @@ class _Groups:
     ginn: str
     user: str
     supervisor: str
-    cli: str
 
 
 def _groups(uid: int) -> _Groups:
     ginn = DEFAULT_CGROUP_ROOT / GINN_DIR
     user = ginn / str(uid)
-    return _Groups(
-        ginn=str(ginn),
-        user=str(user),
-        supervisor=str(user / SUPERVISOR_LEAF),
-        cli=str(user / CLI_LEAF),
-    )
+    return _Groups(ginn=str(ginn), user=str(user), supervisor=str(user / SUPERVISOR_LEAF))
+
+
+@dataclass
+class InstallPlan:
+    """What `install` changed under the root, for the Host Setup Record (DR-009) and undo (FR-003).
+
+    `created` lists the directories, scripts and link that did not exist before this call. Undo
+    removes them. `replaced` lists scripts that existed with other bytes, and `pre_images` holds
+    each one's bytes from before the change. `relinked` lists a var/service link that pointed
+    somewhere else, and `pre_links` holds the old target. A path is in exactly one of `created`,
+    `replaced` or `relinked`. Nothing is listed when the content already matched.
+    """
+
+    created: list[Path] = field(default_factory=list)
+    replaced: list[Path] = field(default_factory=list)
+    relinked: list[Path] = field(default_factory=list)
+    pre_images: dict[Path, bytes] = field(default_factory=dict)
+    pre_links: dict[Path, str] = field(default_factory=dict)
 
 
 def render(
@@ -73,7 +90,6 @@ def render(
     home: str,
     xdg: Mapping[str, str],
     *,
-    group: str | None = None,
     runtime_dir: str | None = None,
 ) -> dict[str, str]:
     """Render the service scripts for `user`.
@@ -81,12 +97,11 @@ def render(
     Returns a mapping from root-relative path to file text, for example
     "etc/sv/ginn-alice/run". `install` takes that mapping directly.
 
-    `group` defaults to the user name. `runtime_dir` defaults to /run/ginn/<uid> (ADR-004).
-    uid 0 and gid 0 are refused, because a realm must never run as root (CR-003).
+    `gid` is the user's numeric primary group. The caller resolves it, and the scripts never use
+    a group name. `runtime_dir` defaults to /run/ginn/<uid> (ADR-004). uid 0 and gid 0 are
+    refused, because a realm must never run as root (CR-003).
     """
-    group_name = user if group is None else group
     _check_account("user", user)
-    _check_account("group", group_name)
     if uid <= 0 or gid <= 0:
         raise ValueError(f"refusing a supervisor for uid {uid} gid {gid}")
     missing = [key for key in XDG_KEYS if key not in xdg]
@@ -101,7 +116,6 @@ def render(
 
     values: dict[str, str] = {
         "USER_NAME": user,
-        "GROUP_NAME": group_name,
         "UID_NUM": str(uid),
         "GID_NUM": str(gid),
         "HOME_DIR": home_dir,
@@ -112,8 +126,7 @@ def render(
         "SV_DIR": str(PurePosixPath(state) / "ginn" / "sv"),
         "LOG_DIR": str(PurePosixPath(state) / "ginn" / "log" / "supervisor"),
     }
-    service = f"ginn-{user}"
-    base = f"{SV_PARENT}/{service}"
+    base = f"{SV_PARENT}/ginn-{user}"
     return {
         f"{base}/run": _run_script(values, uid),
         f"{base}/finish": _FINISH,
@@ -121,33 +134,40 @@ def render(
     }
 
 
-def install(root_dir: Path, rendered: Mapping[str, str]) -> list[Path]:
+def install(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
     """Write the rendered service under `root_dir` and link it into var/service.
 
-    Each script is written atomically with mode 0755. Files whose content and mode already match
-    are not rewritten. The symlink is created last, so runsvdir never sees a half-built service.
-    The link target is the absolute /etc/sv/ginn-<user>, not prefixed with `root_dir`.
+    Each script is written atomically with mode 0755. A script whose bytes and mode already
+    match is not rewritten. The symlink is created last, so runsvdir never sees a half-built
+    service. The link target is the absolute /etc/sv/ginn-<user>, not prefixed with `root_dir`.
 
-    Returns every path this call created or changed (directories it made, files it wrote and
-    the link), for the Host Setup Record (DR-009). Directories that already existed are not
-    returned.
+    Every path that changed is recorded with its pre-image, so undo can restore it. A path that
+    exists but is not a regular file (or, for the link, not a symlink) is refused, because undo
+    could not restore it.
     """
     service = _service_name(rendered)
-    created: list[Path] = []
-    written: list[Path] = []
+    link = root_dir / LINK_PARENT / service
+    # Every refusal is checked before the first write, so a refused call leaves nothing behind
+    # that the caller has no record of.
+    existing = {rel: _read_script(root_dir / rel) for rel in sorted(rendered)}
+    _check_link(link)
+    plan = InstallPlan()
     for rel in sorted(rendered):
         target = root_dir / rel
-        _ensure_dirs(target.parent, root_dir, created)
+        _ensure_dirs(target.parent, root_dir, plan)
         data = rendered[rel].encode("utf-8")
-        if _is_current(target, data):
+        before = existing[rel]
+        if before is not None and before == (data, SCRIPT_MODE):
             continue
         atomic_write(target, data, SCRIPT_MODE)
-        written.append(target)
-    link = root_dir / LINK_PARENT / service
-    _ensure_dirs(link.parent, root_dir, created)
-    if _ensure_link(link, f"/{SV_PARENT}/{service}"):
-        written.append(link)
-    return [*created, *written]
+        if before is None:
+            plan.created.append(target)
+        else:
+            plan.replaced.append(target)
+            plan.pre_images[target] = before[0]
+    _ensure_dirs(link.parent, root_dir, plan)
+    _ensure_link(link, f"/{SV_PARENT}/{service}", plan)
+    return plan
 
 
 def _run_script(v: Mapping[str, str], uid: int) -> str:
@@ -165,7 +185,6 @@ def _run_script(v: Mapping[str, str], uid: int) -> str:
             "GINN_CGROUP": groups.ginn,
             "USER_CGROUP": groups.user,
             "SUPERVISOR_CGROUP": groups.supervisor,
-            "LEAF_PATHS": f"{groups.supervisor} {groups.cli}",
             "CHOWN_LINES": chown_lines,
             "WAIT_SECONDS": str(WAIT_SECONDS),
         },
@@ -228,44 +247,56 @@ def _service_name(rendered: Mapping[str, str]) -> str:
     return service
 
 
-def _is_current(target: Path, data: bytes) -> bool:
+def _read_script(target: Path) -> tuple[bytes, int] | None:
+    """Return (bytes, mode bits) of the regular file at `target`, or None if it does not exist.
+
+    A path that exists but is not a regular file is refused. Its previous content could not be
+    recorded as bytes, so undo could not restore it.
+    """
     try:
         st = os.lstat(target)
     except FileNotFoundError:
-        return False
-    if not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != SCRIPT_MODE:
-        return False
-    return target.read_bytes() == data
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{target} exists and is not a regular file")
+    return target.read_bytes(), stat.S_IMODE(st.st_mode)
 
 
-def _ensure_dirs(directory: Path, root_dir: Path, created: list[Path]) -> None:
+def _ensure_dirs(directory: Path, root_dir: Path, plan: InstallPlan) -> None:
     current = root_dir
     for part in directory.relative_to(root_dir).parts:
         current = current / part
         if not current.exists():
             os.mkdir(current, SCRIPT_MODE)
-            created.append(current)
+            plan.created.append(current)
 
 
-def _ensure_link(link: Path, target: str) -> bool:
-    """Point `link` at `target`. Return True if it changed."""
+def _check_link(link: Path) -> None:
+    """Refuse a path that exists and is not a symlink, because undo could not restore it."""
+    if not link.is_symlink() and link.exists():
+        raise ValueError(f"{link} exists and is not a symlink")
+
+
+def _ensure_link(link: Path, target: str, plan: InstallPlan) -> None:
+    """Point `link` at `target`, recording the old target if it was different."""
     if link.is_symlink():
-        if os.readlink(link) == target:
-            return False
+        before = os.readlink(link)
+        if before == target:
+            return
         tmp = link.with_name(f".{link.name}.tmp")
         tmp.unlink(missing_ok=True)
         os.symlink(target, tmp)
         os.replace(tmp, link)
-        return True
-    if link.exists():
-        raise ValueError(f"{link} exists and is not a symlink")
+        plan.relinked.append(link)
+        plan.pre_links[link] = before
+        return
     os.symlink(target, link)
-    return True
+    plan.created.append(link)
 
 
 _FINISH = """\
 #!/bin/sh
-# Runs after runsvdir exits. The cgroup leaves persist, and run recreates what is missing.
+# Runs after runsvdir exits. The cgroup leaf persists, and run recreates what is missing.
 exit 0
 """
 
@@ -285,7 +316,7 @@ _RUN = (
     """\
 #!/bin/sh
 # ginn supervisor service for @USER_NAME@ (FR-001, FR-081, FR-084). Written by ginn host-setup.
-# Runs as root under runsv. It creates the runtime directory and the delegated cgroup leaves
+# Runs as root under runsv. It creates the runtime directory and the delegated cgroup leaf
 # (spike S-01), moves itself into the supervisor leaf, waits for the state directory, then drops
 # to @USER_NAME@ and execs runsvdir. Every value below was rendered at setup time.
 set -eu
@@ -293,8 +324,6 @@ set -eu
 PATH=/usr/bin:/bin
 export PATH
 
-USER_NAME=@USER_NAME@
-GROUP_NAME=@GROUP_NAME@
 UID_NUM=@UID_NUM@
 GID_NUM=@GID_NUM@
 HOME_DIR=@HOME_DIR@
@@ -347,7 +376,7 @@ if ! enable_controllers @GINN_CGROUP@; then
     log "could not enable controllers at @GINN_CGROUP@"
     exit 1
 fi
-mkdir -p @LEAF_PATHS@
+mkdir -p @SUPERVISOR_CGROUP@
 if ! enable_controllers @USER_CGROUP@; then
     log "could not enable controllers at @USER_CGROUP@"
     exit 1
@@ -361,8 +390,14 @@ printf '%s\\n' "$$" > @SUPERVISOR_CGROUP@/cgroup.procs
 """
     + _WAIT_BLOCK
     + """
-# 5. Drop to the user and run its runit supervisor. chpst -u clears the supplementary groups.
-exec chpst -u "$USER_NAME:$GROUP_NAME" env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \\
+# 5. Drop to the user and run its runit supervisor. setpriv sets the numeric ids and loads the
+# user's supplementary groups from the account database (video, render, kvm and so on). This
+# happens at each start of this service, so a group added later applies from the next start.
+# --reset-env clears the root environment, and env sets what the user's supervisor needs.
+# XDG_RUNTIME_DIR is kept because podman reads it for its rootless runtime directory, so podman
+# state lives in the user-owned 0700 directory and not under the /tmp fallback.
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \\
+env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \\
 XDG_STATE_HOME="$STATE_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_CONFIG_HOME="$CONFIG_HOME" \\
 GINN_RUNTIME_DIR="$RUNTIME_DIR" runsvdir -P "$SV_DIR"
 """
@@ -372,14 +407,14 @@ _LOG_RUN = (
     """\
 #!/bin/sh
 # Log service for the ginn supervisor of @USER_NAME@ (FR-081). Runs as root. It creates the log
-# directory as @USER_NAME@, then drops to @USER_NAME@ for svlogd.
+# directory as the user, then drops to the user for svlogd, with the same setpriv as run.
 set -eu
 
 PATH=/usr/bin:/bin
 export PATH
 
-USER_NAME=@USER_NAME@
-GROUP_NAME=@GROUP_NAME@
+UID_NUM=@UID_NUM@
+GID_NUM=@GID_NUM@
 SV_DIR=@SV_DIR@
 LOG_DIR=@LOG_DIR@
 
@@ -391,7 +426,8 @@ log() {
 """
     + _WAIT_BLOCK
     + """
-chpst -u "$USER_NAME:$GROUP_NAME" mkdir -p "$LOG_DIR"
-exec chpst -u "$USER_NAME:$GROUP_NAME" svlogd -tt "$LOG_DIR"
+setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env mkdir -p "$LOG_DIR"
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \\
+svlogd -tt "$LOG_DIR"
 """
 )

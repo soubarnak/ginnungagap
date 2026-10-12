@@ -116,7 +116,6 @@ def _user_tree(root: Path, uid: int) -> dict[str, Path]:
         "ginn": root / "ginn",
         "user": user,
         "supervisor": user / "supervisor",
-        "cli": user / "cli",
     }
 
 
@@ -143,6 +142,7 @@ def test_delegate_writes_and_chowns_exactly_the_expected_paths(
     tree = _user_tree(fake.root, 1000)
     plan = delegate_user_tree(fake.root, 1000, 1000)
 
+    assert plan.root_refused is False
     assert plan.written == [
         fake.root / "cgroup.subtree_control",
         tree["ginn"] / "cgroup.subtree_control",
@@ -153,7 +153,7 @@ def test_delegate_writes_and_chowns_exactly_the_expected_paths(
     assert plan.enabled[tree["user"]] == CONTROLLERS
     assert plan.pre_images[fake.root / "cgroup.subtree_control"] == ROOT_ENABLED
 
-    assert plan.created == [tree["ginn"], tree["user"], tree["supervisor"], tree["cli"]]
+    assert plan.created == [tree["ginn"], tree["user"], tree["supervisor"]]
     expected_chown = {
         tree["user"],
         tree["user"] / "cgroup.procs",
@@ -162,9 +162,6 @@ def test_delegate_writes_and_chowns_exactly_the_expected_paths(
         tree["supervisor"],
         tree["supervisor"] / "cgroup.procs",
         tree["supervisor"] / "cgroup.threads",
-        tree["cli"],
-        tree["cli"] / "cgroup.procs",
-        tree["cli"] / "cgroup.threads",
     }
     chowned = [path for path, _, _ in chowns]
     assert set(chowned) == expected_chown
@@ -212,13 +209,30 @@ def test_refused_root_write_is_a_warning_and_missing_pids_is_reported(
     fake.fail_on[fake.root / "cgroup.subtree_control"] = err
     tree = _user_tree(fake.root, uid)
     plan = delegate_user_tree(fake.root, uid, TEST_GID)
+    assert plan.root_refused is True
     assert len(plan.warnings) == 2
     assert "cgroup.subtree_control not written" in plan.warnings[0]
     assert "pids" in plan.warnings[1]
     assert tree["supervisor"].is_dir()
-    assert verify(fake.root, uid) == [
-        "root: controller pids is not enabled in subtree_control",
-    ]
+
+
+@pytest.mark.fr("FR-007")
+def test_doctor_passes_with_a_refused_root_write_only_when_the_record_tolerates_it(
+    fake: FakeCgroupfs,
+    chowns: list[tuple[Path, int, int]],
+) -> None:
+    uid = TEST_UID
+    fake.fail_on[fake.root / "cgroup.subtree_control"] = errno.EBUSY
+    plan = delegate_user_tree(fake.root, uid, TEST_GID)
+    root_gap = "root: controller pids is not enabled in subtree_control"
+
+    tolerated = verify(fake.root, uid, tolerated_root=plan.root_refused)
+    assert tolerated.problems == []
+    assert tolerated.warnings == [root_gap]
+
+    strict = verify(fake.root, uid)
+    assert strict.problems == [root_gap]
+    assert strict.warnings == []
 
 
 def test_other_errors_on_the_root_write_propagate(
@@ -237,7 +251,7 @@ def test_root_and_negative_uids_are_refused(fake: FakeCgroupfs, uid: int) -> Non
 
 
 def test_verify_reports_a_missing_tree_before_setup(fake: FakeCgroupfs) -> None:
-    problems = verify(fake.root, 1000)
+    problems = verify(fake.root, 1000).problems
     hint = "missing; run 'sudo ginn host-setup --user <name>'"
     assert problems == [
         "root: controller pids is not enabled in subtree_control",
@@ -252,7 +266,7 @@ def test_verify_is_clean_after_delegation(
     # The fake chown is recorded, not applied, so the files stay owned by the test user.
     uid = TEST_UID
     delegate_user_tree(fake.root, uid, TEST_GID)
-    assert verify(fake.root, uid) == []
+    assert verify(fake.root, uid).problems == []
 
 
 def test_verify_reports_a_missing_leaf(
@@ -262,7 +276,7 @@ def test_verify_reports_a_missing_leaf(
     delegate_user_tree(fake.root, uid, TEST_GID)
     supervisor = _user_tree(fake.root, uid)["supervisor"]
     shutil.rmtree(supervisor)
-    problems = verify(fake.root, uid)
+    problems = verify(fake.root, uid).problems
     assert f"{supervisor}: missing" in problems
     assert len(problems) == 3
 
@@ -272,6 +286,16 @@ def test_move_self_to_writes_this_pid_into_the_leaf(
 ) -> None:
     uid = TEST_UID
     delegate_user_tree(fake.root, uid, TEST_GID)
-    cli = _user_tree(fake.root, uid)["cli"]
-    move_self_to(cli)
-    assert (cli / "cgroup.procs").read_text() == str(os.getpid())
+    supervisor = _user_tree(fake.root, uid)["supervisor"]
+    move_self_to(supervisor)
+    assert (supervisor / "cgroup.procs").read_text() == str(os.getpid())
+
+
+def test_no_leaf_is_created_for_ginn_start_or_podman_start(
+    fake: FakeCgroupfs, chowns: list[tuple[Path, int, int]]
+) -> None:
+    # Session processes cannot enter such a leaf (see the NOTE in cgroups.py), so none is made.
+    uid = TEST_UID
+    delegate_user_tree(fake.root, uid, TEST_GID)
+    assert not (_user_tree(fake.root, uid)["user"] / "cli").exists()
+    assert all("cli" not in path.parts for path in chown_paths(fake.root, uid))

@@ -1,13 +1,13 @@
 #!/bin/sh
 # Log service for the ginn supervisor of alice (FR-081). Runs as root. It creates the log
-# directory as alice, then drops to alice for svlogd.
+# directory as the user, then drops to the user for svlogd, with the same setpriv as run.
 set -eu
 
 PATH=/usr/bin:/bin
 export PATH
 
-USER_NAME=alice
-GROUP_NAME=alice
+UID_NUM=1000
+GID_NUM=1000
 SV_DIR=/home/alice/.local/state/ginn/sv
 LOG_DIR=/home/alice/.local/state/ginn/log/supervisor
 
@@ -26,5 +26,6 @@ while [ ! -d "$SV_DIR" ]; do
     waited=$((waited + 1))
 done
 
-chpst -u "$USER_NAME:$GROUP_NAME" mkdir -p "$LOG_DIR"
-exec chpst -u "$USER_NAME:$GROUP_NAME" svlogd -tt "$LOG_DIR"
+setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env mkdir -p "$LOG_DIR"
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \
+svlogd -tt "$LOG_DIR"

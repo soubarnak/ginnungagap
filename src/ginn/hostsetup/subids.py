@@ -4,7 +4,8 @@
 A line is `name_or_uid:start:count`. Blank lines, comments and lines this module does not
 understand are kept byte for byte. `ensure_range` only ever appends, so the bytes already in the
 file are never rewritten. A user who already holds at least `size` IDs in total is left alone,
-which makes a second run a no-op (FR-002).
+which makes a second run a no-op (FR-002). The read-modify-replace runs under `<name>.lock` next to
+the file (etc/subuid.lock, etc/subgid.lock), so two Host Setup runs cannot both append (FR-001).
 """
 
 from __future__ import annotations
@@ -12,7 +13,9 @@ from __future__ import annotations
 import os
 import re
 import stat
-from collections.abc import Sequence
+import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +28,9 @@ DEFAULT_SIZE = MIN_SIZE
 DEFAULT_FLOOR = 100_000
 DEFAULT_CEILING = 2**32 - 1 - 65_536
 DEFAULT_MODE = 0o644
+LOCK_TIMEOUT_SECONDS = 5.0
+"""How long `ensure_range` waits for another holder of the lock before it gives up."""
+LOCK_POLL_SECONDS = 0.05
 
 _DECIMAL = re.compile(r"[0-9]+")
 _BAD_NAME_CHARS = frozenset(":\r\n\0")
@@ -35,6 +41,13 @@ class SubIdExhausted(Exception):
 
     This is a host configuration problem, not a user error. The module has no catalogue code
     for it, so Host Setup reports it as an internal failure.
+    """
+
+
+class SubIdLocked(Exception):
+    """Another process holds `<name>.lock` for the subordinate ID file and did not let go in time.
+
+    The lock is not removed. The holder owns it, and Host Setup should be run again later.
     """
 
 
@@ -123,29 +136,32 @@ def ensure_range(
     uid: int | None = None,
     floor: int = DEFAULT_FLOOR,
     ceiling: int = DEFAULT_CEILING,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
 ) -> Change:
     """Make sure `user` holds at least `size` subordinate IDs in the file at `path`.
 
     Lines are matched by name, and also by `str(uid)` when `uid` is given, because newuidmap
     accepts either form. If the existing entries already total at least `size`, nothing is
     written. Otherwise a new entry is appended and the file is replaced atomically with its
-    mode kept (0644 for a new file).
+    mode kept (0644 for a new file). The read and the replace happen under the file's lock, and
+    `SubIdLocked` is raised if another holder keeps the lock for `lock_timeout` seconds.
     """
     _check_name(user)
     _check_size(size)
-    try:
-        before = path.read_bytes()
-    except FileNotFoundError:
-        before = b""
-    names = {user} if uid is None else {user, str(uid)}
-    entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
-    held = sum(entry.count for entry in entries if entry.name in names)
-    if held >= size:
-        return Change(before=before, after=before, changed=False)
-    added = allocate(entries, user, size, floor=floor, ceiling=ceiling)
-    after = _append_line(before, added.render().encode("utf-8"))
-    atomic_write(path, after, file_mode(path, DEFAULT_MODE))
-    return Change(before=before, after=after, changed=True, added=added)
+    with _lock(path, lock_timeout):
+        try:
+            before = path.read_bytes()
+        except FileNotFoundError:
+            before = b""
+        names = {user} if uid is None else {user, str(uid)}
+        entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
+        held = sum(entry.count for entry in entries if entry.name in names)
+        if held >= size:
+            return Change(before=before, after=before, changed=False)
+        added = allocate(entries, user, size, floor=floor, ceiling=ceiling)
+        after = _append_line(before, added.render().encode("utf-8"))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        return Change(before=before, after=after, changed=True, added=added)
 
 
 def newuidmap_present(root_dir: Path) -> bool:
@@ -163,6 +179,33 @@ def _is_setuid(path: Path) -> bool:
     except FileNotFoundError:
         return False
     return stat.S_ISREG(mode) and bool(mode & stat.S_ISUID)
+
+
+@contextmanager
+def _lock(path: Path, timeout: float) -> Iterator[None]:
+    """Hold `<path>.lock` (etc/subuid.lock for etc/subuid) while the caller edits `path`.
+
+    The lock is a file created with O_CREAT|O_EXCL, so only one creator can succeed. A second
+    caller retries every LOCK_POLL_SECONDS until `timeout`, then raises SubIdLocked and leaves
+    the other holder's file in place. The file this call created is removed on exit, including
+    when the body raises.
+    """
+    lock = path.with_name(f"{path.name}.lock")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise SubIdLocked(f"{lock} is held by another process") from None
+            time.sleep(LOCK_POLL_SECONDS)
+            continue
+        break
+    os.close(fd)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
 
 
 def _append_line(before: bytes, line: bytes) -> bytes:

@@ -6,11 +6,16 @@ Layout created by `delegate_user_tree`, with `<uid>` the user:
     <root>/ginn/                  controllers enabled, root-owned
     <root>/ginn/<uid>/            controllers enabled, chowned to uid:gid
     <root>/ginn/<uid>/supervisor/ leaf for the runit supervisor, chowned
-    <root>/ginn/<uid>/cli/        leaf for `ginn start` and `podman start`, chowned
 
 A cgroup that has controllers in subtree_control cannot hold processes, so the processes sit in
 the leaves. Only the directories and the procs, threads and subtree_control files are chowned.
 Limit files such as memory.max stay root-owned, so the user cannot raise its own limits.
+
+NOTE: there is deliberately no leaf for `ginn start` or `podman start`. A session process cannot
+move itself into <root>/ginn/<uid>/...: cgroup v2 migration needs write access to cgroup.procs of
+the common ancestor, which is the cgroup root here, and that file is root-owned. So podman run and
+start for services-on realms must be routed through the supervisor, which already runs inside the
+delegated tree. That routing is to be designed in T3.4 and M7.
 
 All kernel I/O goes through `_read_text`, `_write_control` and `_make_dir`. Tests replace these to
 emulate cgroupfs, because cgroupfs semantics (accumulating `+ctrl` writes, auto-created
@@ -29,7 +34,6 @@ DEFAULT_CGROUP_ROOT = Path("/sys/fs/cgroup")
 CONTROLLERS: frozenset[str] = frozenset({"cpu", "cpuset", "io", "memory", "pids"})
 GINN_DIR = "ginn"
 SUPERVISOR_LEAF = "supervisor"
-CLI_LEAF = "cli"
 USER_CHOWN_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads", "cgroup.subtree_control")
 LEAF_CHOWN_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads")
 TOLERATED_ROOT_ERRNOS: frozenset[int] = frozenset({errno.EBUSY, errno.EACCES})
@@ -42,19 +46,28 @@ class DelegationPlan:
     `pre_images` maps each control file written to its content before the first write.
     `enabled` maps each node to the controllers this call added there. `created` lists only the
     directories this call made. Directories that already existed are not listed, so undo never
-    removes them.
+    removes them. `root_refused` is True when the root's subtree_control write was refused with a
+    tolerated errno. The record keeps it, and `verify` reads it.
     """
 
     uid: int
     gid: int
     user_dir: Path
     supervisor: Path
-    cli: Path
     created: list[Path] = field(default_factory=list)
     written: list[Path] = field(default_factory=list)
     chowned: list[Path] = field(default_factory=list)
     enabled: dict[Path, frozenset[str]] = field(default_factory=dict)
     pre_images: dict[Path, str] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    root_refused: bool = False
+
+
+@dataclass(frozen=True)
+class Verification:
+    """Result of `verify`. `problems` make `ginn doctor` fail. `warnings` are reported only."""
+
+    problems: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -64,11 +77,11 @@ def chown_groups(cgroup_root: Path, uid: int) -> tuple[tuple[Path, ...], ...]:
     The runit renderer reads these same groups, so the two cannot drift apart.
     """
     user_dir = cgroup_root / GINN_DIR / str(uid)
-    groups: list[tuple[Path, ...]] = [(user_dir, *(user_dir / name for name in USER_CHOWN_FILES))]
-    for leaf_name in (SUPERVISOR_LEAF, CLI_LEAF):
-        leaf = user_dir / leaf_name
-        groups.append((leaf, *(leaf / name for name in LEAF_CHOWN_FILES)))
-    return tuple(groups)
+    supervisor = user_dir / SUPERVISOR_LEAF
+    return (
+        (user_dir, *(user_dir / name for name in USER_CHOWN_FILES)),
+        (supervisor, *(supervisor / name for name in LEAF_CHOWN_FILES)),
+    )
 
 
 def chown_paths(cgroup_root: Path, uid: int) -> tuple[Path, ...]:
@@ -103,26 +116,26 @@ def enable_controllers(path: Path, wanted: Iterable[str]) -> frozenset[str]:
 
 
 def delegate_user_tree(cgroup_root: Path, uid: int, gid: int) -> DelegationPlan:
-    """Create and delegate `ginn/<uid>` with its two leaves, as S-01 showed is required.
+    """Create and delegate `ginn/<uid>` with its supervisor leaf, as S-01 showed is required.
 
-    The root `subtree_control` write may fail with EBUSY or EACCES. That is recorded in
-    `warnings` and the rest goes on, so `pids` may be missing and is reported there. Any other
-    failure propagates. Running the function again is safe: nothing is created twice, nothing is
-    written when controllers are already enabled, and the chown is repeated.
+    The root `subtree_control` write may fail with EBUSY or EACCES. That sets `root_refused`,
+    is recorded in `warnings`, and the rest goes on, so `pids` may be missing and is reported
+    there. Any other failure propagates. Running the function again is safe: nothing is created
+    twice, nothing is written when controllers are already enabled, and the chown is repeated.
     """
     if uid <= 0 or gid <= 0:
         raise ValueError(f"refusing to delegate a cgroup subtree to uid {uid} gid {gid}")
     ginn = cgroup_root / GINN_DIR
     user_dir = ginn / str(uid)
     supervisor = user_dir / SUPERVISOR_LEAF
-    cli = user_dir / CLI_LEAF
-    plan = DelegationPlan(uid=uid, gid=gid, user_dir=user_dir, supervisor=supervisor, cli=cli)
+    plan = DelegationPlan(uid=uid, gid=gid, user_dir=user_dir, supervisor=supervisor)
 
     try:
         _enable_recorded(cgroup_root, plan)
     except OSError as exc:
         if exc.errno not in TOLERATED_ROOT_ERRNOS:
             raise
+        plan.root_refused = True
         plan.warnings.append(
             f"{cgroup_root / 'cgroup.subtree_control'} not written "
             f"({errno.errorcode.get(exc.errno, exc.errno)}); "
@@ -133,7 +146,6 @@ def delegate_user_tree(cgroup_root: Path, uid: int, gid: int) -> DelegationPlan:
     _enable_recorded(ginn, plan)
     _make_recorded(user_dir, plan)
     _make_recorded(supervisor, plan)
-    _make_recorded(cli, plan)
     _enable_recorded(user_dir, plan)
 
     for path in chown_paths(cgroup_root, uid):
@@ -148,33 +160,40 @@ def delegate_user_tree(cgroup_root: Path, uid: int, gid: int) -> DelegationPlan:
     return plan
 
 
-def verify(cgroup_root: Path, uid: int) -> list[str]:
-    """Return the problems with the delegated tree for `uid`. An empty list means it is fine.
+def verify(cgroup_root: Path, uid: int, *, tolerated_root: bool = False) -> Verification:
+    """Check the delegated tree for `uid`. An empty `problems` list means it is fine.
 
-    This is the check `ginn doctor` uses (FR-007). Each message names the path that is wrong.
+    `tolerated_root` is `DelegationPlan.root_refused` from the Host Setup Record. When it is True,
+    controllers the root did not enable are reported as warnings, because delegation accepted
+    that refusal. Every other gap is a problem. Each message names the path that is wrong. This
+    is the check `ginn doctor` uses (FR-007).
     """
     if not (cgroup_root / "cgroup.controllers").exists():
-        return [f"{cgroup_root}: cgroup v2 is not mounted"]
-    problems: list[str] = []
+        return Verification(problems=[f"{cgroup_root}: cgroup v2 is not mounted"])
+    result = Verification()
     ginn = cgroup_root / GINN_DIR
     user_dir = ginn / str(uid)
-    _check_enabled(cgroup_root, "root", problems)
-    if not ginn.is_dir():
-        problems.append(f"{ginn}: missing; run 'sudo ginn host-setup --user <name>'")
+    root_gaps = _missing_enabled(cgroup_root, "root")
+    if tolerated_root:
+        result.warnings.extend(root_gaps)
     else:
-        _check_enabled(ginn, str(ginn), problems)
+        result.problems.extend(root_gaps)
+    if not ginn.is_dir():
+        result.problems.append(f"{ginn}: missing; run 'sudo ginn host-setup --user <name>'")
+    else:
+        result.problems.extend(_missing_enabled(ginn, str(ginn)))
     if not user_dir.is_dir():
-        problems.append(f"{user_dir}: missing; run 'sudo ginn host-setup --user <name>'")
-        return problems
-    _check_enabled(user_dir, str(user_dir), problems)
+        result.problems.append(f"{user_dir}: missing; run 'sudo ginn host-setup --user <name>'")
+        return result
+    result.problems.extend(_missing_enabled(user_dir, str(user_dir)))
     for path in chown_paths(cgroup_root, uid):
         if not path.exists():
-            problems.append(f"{path}: missing")
+            result.problems.append(f"{path}: missing")
             continue
         owner = os.stat(path).st_uid
         if owner != uid:
-            problems.append(f"{path}: owned by uid {owner}, expected {uid}")
-    return problems
+            result.problems.append(f"{path}: owned by uid {owner}, expected {uid}")
+    return result
 
 
 def move_self_to(leaf: Path) -> None:
@@ -182,11 +201,13 @@ def move_self_to(leaf: Path) -> None:
     _write_control(leaf / "cgroup.procs", str(os.getpid()))
 
 
-def _check_enabled(node: Path, label: str, problems: list[str]) -> None:
+def _missing_enabled(node: Path, label: str) -> list[str]:
     offered = read_controllers(node) & CONTROLLERS
     enabled = read_subtree_control(node)
-    for ctrl in sorted(offered - enabled):
-        problems.append(f"{label}: controller {ctrl} is not enabled in subtree_control")
+    return [
+        f"{label}: controller {ctrl} is not enabled in subtree_control"
+        for ctrl in sorted(offered - enabled)
+    ]
 
 
 def _enable_recorded(path: Path, plan: DelegationPlan) -> None:

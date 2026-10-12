@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import os
 import stat
+import threading
 from pathlib import Path
 
 import pytest
 
+from ginn.hostsetup import subids
 from ginn.hostsetup.subids import (
     DEFAULT_CEILING,
     MIN_SIZE,
     Change,
     SubIdEntry,
     SubIdExhausted,
+    SubIdLocked,
     allocate,
     ensure_range,
     newuidmap_present,
@@ -207,3 +210,78 @@ def test_newuidmap_present_needs_both_tools_to_be_setuid(tmp_path: Path) -> None
     assert newuidmap_present(tmp_path) is False
     os.chmod(bin_dir / "newgidmap", 0o4755)  # noqa: S103 - fixture mode bits, not a host file
     assert newuidmap_present(tmp_path) is True
+
+
+def _lock_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.lock")
+
+
+@pytest.mark.fr("FR-001")
+def test_lock_is_held_during_the_edit_and_removed_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    real_atomic_write = subids.atomic_write
+    probed: list[str] = []
+
+    def probe(target: Path, data: bytes, mode: int) -> None:
+        # Another caller must not get in while this one replaces the file.
+        assert _lock_path(target).exists()
+        with pytest.raises(SubIdLocked):
+            ensure_range(target, "bob", MIN_SIZE, lock_timeout=0.0)
+        probed.append("refused")
+        real_atomic_write(target, data, mode)
+
+    monkeypatch.setattr(subids, "atomic_write", probe)
+    ensure_range(path, "alice", MIN_SIZE)
+    assert probed == ["refused"]
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-001")
+def test_a_lock_held_by_someone_else_is_waited_for_then_refused_and_left_in_place(
+    tmp_path: Path,
+) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text("held by another Host Setup\n")
+    with pytest.raises(SubIdLocked, match="held by another process"):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.read_text() == "held by another Host Setup\n"
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+def test_a_caller_proceeds_once_the_other_holder_releases_the_lock(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text("")
+    release = threading.Timer(0.2, lock.unlink)
+    release.start()
+    try:
+        change = ensure_range(path, "alice", MIN_SIZE, lock_timeout=10.0)
+    finally:
+        release.join()
+    assert change.changed is True
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-001")
+def test_the_lock_is_removed_when_the_edit_fails(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    with pytest.raises(SubIdExhausted):
+        ensure_range(path, "alice", MIN_SIZE, ceiling=200000)
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-001")
+def test_subgid_has_its_own_lock_file(tmp_path: Path) -> None:
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    path = etc / "subgid"
+    path.write_bytes(SAMPLE)
+    _lock_path(path).write_text("")
+    with pytest.raises(SubIdLocked):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
+    assert _lock_path(path).exists()
+    assert not (etc / "subuid.lock").exists()

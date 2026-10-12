@@ -1,6 +1,6 @@
 #!/bin/sh
 # ginn supervisor service for alice (FR-001, FR-081, FR-084). Written by ginn host-setup.
-# Runs as root under runsv. It creates the runtime directory and the delegated cgroup leaves
+# Runs as root under runsv. It creates the runtime directory and the delegated cgroup leaf
 # (spike S-01), moves itself into the supervisor leaf, waits for the state directory, then drops
 # to alice and execs runsvdir. Every value below was rendered at setup time.
 set -eu
@@ -8,8 +8,6 @@ set -eu
 PATH=/usr/bin:/bin
 export PATH
 
-USER_NAME=alice
-GROUP_NAME=alice
 UID_NUM=1000
 GID_NUM=1000
 HOME_DIR=/home/alice
@@ -62,14 +60,13 @@ if ! enable_controllers /sys/fs/cgroup/ginn; then
     log "could not enable controllers at /sys/fs/cgroup/ginn"
     exit 1
 fi
-mkdir -p /sys/fs/cgroup/ginn/1000/supervisor /sys/fs/cgroup/ginn/1000/cli
+mkdir -p /sys/fs/cgroup/ginn/1000/supervisor
 if ! enable_controllers /sys/fs/cgroup/ginn/1000; then
     log "could not enable controllers at /sys/fs/cgroup/ginn/1000"
     exit 1
 fi
 chown 1000:1000 /sys/fs/cgroup/ginn/1000 /sys/fs/cgroup/ginn/1000/cgroup.procs /sys/fs/cgroup/ginn/1000/cgroup.threads /sys/fs/cgroup/ginn/1000/cgroup.subtree_control
 chown 1000:1000 /sys/fs/cgroup/ginn/1000/supervisor /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs /sys/fs/cgroup/ginn/1000/supervisor/cgroup.threads
-chown 1000:1000 /sys/fs/cgroup/ginn/1000/cli /sys/fs/cgroup/ginn/1000/cli/cgroup.procs /sys/fs/cgroup/ginn/1000/cli/cgroup.threads
 
 # 3. Move this process into the supervisor leaf. The exec below keeps the PID and the cgroup.
 printf '%s\n' "$$" > /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs
@@ -85,7 +82,13 @@ while [ ! -d "$SV_DIR" ]; do
     waited=$((waited + 1))
 done
 
-# 5. Drop to the user and run its runit supervisor. chpst -u clears the supplementary groups.
-exec chpst -u "$USER_NAME:$GROUP_NAME" env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+# 5. Drop to the user and run its runit supervisor. setpriv sets the numeric ids and loads the
+# user's supplementary groups from the account database (video, render, kvm and so on). This
+# happens at each start of this service, so a group added later applies from the next start.
+# --reset-env clears the root environment, and env sets what the user's supervisor needs.
+# XDG_RUNTIME_DIR is kept because podman reads it for its rootless runtime directory, so podman
+# state lives in the user-owned 0700 directory and not under the /tmp fallback.
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \
+env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 XDG_STATE_HOME="$STATE_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_CONFIG_HOME="$CONFIG_HOME" \
 GINN_RUNTIME_DIR="$RUNTIME_DIR" runsvdir -P "$SV_DIR"

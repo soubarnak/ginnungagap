@@ -278,8 +278,7 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 [[deferred]]
 id = "NFR-001"
 milestone = "M10"
-partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M10"
+reason = "not covered yet; the 1 MiB RSS bound for the resident runsvdir needs a host measurement in M10"
 
 [[deferred]]
 id = "NFR-002"
