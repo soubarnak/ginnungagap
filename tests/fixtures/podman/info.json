@@ -1,0 +1,169 @@
+{
+  "host": {
+    "arch": "amd64",
+    "buildahVersion": "1.43.4",
+    "cgroupManager": "cgroupfs",
+    "cgroupVersion": "v2",
+    "cgroupControllers": [
+      "cpuset",
+      "cpu",
+      "io",
+      "memory",
+      "pids"
+    ],
+    "conmon": {
+      "package": "Unknown",
+      "path": "/usr/libexec/podman/conmon",
+      "version": "conmon version 2.2.1, commit: unknown"
+    },
+    "cpus": 12,
+    "cpuUtilization": {
+      "userPercent": 17.87,
+      "systemPercent": 2.58,
+      "idlePercent": 79.55
+    },
+    "databaseBackend": "sqlite",
+    "distribution": {
+      "distribution": "void",
+      "version": "unknown"
+    },
+    "eventLogger": "none",
+    "freeLocks": 2033,
+    "hostname": "alice-host",
+    "idMappings": {
+      "gidmap": [
+        {
+          "container_id": 0,
+          "host_id": 1000,
+          "size": 1
+        },
+        {
+          "container_id": 1,
+          "host_id": 100000,
+          "size": 65536
+        }
+      ],
+      "uidmap": [
+        {
+          "container_id": 0,
+          "host_id": 1000,
+          "size": 1
+        },
+        {
+          "container_id": 1,
+          "host_id": 100000,
+          "size": 65536
+        }
+      ]
+    },
+    "kernel": "7.2.9_1",
+    "logDriver": "k8s-file",
+    "memFree": 998223872,
+    "memTotal": 15928025088,
+    "networkBackend": "netavark",
+    "networkBackendInfo": {
+      "backend": "netavark",
+      "version": "netavark 1.17.2",
+      "package": "Unknown",
+      "path": "/usr/libexec/podman/netavark",
+      "dns": {
+        "version": "aardvark-dns 1.17.1",
+        "package": "Unknown",
+        "path": "/usr/libexec/podman/aardvark-dns"
+      },
+      "defaultNetwork": "podman"
+    },
+    "ociRuntime": {
+      "name": "runc",
+      "package": "Unknown",
+      "path": "/usr/bin/runc",
+      "version": "runc version 1.5.2\nspec: 1.3.0\ngo: go1.27.1\nlibseccomp: 2.6.1"
+    },
+    "os": "linux",
+    "remoteSocket": {
+      "path": "/run/user/1000/podman/podman.sock",
+      "exists": true
+    },
+    "rootlessNetworkCmd": "pasta",
+    "serviceIsRemote": false,
+    "security": {
+      "apparmorEnabled": false,
+      "capabilities": "CAP_CHOWN,CAP_DAC_OVERRIDE,CAP_FOWNER,CAP_FSETID,CAP_KILL,CAP_NET_BIND_SERVICE,CAP_SETFCAP,CAP_SETGID,CAP_SETPCAP,CAP_SETUID,CAP_SYS_CHROOT",
+      "rootless": true,
+      "seccompEnabled": true,
+      "seccompProfilePath": "/usr/share/containers/seccomp.json",
+      "selinuxEnabled": false
+    },
+    "slirp4netns": {
+      "executable": "/usr/sbin/slirp4netns",
+      "package": "Unknown",
+      "version": "slirp4netns version 1.3.3\ncommit: 944fa94090e1fd1312232cbc0e6b43585553d824\nlibslirp: 4.9.5\nSLIRP_CONFIG_VERSION_MAX: 5\nlibseccomp: 2.6.1"
+    },
+    "pasta": {
+      "executable": "/usr/sbin/pasta",
+      "package": "Unknown",
+      "version": "pasta 2026_01_20.386b5f5\nCopyright Red Hat\nGNU General Public License, version 2 or later\n  <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n"
+    },
+    "swapFree": 16132714496,
+    "swapTotal": 29125234688,
+    "uptime": "13h 51m 1.00s (Approximately 0.54 days)",
+    "variant": "",
+    "linkmode": "dynamic"
+  },
+  "store": {
+    "configFile": "/home/alice/.config/containers/storage.conf",
+    "containerStore": {
+      "number": 2,
+      "paused": 0,
+      "running": 0,
+      "stopped": 2
+    },
+    "graphDriverName": "overlay",
+    "graphOptions": {},
+    "graphRoot": "/home/alice/.local/share/ginn-spike-t211/podman",
+    "graphRootAllocated": 502392610816,
+    "graphRootUsed": 273980436480,
+    "graphStatus": {
+      "Backing Filesystem": "extfs",
+      "Native Overlay Diff": "true",
+      "Supports d_type": "true",
+      "Supports shifting": "false",
+      "Supports volatile": "true",
+      "Using metacopy": "false"
+    },
+    "imageCopyTmpDir": "/home/alice/.cache/tmp",
+    "imageStore": {
+      "number": 1
+    },
+    "runRoot": "/run/user/1000/ginn-spike-t211",
+    "volumePath": "/home/alice/.local/share/ginn-spike-t211/podman/volumes",
+    "transientStore": false
+  },
+  "registries": {},
+  "plugins": {
+    "volume": [
+      "local"
+    ],
+    "network": [
+      "bridge",
+      "macvlan",
+      "ipvlan"
+    ],
+    "log": [
+      "k8s-file",
+      "none",
+      "passthrough"
+    ],
+    "authorization": null
+  },
+  "version": {
+    "APIVersion": "5.8.8",
+    "Version": "5.8.8",
+    "GoVersion": "go1.27.1",
+    "GitCommit": "",
+    "BuiltTime": "Thu Jan  1 05:30:00 1970",
+    "Built": 0,
+    "OsArch": "linux/amd64",
+    "Os": "linux"
+  }
+}

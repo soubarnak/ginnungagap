@@ -1,0 +1,72 @@
+[
+  {
+    "Id": "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8",
+    "Digest": "sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395",
+    "RepoTags": [
+      "docker.io/library/alpine:3"
+    ],
+    "RepoDigests": [
+      "docker.io/library/alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6",
+      "docker.io/library/alpine@sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395"
+    ],
+    "Parent": "",
+    "Comment": "buildkit.dockerfile.v0",
+    "Created": "2026-09-17T20:37:20.889221879Z",
+    "Config": {
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      ],
+      "Cmd": [
+        "/bin/sh"
+      ],
+      "WorkingDir": "/"
+    },
+    "Version": "",
+    "Author": "",
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Size": 8715873,
+    "VirtualSize": 8715873,
+    "GraphDriver": {
+      "Name": "overlay",
+      "Data": {
+        "UpperDir": "/home/alice/.local/share/ginn-spike-t211/podman/overlay/74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711/diff",
+        "WorkDir": "/home/alice/.local/share/ginn-spike-t211/podman/overlay/74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711/work"
+      }
+    },
+    "RootFS": {
+      "Type": "layers",
+      "Layers": [
+        "sha256:74d97c428c51a828f9051a7a40a53ff1fc99e54fc30323ce36760701b0b7f711"
+      ]
+    },
+    "Labels": null,
+    "Annotations": {
+      "com.docker.official-images.bashbrew.arch": "amd64",
+      "org.opencontainers.image.base.name": "scratch",
+      "org.opencontainers.image.created": "2026-09-17T20:36:57Z",
+      "org.opencontainers.image.revision": "1c744e2d49059e51b063a11a6e3e18c9ccf04ab8",
+      "org.opencontainers.image.source": "https://github.com/alpinelinux/docker-alpine.git#1c744e2d49059e51b063a11a6e3e18c9ccf04ab8:x86_64",
+      "org.opencontainers.image.url": "https://hub.docker.com/_/alpine",
+      "org.opencontainers.image.version": "3.24.2"
+    },
+    "ManifestType": "application/vnd.oci.image.manifest.v1+json",
+    "User": "",
+    "History": [
+      {
+        "created": "2026-09-17T20:37:20.889221879Z",
+        "created_by": "ADD alpine-minirootfs-3.24.2-x86_64.tar.gz / # buildkit",
+        "comment": "buildkit.dockerfile.v0"
+      },
+      {
+        "created": "2026-09-17T20:37:20.889221879Z",
+        "created_by": "CMD [\"/bin/sh\"]",
+        "comment": "buildkit.dockerfile.v0",
+        "empty_layer": true
+      }
+    ],
+    "NamesHistory": [
+      "docker.io/library/alpine:3"
+    ]
+  }
+]

@@ -1,0 +1,5 @@
+{
+  "stdout": "[]\n",
+  "stderr": "Error: no such container \"nonexist\"\n",
+  "exit": 125
+}

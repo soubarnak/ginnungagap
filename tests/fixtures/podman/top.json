@@ -1,0 +1,5 @@
+{
+  "stdout": "PID         RSS         COMMAND\n1           1040        sleep\n",
+  "stderr": "",
+  "exit": 0
+}
