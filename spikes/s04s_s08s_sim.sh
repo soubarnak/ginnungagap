@@ -10,14 +10,20 @@
 # (default no), so no process is killed. This is not a real logout: no PAM session closes and
 # no elogind session is involved.
 #
-#   build       compile the static probe client (uclient) into the spike store
+#   build       compile the static probe client (uclient); copy the catatonit init stand-in into the store
 #   setup       spike storage: pull alpine into variant A's store, save it, load it into variant B's
-#   start       s04a (variant A), s04b (variant B), s08c (variant A flags, socket bind mount), gen1 server
+#   start       s04a (variant A), s04b (variant B), s08c (variant A flags, socket bind mount), gen1 server.
+#               With GINN_S08_KEEPID=1: no s04a/s04b; s08c gets the realm base argv instead
+#               (--runtime crun --userns keep-id --init --init-path <stand-in> --network host)
 #   logout      simulated logout: stop gen1, remove $SIM_RUNTIME, wait 15 s, check pinned processes
 #   login       simulated login: recreate $SIM_RUNTIME empty (0700), start gen2 at the same path
 #   s04-post    podman ps -a, inspect, exec and stop per variant with exact flags
 #   s08-probe   probe /run/s08.sock inside s08c (argument: a label)
-#   s08-rebind  rebind the gen2 socket into s08c without a restart: podman unshare first, then the plain session
+#   s08-rebind  the six S-08s attempts on s08c (as recorded in results/S-08.md)
+#   s08-try V   one rebind attempt on s08c with the namespace listing and probes around it (S-08t).
+#               V = row5: podman unshare, helper with --unmount-first (user ns entered when different)
+#               V = b:    as row5, plus --no-setns-user (enter only the mount namespace)
+#               V = row3: podman unshare, helper without umount (control)
 #   reap        podman rm with exact flags, then kill leftovers that match their pins
 #   teardown    podman unshare rm -rf the spike storage; remove $SIM_RUNTIME, $SIM_GINN and the store
 #
@@ -39,6 +45,10 @@ SOCK=$SIM_RUNTIME/s08.sock
 IMAGE=docker.io/library/alpine:3
 TAR=$STORE/alpine.tar
 CLIENT=$STORE/uclient
+# catatonit stand-in: this host has no catatonit at a path podman searches (S-05, S-05b). The copy
+# comes from the S-07c spike store once, in cmd_build, and every later run uses $INIT in the store.
+INIT_SRC=$HOME/.cache/ginn-spike/s07c/catatonit
+INIT=$STORE/catatonit
 UCLIENT_C=$SELF_DIR/s04s_s08s_uclient.c
 SERVER_PY=$SELF_DIR/s04_s08_sockserver.py
 REBIND_PY=$SELF_DIR/s04s_s08s_rebind.py
@@ -163,6 +173,10 @@ cmd_build() {
   mkdir -p -m 0700 "$STORE"
   gcc -static -O2 -Wall -Wextra -Werror -o "$CLIENT" "$UCLIENT_C"
   ls -l "$CLIENT"
+  [[ -x $INIT_SRC ]] || die "no catatonit stand-in at $INIT_SRC"
+  install -m 0755 "$INIT_SRC" "$INIT"
+  sha256sum "$INIT" | tee -a "$OUT/run.log" >&2
+  "$INIT" --version | head -1
 }
 
 cmd_setup() {
@@ -180,10 +194,14 @@ cmd_setup() {
 
 write_pins() {  # before the logout: init and conmon of each container, gen1, and the inventory
   : >"$PINS"
-  pin "init:s04a" "$(pa inspect -f '{{.State.Pid}}' s04a)"
-  pin "conmon:s04a" "$(pa inspect -f '{{.State.ConmonPid}}' s04a)"
-  pin "init:s04b" "$(pb inspect -f '{{.State.Pid}}' s04b)"
-  pin "conmon:s04b" "$(pb inspect -f '{{.State.ConmonPid}}' s04b)"
+  if pa container exists s04a; then
+    pin "init:s04a" "$(pa inspect -f '{{.State.Pid}}' s04a)"
+    pin "conmon:s04a" "$(pa inspect -f '{{.State.ConmonPid}}' s04a)"
+  fi
+  if pb container exists s04b; then
+    pin "init:s04b" "$(pb inspect -f '{{.State.Pid}}' s04b)"
+    pin "conmon:s04b" "$(pb inspect -f '{{.State.ConmonPid}}' s04b)"
+  fi
   pin "init:s08c" "$(pa inspect -f '{{.State.Pid}}' s08c)"
   pin "conmon:s08c" "$(pa inspect -f '{{.State.ConmonPid}}' s08c)"
   pin "gen1" "$(cat "$OUT/gen1.pid")"
@@ -199,10 +217,18 @@ cmd_start() {
   [[ ! -s $PINS ]] || die "$PINS exists: a run is already started"
   [[ -d $SIM_RUNTIME && -d $SIM_GINN ]] || die "run setup first"
   start_server gen1
-  pa run -d --name s04a --cgroups disabled --network none "$IMAGE" sleep infinity
-  pb run -d --name s04b --cgroups disabled --network none "$IMAGE" sleep infinity
-  pa run -d --name s08c --cgroups disabled --network none \
-    -v "$SOCK:/run/s08.sock" -v "$CLIENT:/opt/uclient:ro" "$IMAGE" sleep infinity
+  if [[ ${GINN_S08_KEEPID:-0} == 1 ]]; then
+    # Realm base argv (S-08t): keep-id gives the container its own child user namespace, and
+    # --init runs catatonit as PID 1. --init-path is the only addition, because of INIT (see above).
+    [[ -x $INIT ]] || die "run build first: no $INIT"
+    pa run -d --name s08c --runtime crun --userns keep-id --init --init-path "$INIT" --network host \
+      -v "$SOCK:/run/s08.sock" -v "$CLIENT:/opt/uclient:ro" "$IMAGE" sleep infinity
+  else
+    pa run -d --name s04a --cgroups disabled --network none "$IMAGE" sleep infinity
+    pb run -d --name s04b --cgroups disabled --network none "$IMAGE" sleep infinity
+    pa run -d --name s08c --cgroups disabled --network none \
+      -v "$SOCK:/run/s08.sock" -v "$CLIENT:/opt/uclient:ro" "$IMAGE" sleep infinity
+  fi
   echo "== baseline probe from inside s08c (before logout)"
   run_rc pa exec s08c /opt/uclient /run/s08.sock
   write_pins
@@ -300,6 +326,48 @@ cmd_s08_rebind() {
   cmd_s08_probe "after attempt 6"
 }
 
+# ns_listing PID: user and mount namespace inodes of the plain session, of podman unshare and of PID
+# (the container init), plus the uid maps of the last two.
+ns_listing() {
+  local ipid=$1
+  echo "plain session:           user=$(readlink /proc/self/ns/user) mnt=$(readlink /proc/self/ns/mnt)"
+  echo "podman unshare:          user=$(pa unshare readlink /proc/self/ns/user) mnt=$(pa unshare readlink /proc/self/ns/mnt)"
+  echo "container init pid=$ipid: user=$(readlink "/proc/$ipid/ns/user") mnt=$(readlink "/proc/$ipid/ns/mnt")"
+  echo "uid_map podman unshare:  $(pa unshare cat /proc/self/uid_map | sed 's/^ *//; s/  */ /g' | paste -sd';' -)"
+  echo "uid_map container init:  $(sed 's/^ *//; s/  */ /g' "/proc/$ipid/uid_map" | paste -sd';' -)"
+}
+
+# cmd_s08_try VARIANT: one rebind attempt on s08c, with the namespace listing, the pid and StartedAt
+# before and after, and a probe before and after. Pass: the probe after reports gen2 and the pid and
+# StartedAt are unchanged. Run it on a freshly staled container only: a successful attempt consumes
+# the stale mount.
+cmd_s08_try() {
+  guard
+  local variant=${1:-} ipid before after
+  local -a extra
+  case $variant in
+    row5) extra=(--unmount-first) ;;
+    b)    extra=(--unmount-first --no-setns-user) ;;
+    row3) extra=() ;;
+    *) die "usage: $0 s08-try {row5|b|row3}" ;;
+  esac
+  ipid=$(pa inspect -f '{{.State.Pid}}' s08c)
+  before=$(pa inspect -f '{{.State.Pid}} {{.State.StartedAt}}' s08c)
+  say "variant $variant: s08c init pid and StartedAt before: $before; host socket inode $(stat -c %i "$SOCK")"
+  echo "== namespaces before the attempt"
+  ns_listing "$ipid"
+  cmd_s08_probe "before $variant"
+  echo "== variant $variant: podman unshare python3 rebind ${extra[*]:-(no umount)}"
+  run_rc pa unshare python3 -I "$REBIND_PY" "$ipid" "$SOCK" /run/s08.sock "${extra[@]}"
+  cmd_s08_probe "after $variant"
+  after=$(pa inspect -f '{{.State.Pid}} {{.State.StartedAt}}' s08c)
+  if [[ $before == "$after" ]]; then
+    echo "init pid and StartedAt unchanged: $after"
+  else
+    echo "init pid or StartedAt CHANGED: $before -> $after"
+  fi
+}
+
 kill_pins() {  # SIGTERM, then SIGKILL, for each pinned process whose pid, start time and command still match
   local sig role pid start cmd
   for sig in TERM KILL; do
@@ -380,7 +448,8 @@ case "${1:-}" in
   s04-post)   cmd_s04_post ;;
   s08-probe)  cmd_s08_probe "${2:-probe}" ;;
   s08-rebind) cmd_s08_rebind ;;
+  s08-try)    cmd_s08_try "${2:-}" ;;
   reap)       cmd_reap ;;
   teardown)   cmd_teardown ;;
-  *) die "usage: $0 {build|setup|start|logout|login|s04-post|s08-probe [label]|s08-rebind|reap|teardown}" ;;
+  *) die "usage: $0 {build|setup|start|logout|login|s04-post|s08-probe [label]|s08-rebind|s08-try {row5|b|row3}|reap|teardown}" ;;
 esac

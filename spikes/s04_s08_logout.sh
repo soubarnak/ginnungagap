@@ -19,7 +19,8 @@
 #   s08-probe       connect from inside s08c; print socket inode and server reply
 #   s08-rebind      rebind gen2 into s08c: podman unshare first, then session namespaces
 #   teardown        (session) remove containers, images, storage and socket servers
-#   root-teardown   (root) stop sshd, remove /run trees, user, subuid/subgid lines; diff
+#   root-teardown   (root) stop sshd, remove /run trees, user, subuid/subgid lines; each removal is
+#                   gated on provenance; subid files must match the setup snapshot apart from our lines
 #
 # Every podman call passes --root, --runroot and --tmpdir at spike-owned paths. Every root
 # command is appended to $OUT/root-commands.log before it runs. Set GINN_SPIKE_OUT to the
@@ -77,7 +78,10 @@ push_helpers() {
 
 cmd_root_setup() {
   mkdir -p "$OUT/orig"
-  [[ -f $OUT/orig/subuid ]] || cp -p /etc/subuid /etc/subgid "$OUT/orig/"
+  # A fresh snapshot on every setup, taken before this run changes anything. The $USER_NAME lines
+  # are left out, so a second setup (user already present) still records only the host's own lines.
+  awk -F: -v u="$USER_NAME" '$1 != u' /etc/subuid >"$OUT/orig/subuid"
+  awk -F: -v u="$USER_NAME" '$1 != u' /etc/subgid >"$OUT/orig/subgid"
   if ! awk -F: -v s="$SUB_START" -v e="$((SUB_START + 65535))" -v u="$USER_NAME" \
       '$1 != u { if ($2 <= e && s <= $2 + $3 - 1) bad = 1 } END { exit bad }' /etc/subuid /etc/subgid; then
     die "candidate subordinate range overlaps an existing entry"
@@ -114,7 +118,10 @@ LogLevel VERBOSE
 EOF
   if [[ ! -d /run/sshd ]]; then
     root mkdir -m 0755 /run/sshd
-    echo created >"$OUT/created-run-sshd"
+    # Provenance: the device and inode of the directory this spike created. Teardown checks them.
+    stat -c '%d:%i' /run/sshd >"$OUT/created-run-sshd"
+  else
+    rm -f "$OUT/created-run-sshd"  # /run/sshd was already there: not ours, so no marker
   fi
   root /usr/sbin/sshd -f "$OUT/sshd_config" -E "$OUT/sshd.log" \
     -o ListenAddress=127.0.0.1 -o Port="$SSHD_PORT" -o PasswordAuthentication=no -o UsePAM=yes
@@ -126,9 +133,13 @@ EOF
 
 cmd_root_ginn_dir() {
   local u; u=$(spike_uid)
-  [[ -e /run/ginn ]] && die "/run/ginn already exists; not created by this spike"
+  if [[ -e /run/ginn ]]; then
+    rm -f "$OUT/created-run-ginn"  # a marker must not outlive a directory this run did not make
+    die "/run/ginn already exists; not created by this spike"
+  fi
   root mkdir -m 0755 /run/ginn
-  echo created >"$OUT/created-run-ginn"
+  # Provenance: the device and inode of the directory this spike created. Teardown checks them.
+  stat -c '%d:%i' /run/ginn >"$OUT/created-run-ginn"
   root mkdir -m 0700 "/run/ginn/$u"
   root chown "$USER_NAME:$USER_NAME" "/run/ginn/$u"
   root chmod 0700 "/run/ginn/$u"
@@ -236,7 +247,16 @@ cmd_teardown() {
   else
     local u; u=$(spike_uid)
     cmd_login_open
-    rx "pkill -u $USER_NAME -f s04_s08_sockserver.py || true"
+    # Signal only the socket servers of this spike, by pid, after the cmdline check.
+    rx "sh -s" <<'REMOTE'
+for p in $(pgrep -u "$(id -u)" -f s04_s08_sockserver.py || true); do
+  argv=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null) || continue
+  case $argv in
+    "/usr/sbin/python3 -I $HOME/s04/s04_s08_sockserver.py "*) echo "kill $p: $argv"; kill "$p" ;;
+    *) echo "pid $p is not a socket server of this spike; not signalled" ;;
+  esac
+done
+REMOTE
     for v in a b s8; do
       case $v in
         a)  pmv=pm_a;  root_p="$HOME_S/s04/a/root";     run_p="/run/ginn/$u/a" ;;
@@ -253,42 +273,112 @@ cmd_teardown() {
   log "teardown: session cleanup done"
 }
 
-# root-teardown: sshd, leftover processes, /run trees created by this spike, the user, and
-# the subuid/subgid lines. Each root command is logged. Diffs against the saved originals last.
+# subid_check: /etc/subuid and /etc/subgid, without the $USER_NAME lines, must match the setup
+# snapshot. The comparison uses sorted line sets, because useradd re-sorts both files when it
+# allocates ids (S-04, step 17) and line order does not change subordinate id lookup. Any other
+# difference dies with the diff. Nothing is restored from the snapshot: the host's files change
+# only by deleting $USER_NAME lines.
+subid_check() {
+  local f
+  [[ -f $OUT/orig/subuid && -f $OUT/orig/subgid ]] \
+    || die "no subid snapshot in $OUT/orig; run root-setup first"
+  for f in subuid subgid; do
+    if ! diff -u <(sort "$OUT/orig/$f") <(awk -F: -v u="$USER_NAME" '$1 != u' "/etc/$f" | sort); then
+      die "/etc/$f differs from the setup snapshot beyond $USER_NAME lines (diff above); nothing removed, snapshot kept"
+    fi
+  done
+}
+
+# sshd_is_ours PID: 0 when PID is the private sshd this spike started, 1 when no process has that
+# pid, and dies when a live process has that pid but is not our sshd (it is never signalled).
+# cmdline is world-readable. exe is readable only with root, so it is read with a logged sudo readlink.
+sshd_is_ours() {
+  local pid=$1 argv exe
+  [[ $pid =~ ^[0-9]+$ ]] || die "sshd.pid holds no pid: '$pid'"
+  [[ -d /proc/$pid ]] || return 1
+  argv=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || argv=""
+  [[ $argv == "/usr/sbin/sshd -f $OUT/sshd_config "* ]] \
+    || die "pid $pid is not our sshd (argv: $argv); not signalled"
+  [[ $(stat -c %u "/proc/$pid") == 0 ]] || die "pid $pid is not owned by root; not signalled"
+  exe=$(root readlink "/proc/$pid/exe") || exe=""
+  [[ $exe == "$(readlink -f /usr/sbin/sshd)" ]] || die "pid $pid runs '$exe', not sshd; not signalled"
+  return 0
+}
+
+# spike_proc_ok PID: PID belongs to $USER_NAME, and its environ names the spike's HOME.
+# environ is readable only by root, so it is read with a logged sudo cat.
+spike_proc_ok() {
+  local p=$1 env_txt
+  [[ $(stat -c %u "/proc/$p" 2>/dev/null) == "$(spike_uid)" ]] || return 1
+  env_txt=$(root cat "/proc/$p/environ" 2>/dev/null | tr '\0' '\n') || return 1
+  grep -qxF "HOME=$HOME_S" <<<"$env_txt"
+}
+
+# root-teardown: sshd, leftover processes, /run trees created by this spike, the user, and the
+# subuid/subgid lines. Gates run before anything changes: the user must be one this spike created,
+# and the subid files must match the setup snapshot apart from $USER_NAME lines. Each removal then
+# checks its own provenance. Processes are signalled by pid, after a check. Each root command is
+# logged. The snapshot is deleted last, once the final check has passed.
 cmd_root_teardown() {
-  local u sshd_pid=""
+  local u sshd_pid="" p
   u=$(id -u "$USER_NAME" 2>/dev/null || echo none)
-  [[ -f $OUT/sshd.pid ]] && sshd_pid=$(cat "$OUT/sshd.pid")
-  if [[ -n $sshd_pid && -d /proc/$sshd_pid ]]; then root kill "$sshd_pid"; fi
+  if [[ $u != none ]]; then
+    grep -q "sudo useradd -m $USER_NAME" "$ROOTLOG" 2>/dev/null \
+      || die "user $USER_NAME exists and this spike did not create it; nothing removed"
+  fi
+  subid_check
+  if [[ -f $OUT/sshd.pid ]]; then
+    sshd_pid=$(cat "$OUT/sshd.pid")
+    if sshd_is_ours "$sshd_pid"; then root kill "$sshd_pid"; fi
+  fi
   sleep 1
   if (exec 3<>"/dev/tcp/127.0.0.1/$SSHD_PORT") 2>/dev/null; then die "private sshd still listening"; fi
   log "private sshd stopped"
-  if [[ $u != none ]] && pgrep -u "$USER_NAME" >/dev/null; then
-    pgrep -u "$USER_NAME" -a || true
-    root pkill -KILL -u "$USER_NAME" || true
+  if [[ $u != none ]]; then
+    for p in $(pgrep -u "$USER_NAME" || true); do
+      if spike_proc_ok "$p"; then
+        echo "pid $p: $(tr '\0' ' ' <"/proc/$p/cmdline")"
+        root kill -KILL "$p"
+      else
+        echo "pid $p of $USER_NAME failed the identity check; not signalled"
+      fi
+    done
     sleep 1
   fi
   if [[ -f $OUT/created-run-ginn ]]; then
-    [[ -z $(ls -A /run/ginn | grep -v "^$u\$") ]] || die "/run/ginn has entries this spike did not create"
+    grep -q "sudo mkdir -m 0755 /run/ginn" "$ROOTLOG" || die "no logged mkdir of /run/ginn; not removed"
+    [[ $u != none ]] || die "$USER_NAME is gone, so /run/ginn cannot be checked; not removed"
+    [[ -d /run/ginn && ! -L /run/ginn ]] || die "/run/ginn is not a real directory; not removed"
+    [[ $(stat -c '%d:%i' /run/ginn) == "$(cat "$OUT/created-run-ginn")" ]] \
+      || die "/run/ginn is not the directory this spike created (device:inode differs); not removed"
+    [[ $(stat -c %U /run/ginn) == root ]] || die "/run/ginn is not owned by root; not removed"
+    [[ -z $(grep -vxF "$u" <<<"$(ls -A /run/ginn)") ]] || die "/run/ginn has entries other than $u; not removed"
+    [[ $(stat -c %u "/run/ginn/$u" 2>/dev/null) == "$u" ]] || die "/run/ginn/$u is not owned by $u; not removed"
     root rm -rf /run/ginn
+    rm -f "$OUT/created-run-ginn"
+    log "/run/ginn removed (created by this spike)"
   fi
   if [[ $u != none && -d /run/user/$u ]]; then
+    [[ $(stat -c %U "/run/user/$u") == "$USER_NAME" ]] || die "/run/user/$u is not owned by $USER_NAME; not removed"
     root rm -rf "/run/user/$u"
   fi
   if [[ $u != none ]]; then root userdel -r "$USER_NAME"; fi
   root sed -i "/^$USER_NAME:/d" /etc/subuid /etc/subgid
-  # useradd re-sorted both files when it allocated ids, so the line set can match while the order does not.
-  # Restore the saved originals byte for byte (root-owned, original mode).
-  if ! cmp -s "$OUT/orig/subuid" /etc/subuid || ! cmp -s "$OUT/orig/subgid" /etc/subgid; then
-    root install -m 0644 -o root -g root "$OUT/orig/subuid" /etc/subuid
-    root install -m 0644 -o root -g root "$OUT/orig/subgid" /etc/subgid
+  subid_check
+  if [[ -f $OUT/created-run-sshd ]]; then
+    grep -q "sudo mkdir -m 0755 /run/sshd" "$ROOTLOG" || die "no logged mkdir of /run/sshd; not removed"
+    [[ -d /run/sshd && ! -L /run/sshd ]] || die "/run/sshd is not a real directory; not removed"
+    [[ $(stat -c '%d:%i' /run/sshd) == "$(cat "$OUT/created-run-sshd")" ]] \
+      || die "/run/sshd is not the directory this spike created; not removed"
+    [[ -z $(ls -A /run/sshd) ]] || die "/run/sshd is not empty; not removed"
+    root rmdir /run/sshd
+    rm -f "$OUT/created-run-sshd"
   fi
-  if [[ -f $OUT/created-run-sshd ]]; then root rmdir /run/sshd; fi
   echo "== after cleanup"
   getent passwd "$USER_NAME" || echo "passwd: $USER_NAME absent"
-  ls -d /home/$USER_NAME /run/ginn /run/sshd "/run/user/$u" 2>&1 || true
-  diff "$OUT/orig/subuid" /etc/subuid && diff "$OUT/orig/subgid" /etc/subgid \
-    && echo "subuid and subgid identical to the saved originals"
+  ls -d "/home/$USER_NAME" /run/ginn /run/sshd "/run/user/$u" 2>&1 || true
+  rm -f "$OUT/orig/subuid" "$OUT/orig/subgid"
+  echo "subuid and subgid: $USER_NAME lines gone, other lines match the setup snapshot; snapshot deleted"
 }
 
 case "${1:-}" in

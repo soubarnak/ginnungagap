@@ -5,12 +5,15 @@
 # container, with no root and no container restart. Run it from one of the user's own
 # namespace views: the plain session, or `podman unshare`.
 #
-#   python3 -I s04s_s08s_rebind.py <container init pid> <host path> <container path> [--unmount-first]
+#   python3 -I s04s_s08s_rebind.py <container init pid> <host path> <container path>
+#       [--unmount-first] [--no-setns-user]
 #
 # Steps, each printed with its errno on failure:
 #   1. open_tree(OPEN_TREE_CLONE) of the host path, in the caller's mount namespace (the host
 #      path is visible only there);
-#   2. setns into the container's user namespace, skipped when it is already the caller's;
+#   2. setns into the container's user namespace, skipped when it is already the caller's and
+#      always skipped with --no-setns-user. A realm container created with --userns keep-id has
+#      its own user namespace, so step 2 runs there unless the flag is given (S-08t);
 #   3. setns into the container's mount namespace;
 #   3b. with --unmount-first: umount2 of the container path (removes the stale bind mount);
 #   4. move_mount of the detached tree onto the container path.
@@ -56,9 +59,11 @@ def cap_eff():
 def main():
     args = sys.argv[1:]
     unmount_first = "--unmount-first" in args
-    args = [a for a in args if a != "--unmount-first"]
+    no_setns_user = "--no-setns-user" in args
+    args = [a for a in args if a not in ("--unmount-first", "--no-setns-user")]
     if len(args) != 3:
-        print("usage: s04s_s08s_rebind.py <container init pid> <host path> <container path> [--unmount-first]")
+        print("usage: s04s_s08s_rebind.py <container init pid> <host path> <container path> "
+              "[--unmount-first] [--no-setns-user]")
         return 2
     pid, src, dst = args
     print(f"caller: uid={os.getuid()} euid={os.geteuid()} CapEff={cap_eff()}", flush=True)
@@ -81,7 +86,9 @@ def main():
         step("open target ns files", False, f"errno={exc.errno} ({exc.strerror})")
         return 1
 
-    if os.readlink("/proc/self/ns/user") == os.readlink(f"/proc/{pid}/ns/user"):
+    if no_setns_user:
+        step("2 setns user", True, "skipped: --no-setns-user")
+    elif os.readlink("/proc/self/ns/user") == os.readlink(f"/proc/{pid}/ns/user"):
         step("2 setns user", True, "skipped: target user ns is already ours")
     else:
         try:
