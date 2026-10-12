@@ -39,7 +39,7 @@ A dated in-place amendment is allowed when the decision stands and only its real
 | [ADR-010](ADR-010-launch-path.md) | Launch path (renumbered from ADR-006 on 2026-10-12, because ADR-006 went to the Development tier) | Accepted, on runc (crun re-measure in T4.9) | R-006, NFR-001, NFR-004, NFR-005, FR-017, FR-046, FR-048, FR-049, FR-061, FR-082, NFR-SEC-002 |
 | [ADR-011](ADR-011-package-manager-semantics.md) | Package manager semantics for refresh, update checks and removal | Accepted | FR-013, FR-023, FR-024, FR-040, FR-041, NFR-060, CR-007 |
 | [ADR-012](ADR-012-gpu-nvidia-injection.md) | GPU and NVIDIA injection (renumbered from ADR-008 on 2026-10-12, because ADR-008 went to session socket rebind) | Accepted for the FR-046 renderer check (runc) and the S-06 parts of FR-069. Audio (FR-046 AC-1), menu launch, crun and the CDI env field are pending T6.6 and T5.4. | FR-046, FR-061, FR-069, FR-082, DR-010, IR-025, IR-026, R-005, CR-007 |
-| [ADR-013](ADR-013-host-setup-record.md) | Host Setup Record, pre-images and resume | Proposed | DR-009, FR-001, FR-002, FR-003, NFR-030 |
+| [ADR-013](ADR-013-host-setup-record.md) | Host Setup Record, pre-images and resume | Proposed | DR-009, DR-010, FR-001, FR-002, FR-003, FR-007, NFR-030, NFR-040 |
 
 ## Adding an ADR
 

@@ -5,6 +5,7 @@
 - Amended: 2026-10-12 (D2). The first decision used setcap helpers and a subordinate ID range inside the realm. The amended decision runs the inner podman in single-ID mode. It needs no setcap, no libcap package and no subordinate range for the realm user. No code implements the first decision (M6 is not started), so nothing migrates.
 - Amended: 2026-10-12 (D3). FR-062 AC-3 passes with the decided set (S-07f case A; scope in Assumptions). The no-new-privileges reason and the containers.conf rationale are recorded in the Decision.
 - Amended: 2026-10-12 (D5; the count is corrected in D6). Three statements are corrected to match S-07: the SELinux scope, what podman chose with containers.conf absent, and the XDG_RUNTIME_DIR pin disclosure. No decision changes.
+- Amended: 2026-10-12 (D8). The FR-085 re-run is named by its roadmap task (T7.7, conditional on CL-2), and T10.6 carries the deferral if FR-085 stays deferred. The earlier "after M7" wording named no task. No decision changes.
 
 ## Context
 
@@ -84,7 +85,7 @@ The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must 
 - The code must write the Realm Home config files. It must not pass `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt` to inner podman.
 - The seccomp source is a host file. On Void it belongs to the `containers-common` package (checked in the xbps file list on 2026-10-12), and the ginn package template declares that package. A dedicated GINN error code is needed for a missing source or entry. None exists in `docs/errors.md`, and one is requested for the errors owner, as ADR-004 did for the runtime directory.
 - Follow-up tasks: T6.1 (`security/caps.py`), T6.7 (realm user creation with `-K`, the Realm Home config files with the containers.conf pin, and the seccomp profile), T8.3 (the rebuild repeats the user creation), the M6 test `test_tiers_real.py` (the open items in `docs/capabilities.md`), and CL-8 (withdrawn; the podman request route is still open).
-- FR-085 (Docker in a realm) is deferred. Its options are not in this decision. Re-run S-07 Part B after M7. CL-2 records the open question.
+- FR-085 (Docker in a realm) is deferred. Its options are not in this decision. Re-run S-07 Part B in T7.7, which has services on (conditional on CL-2). If FR-085 stays deferred, T10.6 lists it in the release notes (gate 8). CL-2 records the open question.
 - The Launch path reservation that the ADR index gave to ADR-006 now sits at ADR-010. See the ADR index.
 
 ## Requirement IDs
