@@ -4,6 +4,7 @@
 - Date: 2026-10-12
 - Amended: 2026-10-12 (R11). The Podman configuration finding is verified, the environment is an allowlist, the config files and the image tmpdir are Owned Paths, and the runtime root is checked for owner and mode. See Verification.
 - Amended: 2026-10-12 (D7). Status qualifier added. The logout evidence is the simulation in the addendum below, and the real logout run is pending T7.8. No decision changes.
+- Amended: 2026-10-12 (proxy names). The allowlist also holds the proxy variable names `http_proxy`, `https_proxy` and `no_proxy`, and their upper-case forms `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. A name passes only when the parent sets it. The reason: exec and launch pass the proxy variables to podman as `--env NAME` (T4.6), and podman reads the value from its own environment. The values stay in that environment and never reach the argv. The list is these six names. Any other proxy name needs a new amendment. No other decision changes.
 
 ## Context
 
@@ -46,7 +47,7 @@ The checks apply to the override too. Neither error repairs the directory. ginn 
 
 Every podman call carries `--remote=false`, `--root`, `--runroot`, `--tmpdir` and `--runtime crun`. The tmpdir is `<runtime>/podman-tmp`, never the user's libpod tmpdir. `--remote=false` is a guard in its own right: podman(1) makes `--remote` default to true when `CONTAINER_HOST` is set.
 
-The subprocess environment is an allowlist (CR-006), not a copy of the parent's. It holds PATH, HOME, TERM, USER, LOGNAME, LANG and LC_*, plus these pins:
+The subprocess environment is an allowlist (CR-006), not a copy of the parent's. It holds PATH, HOME, TERM, USER, LOGNAME, LANG, LC_*, and the six proxy names of the 2026-10-12 amendment (`http_proxy`, `https_proxy`, `no_proxy` and their upper-case forms), plus these pins:
 
 - `XDG_RUNTIME_DIR` is the runtime root.
 - `CONTAINERS_CONF` and `CONTAINERS_STORAGE_CONF` are ginn's own files.
@@ -110,7 +111,7 @@ Residual, not pinned by R11: containers/image still reads user files under `$HOM
 | FR-084 | Autostart at boot runs in the supervisor, which has no login session, so it cannot depend on `XDG_RUNTIME_DIR`. |
 | IR-020 | Podman is the sole runtime. Every call carries `--remote=false`, `--root`, `--runroot`, `--tmpdir` and `--runtime crun`. |
 | CR-003 | Rootless only. `/run/ginn/<uid>` must be owned by the user with mode 0700, and nothing here runs as root. |
-| CR-006 | After Host Setup, ginn writes only to Owned Paths. The podman environment is an allowlist, and TMPDIR and the config files are Owned Paths. |
+| CR-006 | After Host Setup, ginn writes only to Owned Paths. The podman environment is an allowlist, and TMPDIR and the config files are Owned Paths. The allowlist holds the six proxy names (amendment 2026-10-12), so `--env NAME` can pass them. |
 | NFR-SEC-005 | The new flags are argv entries. The OCI runtime name is validated with `require_arg`. |
 | NFR-040 | Failures map to catalogue codes: GINN-E-HOST-NOT-SET-UP and GINN-E-RUNTIME-DIR-UNSAFE for the runtime root (exit 77), and GINN-E-INTERNAL for a missing ginn config file. |
 

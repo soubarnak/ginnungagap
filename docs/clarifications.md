@@ -10,13 +10,14 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-2 | Docker daemon in a realm (FR-085) | FR-085, AS-006, NFR-SEC-002 | open, for SRS v1.1 (deferred with FR-085) |
 | CL-3 | Realm root maps to a subordinate UID | AS-007, CR-003, NFR-SEC-001 | open, for SRS v1.1 |
 | CL-4 | unused | none | unused |
-| CL-5 | Session sockets after re-login | IR-025, FR-084 | resolved by S-08s/S-08t (simulated); host confirmation in T7.8; SRS wording open for v1.1 |
+| CL-5 | Session sockets after re-login | IR-025, FR-084 | resolved by S-08s/S-08t (simulated); host confirmation in T4.9 (attach gate) and T7.8 (real logout); SRS wording open for v1.1 |
 | CL-6 | Kali image channel | AS-024, IR-021, FR-011 | open, for SRS v1.1 |
 | CL-7 | Distribution ID is an enum | DR-005, NFR-060, DR-003 | open, for SRS v1.1 |
 | CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | withdrawn (2026-10-12, D2) |
 | CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
 | CL-10 | Create-time mitigations for services-on realms | CR-007, FR-013, NFR-003, FR-080 | open, for SRS v1.1 (needed only if S-05s fails) |
 | CL-11 | Host Setup undo when a path is shared, or its state is gone | FR-003 | open, for SRS v1.1; the plan proceeds under the proposed wording |
+| CL-12 | Identical paths and fixed names for grants attached after start | FR-065, FR-061, FR-066, IR-025 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-13 | Doctor readiness: "all checks passing" and the disk thresholds | FR-001, FR-007 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 
 ## CL-1: runtime directory for services-on realms
@@ -52,7 +53,7 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Issue: session sockets (display, audio, D-Bus) are bound when a realm starts. After logout they go stale, while a services-on realm keeps running. A realm that autostarts (FR-084) would then hold dead sockets after the next login.
 - Proposed wording: decided by S-08s, not by the SRS. ginn rebinds the stale sockets in place (ADR-008). Suggested SRS wording: "A services-on realm keeps running after re-login, and its session sockets are rebound on the next enter or launch."
 - Evidence: the real-logout run S-08 is invalid for the same reason as S-04: no elogind session for the test login (`spikes/results/S-08.md`). The simulation S-08s (same file, section "Simulated logout") shows a stale socket after the simulated logout. An in-place rebind under `podman unshare` (umount2, then move_mount) gives a live socket with no restart. The keep-id case is the simulation S-08t (same file, section "S-08t: rebind under keep-id"). The caveats are in ADR-008.
-- Status: resolved by S-08s/S-08t (simulated); host confirmation in T7.8. The resolution is the rebind, through the mount namespace only (variant b, S-08s, S-08t, ADR-008). Restart-required was rejected, because services-on realms exist to keep their services running across logout (FR-081, FR-084). The SRS wording is still open for v1.1.
+- Status: resolved by S-08s/S-08t (simulated); host confirmation in T4.9 (the attach gate, which covers the variable grant attachment of the ADR-008 amendment of 2026-10-12) and in T7.8 (the real logout run). The resolution is the rebind, through the mount namespace only (variant b, S-08s, S-08t, ADR-008). Restart-required was rejected, because services-on realms exist to keep their services running across logout (FR-081, FR-084). The SRS wording is still open for v1.1.
 
 ## CL-6: Kali image channel
 
@@ -109,6 +110,17 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - How ginn works now: ADR-013 Decision 15 reverses setup's change instead of writing bytes back. Subid lines are removed by exact match (i). Root controllers are disabled only for the last record, and only in the same boot (ii). Shared directories are removed only when their pre-image is absent and they are empty (iii). Undo prints each path it leaves, and why. The register does not claim that AC-1 holds as written.
 - Evidence: ADR-013 Decisions 6, 15 and 17. The shared record followed the eighth review (MJ1), which showed that per-user records lost shared pre-images when users were undone out of order. The cases above follow from the same rules. No undo has run on a host yet.
 - Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds on the assumption that the proposed wording is accepted, and T3.5 is built to it.
+
+## CL-12: identical paths and fixed names for grants attached after start
+
+- Requirement IDs: FR-065, FR-061, FR-066, IR-025.
+- Issue: FR-065 says every shared path appears inside the realm at the same absolute path as on the host. ADR-008 (amendment of 2026-10-12) attaches the variable grants after `podman start`, not at create. A grant is then attached at each start, enter and launch, and not when the realm is created. ADR-008 also gives the session paths fixed realm names under `/run/user/<uid>`: the Wayland socket at `wayland-0`, and the authority file at `ginn-xauthority`. The X11 socket directory is the one exception, and it keeps its own path, `/tmp/.X11-unix`. The SRS says neither that a grant attached after start meets FR-065, nor that a session path may use a fixed name. Two points need the SRS to say more:
+  - A shared path keeps its host path inside the realm, although the attach, not the create, places it. A grant that is attached after start therefore still meets FR-065 AC-1, which asks that the same path show the same files.
+  - A source that appears after the realm starts, such as a drive mounted after start or a folder made after start, is visible to the next enter or launch, which runs the lazy re-attach. It is not visible in a shell that was already open before the source appeared. FR-065 AC-1 holds for that new shell, and not for the shell already open.
+- Proposed wording: "Every shared path appears inside the realm at the same absolute path as on the host, from the next enter or launch after the source appears. A session path appears at a fixed name under the realm's runtime directory, except the X11 socket directory, which keeps its own path."
+- How ginn works now: a grant that is a shared path is attached at its host path. The session paths are attached at `/run/user/<uid>/wayland-0` and `/run/user/<uid>/ginn-xauthority`, and `WAYLAND_DISPLAY` and `XAUTHORITY` are set to those names at exec (T4.3). A session path is not a shared path, so the fixed names do not break FR-065 in its ordinary meaning. The SRS does not say so.
+- Evidence: none on the host. The T4.9 host gate (ADR-008 amendment, review amendment) proves the attach and the lazy re-attach, including a drive mounted after start. The keep-id runs S-08s and S-08t cover one socket under the rebind, in simulation.
+- Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds on the proposed wording, and T4.9 tests it.
 
 ## CL-13: doctor readiness: "all checks passing" and the disk thresholds
 

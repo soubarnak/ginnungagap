@@ -3,6 +3,7 @@
 - Status: Accepted, on runc. The crun re-measure is T4.9 (see Decision).
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D6). Status is Accepted. The crun re-measure rule is added to the Decision, and the FR-082 wording is corrected. The runc caveat stands.
+- Amended: 2026-10-12 (review of T4.2 and T4.3). The ADR-008 pre-check that runs before exec is one identity read per variable grant, plus a mount-table scan for each mount root. It must stay inside the NFR-004 300 ms budget, and T4.9 measures it. The launch path, the decision and the parity table do not change. Requirement IDs: NFR-004, NFR-001, FR-061.
 
 ## Context
 
@@ -73,7 +74,7 @@ The measurements above are on runc, and the base argv names crun (`docs/capabili
 - Positive: NFR-004 is met on the measured path in both runs (p95 136.0 ms and 211.8 ms). The launched process keeps the container's seccomp filter, bounding set, group set and namespaces (S-02 section 6).
 - Margin: 88 to 164 ms, from two runs on one noisy host, on runc.
 - The measured launcher is a spike script. The shipped launcher must keep its imports lean and must be measured again. T4.6 builds it. T4.9 carries the NFR-004 check (100 launches, p95 <= 300 ms), which the roadmap did not assign before this ADR.
-- The socket pre-check of ADR-008 runs before exec on this path. It adds cost that S-02 did not measure.
+- The socket pre-check of ADR-008 runs before exec on this path. It is one identity read per variable grant, plus a mount-table scan for each mount root (ADR-008, review amendment). S-02 did not measure that cost. T4.9 measures it, and the NFR-004 check in T4.9 covers the launch with the pre-check included.
 - S-02 ran without `--init`, because catatonit was absent. FR-082 requires a minimal init process in services-off realms. ginn ships catatonit for it (ADR-007, roadmap T0.6). Without an init, PID 1 ignores signals it has no handler for. The cold path therefore stopped the container with `podman stop -t 0`, not with a signal.
 - Cold start (FR-017, NFR-005): 20 cycles, not the 50 per distribution that NFR-005 requires. p95 96.6 to 121.9 ms, far inside 2 s. NFR-005 is not proven.
 - A restarted realm gets a new init PID, so the state record must be rewritten on each start. S-02 tested only the start-time happy path. The stale-PID path was not tested.

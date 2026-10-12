@@ -5,6 +5,7 @@
 - Renumbered from ADR-008 on 2026-10-12, because ADR-008 went to session socket rebind. `spikes/results/S-06.md` section 7 still carries the heading "Recommendations for ADR-008". The spike file is owned elsewhere and is not edited here.
 - Amended: 2026-10-12 (D6). The status is set to what S-06 ran. The S-06 method is cited from its variant table. The catatonit fact is corrected, and DR-010 and FR-082 are added. No decision changes.
 - Amended: 2026-10-12 (D7). Status qualifier narrowed to the runc renderer check and the S-06 parts of FR-069, with the pending items and their tasks named. No decision changes.
+- Amended: 2026-10-12 (variable grant attachment). The HOME sentence in the Decision is corrected. HOME is set at exec by `runtime/env.py` (T4.3, M4), so it is not an M6 item. M6 still owns `XDG_CACHE_HOME`. The display and audio socket binds are attached after `podman start` under ADR-008, not bound at create. The fonts, localtime, device and NVIDIA items are unchanged. No decision changes.
 
 ## Context
 
@@ -54,7 +55,7 @@ Library resolution. The drop-in alone does nothing. The loader reads only `/etc/
 - `LD_LIBRARY_PATH=/usr/lib/ginn-nvidia`, tested as `env LD_LIBRARY_PATH=/usr/lib/ginn-nvidia nvidia-smi` in the realm (variant (a), S-06.md:114). This is the form chosen for M6. It needs no root step and writes nothing into the realm. S-06's recommendation text (S-06.md:119) names `podman exec -e` for the same test. That disagrees with its own table. This ADR follows the table, and the owner of S-06 must reconcile the two. M6 must first test the form through the CDI `containerEdits.env` field, which S-06 did not test (pending T6.6).
 - `ldconfig` run as container root (`--user 0:0`), which worked (variant (b)). This is the fallback. It writes `/etc/ld.so.cache` into the realm's upper layer, and that cache is lost when the container is recreated. A write into realm /etc is a CR-007 question. The fallback therefore needs its own clarification, as CL-10 does for ADR-007, before it is used.
 
-GL selection. For NVIDIA GLX, the environment is `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia`. `DRI_PRIME=1` is not an NVIDIA route: on this host it failed to load `nouveau` and fell back to zink on the AMD RADV device (S-06 section 3). Every GPU check must name its platform (`eglinfo -p wayland`, or `glxinfo` with `DISPLAY`), because a bare `eglinfo` reports llvmpipe through the GBM platform (S-06 section 6). Realm HOME: keep-id leaves `HOME` at `/`, and Mesa's shader cache then fails. M6 sets `HOME` and `XDG_CACHE_HOME` (S-06 section 6).
+GL selection. For NVIDIA GLX, the environment is `__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia`. `DRI_PRIME=1` is not an NVIDIA route: on this host it failed to load `nouveau` and fell back to zink on the AMD RADV device (S-06 section 3). Every GPU check must name its platform (`eglinfo -p wayland`, or `glxinfo` with `DISPLAY`), because a bare `eglinfo` reports llvmpipe through the GBM platform (S-06 section 6). Realm HOME: keep-id leaves `HOME` at `/`, and Mesa's shader cache then fails. `HOME` is set at exec by `runtime/env.py` (T4.3, M4), not by M6. M6 still sets `XDG_CACHE_HOME` (S-06 section 6).
 
 ## Alternatives considered
 
