@@ -24,7 +24,7 @@ Architecture decision records (ADRs) record the decisions that shape Ginnungagap
 | [ADR-001](ADR-001-language-and-gui-toolkit.md) | Language and GUI toolkit | Accepted | CR-002, CR-009, NFR-001, NFR-002, NFR-004, NFR-061, NFR-062, FR-105, FR-106 |
 | [ADR-002](ADR-002-podman-cli-over-rest.md) | Drive Podman through its command line, not the REST API | Accepted | CR-002, CR-003, NFR-001, NFR-002, NFR-004, NFR-040, NFR-042, NFR-061, NFR-SEC-005, NFR-SEC-009, DR-010, FR-011 |
 | ADR-003 | Services-mode cgroup strategy | Planned (decided by spike S-01 in M1) | R-001, FR-080, FR-081 |
-| ADR-004 | Runtime directory and Podman storage root | Planned (decided by spike S-04 in M1) | DR-010, FR-081, FR-084 |
+| [ADR-004](ADR-004-runtime-root.md) | Runtime directory and Podman storage root | Accepted | DR-010, DR-033, FR-081, FR-084, FR-123 |
 | ADR-005 | Trust Manifest update process | Planned (decided by spike S-10 in M1) | R-003, DR-040, FR-011 |
 | ADR-006 | Launch path | Planned (decided by spike S-02 in M1) | R-006, NFR-004, FR-048, FR-049 |
 | ADR-007 | Native helpers and memory budget | Planned (decided by spike S-05 in M1) | NFR-002, NFR-003, FR-067 |

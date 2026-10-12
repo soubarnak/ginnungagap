@@ -5,15 +5,17 @@ Roots, from the environment (XDG Base Directory spec; empty or relative values c
 - data    = $XDG_DATA_HOME/ginn      (default ~/.local/share/ginn)
 - config  = $XDG_CONFIG_HOME/ginn    (default ~/.config/ginn)
 - state   = $XDG_STATE_HOME/ginn     (default ~/.local/state/ginn)
-- runtime, first candidate that applies:
-    1. GINN_RUNTIME_DIR (must be absolute; a configurable override, see below)
-    2. $XDG_RUNTIME_DIR/ginn
-    3. /run/ginn/<uid>, only if that directory exists
-    4. state/run (not tmpfs; used only when no runtime directory is available)
+- runtime = /run/ginn/<uid>, the directory Host Setup creates (ADR-004). Every ginn process of
+  the user resolves the same runtime root, whatever the session: the locks, the Podman runroot
+  and the Podman tmpdir all live under it (DR-033, FR-123).
+  GINN_RUNTIME_DIR, when set, must be absolute and replaces the default. Only tests and the
+  boot-time supervisor use it, and the supervisor exports the same path.
 
-Runtime directory decision: DR-010 names $XDG_RUNTIME_DIR/ginn. S-04 (the cgroup and runtime
-spike) has not run, so the choice is open and the root is configurable. Its final location is
-for ADR-004 to decide. Until then GINN_RUNTIME_DIR overrides every other candidate.
+$XDG_RUNTIME_DIR is never read here. Under elogind it exists only while a login session lives, so
+a session ginn and the boot-time supervisor would disagree on the runtime root (ADR-004).
+
+If the runtime directory does not exist, `from_env` refuses with GINN-E-USAGE. It never falls
+back to a directory on disk: Podman needs its runroot and tmpdir on tmpfs to detect a reboot.
 
 `applications_dir` ($XDG_DATA_HOME/applications) is shared with the host and is NOT owned as a
 whole. Only `ginn-*.desktop` files in it are owned (`desktop_entry_glob`). It is therefore left out
@@ -46,20 +48,23 @@ def _xdg_base(env: Mapping[str, str], var: str, default: Path) -> Path:
     return default
 
 
-def _runtime_dir(env: Mapping[str, str], uid: int, state: Path, system_run: Path) -> Path:
-    """Choose the runtime directory per the order in the module docstring."""
+def _runtime_dir(env: Mapping[str, str], uid: int, system_run: Path) -> Path:
+    """Return the one runtime directory: the GINN_RUNTIME_DIR override, else /run/ginn/<uid>."""
     override = env.get("GINN_RUNTIME_DIR", "")
     if override:
         if not os.path.isabs(override):
             raise make("GINN-E-USAGE", detail="GINN_RUNTIME_DIR must be an absolute path")
         return Path(override)
-    xdg = env.get("XDG_RUNTIME_DIR", "")
-    if xdg and os.path.isabs(xdg):
-        return Path(xdg) / _APP_NAME
-    system = system_run / _APP_NAME / str(uid)
-    if system.is_dir():
-        return system
-    return state / "run"
+    runtime = system_run / _APP_NAME / str(uid)
+    if not runtime.is_dir():
+        raise make(
+            "GINN-E-USAGE",
+            detail=(
+                f"runtime directory {runtime} is missing; run "
+                "'sudo ginn host-setup --user <name>' or 'ginn doctor'"
+            ),
+        )
+    return runtime
 
 
 @dataclass(frozen=True)
@@ -83,7 +88,8 @@ class OwnedPaths:
         """Compute the owned paths from `env` (default: os.environ) and the user id.
 
         `system_run` is the root that holds the Host Setup runtime directory `ginn/<uid>`. Tests
-        pass a temporary directory.
+        pass a temporary directory. Raises GINN-E-USAGE when that directory is missing and no
+        GINN_RUNTIME_DIR override is set.
         """
         environ: Mapping[str, str] = os.environ if env is None else env
         home_raw = environ.get("HOME", "")
@@ -97,7 +103,7 @@ class OwnedPaths:
             data=data_base / _APP_NAME,
             config=config_base / _APP_NAME,
             state=state,
-            runtime=_runtime_dir(environ, real_uid, state, system_run),
+            runtime=_runtime_dir(environ, real_uid, system_run),
             applications_dir=data_base / "applications",
         )
 
@@ -110,6 +116,21 @@ class OwnedPaths:
     @property
     def podman_runroot(self) -> Path:
         return self.runtime / "podman"
+
+    @property
+    def podman_tmpdir(self) -> Path:
+        """Podman's --tmpdir: ginn's own, never the user's $XDG_RUNTIME_DIR/libpod/tmp."""
+        return self.runtime / "podman-tmp"
+
+    @property
+    def podman_containers_conf(self) -> Path:
+        """The file CONTAINERS_CONF points to. Not written yet (see podman/cli.py)."""
+        return self.config / "containers.conf"
+
+    @property
+    def podman_storage_conf(self) -> Path:
+        """The file CONTAINERS_STORAGE_CONF points to. Not written yet (see podman/cli.py)."""
+        return self.config / "storage.conf"
 
     @property
     def realms(self) -> Path:
@@ -161,6 +182,7 @@ class OwnedPaths:
             self.runtime,
             self.podman_root,
             self.podman_runroot,
+            self.podman_tmpdir,
             self.realms,
             self.homes,
             self.icons,

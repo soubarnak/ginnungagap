@@ -26,6 +26,8 @@ CREATED = datetime(2026, 10, 12, 9, 30, tzinfo=UTC)
 
 
 def _paths(tmp_path: Path) -> OwnedPaths:
+    # from_env refuses a missing runtime directory (ADR-004), so create Host Setup's one.
+    (tmp_path / "no-run" / "ginn" / "1000").mkdir(parents=True, mode=0o700)
     paths = OwnedPaths.from_env(
         {"HOME": str(tmp_path / "home")}, uid=1000, system_run=tmp_path / "no-run"
     )

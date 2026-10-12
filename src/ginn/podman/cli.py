@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """The podman command line behind the Podman adapter (ADR-002, IR-020, NFR-042).
 
-Every call runs one `podman` process with an argv list (NFR-SEC-005). The global flags --root and
---runroot keep ginn's storage apart from the user's own Podman (DR-010). Output that ginn parses
-is requested with `--format json`. Before each run, the full argv is passed to `verbose` as one
-shell-quoted line, so a user can copy it and run it by hand (NFR-042).
+Every call runs one `podman` process with an argv list (NFR-SEC-005). Every call carries the
+global flags --root, --runroot, --tmpdir and --runtime, so ginn's storage, tmpdir and OCI runtime
+never fall back to the user's own Podman (DR-010, ADR-004). The subprocess environment pins
+CONTAINERS_CONF and CONTAINERS_STORAGE_CONF to ginn's files, so the user's configuration is not
+read. Output that ginn parses is requested with `--format json`. Before each run, the full argv is
+passed to `verbose` as one shell-quoted line, so a user can copy it and run it by hand (NFR-042).
 
 Failures map to catalogue codes here and nowhere else (NFR-040):
 - exit 125 with a registry or network message: GINN-E-NETWORK;
 - a digest pull that the registry rejects: GINN-E-IMAGE-UNVERIFIED (FR-011);
 - anything else: GINN-E-INTERNAL, with the decisive stderr line in details.
+Exit 125 from `exec` is podman's own failure and is never returned as the command's status.
 """
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -47,6 +51,11 @@ _DIGEST_PATTERNS: Final = (
 )
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NETWORK_EXIT: Final = 125
+PODMAN_ERROR_EXIT: Final = 125
+"""Exit status podman uses for its own failures (`podman exec` included)."""
+DEFAULT_OCI_RUNTIME: Final = "crun"
+"""OCI runtime passed as `--runtime` on every call (IR-020, ADR-004). crun is the runtime the
+spikes validate, and keep-groups works only with it."""
 
 
 def _matches(patterns: Sequence[re.Pattern[str]], text: str) -> bool:
@@ -115,27 +124,74 @@ class PodmanCli:
         root: Path,
         runroot: Path,
         *,
+        tmpdir: Path,
+        containers_conf: Path,
+        storage_conf: Path,
+        runtime_root: Path,
         binary: str = "podman",
+        oci_runtime: str = DEFAULT_OCI_RUNTIME,
         cdi_spec_dir: Path | None = None,
-        tmpdir: Path | None = None,
         verbose: Callable[[str], None] | None = None,
     ) -> None:
+        """`tmpdir` is required: without it podman uses the user's own libpod tmpdir.
+
+        `containers_conf` and `storage_conf` are the files CONTAINERS_CONF and
+        CONTAINERS_STORAGE_CONF point to. The files are not written yet. Until the task that
+        renders them lands, podman gets paths that do not exist (see the TODO below).
+
+        `runtime_root` is ginn's single runtime root, /run/ginn/<uid> (ADR-004). Podman reads
+        XDG_RUNTIME_DIR for its rootless state, so every call gets this value, whatever the
+        caller's session exports.
+        """
         self.root = root
         self.runroot = runroot
-        self.binary = binary
-        self.cdi_spec_dir = cdi_spec_dir
         self.tmpdir = tmpdir
+        self.containers_conf = containers_conf
+        self.storage_conf = storage_conf
+        self.runtime_root = runtime_root
+        self.binary = binary
+        self.oci_runtime = require_arg(oci_runtime, "oci runtime")
+        self.cdi_spec_dir = cdi_spec_dir
         self.verbose = verbose
         self.history: list[list[str]] = []
 
     def _global_flags(self) -> list[str]:
         """Global flags come before the subcommand. --cdi-spec-dir is global (S-06)."""
-        flags = [self.binary, "--root", str(self.root), "--runroot", str(self.runroot)]
-        if self.tmpdir is not None:
-            flags += ["--tmpdir", str(self.tmpdir)]
+        flags = [
+            self.binary,
+            "--root",
+            str(self.root),
+            "--runroot",
+            str(self.runroot),
+            "--tmpdir",
+            str(self.tmpdir),
+            "--runtime",
+            self.oci_runtime,
+        ]
         if self.cdi_spec_dir is not None:
             flags += ["--cdi-spec-dir", str(self.cdi_spec_dir)]
         return flags
+
+    def _env(self) -> dict[str, str]:
+        """The environment of one podman call (ADR-004).
+
+        XDG_RUNTIME_DIR is set to ginn's runtime root, so podman's rootless state (and any default
+        tmpdir it might pick) lands in ginn's directory, not the session's /run/user/<uid>.
+        CONTAINERS_CONF replaces the system and user containers.conf files (containers.conf(5)).
+        CONTAINERS_CONF_OVERRIDE is removed, because podman loads that file last even when
+        CONTAINERS_CONF is set, which would bring the user's settings back.
+
+        TODO(T4.4): the first task that drives real podman through PodmanCli must write these two
+        files under the config root, or the pins point at missing files. Podman's docs say builtin
+        defaults apply when no containers.conf exists, but that is not verified for
+        CONTAINERS_CONF with a missing file. Verify it in that task.
+        """
+        env = dict(os.environ)
+        env.pop("CONTAINERS_CONF_OVERRIDE", None)
+        env["XDG_RUNTIME_DIR"] = str(self.runtime_root)
+        env["CONTAINERS_CONF"] = str(self.containers_conf)
+        env["CONTAINERS_STORAGE_CONF"] = str(self.storage_conf)
+        return env
 
     def _prepare(self, args: Sequence[str]) -> list[str]:
         """Build the full argv, record it, and echo it to `verbose` before it runs (NFR-042)."""
@@ -150,7 +206,12 @@ class PodmanCli:
         try:
             # Fixed argv list, no shell. The binary is resolved from PATH by design.
             return subprocess.run(  # noqa: S603
-                argv, capture_output=True, text=True, check=False, errors="replace"
+                argv,
+                capture_output=True,
+                text=True,
+                check=False,
+                errors="replace",
+                env=self._env(),
             )
         except OSError as exc:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
@@ -275,6 +336,15 @@ class PodmanCli:
         interactive: bool = False,
         capture: bool = True,
     ) -> ExecResult:
+        """Run one command in the container and return its status and output.
+
+        Exit 125 is podman's own failure status, so it is mapped to a catalogue error through
+        `_failure`. A command that exits 125 itself cannot be told apart from that, and is
+        reported the same way; EXEC_GINN_FAILURE already reserves 125 for ginn's failures. Exit
+        126 and 127 are passed through: podman reports them for a command that cannot be run in
+        a container that did start. With `capture=False` the output goes to the terminal, so
+        stderr cannot be read and the status is returned as it is.
+        """
         if not capture:
             status = self.exec_interactive(
                 container_id,
@@ -288,6 +358,8 @@ class PodmanCli:
             return ExecResult(status, "", "")
         args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive)
         result = self._run(args)
+        if result.returncode == PODMAN_ERROR_EXIT:
+            raise self._failure("exec", result)
         return ExecResult(result.returncode, result.stdout, result.stderr)
 
     def exec_interactive(
@@ -305,7 +377,7 @@ class PodmanCli:
         full = self._prepare(args)
         try:
             # Fixed argv list, no shell. stdio is inherited so the user's terminal is used.
-            completed = subprocess.run(full, check=False)  # noqa: S603
+            completed = subprocess.run(full, check=False, env=self._env())  # noqa: S603
         except OSError as exc:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
         return _exit_status(completed.returncode)
@@ -336,6 +408,9 @@ class PodmanCli:
         return ["exec", *flags, "--", require_arg(container_id, "container"), *argv]
 
     def cp_from(self, container_id: str, src: str, dst: Path) -> None:
+        # An absolute destination cannot start with '-', so podman never reads it as an option.
+        if not dst.is_absolute():
+            raise ValueError(f"cp destination must be an absolute path (NFR-SEC-005): {dst}")
         args = ["cp", f"{require_arg(container_id, 'container')}:{src}", str(dst)]
         self._expect("cp", self._run(args))
 

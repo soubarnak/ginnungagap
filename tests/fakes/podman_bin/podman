@@ -6,7 +6,8 @@ This file stands in for `podman` on PATH. It never runs a real podman. Each call
 
 1. appends one JSON line {"argv": [...], "key": "...", "case": "..."} to $GINN_FAKE_PODMAN_LOG,
    when that variable is set;
-2. skips the global flags --root, --runroot, --tmpdir and --cdi-spec-dir, each with its value;
+2. skips the global flags --root, --runroot, --tmpdir, --runtime and --cdi-spec-dir, each with its
+   value;
 3. builds a route key: the first word after the global flags, or `<word>-<verb>` when the word is
    `image` or `container` (for example `pull`, `info`, `image-inspect`, `container-inspect`);
 4. picks the case: the route key's entry in $GINN_FAKE_PODMAN_CASE, a comma-separated list of
@@ -27,7 +28,7 @@ import os
 import sys
 from pathlib import Path
 
-GLOBAL_WITH_VALUE = frozenset({"--root", "--runroot", "--tmpdir", "--cdi-spec-dir"})
+GLOBAL_WITH_VALUE = frozenset({"--root", "--runroot", "--tmpdir", "--runtime", "--cdi-spec-dir"})
 GROUPS = frozenset({"image", "container"})
 MISSING_FIXTURE_EXIT = 98
 
