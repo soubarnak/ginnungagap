@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07d image: the S-07 image (Dockerfile.s07) plus libcap2-bin (getcap, setcap, capsh) for
+# the H1 to H3 probes, and a FIX build argument that selects one candidate fix:
+#   FIX=none    no change (the evidence image)
+#   FIX=setuid  newuidmap and newgidmap set to mode 4755 (setuid root, no file capabilities)
+#   FIX=setcap  setuid bit cleared; newuidmap cap_setuid=ep, newgidmap cap_setgid=ep
+# Built by spikes/s07d_newuidmap.sh; not a Realm image. The user "dev" (uid 1000) is the
+# keep-id user the outer container maps to the host user. The spike overwrites /etc/subuid
+# and /etc/subgid at run time, as S-07 does.
+FROM docker.io/library/debian:stable
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      podman fuse-overlayfs slirp4netns passt uidmap catatonit ca-certificates libcap2-bin \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --uid 1000 --create-home --shell /bin/bash dev
+ARG FIX=none
+RUN case "$FIX" in \
+      none) ;; \
+      setuid) chmod 4755 /usr/bin/newuidmap /usr/bin/newgidmap ;; \
+      setcap) chmod 0755 /usr/bin/newuidmap /usr/bin/newgidmap \
+              && setcap cap_setuid=ep /usr/bin/newuidmap \
+              && setcap cap_setgid=ep /usr/bin/newgidmap ;; \
+      *) echo "unknown FIX=$FIX" >&2; exit 1 ;; \
+    esac
