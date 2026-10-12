@@ -1,0 +1,417 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Enter a realm, exec a command in it, or run as container root (FR-042, FR-048, FR-049).
+
+`enter_realm` serves `ginn enter` (no command: the distribution's login shell), `ginn exec` (a
+command) and `--root` (container root inside the realm only, FR-042). It returns the exit status of
+the inner process as podman reports it, because IR-011 says `ginn exec` returns the inner command's
+exit code. A command that a signal ends comes back as 128 plus the signal number, which is podman's
+convention; cli.py maps the same way a signal that ends podman itself (IR-011 names no other rule).
+
+The steps, in order:
+
+1. The record is read (FR-025: GINN-E-NO-SUCH-REALM). A Kali realm is refused with
+   GINN-E-NOT-SUPPORTED-YET, and a state that does not allow enter with GINN-E-REALM-STATE
+   (DR-020). Both come before any podman call.
+2. The session is read from the host (runtime/env.py). Proxy values stay in podman's environment,
+   and the argv carries only their names (ADR-004 amendment).
+3. One `podman ps` answers whether the container runs. Its state and its pid come from that one
+   listing, with no record pid and no /proc read. ADR-010's amendment of 2026-10-13 (section "T4.6
+   enter runs one listing per enter") decides this path, and NFR-004 measures it. A realm that does
+   not run is started by `start_realm`, which records the grants and attaches them (FR-017,
+   FR-049). A start has its grants attached already, so no re-attach follows it.
+4. A running realm is pre-checked (ADR-008 amendment): `needs_reattach` reads the host sources and
+   changes nothing. Most enters find nothing changed and go straight to exec. When a grant changed,
+   `mutating("reattach")` takes the realm lock (FR-123, DR-033), reads the state again, re-attaches
+   the changed grants, and saves the record only when its grant list or its share list changed
+   (DR-032). Inside the lock, a check that finds no work writes a `noop` step with its reason.
+5. A realm lock held by a re-attach or a start (GINN-E-REALM-BUSY with that op) is waited for, up
+   to `BUSY_WAIT_S`, in steps of `BUSY_STEP_S`. Each step repeats the lock-free check of steps 3
+   and 4, and the command runs once the realm runs with its grants current. Any other holder, and a
+   deadline that passes, raise GINN-E-REALM-BUSY. GINN-E-HOST-UNACKED and GINN-E-ATTACH-FAILED are
+   never waited for.
+6. `podman exec` runs the command as the realm user (`--user uid:gid`, or `0:0` under `--root`),
+   with HOME and the workdir at the host home path (FR-048). Under `--root` both are `/root`
+   (`ROOT_HOME`). The session environment is passed, and the proxy names go as `--env NAME`
+   (ADR-004 amendment). A status of 125 is podman's own failure or the command's own 125, so enter
+   reads the listing once more. If the container no longer runs, GINN-E-REALM-STATE is raised.
+   Otherwise the status comes back unchanged. The exec is never retried.
+
+A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm keeps running, since
+enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
+service (FR-081).
+
+Budgets. `PRECHECK_BUDGET_S` is the share of NFR-004's 300 ms p95 that the stat pre-check may use.
+It is documented, not enforced: enter reports `listing`, `precheck` and `exec` through
+`EnterHooks.observe`, and T4.9 measures the p95 over 100 launches with them included.
+`BUSY_WAIT_S` bounds the wait for a lock holder.
+
+Decisions and open items (see the report): a user exec's workdir is the host home, not the host
+working directory; `--root` uses `/root` for HOME and the workdir, since a root write into the bound
+Realm Home would land on a subordinate uid (FR-042); a 125 is returned unchanged, and the CLI maps a
+ginn-side failure to EXEC_GINN_FAILURE (IR-011, T4.11); the pid comes from the listing, as ADR-010's
+amendment of 2026-10-13 decides.
+"""
+
+import os
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Final
+
+from ginn.distros import load as load_distro
+from ginn.domain import RealmName, RealmState
+from ginn.errors import GinnError, make
+from ginn.ops._mutating import Mutation, OpEnv, mutating
+from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
+from ginn.podman.adapter import PODMAN_ERROR_EXIT, Podman
+from ginn.podman.models import ContainerInfo, ContainerState
+from ginn.runtime._enter_plan import exec_home, exec_user, login_argv, share_after
+from ginn.runtime.attach import Admit, admission, needs_reattach, reattach
+from ginn.runtime.env import SessionEnv, session_env
+from ginn.runtime.spec import KALI, LABEL_REALM
+from ginn.store._time import utc_from_epoch
+from ginn.store.records import RealmRecord, RealmStore
+
+PRECHECK_BUDGET_S: Final = 0.050
+"""Seconds the stat pre-check may use on a running realm (ADR-008, ADR-010): the session read, one
+identity read per grant and the admission checks. The podman listing is not in the budget; enter
+reports it as `listing`, so T4.9 can tell the stat work from the podman cost. Documented only."""
+BUSY_WAIT_S: Final = 2.0
+"""Seconds an enter waits for a re-attach or a start that holds the realm lock (FR-123). A longer
+hold is refused, so the user never waits more than this for another operation."""
+BUSY_STEP_S: Final = 0.05
+"""Seconds between two lock-free checks while an enter waits for a lock holder."""
+_WAIT_FOR: Final = frozenset({"reattach", "start"})
+"""The operations whose realm lock an enter waits for. Any other holder is refused at once."""
+_ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmState.FAILED})
+"""The record states an enter accepts. Any other state is refused with GINN-E-REALM-STATE."""
+_HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
+"""The container states that mean the process is not running. Any other state is running."""
+_KALI_MILESTONE: Final = "M10"
+"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
+_STOPPED_SINCE_LOOK: Final = "the realm stopped after the pre-check"
+"""The `noop` reason when the realm stopped between the look and the lock."""
+
+
+def _stdio_is_tty() -> bool:
+    """True when stdin and stdout are both terminals, so the exec gets a TTY (FR-048)."""
+    return os.isatty(0) and os.isatty(1)
+
+
+@dataclass(frozen=True)
+class EnterHooks:
+    """The seams of enter. The defaults are the real ones.
+
+    `lifecycle` carries the probes and the helper path that runtime/ reads, and it is passed to
+    `start_realm`. `isatty` decides whether the exec gets a TTY. `clock` times the steps and bounds
+    the wait for a lock holder, and `sleep` separates two checks of that wait. `observe` receives
+    `listing`, `precheck` and `exec`, each with the seconds it took (NFR-004, T4.9).
+    """
+
+    lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
+    isatty: Callable[[], bool] = _stdio_is_tty
+    clock: Callable[[], float] = time.perf_counter
+    sleep: Callable[[float], None] = time.sleep
+    observe: Callable[[str, float], None] | None = None
+
+
+@dataclass(frozen=True)
+class _Look:
+    """One lock-free look at a realm: its record, its session, and what it needs (ADR-008)."""
+
+    record: RealmRecord
+    session: SessionEnv
+    admit: Admit
+    running: bool
+    pending: bool
+
+
+def _internal(detail: str) -> GinnError:
+    err = make("GINN-E-INTERNAL")
+    err.details["detail"] = detail
+    return err
+
+
+def _load(store: RealmStore, name: RealmName) -> RealmRecord:
+    """Read a record. A read error other than a missing file is GINN-E-INTERNAL, as lifecycle's
+    `_load` maps it (FR-020), so no caller sees a raw OSError."""
+    try:
+        return store.load(name)
+    except OSError as exc:
+        err = _internal("cannot read the realm record")
+        err.details["reason"] = exc.strerror or str(exc)
+        raise err from exc
+
+
+def _observe(hooks: EnterHooks, name: str, seconds: float) -> None:
+    if hooks.observe is not None:
+        hooks.observe(name, seconds)
+
+
+def _listed(podman: Podman, name: RealmName, cid: str | None) -> ContainerInfo | None:
+    """The realm's container from one `podman ps`, or None when podman does not list it.
+
+    A podman error propagates, and no caller reads it as "not running", so nothing is written and
+    nothing is stopped on it.
+    """
+    if cid is None:
+        return None
+    return next((info for info in podman.ps({LABEL_REALM: name.value}) if info.id == cid), None)
+
+
+def _running(info: ContainerInfo | None) -> bool:
+    return info is not None and info.state not in _HALTED
+
+
+def _waits_for_holder(err: GinnError) -> bool:
+    """True for a realm-busy refusal whose holder is a re-attach or a start (FR-123)."""
+    return err.code == "GINN-E-REALM-BUSY" and err.details.get("op") in _WAIT_FOR
+
+
+def _look(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+) -> _Look:
+    """Read the record and the host without the realm lock: the hot path of enter (ADR-010).
+
+    Refusals come first, so a refused realm causes no podman call. The session read and the
+    admission are the stat pre-check, and the listing is timed apart from them.
+    """
+    record = _load(RealmStore(env.paths, env.clock), name)
+    if record.settings.distro.value == KALI:
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=name.value,
+            feature="a Kali realm",
+            milestone=_KALI_MILESTONE,
+        )
+    if record.state not in _ENTERABLE:
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=name.value,
+            state=record.state.value,
+            action="enter",
+            allowed="stopped, failed or running",
+        )
+    owned = env.paths.all_owned_roots()
+    read_started = hooks.clock()
+    realm_session = session_env(
+        session.host_env, home=session.host_home, uid=session.uid, owned_paths=owned
+    )
+    read_seconds = hooks.clock() - read_started
+    listing_started = hooks.clock()
+    info = (
+        _listed(podman, name, record.container_id) if record.state is RealmState.RUNNING else None
+    )
+    _observe(hooks, "listing", hooks.clock() - listing_started)
+    admit = admission(home=session.host_home, owned_paths=owned, env=session.host_env)
+    if not _running(info):
+        return _Look(record, realm_session, admit, running=False, pending=False)
+    check_started = hooks.clock()
+    pending = needs_reattach(
+        record.grants,
+        realm_session,
+        admit=admit,
+        mountinfo=hooks.lifecycle.mountinfo,
+    )
+    _observe(hooks, "precheck", read_seconds + hooks.clock() - check_started)
+    return _Look(record, realm_session, admit, running=True, pending=pending)
+
+
+def _settle(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    look: _Look,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+) -> RealmRecord:
+    """Make the realm run with its grants current, and return its record (ADR-008, FR-017).
+
+    The lock is taken only for a change: a running realm with nothing pending returns at once. A
+    realm that stopped after the look is started, which takes the lock itself.
+    """
+    if look.running and not look.pending:
+        return look.record
+    if look.running and _reattach_locked(env, podman, name, look, session=session, hooks=hooks):
+        return look.record
+    return start_realm(env, podman, name, session=session, hooks=hooks.lifecycle)
+
+
+def _await_holder(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    busy: GinnError,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+) -> RealmRecord:
+    """Wait a bounded time for the re-attach or the start that holds the realm lock (FR-123).
+
+    Each step sleeps, then repeats the lock-free look. The command runs as soon as the realm runs
+    with nothing pending. Otherwise the lock is tried again. A refusal that is not a wait case, and
+    the refusal of the deadline, are raised as they come.
+    """
+    deadline = hooks.clock() + BUSY_WAIT_S
+    while True:
+        if hooks.clock() >= deadline:
+            raise busy
+        hooks.sleep(BUSY_STEP_S)
+        look = _look(env, podman, name, session=session, hooks=hooks)
+        if look.running and not look.pending:
+            return look.record
+        try:
+            return _settle(env, podman, name, look, session=session, hooks=hooks)
+        except GinnError as again:
+            if not _waits_for_holder(again):
+                raise
+            busy = again
+
+
+def enter_realm(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    *,
+    session: HostUser,
+    gid: int,
+    argv: Sequence[str] | None = None,
+    root: bool = False,
+    hooks: EnterHooks | None = None,
+) -> int:
+    """Run `argv` in realm `name`, or the login shell when `argv` is None. Return its exit status.
+
+    `session` is the host user with its environment. `gid` is the host user's group, which the
+    realm user keeps under keep-id. `root` runs as container root inside the realm (FR-042). An
+    empty `argv` is a usage error (IR-010). See the module docstring for the steps.
+    """
+    hooks = EnterHooks() if hooks is None else hooks
+    if argv is not None and not argv:
+        raise make("GINN-E-USAGE", detail="exec needs a command after '--'")
+    look = _look(env, podman, name, session=session, hooks=hooks)
+    try:
+        record = _settle(env, podman, name, look, session=session, hooks=hooks)
+    except GinnError as err:
+        if not _waits_for_holder(err):
+            raise
+        record = _await_holder(env, podman, name, err, session=session, hooks=hooks)
+    cid = record.container_id
+    if cid is None:
+        raise _internal("the realm has no container to enter")
+    if argv is None:
+        command = login_argv(load_distro(record.settings.distro.value).shell)
+        action = "enter"
+    else:
+        command = list(argv)
+        action = "exec"
+    home = exec_home(session.host_home, root=root)
+    exec_started = hooks.clock()
+    status = podman.exec_interactive(
+        cid,
+        command,
+        user=exec_user(session.uid, gid, root=root),
+        env={**look.session.env, "HOME": home},
+        workdir=home,
+        tty=hooks.isatty(),
+        interactive=True,
+        pass_env=tuple(look.session.pass_through),
+    )
+    _observe(hooks, "exec", hooks.clock() - exec_started)
+    if status == PODMAN_ERROR_EXIT and not _running(_listed(podman, name, cid)):
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=name.value,
+            state="stopped",
+            action=action,
+            allowed="running",
+        )
+    return status
+
+
+def _noop(mutation: Mutation, reason: str) -> None:
+    """Record that the lock held no work: a `noop` step, and the reason in the audit params."""
+    mutation.add_params(noop=reason)
+    mutation.step("noop")
+
+
+def _reattach_locked(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    look: _Look,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+) -> bool:
+    """Re-attach the changed grants under the realm lock (FR-123, ADR-008 amendment).
+
+    Return False when the realm no longer runs, because it stopped after the look. The caller then
+    starts it, which takes the lock itself. The state is read again under the lock (DR-033), and the
+    grant list is decided again from the same host reads. A check that finds no work is recorded as
+    a `noop` step, so the audit entry says that nothing was attached. The record is saved only when
+    its grant list or its share list changed (DR-032). A failure raises, and the realm is left as it
+    was: a failed re-attach never stops the realm.
+    """
+    store = RealmStore(env.paths, env.clock)
+    mountinfo = hooks.lifecycle.mountinfo
+    with mutating(env, "reattach", name, {"generation": look.record.generation}) as mutation:
+        info = _listed(podman, name, look.record.container_id)
+        current = _load(store, name)
+        cid = current.container_id
+        if cid is None or info is None or cid != info.id:
+            _noop(mutation, _STOPPED_SINCE_LOOK)
+            return False
+        if info.state in _HALTED or current.state is not RealmState.RUNNING:
+            _noop(mutation, _STOPPED_SINCE_LOOK)
+            return False
+        if info.pid < 2:
+            raise _internal("the running realm has no init process to attach into")
+        if not needs_reattach(current.grants, look.session, admit=look.admit, mountinfo=mountinfo):
+            _noop(mutation, "no grant changed since the pre-check")
+            return True
+        result = reattach(
+            podman,
+            cid,
+            pid=info.pid,
+            grants=current.grants,
+            session=look.session,
+            realm_home=env.paths.homes / name.value,
+            host_home=session.host_home,
+            admit=look.admit,
+            helper=hooks.lifecycle.helper,
+            mountinfo=mountinfo,
+        )
+        share = share_after(
+            current.share_skipped,
+            current.grants,
+            result.records,
+            look.session,
+            result,
+            session.host_home,
+        )
+        if result.records != current.grants or set(share) != set(current.share_skipped):
+            store.save(
+                replace(
+                    current,
+                    grants=result.records,
+                    share_skipped=share,
+                    updated_at=utc_from_epoch(env.clock()),
+                )
+            )
+        mutation.step("reattached")
+        return True
+
+
+__all__ = [
+    "BUSY_STEP_S",
+    "BUSY_WAIT_S",
+    "PRECHECK_BUDGET_S",
+    "EnterHooks",
+    "enter_realm",
+]

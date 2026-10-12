@@ -198,3 +198,23 @@ def test_every_call_is_recorded_in_order() -> None:
     fake.rm(container_id, force=False)
     assert fake.ops() == ["create", "start", "stop", "rm"]
     assert fake.calls[2].args == (container_id, 5)
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_fake_exec_refuses_the_names_that_the_cli_refuses() -> None:
+    """The fake checks exec options as cli.py does: a name with '=' or with a bad form, and a name
+    given both a value and a pass-through, raise ValueError before the call is recorded."""
+    fake = FakePodman()
+    cid = fake.create(spec())
+    fake.start(cid)
+    with pytest.raises(ValueError):
+        fake.exec_interactive(cid, ["true"], pass_env=["NAME=value"])
+    with pytest.raises(ValueError):
+        fake.exec_interactive(cid, ["true"], env={"http_proxy": "x"}, pass_env=["http_proxy"])
+    with pytest.raises(ValueError):
+        fake.exec_interactive(cid, ["true"], env={"BAD=KEY": "x"})
+    assert fake.exec_calls == []
+    fake.exec_interactive(cid, ["true"], env={"LANG": "C"}, pass_env=["http_proxy"])
+    (call,) = fake.exec_calls
+    assert call.pass_env == ("http_proxy",)
+    assert call.env == {"LANG": "C"}

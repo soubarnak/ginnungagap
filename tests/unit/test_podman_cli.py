@@ -13,9 +13,11 @@ a settings file and then runs the shim. The tests change the settings with `use_
 import json
 import os
 import shlex
+import signal
 import stat
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -794,6 +796,164 @@ def test_exec_interactive_returns_the_inner_status(shim: Path, tmp_path: Path) -
     assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"]) == 7
     result = make_cli(tmp_path).exec(CONTAINER, ["false"], capture=False)
     assert (result.exit_code, result.stdout, result.stderr) == (7, "", "")
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("NFR-SEC-005")
+def test_pass_names_reach_podman_as_env_name_and_no_value_reaches_the_argv(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """podman copies a passed name's value from its own environment, so the argv has the name
+    only (ADR-004 amendment, ADR-010, docs/capabilities.md, Session environment row)."""
+    proxy_url = "http://user:hunter2@proxy.example:3128"
+    monkeypatch.setenv("http_proxy", proxy_url)
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 0}})
+    status = make_cli(tmp_path).exec_interactive(
+        CONTAINER, ["env"], env={"LANG": "C.UTF-8"}, pass_env=["http_proxy"]
+    )
+    assert status == 0
+    argv = logged(shim)[0]["argv"]
+    flags = argv[argv.index("exec") + 1 : argv.index("--")]
+    assert flags == ["--env", "LANG=C.UTF-8", "--env", "http_proxy"]
+    assert not any(token.startswith("http_proxy=") for token in argv)
+    assert all(proxy_url not in token for token in argv)
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_a_pass_name_is_a_plain_name_and_is_not_also_given_a_value(
+    shim: Path, tmp_path: Path
+) -> None:
+    cli = make_cli(tmp_path)
+    with pytest.raises(ValueError):
+        cli.exec_interactive(CONTAINER, ["true"], pass_env=["NAME=value"])
+    with pytest.raises(ValueError):
+        cli.exec_interactive(CONTAINER, ["true"], env={"http_proxy": "x"}, pass_env=["http_proxy"])
+    assert logged(shim) == []
+
+
+@pytest.mark.fr("FR-042")
+@pytest.mark.fr("NFR-SEC-001")
+def test_container_root_exec_adds_no_privilege_to_the_argv(shim: Path, tmp_path: Path) -> None:
+    """`--root` is `--user 0:0` inside the container. `_exec_args` has no privileged option at all,
+    so the argv carries only --tty, --interactive, --user, --env and --workdir (NFR-SEC-001)."""
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 0}})
+    make_cli(tmp_path).exec_interactive(CONTAINER, ["pacman", "-S", "htop"], user="0:0")
+    argv = logged(shim)[0]["argv"]
+    assert argv[argv.index("exec") + 1 : argv.index("--")] == ["--user", "0:0"]
+    assert "--privileged" not in argv
+
+
+def _interrupt_handlers() -> tuple[object, object]:
+    return (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGQUIT))
+
+
+@pytest.mark.fr("IR-011")
+def test_exec_interactive_without_a_tty_catches_interrupts_while_podman_runs(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Ctrl-C reaches the whole foreground group, ginn included. Without a TTY, ginn holds SIGINT
+    and SIGQUIT in a do-nothing handler while podman runs, so podman's status comes back. The
+    handler is not SIG_IGN, because an ignored signal would survive execve into podman."""
+    seen: dict[str, object] = {}
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen["handlers"] = _interrupt_handlers()
+        return subprocess.CompletedProcess(args, 130)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    before = _interrupt_handlers()
+    status = make_cli(tmp_path).exec_interactive(CONTAINER, ["sleep", "9"])
+    assert status == 130
+    sigint, sigquit = seen["handlers"]
+    assert callable(sigint) and sigint is not signal.SIG_IGN
+    assert callable(sigquit) and sigquit is not signal.SIG_IGN
+    assert _interrupt_handlers() == before
+
+
+@pytest.mark.fr("IR-011")
+def test_a_child_started_under_the_guard_does_not_inherit_an_ignored_sigint_or_sigquit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real child: podman is a wrapper on PATH that writes its own SigIgn line to a file. The
+    child is started by exec_interactive while the guard holds the signals. SIGINT and SIGQUIT must
+    not be in its ignored mask, because an ignored signal survives execve (IR-011)."""
+    status_file = tmp_path / "sig-status.txt"
+    wrapper_dir = tmp_path / "sig-bin"
+    wrapper_dir.mkdir()
+    wrapper = wrapper_dir / "podman"
+    wrapper.write_text(
+        f"#!/bin/sh\ngrep '^SigIgn:' /proc/self/status > {shlex.quote(str(status_file))}\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{wrapper_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["true"]) == 0
+
+    name, _, value = status_file.read_text(encoding="utf-8").partition(":")
+    assert name == "SigIgn"
+    mask = int(value.strip(), 16)
+    assert not mask & (1 << (signal.SIGINT - 1))
+    assert not mask & (1 << (signal.SIGQUIT - 1))
+
+
+@pytest.mark.fr("IR-011")
+def test_exec_interactive_with_a_tty_leaves_the_signals_to_the_terminal(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen["handlers"] = _interrupt_handlers()
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    before = _interrupt_handlers()
+    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"], tty=True) == 0
+    assert seen["handlers"] == before
+
+
+@pytest.mark.fr("IR-011")
+def test_the_interrupt_handlers_come_back_when_the_child_raises(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "run", interrupted)
+    before = _interrupt_handlers()
+    with pytest.raises(KeyboardInterrupt):
+        make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"])
+    assert _interrupt_handlers() == before
+
+
+@pytest.mark.fr("IR-011")
+def test_off_the_main_thread_the_interrupt_handlers_are_not_touched(
+    shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signal handlers can be set only from the main thread, so another thread runs its child with
+    the handlers it already has, and no ValueError is raised."""
+    seen: dict[str, object] = {}
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen["handlers"] = _interrupt_handlers()
+        return subprocess.CompletedProcess(args, 130)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    before = _interrupt_handlers()
+    outcome: dict[str, object] = {}
+
+    def worker() -> None:
+        try:
+            outcome["status"] = make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"])
+        except BaseException as exc:  # reported to the test thread below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join()
+    assert outcome == {"status": 130}
+    assert seen["handlers"] == before
 
 
 @pytest.mark.fr("IR-020")

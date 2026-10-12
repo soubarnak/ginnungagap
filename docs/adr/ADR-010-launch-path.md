@@ -4,6 +4,7 @@
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D6). Status is Accepted. The crun re-measure rule is added to the Decision, and the FR-082 wording is corrected. The runc caveat stands.
 - Amended: 2026-10-12 (review of T4.2 and T4.3). The ADR-008 pre-check that runs before exec is one identity read per variable grant, plus a mount-table scan for each mount root. It must stay inside the NFR-004 300 ms budget, and T4.9 measures it. The launch path, the decision and the parity table do not change. Requirement IDs: NFR-004, NFR-001, FR-061.
+- Amended: 2026-10-13 (T4.6 enter). The enter path runs one `podman ps` per enter for the state and the pid, in place of the record pid and `/proc` start-time check of the Decision. The fallback is named. See the section "Amendment (2026-10-13): T4.6 enter runs one listing per enter". Requirement IDs: NFR-004, FR-049, FR-061.
 
 ## Context
 
@@ -80,6 +81,36 @@ The measurements above are on runc, and the base argv names crun (`docs/capabili
 - A restarted realm gets a new init PID, so the state record must be rewritten on each start. S-02 tested only the start-time happy path. The stale-PID path was not tested.
 - Not measured: crun (S-02 ran runc), musl (S-03 has no result), target hardware, the Kali pasta network (S-02 used `--network host`, so Kali realms will be slower, not measured), and `ginn enter`, which S-02 did not run.
 - Follow-up tasks: T4.6 (the launcher and enter), T4.3 (environment injection at exec), T4.9 (the NFR-004 check), S-03 (musl), and a re-measure on crun and target hardware.
+
+## Amendment (2026-10-13): T4.6 enter runs one listing per enter
+
+This amendment changes how the Decision reads the realm's container. It keeps the decision to launch
+with `podman exec` from a lean path, and the parity argument of the table above.
+
+The Decision reads the container's pid and start time from the state record, and it checks the
+start time against `/proc/<pid>/stat`. `RealmRecord` (DR-001, `store/records.py`) holds neither
+field, and T4.5 owns the record. T4.6 does not change the record format. `runtime/enter.py` runs one
+`podman ps` per enter, with the realm label. That one listing gives the state and the pid of the
+container (`ContainerInfo.from_ps`). The hot path makes no `inspect` call and no `/proc` read. A
+realm that the listing does not show as running is started through `start_realm`, which records its
+grants (FR-017).
+
+The ADR-008 pre-check runs after that listing. It is stat calls only, and it makes no podman call
+when nothing changed. Only a changed grant takes the realm lock (FR-123).
+
+Cost. The listing is one podman call on the same CLI as the exec. This ADR measured `podman inspect`
+at 30 to 40 ms p95 (row I), and a listing is the same class of call. The NFR-004 check of T4.9 measures
+the p95 of 100 launches, on crun, with the listing and the pre-check included, against 300 ms. The
+exec alone measured 136 to 212 ms p95 on runc (rows A and B).
+
+Fallback. If T4.9 misses 300 ms at p95, the next step is the one the Decision already names: save the
+pid and the start time in the record at `lifecycle._start`, check `/proc/<pid>/stat` in enter, and keep
+`podman ps` only on the locked path. That changes the record format, so it is a T4.5 change with its
+own schema decision, and it is not taken here. `ginn-run` stays out of `native/` in either case,
+because it loses the seccomp filter, bounding set and groups that the Alternatives section rejects.
+
+Requirement IDs: NFR-004 (the 300 ms target and its measurement), FR-049 (the exit status), and
+FR-061 (the parity of the grants inside the filters).
 
 ## Requirement IDs
 

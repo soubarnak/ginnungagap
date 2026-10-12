@@ -13,6 +13,9 @@ the adapter, so the global flags apply), and it keeps the grant list the next en
 - `reattach` runs at enter and launch, before exec. It passes only the grants whose host identity
   changed since their last attach, each with --force. A grant whose source is gone loses its old
   mount. A device or inode that differs raises, and the realm keeps running (FR-081, ADR-003).
+- `needs_reattach` is the pre-check of enter (ADR-008 amendment, ADR-010). It makes the decision
+  that `reattach` would make, from the same code, and it reads the host only. It makes no helper
+  call and no podman call, so enter takes the realm lock only when it returns True.
 
 Both take `admit`, the DR-004 rules applied again to each grant the helper is about to attach
 (`mounts.recheck`, see `admission`). A refused grant is not attached. A grant that was never
@@ -528,6 +531,62 @@ def attach_at_start(
     return AttachResult(records=records, skipped=_skipped(records, reasons))
 
 
+@dataclass(frozen=True)
+class _Decision:
+    """What one re-attach would do, from the host alone. Nothing is changed to make it."""
+
+    grants: list[GrantRecord]
+    current: list[SourceIdentity | None]
+    reasons: dict[int, str]
+    ops: list[tuple[int, Op]]
+
+
+def _decide(
+    grants: Sequence[GrantRecord],
+    session: SessionEnv,
+    admit: Admit,
+    mountinfo: Path,
+) -> _Decision:
+    """The helper groups of a re-attach, from one identity read per grant and one admission check.
+
+    Shared by `reattach` and `needs_reattach`, so the pre-check never disagrees with the attach.
+    """
+    grants = _with_session(grants, session)
+    current = [read_identity(grant.host, mountinfo=mountinfo) for grant in grants]
+    held = [_held(grant, now) for grant, now in zip(grants, current, strict=True)]
+    changed = [i for i, grant in enumerate(grants) if current[i] != grant.identity and not held[i]]
+    # Every present grant is checked again, so a mount refused now goes, changed or not.
+    refused = _refused(grants, current, admit, range(len(grants)))
+    reasons: dict[int, str] = {i: NOT_VISIBLE for i, is_held in enumerate(held) if is_held}
+    reasons.update(refused)
+    ops: list[tuple[int, Op]] = []
+    for index in sorted({*changed, *refused}):
+        if index in refused:
+            if grants[index].identity is not None:
+                ops.append((index, "unmount"))
+        elif not grants[index].host:
+            ops.append((index, "unmount"))
+        else:
+            ops.append((index, "force"))
+    return _Decision(grants=grants, current=current, reasons=reasons, ops=ops)
+
+
+def needs_reattach(
+    grants: Sequence[GrantRecord],
+    session: SessionEnv,
+    *,
+    admit: Admit,
+    mountinfo: Path = MOUNTINFO,
+) -> bool:
+    """True when `reattach` would call the helper or unmount a mount (ADR-008 pre-check).
+
+    It is the same decision as `reattach`, made by the same code, and it changes nothing: it reads
+    the host sources and runs the admission checks, and it makes no podman call. Enter runs it on
+    every enter of a running realm, so the common case, nothing changed, costs only these reads.
+    """
+    return bool(_decide(grants, session, admit, mountinfo).ops)
+
+
 def reattach(
     podman: Podman,
     container: str,
@@ -551,44 +610,30 @@ def reattach(
     while its host identity stays the same. Any other failure raises, and the caller reports it
     without stopping the realm: a services-on realm is stopped only by its `sv` service (FR-081).
     """
-    grants = _with_session(grants, session)
-    current = [read_identity(grant.host, mountinfo=mountinfo) for grant in grants]
-    held = [_held(grant, now) for grant, now in zip(grants, current, strict=True)]
-    changed = [i for i, grant in enumerate(grants) if current[i] != grant.identity and not held[i]]
-    # Every present grant is checked again, so a mount refused now goes, changed or not.
-    refused = _refused(grants, current, admit, range(len(grants)))
-    reasons: dict[int, str] = {i: NOT_VISIBLE for i, is_held in enumerate(held) if is_held}
-    reasons.update(refused)
-    ops: list[tuple[int, Op]] = []
-    for index in sorted({*changed, *refused}):
-        if index in refused:
-            if grants[index].identity is not None:
-                ops.append((index, "unmount"))
-        elif not grants[index].host:
-            ops.append((index, "unmount"))
-        else:
-            ops.append((index, "force"))
+    decision = _decide(grants, session, admit, mountinfo)
+    checked = decision.grants
+    forced = [i for i, op in decision.ops if op == "force" and checked[i].identity is None]
     rows = _run(
         podman,
         container,
         pid=pid,
-        grants=grants,
-        ops=ops,
-        points=[grants[i] for i, op in ops if op == "force" and grants[i].identity is None],
+        grants=checked,
+        ops=decision.ops,
+        points=[checked[i] for i in forced],
         realm_home=realm_home,
         host_home=host_home,
         helper=helper,
     )
-    records, mismatched = _settle(grants, current, ops, rows, reasons)
+    records, mismatched = _settle(checked, decision.current, decision.ops, rows, decision.reasons)
     if mismatched:
         _unmount(
             podman,
             container,
             pid=pid,
-            grants=grants,
+            grants=checked,
             indices=mismatched,
             realm_home=realm_home,
             host_home=host_home,
             helper=helper,
         )
-    return AttachResult(records=records, skipped=_skipped(records, reasons))
+    return AttachResult(records=records, skipped=_skipped(records, decision.reasons))

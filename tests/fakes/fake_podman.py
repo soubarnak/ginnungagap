@@ -10,6 +10,7 @@ GINN-E-IMAGE-UNVERIFIED for a digest pull. The retry rule matches cli.py, throug
 """
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,7 @@ DEFAULT_INFO: Final = PodmanInfo(
     version="5.8.8",
 )
 _FAKE_IMAGE_SIZE: Final = 1024
+_ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FAKE_IMAGE_CREATED: Final = "1970-01-01T00:00:00Z"
 
 
@@ -43,6 +45,25 @@ class FakeCall(NamedTuple):
 
     op: str
     args: tuple[object, ...]
+
+
+@dataclass
+class ExecCall:
+    """One exec or exec_interactive call, with its options as the adapter received them.
+
+    `pass_env` holds the names given as `--env NAME`. The fake never sees their values, which
+    podman takes from its own environment, so a test checks that no value is in `env`.
+    """
+
+    op: str
+    container_id: str
+    argv: tuple[str, ...]
+    user: str | None
+    env: dict[str, str]
+    pass_env: tuple[str, ...]
+    workdir: str | None
+    tty: bool
+    interactive: bool
 
 
 @dataclass
@@ -81,6 +102,7 @@ class FakePodman:
     containers: dict[str, _Container] = field(default_factory=dict)
     calls: list[FakeCall] = field(default_factory=list)
     exec_users: list[str | None] = field(default_factory=list)
+    exec_calls: list[ExecCall] = field(default_factory=list)
     _pull_failures: int = 0
     _next: int = 1
 
@@ -229,6 +251,47 @@ class FakePodman:
                 matches.append(self._info_for(container))
         return matches
 
+    def _note_exec(
+        self,
+        op: str,
+        container_id: str,
+        argv: Sequence[str],
+        user: str | None,
+        env: Mapping[str, str] | None,
+        workdir: str | None,
+        pass_env: Sequence[str],
+        tty: bool,
+        interactive: bool,
+    ) -> None:
+        """Keep the options of one exec call, as the adapter received them.
+
+        The checks are those of cli.py (`_env_flags` and `_pass_flags`): every name is a plain
+        name, and no name is given both a value and a pass-through. A bad call raises ValueError
+        before anything is recorded.
+        """
+        values = dict(env or {})
+        for key in [*values, *pass_env]:
+            if _ENV_KEY.fullmatch(key) is None:
+                raise ValueError(f"environment name {key!r} is not valid")
+        both = sorted(set(values) & set(pass_env))
+        if both:
+            raise ValueError(
+                f"environment name {both[0]!r} is given both a value and a pass-through"
+            )
+        self.exec_calls.append(
+            ExecCall(
+                op=op,
+                container_id=container_id,
+                argv=tuple(argv),
+                user=user,
+                env=values,
+                pass_env=tuple(pass_env),
+                workdir=workdir,
+                tty=tty,
+                interactive=interactive,
+            )
+        )
+
     def _exec(
         self,
         op: str,
@@ -254,8 +317,10 @@ class FakePodman:
         tty: bool = False,
         interactive: bool = False,
         capture: bool = True,
+        pass_env: Sequence[str] = (),
     ) -> ExecResult:
         self.exec_users.append(user)
+        self._note_exec("exec", container_id, argv, user, env, workdir, pass_env, tty, interactive)
         result = self._exec("exec", container_id, argv)
         if not capture:
             return ExecResult(result.exit_code, "", "")
@@ -271,7 +336,11 @@ class FakePodman:
         workdir: str | None = None,
         tty: bool = False,
         interactive: bool = False,
+        pass_env: Sequence[str] = (),
     ) -> int:
+        self._note_exec(
+            "exec_interactive", container_id, argv, user, env, workdir, pass_env, tty, interactive
+        )
         return self._exec("exec_interactive", container_id, argv).exit_code
 
     def cp_from(self, container_id: str, src: str, dst: Path) -> None:

@@ -30,14 +30,19 @@ import json
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
+from types import FrameType
 from typing import Final
 
 from ginn.errors import GinnError, make
 from ginn.podman.adapter import (
+    PODMAN_ERROR_EXIT,
     CreateSpec,
     RetryHook,
     require_arg,
@@ -64,8 +69,6 @@ _DIGEST_PATTERNS: Final = (
 )
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NETWORK_EXIT: Final = 125
-PODMAN_ERROR_EXIT: Final = 125
-"""Exit status podman uses for its own failures (`podman exec` included)."""
 DEFAULT_OCI_RUNTIME: Final = "crun"
 """OCI runtime passed as `--runtime` on every call (IR-020, ADR-004). crun is the runtime the
 spikes validate, and keep-groups works only with it."""
@@ -139,6 +142,37 @@ def _exit_status(returncode: int) -> int:
     return 128 - returncode if returncode < 0 else returncode
 
 
+def _do_nothing(signum: int, frame: FrameType | None) -> None:
+    """The handler that the guard installs for SIGINT and SIGQUIT. It returns at once."""
+
+
+@contextmanager
+def _parent_ignores_interrupts() -> Iterator[None]:
+    """Hold SIGINT and SIGQUIT in a do-nothing handler while a child without a TTY runs.
+
+    Without a TTY the terminal sends both signals to the whole foreground group, so a Ctrl-C would
+    end ginn with a traceback instead of returning podman's status. The guard does not set SIG_IGN.
+    An ignored signal survives execve, so podman would start with SIGINT and SIGQUIT ignored. A
+    caught signal is reset to its default by the kernel at exec, so podman starts with the default
+    dispositions, as system(3) arranges. The handler returns at once, and Python retries the
+    interrupted wait (PEP 475), so ginn raises no KeyboardInterrupt and returns podman's status.
+    Signal handlers can be set only from the main thread, so another thread runs with the handlers
+    it already has. The previous handlers come back in `finally`, whatever the child did.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    old_int = signal.getsignal(signal.SIGINT)
+    old_quit = signal.getsignal(signal.SIGQUIT)
+    signal.signal(signal.SIGINT, _do_nothing)
+    signal.signal(signal.SIGQUIT, _do_nothing)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, signal.SIG_DFL if old_int is None else old_int)
+        signal.signal(signal.SIGQUIT, signal.SIG_DFL if old_quit is None else old_quit)
+
+
 def _env_flags(env: Mapping[str, str] | None) -> list[str]:
     flags: list[str] = []
     values = env or {}
@@ -146,6 +180,23 @@ def _env_flags(env: Mapping[str, str] | None) -> list[str]:
         if _ENV_KEY.fullmatch(key) is None:
             raise ValueError(f"environment name {key!r} is not valid")
         flags += ["--env", f"{key}={values[key]}"]
+    return flags
+
+
+def _pass_flags(names: Sequence[str], env: Mapping[str, str] | None) -> list[str]:
+    """`--env NAME` for each name, so podman copies the value from its own environment.
+
+    The value never reaches the argv, so a proxy credential is not in /proc/<pid>/cmdline (ADR-004,
+    ADR-010). A name that `env` also sets is refused, because podman would take one of the two.
+    """
+    values = env or {}
+    flags: list[str] = []
+    for key in sorted(names):
+        if _ENV_KEY.fullmatch(key) is None:
+            raise ValueError(f"environment name {key!r} is not valid")
+        if key in values:
+            raise ValueError(f"environment name {key!r} is given both a value and a pass-through")
+        flags += ["--env", key]
     return flags
 
 
@@ -488,6 +539,7 @@ class PodmanCli:
         tty: bool = False,
         interactive: bool = False,
         capture: bool = True,
+        pass_env: Sequence[str] = (),
     ) -> ExecResult:
         """Run one command in the container and return its status and output.
 
@@ -507,9 +559,10 @@ class PodmanCli:
                 workdir=workdir,
                 tty=tty,
                 interactive=interactive,
+                pass_env=pass_env,
             )
             return ExecResult(status, "", "")
-        args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive)
+        args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
         result = self._run(args)
         if result.returncode == PODMAN_ERROR_EXIT:
             raise self._failure("exec", result)
@@ -525,12 +578,16 @@ class PodmanCli:
         workdir: str | None = None,
         tty: bool = False,
         interactive: bool = False,
+        pass_env: Sequence[str] = (),
     ) -> int:
-        args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive)
+        args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
         full = self._prepare(args)
+        # Without a TTY, a Ctrl-C reaches ginn too: a do-nothing handler holds it while podman runs.
+        guard: AbstractContextManager[None] = nullcontext() if tty else _parent_ignores_interrupts()
         try:
             # Fixed argv list, no shell. stdio is inherited so the user's terminal is used.
-            completed = subprocess.run(full, check=False, env=self._env())  # noqa: S603
+            with guard:
+                completed = subprocess.run(full, check=False, env=self._env())  # noqa: S603
         except OSError as exc:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
         return _exit_status(completed.returncode)
@@ -544,6 +601,7 @@ class PodmanCli:
         workdir: str | None,
         tty: bool,
         interactive: bool,
+        pass_env: Sequence[str] = (),
     ) -> list[str]:
         if not argv:
             raise ValueError("exec needs a command")
@@ -555,6 +613,7 @@ class PodmanCli:
         if user is not None:
             flags += ["--user", require_arg(user, "user")]
         flags += _env_flags(env)
+        flags += _pass_flags(pass_env, env)
         if workdir is not None:
             flags += ["--workdir", workdir]
         # `--` ends the options, so a command argument can start with '-'.

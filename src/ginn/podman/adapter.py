@@ -29,6 +29,8 @@ _USER: Final = re.compile(r"[0-9]+:[0-9]+")
 _MOUNT_TYPES: Final = frozenset({"bind", "volume", "tmpfs"})
 _NETWORKS: Final = frozenset({"host", "pasta"})
 PRIVILEGED_MESSAGE: Final = "NFR-SEC-001: podman create must never run privileged"
+PODMAN_ERROR_EXIT: Final = 125
+"""Exit status podman uses for its own failures (`podman exec` included)."""
 
 
 def require_digest_ref(ref: str) -> None:
@@ -254,11 +256,13 @@ class Podman(Protocol):
         tty: bool = False,
         interactive: bool = False,
         capture: bool = True,
+        pass_env: Sequence[str] = (),
     ) -> ExecResult:
         """Run argv in a running container. With capture=False the output is not captured.
 
         The output goes straight to the caller's stdio, and the result has empty stdout and
-        stderr. The exit status is the inner command's status.
+        stderr. The exit status is the inner command's status. `pass_env` names variables that
+        podman copies from its own environment, as `--env NAME`, so no value reaches the argv.
         """
         ...
 
@@ -272,8 +276,12 @@ class Podman(Protocol):
         workdir: str | None = None,
         tty: bool = False,
         interactive: bool = False,
+        pass_env: Sequence[str] = (),
     ) -> int:
-        """Run argv with the caller's stdio and return the exit status (for `ginn enter`)."""
+        """Run argv with the caller's stdio and return the exit status (for `ginn enter`).
+
+        `pass_env` is as in `exec`: names only, copied by podman from its own environment.
+        """
         ...
 
     def cp_from(self, container_id: str, src: str, dst: Path) -> None: ...
