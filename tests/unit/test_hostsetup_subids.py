@@ -8,8 +8,12 @@ Covers FR-001 (ranges written for the user), FR-002 (second run changes nothing)
 from __future__ import annotations
 
 import os
+import re
 import stat
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -216,6 +220,18 @@ def _lock_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.lock")
 
 
+def _age(path: Path, seconds: float) -> None:
+    past = time.time() - seconds
+    os.utime(path, (past, past))
+
+
+def _dead_pid() -> int:
+    """Return the PID of a child that has exited and been reaped, so no process has it now."""
+    child = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603
+    child.wait()
+    return child.pid
+
+
 @pytest.mark.fr("FR-001")
 def test_lock_is_held_during_the_edit_and_removed_afterwards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -225,8 +241,8 @@ def test_lock_is_held_during_the_edit_and_removed_afterwards(
     probed: list[str] = []
 
     def probe(target: Path, data: bytes, mode: int) -> None:
-        # Another caller must not get in while this one replaces the file.
-        assert _lock_path(target).exists()
+        # Another caller must not get in while this one replaces the file, and the lock names us.
+        assert _lock_path(target).read_text() == f"{os.getpid()}\n"
         with pytest.raises(SubIdLocked):
             ensure_range(target, "bob", MIN_SIZE, lock_timeout=0.0)
         probed.append("refused")
@@ -264,6 +280,41 @@ def test_a_caller_proceeds_once_the_other_holder_releases_the_lock(tmp_path: Pat
         release.join()
     assert change.changed is True
     assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-001")
+def test_a_lock_left_by_a_dead_process_is_reclaimed_without_waiting(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text(f"{_dead_pid()}\n")
+    _age(lock, 60)
+    change = ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
+    assert change.changed is True
+    assert _names(path.parent) == ["subuid"]
+
+
+@pytest.mark.fr("FR-001")
+def test_a_lock_of_a_dead_process_is_kept_while_it_is_still_fresh(tmp_path: Path) -> None:
+    # A creator writes its PID a moment after it creates the file, so a fresh lock is not reclaimed.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text(f"{_dead_pid()}\n")
+    with pytest.raises(SubIdLocked):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.exists()
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+def test_a_lock_held_by_a_live_pid_times_out_and_names_that_pid(tmp_path: Path) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text(f"{os.getpid()}\n")
+    _age(lock, 60)
+    with pytest.raises(SubIdLocked, match=re.escape(f"(pid {os.getpid()})")):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.read_text() == f"{os.getpid()}\n"
+    assert path.read_bytes() == SAMPLE
 
 
 @pytest.mark.fr("FR-001")

@@ -6,6 +6,8 @@ understand are kept byte for byte. `ensure_range` only ever appends, so the byte
 file are never rewritten. A user who already holds at least `size` IDs in total is left alone,
 which makes a second run a no-op (FR-002). The read-modify-replace runs under `<name>.lock` next to
 the file (etc/subuid.lock, etc/subgid.lock), so two Host Setup runs cannot both append (FR-001).
+The lock file holds its holder's PID. A lock whose PID is gone and whose file is old enough is
+left behind by a crash, so it is reclaimed instead of blocking every later run.
 """
 
 from __future__ import annotations
@@ -31,8 +33,11 @@ DEFAULT_MODE = 0o644
 LOCK_TIMEOUT_SECONDS = 5.0
 """How long `ensure_range` waits for another holder of the lock before it gives up."""
 LOCK_POLL_SECONDS = 0.05
+LOCK_STALE_SECONDS = 3.0
+"""A lock is reclaimed only when its PID is gone and the lock file is at least this old."""
 
-_DECIMAL = re.compile(r"[0-9]+")
+_DECIMAL = re.compile(r"[0-9]{1,10}")
+_MAX_PID = 2**31 - 1
 _BAD_NAME_CHARS = frozenset(":\r\n\0")
 
 
@@ -47,7 +52,8 @@ class SubIdExhausted(Exception):
 class SubIdLocked(Exception):
     """Another process holds `<name>.lock` for the subordinate ID file and did not let go in time.
 
-    The lock is not removed. The holder owns it, and Host Setup should be run again later.
+    The lock is not removed while its holder is alive, and the message names the holder's PID
+    when the lock records one. Host Setup should be run again later.
     """
 
 
@@ -185,27 +191,69 @@ def _is_setuid(path: Path) -> bool:
 def _lock(path: Path, timeout: float) -> Iterator[None]:
     """Hold `<path>.lock` (etc/subuid.lock for etc/subuid) while the caller edits `path`.
 
-    The lock is a file created with O_CREAT|O_EXCL, so only one creator can succeed. A second
-    caller retries every LOCK_POLL_SECONDS until `timeout`, then raises SubIdLocked and leaves
-    the other holder's file in place. The file this call created is removed on exit, including
-    when the body raises.
+    The lock is a file created with O_CREAT|O_EXCL, so only one creator can succeed, and it
+    holds the creator's PID. A second caller retries every LOCK_POLL_SECONDS until `timeout`,
+    then raises SubIdLocked and leaves the other holder's file in place. An empty or unreadable
+    lock counts as held, because it may be a creator that has not written its PID yet. A lock
+    whose PID is gone (os.kill(pid, 0) raises ProcessLookupError) and whose file is at least
+    LOCK_STALE_SECONDS old is removed once, and the caller tries again. The file this call
+    created is removed on exit, including when the body raises.
     """
     lock = path.with_name(f"{path.name}.lock")
     deadline = time.monotonic() + timeout
+    reclaimed = False
     while True:
         try:
             fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
+            pid = _holder_pid(lock)
+            if pid is not None and not reclaimed and _is_stale(lock, pid):
+                lock.unlink(missing_ok=True)
+                reclaimed = True
+                continue
             if time.monotonic() >= deadline:
-                raise SubIdLocked(f"{lock} is held by another process") from None
+                holder = f" (pid {pid})" if pid is not None else ""
+                raise SubIdLocked(f"{lock} is held by another process{holder}") from None
             time.sleep(LOCK_POLL_SECONDS)
             continue
         break
-    os.close(fd)
     try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write(f"{os.getpid()}\n")
         yield
     finally:
         lock.unlink(missing_ok=True)
+
+
+def _holder_pid(lock: Path) -> int | None:
+    """Return the PID written in `lock`, or None when it is missing, empty or not a PID."""
+    try:
+        text = lock.read_text(encoding="ascii", errors="replace")
+    except FileNotFoundError:
+        return None
+    first = text.split("\n", 1)[0].strip()
+    if _DECIMAL.fullmatch(first) is None:
+        return None
+    pid = int(first)
+    return pid if 0 < pid <= _MAX_PID else None
+
+
+def _is_stale(lock: Path, pid: int) -> bool:
+    """True when `pid` no longer exists and `lock` is at least LOCK_STALE_SECONDS old."""
+    try:
+        age = time.time() - os.stat(lock).st_mtime
+    except FileNotFoundError:
+        return False
+    if age < LOCK_STALE_SECONDS:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        # The process exists but belongs to another user, so it is alive.
+        return False
+    return False
 
 
 def _append_line(before: bytes, line: bytes) -> bytes:

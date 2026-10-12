@@ -26,6 +26,7 @@ while [ ! -d "$SV_DIR" ]; do
     waited=$((waited + 1))
 done
 
-setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env mkdir -p "$LOG_DIR"
-exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \
+setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \
+mkdir -p "$LOG_DIR"
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \
 svlogd -tt "$LOG_DIR"

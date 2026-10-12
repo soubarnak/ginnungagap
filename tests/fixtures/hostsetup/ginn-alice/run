@@ -85,10 +85,11 @@ done
 # 5. Drop to the user and run its runit supervisor. setpriv sets the numeric ids and loads the
 # user's supplementary groups from the account database (video, render, kvm and so on). This
 # happens at each start of this service, so a group added later applies from the next start.
+# --inh-caps=-all clears the inheritable capabilities that root would otherwise pass on.
 # --reset-env clears the root environment, and env sets what the user's supervisor needs.
 # XDG_RUNTIME_DIR is kept because podman reads it for its rootless runtime directory, so podman
 # state lives in the user-owned 0700 directory and not under the /tmp fallback.
-exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \
 env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 XDG_STATE_HOME="$STATE_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_CONFIG_HOME="$CONFIG_HOME" \
 GINN_RUNTIME_DIR="$RUNTIME_DIR" runsvdir -P "$SV_DIR"

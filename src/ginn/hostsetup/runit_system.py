@@ -7,10 +7,12 @@ delegated cgroup leaf (the same writes as cgroups.delegate_user_tree, S-01), mov
 the supervisor leaf, waits for the user's state directory, then drops to the user and execs
 runsvdir. runsvdir is the process that stays resident, and NFR-001 allows it 1 MiB RSS.
 
-The drop uses `setpriv --reuid --regid --init-groups`, not `chpst -u user:group`. chpst drops every
-supplementary group, so realms would lose video, render, audio, input and kvm (/dev/kvm and GPU
-nodes). setpriv loads the user's groups from the account database each time this service starts,
-so a group added after Host Setup applies from the next start of the service.
+The drop uses `setpriv --reuid --regid --init-groups --inh-caps=-all`, not `chpst -u user:group`.
+chpst drops every supplementary group, so realms would lose video, render, audio, input and kvm
+(/dev/kvm and GPU nodes). setpriv loads the user's groups from the account database each time this
+service starts, so a group added after Host Setup applies from the next start of the service.
+`--inh-caps=-all` clears the inheritable set as well, as setpriv(1) advises when dropping from root.
+The bounding set is left alone, because the setuid newuidmap needs it.
 
 Every numeric value is rendered at setup time, and no group name is used. The scripts never look
 up accounts themselves (no getent). Each value is quoted with shlex.quote because the scripts run
@@ -393,10 +395,11 @@ printf '%s\\n' "$$" > @SUPERVISOR_CGROUP@/cgroup.procs
 # 5. Drop to the user and run its runit supervisor. setpriv sets the numeric ids and loads the
 # user's supplementary groups from the account database (video, render, kvm and so on). This
 # happens at each start of this service, so a group added later applies from the next start.
+# --inh-caps=-all clears the inheritable capabilities that root would otherwise pass on.
 # --reset-env clears the root environment, and env sets what the user's supervisor needs.
 # XDG_RUNTIME_DIR is kept because podman reads it for its rootless runtime directory, so podman
 # state lives in the user-owned 0700 directory and not under the /tmp fallback.
-exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \\
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \\
 env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \\
 XDG_STATE_HOME="$STATE_HOME" XDG_DATA_HOME="$DATA_HOME" XDG_CONFIG_HOME="$CONFIG_HOME" \\
 GINN_RUNTIME_DIR="$RUNTIME_DIR" runsvdir -P "$SV_DIR"
@@ -426,8 +429,9 @@ log() {
 """
     + _WAIT_BLOCK
     + """
-setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env mkdir -p "$LOG_DIR"
-exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env \\
+setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \\
+mkdir -p "$LOG_DIR"
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \\
 svlogd -tt "$LOG_DIR"
 """
 )

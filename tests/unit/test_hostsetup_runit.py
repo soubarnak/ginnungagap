@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """System runit service for the user's runsvdir: golden files, shell checks, install.
 
-Covers FR-001 (Host Setup writes the service, the delegated cgroup leaf and the pre-images that
-undo needs), FR-081 (the service is linked into var/service, where runit supervises it), and NFR-001
-(the resident supervisor is runsvdir). NFR-001's 1 MiB RSS and FR-084 (autostart at boot) need a
-booted runit host, so they are not proven here. These tests check the rendered script and the
-installed files only.
+Covers FR-001 (Host Setup writes the service and the delegated cgroup leaf), FR-003 (the
+pre-images that undo needs), FR-081 (the service is linked into var/service, where runit
+supervises it), and NFR-001 (the resident supervisor is runsvdir). NFR-001's 1 MiB RSS and FR-084
+(autostart at boot) need a booted runit host, so they are not proven here. These tests check the
+rendered script and the installed files only.
 """
 
 from __future__ import annotations
@@ -102,6 +102,17 @@ def test_run_moves_itself_into_the_supervisor_leaf_then_execs_setpriv_and_runsvd
     assert words[words.index("runsvdir") :] == ["runsvdir", "-P", "$SV_DIR"]
 
 
+def test_every_setpriv_drop_clears_the_inheritable_capabilities() -> None:
+    # setpriv(1): when dropping from root, --inh-caps=-all clears the inheritable set as well.
+    expected = {RUN: 1, LOG_RUN: 2}  # run: the exec drop; log/run: the mkdir drop and the exec drop
+    for name, count in expected.items():
+        joined = _alice()[name].replace("\\\n", " ")
+        drops = [line for line in joined.splitlines() if "setpriv --reuid" in line]
+        assert len(drops) == count, name
+        for line in drops:
+            assert "--inh-caps=-all" in shlex.split(line), name
+
+
 def test_no_service_script_drops_privileges_with_chpst() -> None:
     # chpst -u user:group keeps only the primary group. setpriv --init-groups keeps the rest.
     for name, text in _alice().items():
@@ -159,21 +170,24 @@ def test_run_does_no_account_lookup_of_its_own() -> None:
 def test_log_run_creates_the_directory_as_the_user_before_svlogd() -> None:
     script = _alice()[LOG_RUN]
     assert "LOG_DIR=/home/alice/.local/state/ginn/log/supervisor" in script
+    # The mkdir line is continued with a backslash, so compare it with the continuations joined.
+    flat = " ".join(script.replace("\\\n", " ").split())
     mkdir_line = (
-        'setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --reset-env '
+        'setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env '
         'mkdir -p "$LOG_DIR"'
     )
-    assert mkdir_line in script
+    assert mkdir_line in flat
     words = _exec_command(script)
-    assert words[:6] == [
+    assert words[:7] == [
         "exec",
         "setpriv",
         "--reuid=$UID_NUM",
         "--regid=$GID_NUM",
         "--init-groups",
+        "--inh-caps=-all",
         "--reset-env",
     ]
-    assert words[6:] == ["svlogd", "-tt", "$LOG_DIR"]
+    assert words[7:] == ["svlogd", "-tt", "$LOG_DIR"]
 
 
 def test_finish_only_exits_zero() -> None:
@@ -273,7 +287,7 @@ def test_install_rewrites_only_a_file_whose_content_changed(tmp_path: Path) -> N
     assert plan == InstallPlan(replaced=[finish], pre_images={finish: before})
 
 
-@pytest.mark.fr("FR-001")
+@pytest.mark.fr("FR-003")
 def test_install_records_the_old_bytes_of_a_script_it_replaces(tmp_path: Path) -> None:
     sv = tmp_path / "etc" / "sv" / "ginn-alice"
     sv.mkdir(parents=True)
@@ -286,7 +300,7 @@ def test_install_records_the_old_bytes_of_a_script_it_replaces(tmp_path: Path) -
     assert (sv / "run").stat().st_mode & 0o777 == 0o755
 
 
-@pytest.mark.fr("FR-001")
+@pytest.mark.fr("FR-003")
 def test_install_repoints_a_link_and_records_the_old_target(tmp_path: Path) -> None:
     service = tmp_path / "var" / "service"
     service.mkdir(parents=True)

@@ -418,9 +418,39 @@ cmd_final() {
   log "S-07d final finished"
 }
 
+# spike_path_ok PATH: teardown may only remove this spike's own storage. PATH must be absolute and
+# not a symlink, must have a path component that starts with ginn-spike-s07d, must not contain . or
+# .. components, and must not be $HOME, an ancestor of $HOME, or /.
+spike_path_ok() {
+  local path="$1" part hit=0
+  local -a parts=()
+  [[ $path == /* ]] || return 1
+  if [[ -L $path ]]; then return 1; fi
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      . | ..) return 1 ;;
+      ginn-spike-s07d*) hit=1 ;;
+    esac
+  done
+  (( hit )) || return 1
+  local home="${HOME%/}"
+  [[ -n $home && $path != "$home" && $home != "$path"/* ]] || return 1
+  return 0
+}
+
+# guard_spike_paths PATH...: stop before any teardown step runs if a path is not the spike's own.
+guard_spike_paths() {
+  local p
+  for p in "$@"; do
+    spike_path_ok "$p" || die "refusing teardown of $p: not an absolute, non-symlink ginn-spike-s07d path, and not \$HOME or above it"
+  done
+}
+
 # teardown: containers, images and spike storage under the explicit --root. Logs in
 # GINN_SPIKE_OUT stay for the record.
 cmd_teardown() {
+  guard_spike_paths "$ROOT_DIR" "$RUN_DIR"
   # Only the spike's own --root, --runroot and --tmpdir. Never the shared libpod tmpdir.
   "${PM[@]}" rm -af >/dev/null 2>&1 || true
   echo "teardown: containers left under spike roots: $("${PM[@]}" ps -aq 2>/dev/null | wc -l)"
@@ -429,12 +459,19 @@ cmd_teardown() {
   # podman's storage init bind-mounts $ROOT_DIR/overlay onto itself inside the unshare
   # namespace, so rm -rf there fails with EBUSY. What remains is removed directly only when
   # every entry is owned by this user (no subordinate-ID files, so no layer data).
-  if [[ -e $ROOT_DIR || -e $RUN_DIR ]] \
-    && [[ -z "$(find "$ROOT_DIR" "$RUN_DIR" ! -user "$(id -un)" 2>/dev/null)" ]]; then
-    rm -rf "$ROOT_DIR" "$RUN_DIR"
+  local -a existing=()
+  local foreign parent
+  if [[ -e $ROOT_DIR ]]; then existing+=("$ROOT_DIR"); fi
+  if [[ -e $RUN_DIR ]]; then existing+=("$RUN_DIR"); fi
+  if (( ${#existing[@]} > 0 )); then
+    foreign="$(find "${existing[@]}" ! -user "$(id -un)")" || die "find failed under the spike roots; nothing removed"
+    if [[ -z $foreign ]]; then
+      rm -rf -- "${existing[@]}"
+    fi
   fi
   if [[ -e $ROOT_DIR || -e $RUN_DIR ]]; then die "spike storage left behind: $ROOT_DIR $RUN_DIR"; fi
-  rmdir "$(dirname "$ROOT_DIR")" 2>/dev/null || true
+  parent="$(dirname "$ROOT_DIR")"
+  if spike_path_ok "$parent"; then rmdir "$parent" 2>/dev/null || true; fi
   echo "teardown: removed $ROOT_DIR and $RUN_DIR"
 }
 
