@@ -57,18 +57,20 @@ jobs:
           python-version: "3.12"
       - name: Scan the source against the reference sources
         env:
-          # TODO(T0.9b follow-up): add a shell-era pin for the second reference. Its upstream
-          # publishes no tags, so a human must choose a commit SHA first (docs/provenance.md).
-          PROVENANCE_REPOS: "https://github.com/89luca89/distrobox https://github.com/anatase-org/spaces"
+          # TODO(T0.9c follow-up): pin the second reference to a commit SHA once a human chooses
+          # one. Its upstream publishes no tags (docs/provenance.md).
+          # The last entry pins the first reference to its shell-era tag 1.8.2.5.
+          PROVENANCE_REPOS: "https://github.com/89luca89/distrobox https://github.com/anatase-org/spaces https://github.com/89luca89/distrobox@1.8.2.5"
           PROVENANCE_REPORT_DIR: ${{ runner.temp }}/provenance-report
         run: bash tools/provenance-scan.sh
-      - name: Upload the provenance report
-        # The report shows reference code. It is for human triage only (docs/provenance.md).
+      - name: Upload the provenance table
+        # Only table.txt (numbers and paths) is uploaded. report.html shows reference code and is
+        # never uploaded (docs/provenance.md).
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: provenance-report
-          path: ${{ runner.temp }}/provenance-report
+          path: ${{ runner.temp }}/provenance-report/table.txt
           if-no-files-found: warn
 
   package:

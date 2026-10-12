@@ -7,9 +7,18 @@ The provenance scan checks that ginn source does not copy code from the referenc
 1. Clones each entry of `PROVENANCE_REPOS` at depth 1 into a temporary directory, which is removed when the script exits. An entry is `URL` or `URL@REF`. Only `https://` URLs without credentials are accepted. `REF` is a branch, tag or commit SHA. Without `REF` the default branch is scanned. The script prints the resolved commit of each reference.
 2. Copies each extensionless file whose first line starts with `#!/bin/sh`, `#!/usr/bin/env sh`, `#!/bin/bash` or `#!/usr/bin/env bash` to `NAME.sh` beside it, so that shell scripts without an extension are scanned too. The original file is kept.
 3. Compares every `.py`, `.sh`, `.c` and `.h` file under `src`, `tools`, `tests`, `packaging` and `native` (directories that do not exist are skipped) with the files of every reference. It uses copydetect 0.5.0 with `--noise-threshold 25` and `--guarantee-threshold 30`. Noise threshold: copied runs shorter than 25 tokens are ignored. Guarantee threshold: copied runs of at least 30 tokens are always found.
-4. Prints a table with one row per scanned file, and applies the gate. When `PROVENANCE_REPORT_DIR` is set, the table is also written to `table.txt` and the HTML report to `report.html` in that directory. Without it, the report is discarded when the script exits.
+4. Runs step 3 once for each seed in `PROVENANCE_SEEDS`, default `0,1,2,3`. Each run is a separate Python process with `PYTHONHASHSEED` set to its seed. copydetect fingerprints k-grams with Python's `hash()`, which varies between processes unless the seed is fixed. Each (file, reference) pair takes its maximum similarity and its maximum token count over the seeds. The two maxima are taken separately.
+5. Prints a table with one row per scanned file, and applies the gate. When `PROVENANCE_REPORT_DIR` is set, the table is also written to `table.txt` in that directory.
+
+`PROVENANCE_SEEDS` takes comma-separated integers from 0 to 4294967295, with no leading zeros and no repeats. Any other value exits with status 2. A larger seed set can only raise the numbers in the table, never lower them.
+
+## Determinism
+
+With the same seeds, the same reference commits and the same tree, two runs produce the same `table.txt`. The table does not depend on the order in which copydetect returns its pairs: ties on similarity and tokens resolve by reference label. The resolved reference commits are printed on stdout, not written to the table, so that the table diffs only when the detection changes.
 
 ## The table
+
+The first line of the table names the seed set, for example `seeds: PYTHONHASHSEED=0,1,2,3 (maximum over the seeds, per file and reference pair)`. The second line is the column header.
 
 | Column | Meaning |
 |---|---|
@@ -27,7 +36,9 @@ A file fails the gate when any one of its reference pairs has similarity at leas
 
 The gate is calibrated this way because any non-zero similarity is noise. Common idioms, such as an entry point that calls `main()`, match at low similarity over a few tokens. A copied function or module is a long run at high similarity.
 
-Exit status: `0` when no file fails, `1` when a file fails, `2` for a configuration error such as a malformed allowlist or an invalid `PROVENANCE_REPOS` entry.
+The gate runs on the merged maxima over the seeds. The thresholds are not seed-dependent.
+
+Exit status: `0` when no file fails, `1` when a file fails, `2` for a configuration error such as a malformed allowlist, an invalid `PROVENANCE_REPOS` entry or an invalid `PROVENANCE_SEEDS`.
 
 ## The allowlist
 
@@ -48,27 +59,38 @@ An entry only exempts a file from failing. The file still appears in the table, 
 A failing file fails the CI job. Triage works like this:
 
 1. The table row gives the file, the similarity, the matched tokens and the reference path. Those are numbers and paths, so they are safe to read in logs and by agents.
-2. A human downloads the `provenance-report` artifact from the CI run, or runs the scan locally with `PROVENANCE_REPORT_DIR` set. The human opens `report.html` outside this repository. The HTML report shows the matched code on both sides. Keep the report out of the repository and do not publish it.
+2. A human reads the matched code locally. CI does not provide it. Run the scan with `PROVENANCE_HTML_DIR` set to a directory outside the checkout. The script writes one `report-seed-N.html` per seed. Each file shows the matches of that seed. Every match the gate counts appears in at least one of these files. Open the files outside this repository. They show the matched code on both sides. Do not commit them and do not publish them. Delete them when triage is finished.
 3. The human decides:
    - **Copied code.** Rewrite the code from the SRS and public specifications, then run the scan again. Do not allowlist it.
    - **False positive or accepted idiom.** Add an allowlist entry with the reason, the reviewer's name and the date. Commit it in the same change as the code it covers.
 4. Agents never read reference sources or the HTML report. An agent may read `table.txt`, fix code that the table flags, and run the scan. An agent must not add allowlist entries. Only a human reviewer adds them.
-5. Delete the local report when triage is finished.
 
 ## CI
 
 The `provenance` job:
 
 - runs `tools/provenance-scan.sh` with `PROVENANCE_REPOS` set in the job environment and `PROVENANCE_REPORT_DIR` set to a directory outside the checkout
-- uploads that directory as the `provenance-report` artifact, even when the gate fails
+- never sets `PROVENANCE_HTML_DIR`, so no HTML report is produced in CI
+- uploads only `table.txt` as the `provenance-report` artifact, even when the gate fails
 
-The CI default scans both references at their default branch HEAD. A shell-era pin for the second reference is still pending. Its upstream publishes no tags, so a human must choose a commit SHA before it can be added. Until then, the scan covers that reference only at HEAD.
+The CI default `PROVENANCE_REPOS` scans three entries:
+
+| Reference | Entry | Scanned at |
+|---|---|---|
+| `ref-1` | the first reference | default branch HEAD |
+| `ref-2` | the second reference | default branch HEAD |
+| `ref-3` | the first reference, shell-era tag `1.8.2.5` | commit `40c3cd724faa434aeb0a23e28776665b92de68bd` |
+
+The pin for `ref-3` is the highest `1.8.x` tag the first reference publishes, as listed by `git ls-remote --tags`. The tag is lightweight, so the commit above is the tag target. Check the pin against the `reference: ... at <commit>` line the scan prints. Changing a pin is a reviewed change to `ci.yaml` and to the occurrence count in `tests/unit/test_repo_hygiene.py`.
+
+The second reference publishes no tags, so it is scanned at HEAD. A pin needs a commit SHA chosen by a human first. Until then the scan covers that reference only at HEAD.
 
 ## Run locally
 
 ```sh
 PROVENANCE_REPOS="<reference-url>[@REF] <reference-url>[@REF]" \
-    PROVENANCE_REPORT_DIR="$HOME/provenance-report" tools/provenance-scan.sh
+    PROVENANCE_REPORT_DIR="$HOME/provenance-table" \
+    PROVENANCE_HTML_DIR="$HOME/provenance-html" tools/provenance-scan.sh
 ```
 
-Set `TMPDIR` to choose where the clones are written. They are removed when the script exits. A run needs network access to clone the references and to install copydetect into a temporary virtual environment.
+Set `TMPDIR` to choose where the clones are written. They are removed when the script exits. A run needs network access to clone the references and to install copydetect into a temporary virtual environment. The script needs Python 3.11 or later for `tomllib`. CI uses 3.12.

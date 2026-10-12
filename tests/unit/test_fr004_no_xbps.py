@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 SHIM_DIR = REPO / "tests" / "shims" / "xbps-fail"
 SHIM = SHIM_DIR / "xbps-install"
 LOG_DIR_ENV = "GINN_XBPS_SHIM_LOG_DIR"
-CALL_FILE = re.compile(r"\d+-\d+\.log")
+CALL_FILE = re.compile(r"[0-9]+-[0-9]+\.log")
 
 
 def _run_shim(

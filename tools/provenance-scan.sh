@@ -10,8 +10,13 @@
 #                               Append @REF (branch, tag or commit SHA) to pin a reference;
 #                               without it the remote HEAD is scanned. Each resolved commit is
 #                               printed.
-#   PROVENANCE_REPORT_DIR       optional. Copy table.txt and report.html into this directory.
-#                               report.html shows reference code: never commit it or publish it.
+#   PROVENANCE_SEEDS            optional, default 0,1,2,3. Comma-separated PYTHONHASHSEED values,
+#                               each 0 to 4294967295. The detection runs once per seed; the
+#                               table keeps the maximum similarity and token count per pair.
+#   PROVENANCE_REPORT_DIR       optional. Receives table.txt only (numbers and paths). CI sets it.
+#   PROVENANCE_HTML_DIR         optional. Receives report-seed-N.html, one per seed, each showing
+#                               the matches of that seed. The HTML shows reference code: keep it
+#                               outside the checkout, never set it in CI, never upload it.
 #   PROVENANCE_FAIL_SIMILARITY  gate similarity, default 0.30
 #   PROVENANCE_MIN_TOKENS       gate matched tokens, default 60
 #
@@ -26,21 +31,43 @@ SCAN_EXTENSIONS=py,sh,c,h
 SCAN_DIRS=(src tools tests packaging native)
 FAIL_SIMILARITY=${PROVENANCE_FAIL_SIMILARITY:-0.30}
 MIN_TOKENS=${PROVENANCE_MIN_TOKENS:-60}
+SEEDS_TEXT=${PROVENANCE_SEEDS:-0,1,2,3}
 ALLOWLIST=docs/provenance-allowlist.toml
 
 url_pattern='^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+$'
 ref_pattern='^[A-Za-z0-9._/-]+$'
 shell_shebang='^#!(/bin/sh|/bin/bash|/usr/bin/env (sh|bash))([[:space:]]|$)'
+seed_pattern='^(0|[1-9][0-9]{0,9})(,(0|[1-9][0-9]{0,9}))*$'
 
 die() {
     echo "provenance-scan: $*" >&2
     exit 2
 }
 
-repo_root=$(cd "$(dirname "$0")/.." && pwd)
+repo_root=$(cd "$(dirname "$0")/.." && pwd -P)
 scratch=$(mktemp -d)
 trap 'rm -rf -- "$scratch"' EXIT
 export GIT_TERMINAL_PROMPT=0
+
+# Seeds: PYTHONHASHSEED accepts 0 to 4294967295. Leading zeros are refused so that each seed has
+# one spelling, and the seed set in the table header stays exact.
+[[ "$SEEDS_TEXT" =~ $seed_pattern ]] \
+    || die "PROVENANCE_SEEDS must be a comma-separated list of integers, for example 0,1,2,3"
+IFS=, read -r -a seeds <<<"$SEEDS_TEXT"
+for seed in "${seeds[@]}"; do
+    (( seed <= 4294967295 )) || die "PROVENANCE_SEEDS value out of range (0 to 4294967295): $seed"
+done
+duplicate_seeds=$(printf '%s\n' "${seeds[@]}" | sort | uniq -d)
+[ -z "$duplicate_seeds" ] || die "PROVENANCE_SEEDS repeats a seed: $duplicate_seeds"
+
+# The HTML report goes outside the checkout, so that it can never be committed by accident.
+html_dir=""
+if [ -n "${PROVENANCE_HTML_DIR:-}" ]; then
+    html_dir=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PROVENANCE_HTML_DIR")
+    case "$html_dir/" in
+        "$repo_root/"*) die "PROVENANCE_HTML_DIR must lie outside the repository: $html_dir" ;;
+    esac
+fi
 
 # Copy each extensionless shell script to NAME.sh beside it, so that the scanner sees it.
 # Only the first line is read, to recognise the interpreter.
@@ -103,26 +130,94 @@ python3 -m venv "$scratch/venv"
 "$scratch/venv/bin/python" -m pip install --quiet --disable-pip-version-check \
     "copydetect==$COPYDETECT_VERSION"
 
+# The Python code lives in its own directory, apart from the clones and the venv.
+code_dir="$scratch/code"
+pairs_dir="$scratch/pairs"
+html_scratch="$scratch/html"
 report_dir="$scratch/report"
-mkdir -p "$report_dir"
-status=0
-# The Python API returns the matched pairs directly. Only pairs whose reference side lies
-# under $scratch/ref-* count; test-versus-test pairs inside this repository are not provenance.
-# The highlighted code in each result row is never read or printed.
-"$scratch/venv/bin/python" - "$scratch" "$report_dir" "$repo_root" "$NOISE_THRESHOLD" \
-    "$GUARANTEE_THRESHOLD" "$DISPLAY_THRESHOLD" "$SCAN_EXTENSIONS" "$FAIL_SIMILARITY" \
-    "$MIN_TOKENS" "$repo_root/$ALLOWLIST" "${test_dirs[@]}" <<'PY' || status=$?
+mkdir -p "$code_dir" "$pairs_dir" "$html_scratch" "$report_dir"
+
+# One detection run per seed. The seed reaches copydetect only through PYTHONHASHSEED, which
+# Python reads at interpreter start, so each seed needs its own process. The Python API returns
+# the matched pairs directly. The highlighted code in each result row is never read or printed.
+cat >"$code_dir/detect.py" <<'PY'
 import glob
+import json
+import os
+import sys
+
+from copydetect import CopyDetector
+
+(scratch, noise, guarantee, display, extensions, html_path, out_path, *test_dirs) = sys.argv[1:]
+
+ref_dirs = sorted(
+    (os.path.realpath(path) for path in glob.glob(os.path.join(scratch, "ref-*"))),
+    key=lambda path: int(os.path.basename(path).split("-", 1)[1]),
+)
+
+
+def reference_label(path):
+    real = os.path.realpath(path)
+    for index, ref_root in enumerate(ref_dirs, start=1):
+        if real.startswith(ref_root + os.sep):
+            return f"ref-{index}:" + os.path.relpath(real, ref_root)
+    return None
+
+
+detector = CopyDetector(
+    test_dirs=list(test_dirs),
+    ref_dirs=ref_dirs,
+    extensions=extensions.split(","),
+    noise_t=int(noise),
+    guarantee_t=int(guarantee),
+    display_t=float(display),
+    autoopen=False,
+    silent=True,
+    out_file=html_path or os.path.join(scratch, "unused.html"),
+)
+detector.run()
+if html_path:
+    detector.generate_html_report()
+
+# Only pairs whose reference side lies under a ref-N directory count. Test-versus-test pairs
+# inside this repository are not provenance. Row layout: [test sim, ref sim, test path,
+# ref path, highlighted test code, highlighted ref code, overlapping tokens].
+rows = []
+for row in detector.get_copied_code_list():
+    label = reference_label(row[3])
+    if label is None:
+        continue
+    similarity = max(float(row[0]), float(row[1]))
+    rows.append([os.path.realpath(row[2]), label, similarity, int(row[6])])
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle)
+PY
+
+for seed in "${seeds[@]}"; do
+    html_out=""
+    if [ -n "$html_dir" ]; then
+        html_out="$html_scratch/report-seed-$seed.html"
+    fi
+    PYTHONHASHSEED="$seed" "$scratch/venv/bin/python" "$code_dir/detect.py" "$scratch" \
+        "$NOISE_THRESHOLD" "$GUARANTEE_THRESHOLD" "$DISPLAY_THRESHOLD" "$SCAN_EXTENSIONS" \
+        "$html_out" "$pairs_dir/seed-$seed.json" "${test_dirs[@]}" \
+        || die "detection failed for PYTHONHASHSEED=$seed"
+done
+
+# Merge the seeds and apply the gate. Each pair takes its maximum similarity and its maximum
+# token count over the seeds, independently; the gate then runs on the merged pairs.
+cat >"$code_dir/gate.py" <<'PY'
+import glob
+import json
 import os
 import sys
 import tomllib
 
-from copydetect import CopyDetector
-
 REQUIRED_KEYS = ("path", "reason", "reviewed_by", "date")
 
-(scratch, report_dir, root, noise, guarantee, display, extensions,
- fail_similarity_text, min_tokens_text, allowlist_path, *test_dirs) = sys.argv[1:]
+(scratch, out_path, root, fail_similarity_text, min_tokens_text, allowlist_path,
+ extensions, seeds_text, *test_dirs) = sys.argv[1:]
+seeds = seeds_text.split(",")
 
 
 def fail(message):
@@ -161,20 +256,14 @@ def scanned_files(dirs, suffixes):
     return sorted(found)
 
 
-def reference_label(path):
-    real = os.path.realpath(path)
-    for index, ref_root in enumerate(ref_roots, start=1):
-        if real.startswith(ref_root + os.sep):
-            return f"ref-{index}:" + os.path.relpath(real, ref_root)
-    return None
-
-
 def render(rows):
     file_width = max([len("FILE")] + [len(r["file"]) for r in rows])
     ref_width = max([len("REFERENCE")] + [len(r["ref"]) for r in rows])
     lines = [
+        "seeds: PYTHONHASHSEED=" + ",".join(seeds)
+        + " (maximum over the seeds, per file and reference pair)",
         f"{'FILE':<{file_width}}  {'SIMILARITY':>10}  {'REFERENCE':<{ref_width}}  "
-        f"{'TOKENS':>6}  GATE"
+        f"{'TOKENS':>6}  GATE",
     ]
     for r in rows:
         lines.append(
@@ -189,39 +278,31 @@ min_tokens = int(min_tokens_text)
 suffixes = {"." + ext for ext in extensions.split(",")}
 root = os.path.realpath(root)
 allowed = load_allowlist(allowlist_path)
-ref_dirs = [os.path.realpath(path) for path in glob.glob(os.path.join(scratch, "ref-*"))]
-ref_dirs.sort(key=lambda path: int(os.path.basename(path).split("-", 1)[1]))
-ref_roots = ref_dirs
-
-detector = CopyDetector(
-    test_dirs=list(test_dirs),
-    ref_dirs=ref_dirs,
-    extensions=extensions.split(","),
-    noise_t=int(noise),
-    guarantee_t=int(guarantee),
-    display_t=float(display),
-    autoopen=False,
-    silent=True,
-    out_file=os.path.join(report_dir, "report.html"),
+ref_roots = sorted(
+    glob.glob(os.path.join(scratch, "ref-*")),
+    key=lambda path: int(os.path.basename(path).split("-", 1)[1]),
 )
-detector.run()
-detector.generate_html_report()
 
-# Per test file: every reference pair as (similarity, matched tokens, reference label).
-# Similarity is the larger of the two copied fractions of the pair. Matched tokens are the
-# test file's tokens covered by copied fragments of that pair (copydetect's token count).
+merged = {}
+for seed in seeds:
+    with open(os.path.join(scratch, "pairs", f"seed-{seed}.json"), encoding="utf-8") as handle:
+        for path, label, similarity, tokens in json.load(handle):
+            current = merged.get((path, label))
+            if current is None:
+                merged[(path, label)] = [similarity, tokens]
+            else:
+                current[0] = max(current[0], similarity)
+                current[1] = max(current[1], tokens)
+
 pairs = {}
-for row in detector.get_copied_code_list():
-    label = reference_label(row[3])
-    if label is None:
-        continue
-    similarity = max(float(row[0]), float(row[1]))
-    pairs.setdefault(os.path.realpath(row[2]), []).append((similarity, int(row[6]), label))
+for (path, label), (similarity, tokens) in merged.items():
+    pairs.setdefault(path, []).append((similarity, tokens, label))
 
 rows = []
 for path in scanned_files(test_dirs, suffixes):
     rel = os.path.relpath(path, root)
-    matches = pairs.get(path, [])
+    # Sorted by label, so that ties on similarity and tokens resolve the same way on every run.
+    matches = sorted(pairs.get(path, []), key=lambda m: m[2])
     best = max(matches, key=lambda m: (m[0], m[1]), default=(0.0, 0, "-"))
     over = [m for m in matches if m[0] >= fail_similarity and m[1] >= min_tokens]
     if over and rel in allowed:
@@ -242,7 +323,7 @@ for path in scanned_files(test_dirs, suffixes):
 rows.sort(key=lambda r: (-r["sim"], r["file"]))
 
 table = render(rows)
-with open(os.path.join(report_dir, "table.txt"), "w", encoding="utf-8") as handle:
+with open(out_path, "w", encoding="utf-8") as handle:
     handle.write(table)
 sys.stdout.write(table)
 print(
@@ -268,15 +349,21 @@ for r in failed:
 sys.exit(1 if failed else 0)
 PY
 
-if [ -n "${PROVENANCE_REPORT_DIR:-}" ]; then
+status=0
+"$scratch/venv/bin/python" "$code_dir/gate.py" "$scratch" "$report_dir/table.txt" "$repo_root" \
+    "$FAIL_SIMILARITY" "$MIN_TOKENS" "$repo_root/$ALLOWLIST" "$SCAN_EXTENSIONS" "$SEEDS_TEXT" \
+    "${test_dirs[@]}" || status=$?
+
+# The report directory receives table.txt and nothing else. The HTML files are never copied there.
+if [ -n "${PROVENANCE_REPORT_DIR:-}" ] && [ -f "$report_dir/table.txt" ]; then
     mkdir -p -- "$PROVENANCE_REPORT_DIR"
-    for name in table.txt report.html; do
-        if [ -f "$report_dir/$name" ]; then
-            cp -- "$report_dir/$name" "$PROVENANCE_REPORT_DIR/"
-        fi
-    done
+    cp -- "$report_dir/table.txt" "$PROVENANCE_REPORT_DIR/table.txt"
     echo "report: $PROVENANCE_REPORT_DIR/table.txt (numbers and paths)"
-    echo "report: $PROVENANCE_REPORT_DIR/report.html (shows reference code; human triage only)"
+fi
+if [ -n "$html_dir" ]; then
+    mkdir -p -- "$html_dir"
+    cp -- "$html_scratch"/report-seed-*.html "$html_dir/"
+    echo "html: $html_dir (shows reference code; local human triage only, never upload)"
 fi
 if [ "$status" -ne 0 ]; then
     echo "provenance scan FAILED (status $status)" >&2
