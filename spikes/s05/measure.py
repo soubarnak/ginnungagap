@@ -230,8 +230,29 @@ def summarize(args):
                   f"{fmt(statistics.median(vals))}\t{fmt(min(vals))}\t{fmt(max(vals))}")
 
 
+def split(paths):
+    """RssAnon, RssFile and RssShmem per realm and pause, read from saved raw JSON (one TSV row each).
+
+    RssFile can fall under memory pressure without any swap (reclaimed file pages leave RSS), so the
+    split shows which rows lost file-backed RSS. RssAnon is the part that does not move with reclaim.
+    """
+    print("raw\trealm_rss_kib\trealm_anon_kib\trealm_file_kib\trealm_shmem_kib\tpause_rss_kib"
+          "\tpause_anon_kib\tpause_file_kib")
+    for path in paths:
+        with open(path) as fh:
+            procs = json.load(fh)["procs"]
+        realm = [p for p in procs if p["role"] != "pause"]
+        pause = [p for p in procs if p["role"] == "pause"]
+        fields = [sum(p["rss_kib"] for p in realm), sum(p["anon_kib"] for p in realm),
+                  sum(p["file_kib"] for p in realm), sum(p["shmem_kib"] for p in realm),
+                  sum(p["rss_kib"] for p in pause), sum(p["anon_kib"] for p in pause),
+                  sum(p["file_kib"] for p in pause)]
+        print("\t".join([os.path.basename(path)] + [str(v) for v in fields]))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("--split-raw", nargs="*", default=None)
     ap.add_argument("--conmon", type=int)
     ap.add_argument("--init", type=int)
     ap.add_argument("--pause-file", default="")
@@ -245,7 +266,9 @@ def main():
     ap.add_argument("--summarize", default="")
     ap.add_argument("--sweep", default="")
     args = ap.parse_args()
-    if args.pss_only is not None:
+    if args.split_raw is not None:
+        split(args.split_raw)
+    elif args.pss_only is not None:
         print(json.dumps({str(p): _pss_direct(p) for p in args.pss_only}))
     elif args.summarize:
         if not args.sweep:

@@ -3,7 +3,8 @@
 #
 # settle_realm NAME LIMIT_S
 #   Poll the systemd manager inside container NAME until `systemctl is-system-running` reports
-#   running, degraded or maintenance, or until LIMIT_S seconds have passed. Each poll is a
+#   running or degraded, or until LIMIT_S seconds have passed (maintenance is not a settled
+#   state for these runs). Each poll is a
 #   podman exec through pm, bounded to 10 s. A non-zero exit from systemctl is not an error:
 #   degraded exits 1. The state and the failed-unit count are read only after the poll ends,
 #   so the row never records a state read before the bus was up.
@@ -16,7 +17,7 @@ settle_realm() {
     st=$(PM_TIMEOUT=10 pm exec "$name" systemctl is-system-running 2>/dev/null || true)
     st=${st%%$'\n'*}
     case $st in
-      running|degraded|maintenance) settle=ok; break ;;
+      running|degraded) settle=ok; break ;;
     esac
     now=$(date +%s.%N)
     if awk -v a="$t0" -v b="$now" -v l="$limit" 'BEGIN {exit !(b - a >= l)}'; then

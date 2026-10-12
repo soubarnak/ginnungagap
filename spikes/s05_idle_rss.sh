@@ -11,9 +11,12 @@
 #   prepare          pull the base image, build the services-on images (base, ab), probe --init
 #   new-sweep        start a sweep id; rows carry it, and summary reads only the current one
 #   off              services-off sweep: RUNS realms, WINDOW seconds idle each
-#   on-trial CFG     one services-on start (base|abd): podman result and settle, no sample
-#   on CFG           services-on sweep (base|abd); needs this process inside /ginn/<uid>/
-#   summary          median, min and max per config for the current sweep id
+#   on-trial CFG     one services-on start (base|abd) under the launch leaf: podman result and
+#                    settle; it gates the sweeps (passes only when settled with 0 failed units)
+#   on CFG           services-on sweep (base|abd); needs the launcher inside s05r-launch
+#   on-leg           the whole services-on leg: the launcher moves itself into s05r-launch (the
+#                    one root write), then check, prepare, trial, on base, on abd, teardown
+#   summary [SWEEP]  median, min and max per config for SWEEP (default: the current sweep id)
 #   nfr001           list catatonit, conmon, podman and crun processes, tagged by environ
 #   teardown         remove containers, images, storage, the spike pause and the spike XDG dir
 #
@@ -87,6 +90,11 @@ NA_ROW=$'-\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-'
 TSV_HEADER=$'sweep_id\tcfg\trun\tstatus\timage\tsettle\tboot_s\tstate\tfailed_units\tconmon_rss_kib\trealm_rss_kib\tpause_rss_kib\ttotal_rss_kib\trealm_pss_kib\tpause_pss_kib\ttotal_pss_kib\tnproc_container\tswap_kib\tpss_missing\tpause_pid'
 TRIAL_HEADER=$'cfg\toutcome\tsettle\tboot_s\tstate\tfailed_units\tdetail'
 MEM_HEADER=$'sweep_id\tcfg\trun\ttime\tMemAvailable_kB\tpsi_memory_some_avg10\tpsi_memory_full_avg10'
+ONSAMPLE_HEADER=$'sweep_id\tcfg\tattempt\ttime\tMemAvailable_kB\tpsi_some_avg10\tpsi_full_avg10\trealm_vmswap_kib\twindow_ok\twindow_min_MemAvailable_kB\twindow_max_psi_some\tstatus'
+# Services-on memory gate, checked before each run and every 10 s in its idle window.
+MEM_MIN_KIB=1572864     # 1.5 GiB of MemAvailable
+PSI_MAX=1.0             # /proc/pressure/memory some avg10 must stay below this
+GATE_TIMEOUT_S=900      # wait at most 15 min for the gate, re-check every 30 s
 ON_TAG=
 ON_FLAGS=()
 
@@ -104,6 +112,13 @@ init_out() {
   [[ -f $OUT/trial.tsv ]] || printf '%s\n' "$TRIAL_HEADER" > "$OUT/trial.tsv"
   [[ -f $OUT/images.tsv ]] || : > "$OUT/images.tsv"
   [[ -f $OUT/mem.tsv ]] || printf '%s\n' "$MEM_HEADER" > "$OUT/mem.tsv"
+  [[ -f $OUT/on-samples.tsv ]] || printf '%s\n' "$ONSAMPLE_HEADER" > "$OUT/on-samples.tsv"
+}
+
+# root_log ARGV...: one line per root command: timestamp, launcher pid, argv
+root_log() {
+  mkdir -p "$OUT"
+  printf '%s\tpid=%s\t%s\n' "$(date -Is)" "$BASHPID" "$*" >> "$OUT/root-commands.log"
 }
 
 # record_mem SWEEP CFG RUN: host memory at the sample time, one row in mem.tsv. Memory
@@ -184,11 +199,109 @@ rm_spike_tree() {
   fi
 }
 
-# self_in_launch_leaf: this process is inside /ginn/<uid>/..., so child realms can be placed there
+# self_in_launch_leaf: this launcher subshell is inside /ginn/<uid>/..., so child realms can be
+# placed there. $BASHPID, not $$: inside a subshell $$ is the parent's pid.
 self_in_launch_leaf() {
   local path
-  path=$(awk -F: '$1 == 0 {print $3}' "/proc/$$/cgroup")
+  path=$(sed -n 's/^0:://p' "/proc/$BASHPID/cgroup")
   [[ $path == "$CG_LEAF_BASE"/* ]]
+}
+
+# move_self_into_leaf LEAF: the only root write in this script. It moves this launcher subshell
+# (pid $BASHPID, checked to carry the spike XDG dir) into a spike-owned s05r- leaf under
+# /sys/fs/cgroup/ginn/<uid>/, through the allowed form sudo sh -c 'echo <pid> > .../cgroup.procs'.
+# Then it is the gate: podman starts only after /proc/$BASHPID/cgroup shows the leaf.
+move_self_into_leaf() {
+  local leaf=$1 me=$BASHPID i cur=""
+  case $leaf in
+    "$CG_DIR_BASE"/s05r-*) ;;
+    *) die "refusing root move into $leaf: not an s05r- leaf under $CG_DIR_BASE" ;;
+  esac
+  [[ $me =~ ^[0-9]+$ ]] || die "launcher pid '$me' is not numeric"
+  env_has_xdg "$me" || die "launcher $me does not carry XDG_RUNTIME_DIR=$SPIKE_XRD; not moved"
+  root_log "sudo sh -c 'echo $me > $leaf/cgroup.procs'"
+  if ! sudo sh -c "echo $me > $leaf/cgroup.procs"; then
+    root_log "  rc=1 root move failed"
+    die "root move of launcher $me into $leaf failed"
+  fi
+  root_log "  rc=0"
+  for (( i = 0; i < 20; i++ )); do
+    cur=$(sed -n 's/^0:://p' "/proc/$me/cgroup")
+    if [[ $cur == "$CG_LEAF_BASE/${leaf##*/}" ]]; then
+      log "gate open: launcher $me in $cur"
+      return 0
+    fi
+    sleep 0.5
+  done
+  die "gate timeout: launcher $me still in '$cur', expected $CG_LEAF_BASE/${leaf##*/}"
+}
+
+# mem_line: "MemAvailable_kB psi_some_avg10 psi_full_avg10" from the host now
+mem_line() {
+  local avail some full
+  avail=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+  some=$(awk '$1 == "some" {sub("avg10=", "", $2); print $2}' /proc/pressure/memory)
+  full=$(awk '$1 == "full" {sub("avg10=", "", $2); print $2}' /proc/pressure/memory)
+  printf '%s %s %s\n' "$avail" "${some:-na}" "${full:-na}"
+}
+
+# gate_open LINE: true when MemAvailable >= MEM_MIN_KIB and PSI some avg10 < PSI_MAX
+gate_open() {
+  local avail some _
+  read -r avail some _ <<<"$1"
+  awk -v a="$avail" -v s="$some" -v m="$MEM_MIN_KIB" -v p="$PSI_MAX" \
+    'BEGIN {exit !(a >= m && s < p)}'
+}
+
+# wait_gate: before each services-on run. Re-check every 30 s, up to GATE_TIMEOUT_S, then die.
+wait_gate() {
+  local t=0 line
+  while :; do
+    line=$(mem_line)
+    if gate_open "$line"; then
+      log "gate open before run: MemAvailable_kB psi_some psi_full = $line"
+      return 0
+    fi
+    if (( t >= GATE_TIMEOUT_S )); then
+      die "memory gate still closed after ${GATE_TIMEOUT_S} s: $line"
+    fi
+    log "memory gate closed ($line), waiting 30 s"
+    sleep 30
+    t=$(( t + 30 ))
+  done
+}
+
+# idle_window SECONDS: sleep the idle window, watching the gate every 10 s. Sets WIN_OK (1 when
+# the gate held at every check), WIN_MIN_AVAIL (kB) and WIN_MAX_PSI (some avg10).
+idle_window() {
+  local end=$(( SECONDS + $1 )) line avail some
+  WIN_OK=1
+  WIN_MIN_AVAIL=
+  WIN_MAX_PSI=0
+  while (( SECONDS < end )); do
+    sleep 10
+    line=$(mem_line)
+    read -r avail some _ <<<"$line"
+    if [[ -z $WIN_MIN_AVAIL || $avail -lt $WIN_MIN_AVAIL ]]; then WIN_MIN_AVAIL=$avail; fi
+    WIN_MAX_PSI=$(awk -v a="$WIN_MAX_PSI" -v b="$some" 'BEGIN {print (b > a ? b : a)}')
+    if ! gate_open "$line"; then
+      WIN_OK=0
+      log "memory gate closed inside the idle window: $line"
+    fi
+  done
+}
+
+# count_ok SWEEP CFG: counted rows (status ok) for one config
+count_ok() {
+  awk -F'\t' -v s="$1" -v c="$2" '$1 == s && $2 == c && $4 == "ok" {n++} END {print n + 0}' \
+    "$OUT/runs.tsv"
+}
+
+# realm_swap_kib RAWJSON: VmSwap summed over the realm's processes (conmon and container), not the pause
+realm_swap_kib() {
+  python3 -I -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+print(sum(p["swap_kib"] for p in d["procs"] if p["role"] != "pause"))' "$1"
 }
 
 # on_spec CFG: sets ON_TAG and ON_FLAGS. base is the baseline; abd is a+b+d.
@@ -329,6 +442,7 @@ cmd_on_trial() {
   leaf="$CG_LEAF_BASE/s05r-trial-$cfg"
   logf="$OUT/logs/trial-$cfg.run"
   cleanup_realm "$name" "$leaf"
+  wait_gate
   if start_on "$cfg" "$name" "$leaf" "$logf"; then
     out=$(settle_realm "$name" "$SETTLE_LIMIT")
     outcome=started
@@ -341,56 +455,104 @@ cmd_on_trial() {
   printf '%s\t%s\t%s\t%s\n' "$cfg" "$outcome" "$out" "$detail" >> "$OUT/trial.tsv"
   log "on-trial $cfg: $outcome | $out | $detail"
   cleanup_realm "$name" "$leaf"
+  # The trial gates the sweeps: it passes only when the start settled with 0 failed units.
+  local s_settle s_boot s_state s_failed
+  IFS=$'\t' read -r s_settle s_boot s_state s_failed <<<"$out"
+  [[ $outcome == started && $s_settle == ok && $s_failed == 0 ]]
 }
 
 cmd_on() {
   init_out
-  local cfg=${1:-} sweep r name leaf logf settle boot state failed con init row
+  local cfg=${1:-} sweep attempt=0 max_attempts ok_n name leaf logf
+  local settle boot state failed con init raw row swap status line avail some full
   sweep=$(current_sweep)
-  self_in_launch_leaf || die "services-on needs this process inside $CG_LEAF_BASE/; the S-01 root step (sudo s01_systemd_rootless.sh --root-move $UID <pid> <dir>) is not run by this script"
+  self_in_launch_leaf || die "services-on needs this launcher inside $CG_LEAF_BASE/s05r-launch; run on-leg"
   on_spec "$cfg"
   name="s05r-on-$cfg"
   leaf="$CG_LEAF_BASE/s05r-$cfg"
-  for r in $(seq 1 "$RUNS"); do
-    done_run "$sweep" "on-$cfg" "$r" && continue
+  max_attempts=$(( RUNS + 5 ))
+  # Attempts repeat until RUNS rows are counted (status ok). Excluded attempts stay in runs.tsv.
+  while :; do
+    ok_n=$(count_ok "$sweep" "on-$cfg")
+    (( ok_n >= RUNS )) && break
+    attempt=$(( attempt + 1 ))
+    (( attempt > max_attempts )) && die "on-$cfg: $ok_n counted rows after $max_attempts attempts; stopping"
+    wait_gate
     cleanup_realm "$name" "$leaf"
-    logf="$OUT/logs/on-$cfg-$r.run"
+    logf="$OUT/logs/on-$cfg-a$attempt.run"
     if ! start_on "$cfg" "$name" "$leaf" "$logf"; then
-      append_row "$sweep" "on-$cfg" "$r" fail-run "$IMG:$ON_TAG" na - - - $NA_ROW
+      append_row "$sweep" "on-$cfg" "$attempt" fail-run "$IMG:$ON_TAG" na - - - $NA_ROW
       cleanup_realm "$name" "$leaf"
       continue
     fi
     IFS=$'\t' read -r settle boot state failed < <(settle_realm "$name" "$SETTLE_LIMIT")
-    if [[ $settle != ok ]]; then
-      append_row "$sweep" "on-$cfg" "$r" unsettled "$IMG:$ON_TAG" "$settle" "$boot" "$state" "$failed" $NA_ROW
+    if [[ $settle != ok || $failed != 0 ]]; then
+      append_row "$sweep" "on-$cfg" "$attempt" unsettled "$IMG:$ON_TAG" "$settle" "$boot" "$state" "$failed" $NA_ROW
+      log "on-$cfg attempt $attempt not settled: settle=$settle state=$state failed=$failed"
       cleanup_realm "$name" "$leaf"
-      [[ $r == 1 ]] && die "services-on $cfg did not settle on run 1 (state $state); stopping this config"
       continue
     fi
-    if [[ $r == 1 ]]; then
+    if [[ ! -s $OUT/probe/on-$cfg.txt ]]; then
       PM_TIMEOUT=120 pm exec "$name" sh -c \
         'systemctl list-units --type=service --state=running --no-legend --plain; echo "--- failed"; systemctl --failed --no-legend; echo "--- journal lines"; journalctl -b --no-pager | wc -l' \
         >"$OUT/probe/on-$cfg.txt" 2>&1 || true
     fi
-    sleep "$WINDOW"
-    record_mem "$sweep" "on-$cfg" "$r"
+    idle_window "$WINDOW"
+    line=$(mem_line)
+    read -r avail some full <<<"$line"
     con=$(pm inspect --format '{{.State.ConmonPid}}' "$name")
     init=$(pm inspect --format '{{.State.Pid}}' "$name")
-    row=$(measure_realm "$con" "$init" "$OUT/raw/on-$cfg-$r.json") \
-      || die "measurement invalid for on-$cfg run $r (pause check or accounting)"
+    raw="$OUT/raw/on-$cfg-a$attempt.json"
+    row=$(measure_realm "$con" "$init" "$raw") \
+      || die "measurement invalid for on-$cfg attempt $attempt (pause check or accounting)"
+    swap=$(realm_swap_kib "$raw")
+    if (( WIN_OK == 1 )) && [[ $swap == 0 ]]; then status=ok; else status=excluded-pressure; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$sweep" "on-$cfg" "$attempt" \
+      "$(date +%T)" "$avail" "$some" "$full" "$swap" "$WIN_OK" "$WIN_MIN_AVAIL" "$WIN_MAX_PSI" \
+      "$status" >> "$OUT/on-samples.tsv"
+    append_row "$sweep" "on-$cfg" "$attempt" "$status" "$IMG:$ON_TAG" "$settle" "$boot" "$state" "$failed" $row
     cleanup_realm "$name" "$leaf"
-    append_row "$sweep" "on-$cfg" "$r" ok "$IMG:$ON_TAG" "$settle" "$boot" "$state" "$failed" $row
-    log "on-$cfg run $r: settle=$settle boot=${boot}s state=$state $row"
+    log "on-$cfg attempt $attempt: status=$status settle=$settle boot=${boot}s state=$state failed=$failed realm_vmswap_kib=$swap window_ok=$WIN_OK $row"
   done
+}
+
+# on-leg: the whole services-on leg. The launcher subshell moves itself into the spike leaf
+# s05r-launch (the one allowed root write), gates on its own cgroup, then runs the trial,
+# the baseline and a+b+d. The parent tears down after the subshell exits.
+cmd_on_leg() {
+  init_out
+  local leaf="$CG_DIR_BASE/s05r-launch" rc=0
+  mkdir -p "$leaf"
+  (
+    move_self_into_leaf "$leaf"
+    cmd_check
+    cmd_prepare
+    cmd_on_trial base || { log "services-on trial did not settle; no sweep run"; exit 3; }
+    cmd_on base
+    cmd_on abd
+  ) || rc=$?
+  log "services-on leg exit status $rc; tearing down"
+  cmd_teardown || log "teardown reported a problem, see the log"
+  return "$rc"
 }
 
 # ------------------------------------------------------------------ reporting, teardown
 
-cmd_summary() {
+cmd_summary() { # [SWEEP_ID]: defaults to the current sweep
   [[ -f $OUT/runs.tsv ]] || die "no runs.tsv"
-  local sweep
-  sweep=$(current_sweep)
+  local sweep=${1:-}
+  [[ -n $sweep ]] || sweep=$(current_sweep)
   python3 -I "$S05/measure.py" --summarize "$OUT/runs.tsv" --sweep "$sweep"
+}
+
+# split: RssAnon, RssFile and RssShmem per realm and pause for every raw sample, into split.tsv
+cmd_split() {
+  shopt -s nullglob
+  local raws=("$OUT"/raw/*.json)
+  shopt -u nullglob
+  (( ${#raws[@]} > 0 )) || die "no raw samples under $OUT/raw"
+  python3 -I "$S05/measure.py" --split-raw "${raws[@]}" > "$OUT/split.tsv"
+  log "split: $(( ${#raws[@]} )) raw samples -> $OUT/split.tsv"
 }
 
 cmd_nfr001() {
@@ -445,14 +607,14 @@ cmd_teardown() {
 
 main() {
   case ${1:-} in
-    check|prepare|new-sweep|off|on-trial|on|summary|nfr001|teardown) ;;
-    *) die "usage: XDG_RUNTIME_DIR=$SPIKE_XRD $0 check|prepare|new-sweep|off|on-trial base|abd|on base|abd|summary|nfr001|teardown" ;;
+    check|prepare|new-sweep|off|on-trial|on|on-leg|summary|split|nfr001|teardown) ;;
+    *) die "usage: XDG_RUNTIME_DIR=$SPIKE_XRD $0 check|prepare|new-sweep|off|on-leg|on-trial base|abd|on base|abd|summary [SWEEP]|nfr001|teardown" ;;
   esac
   if [[ $1 != summary ]]; then
     require_pin
   fi
   case $1 in
-    check|prepare|off|on-trial|on) make_dirs ;;
+    check|prepare|off|on-trial|on|on-leg) make_dirs ;;
   esac
   case $1 in
     check) cmd_check ;;
@@ -461,7 +623,9 @@ main() {
     off) cmd_off ;;
     on-trial) cmd_on_trial "${2:-}" ;;
     on) cmd_on "${2:-}" ;;
-    summary) cmd_summary ;;
+    on-leg) cmd_on_leg ;;
+    summary) cmd_summary "${2:-}" ;;
+    split) cmd_split ;;
     nfr001) cmd_nfr001 ;;
     teardown) cmd_teardown ;;
   esac
