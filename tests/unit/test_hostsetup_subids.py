@@ -75,6 +75,14 @@ def test_entry_render_parses_back_to_itself() -> None:
     assert parse_entries(entry.render() + "\n") == [entry]
 
 
+@pytest.mark.fr("FR-001")
+def test_an_eleven_digit_subid_count_still_parses() -> None:
+    # PID digits have their own pattern, so a subuid count is not limited to ten digits.
+    assert parse_entries("alice:100000:10000000000\n") == [
+        SubIdEntry("alice", 100000, 10_000_000_000)
+    ]
+
+
 def test_allocate_starts_above_every_existing_range() -> None:
     existing = parse_entries(SAMPLE.decode())
     new = allocate(existing, "carol", MIN_SIZE)
@@ -314,6 +322,49 @@ def test_a_lock_held_by_a_live_pid_times_out_and_names_that_pid(tmp_path: Path) 
     with pytest.raises(SubIdLocked, match=re.escape(f"(pid {os.getpid()})")):
         ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
     assert lock.read_text() == f"{os.getpid()}\n"
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+def test_a_lock_naming_more_than_ten_digits_is_not_a_pid_and_is_not_reclaimed(
+    tmp_path: Path,
+) -> None:
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_text("12345678901\n")
+    _age(lock, 60)
+    with pytest.raises(SubIdLocked) as refused:
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert "(pid" not in str(refused.value)
+    assert lock.read_text() == "12345678901\n"
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.parametrize("successor", ["live", "dead-pid"])
+def test_a_waiter_that_judged_a_lock_stale_does_not_remove_its_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, successor: str
+) -> None:
+    # Two waiters judge the same crashed lock stale. The first reclaims it and a new holder takes
+    # the path. The second reaches its own unlink only after that, and must leave the new lock.
+    # "dead-pid" writes the same bytes as the crashed lock, so only the inode and mtime differ.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    dead = _dead_pid()
+    lock.write_text(f"{dead}\n")
+    _age(lock, 60)
+    fresh = f"{os.getpid()}\n" if successor == "live" else f"{dead}\n"
+    real_reclaim = subids._reclaim_if_unchanged
+
+    def interleaved_reclaim(target: Path, seen: subids._LockIdentity) -> bool:
+        staged = lock.with_name(f"{lock.name}.first")
+        staged.write_text(fresh)
+        os.replace(staged, lock)
+        return real_reclaim(target, seen)
+
+    monkeypatch.setattr(subids, "_reclaim_if_unchanged", interleaved_reclaim)
+    with pytest.raises(SubIdLocked):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.read_text() == fresh
     assert path.read_bytes() == SAMPLE
 
 

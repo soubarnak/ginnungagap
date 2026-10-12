@@ -36,8 +36,13 @@ LOCK_POLL_SECONDS = 0.05
 LOCK_STALE_SECONDS = 3.0
 """A lock is reclaimed only when its PID is gone and the lock file is at least this old."""
 
-_DECIMAL = re.compile(r"[0-9]{1,10}")
+_DECIMAL = re.compile(r"[0-9]+")
+"""Digits of a subuid or subgid start or count field. Any length is accepted."""
+_PID = re.compile(r"[0-9]{1,10}")
+"""Digits of a PID on the first line of a lock file. Longer text is not a PID."""
 _MAX_PID = 2**31 - 1
+_READ_LIMIT = 64
+"""Bytes read from a lock file. A PID line is at most 11 bytes."""
 _BAD_NAME_CHARS = frozenset(":\r\n\0")
 
 
@@ -187,6 +192,16 @@ def _is_setuid(path: Path) -> bool:
     return stat.S_ISREG(mode) and bool(mode & stat.S_ISUID)
 
 
+@dataclass(frozen=True)
+class _LockIdentity:
+    """One lock file as read through a single open descriptor. `pid` is None when unknown."""
+
+    dev: int
+    ino: int
+    mtime_ns: int
+    pid: int | None
+
+
 @contextmanager
 def _lock(path: Path, timeout: float) -> Iterator[None]:
     """Hold `<path>.lock` (etc/subuid.lock for etc/subuid) while the caller edits `path`.
@@ -194,10 +209,10 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
     The lock is a file created with O_CREAT|O_EXCL, so only one creator can succeed, and it
     holds the creator's PID. A second caller retries every LOCK_POLL_SECONDS until `timeout`,
     then raises SubIdLocked and leaves the other holder's file in place. An empty or unreadable
-    lock counts as held, because it may be a creator that has not written its PID yet. A lock
-    whose PID is gone (os.kill(pid, 0) raises ProcessLookupError) and whose file is at least
-    LOCK_STALE_SECONDS old is removed once, and the caller tries again. The file this call
-    created is removed on exit, including when the body raises.
+    lock counts as held, because it may be a creator that has not written its PID yet. A stale
+    lock (see `_is_stale`) is reclaimed through `_reclaim_if_unchanged`, at most once per call,
+    and the caller tries again. The file this call created is removed on exit, including when
+    the body raises.
     """
     lock = path.with_name(f"{path.name}.lock")
     deadline = time.monotonic() + timeout
@@ -206,12 +221,13 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
         try:
             fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
-            pid = _holder_pid(lock)
-            if pid is not None and not reclaimed and _is_stale(lock, pid):
-                lock.unlink(missing_ok=True)
-                reclaimed = True
-                continue
+            seen = _read_lock(lock)
+            if seen is not None and not reclaimed and _is_stale(seen):
+                reclaimed = _reclaim_if_unchanged(lock, seen)
+                if reclaimed:
+                    continue
             if time.monotonic() >= deadline:
+                pid = None if seen is None else seen.pid
                 holder = f" (pid {pid})" if pid is not None else ""
                 raise SubIdLocked(f"{lock} is held by another process{holder}") from None
             time.sleep(LOCK_POLL_SECONDS)
@@ -225,35 +241,71 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
         lock.unlink(missing_ok=True)
 
 
-def _holder_pid(lock: Path) -> int | None:
-    """Return the PID written in `lock`, or None when it is missing, empty or not a PID."""
+def _read_lock(lock: Path) -> _LockIdentity | None:
+    """Read `lock` through one descriptor, so the stat and the PID describe the same file.
+
+    Returns None when the lock does not exist (any more).
+    """
     try:
-        text = lock.read_text(encoding="ascii", errors="replace")
+        fd = os.open(lock, os.O_RDONLY)
     except FileNotFoundError:
         return None
+    try:
+        st = os.fstat(fd)
+        text = os.read(fd, _READ_LIMIT).decode("ascii", errors="replace")
+    finally:
+        os.close(fd)
+    return _LockIdentity(st.st_dev, st.st_ino, st.st_mtime_ns, _parse_pid(text))
+
+
+def _parse_pid(text: str) -> int | None:
+    """Return the PID on the first line of a lock file, or None when that line is not a PID."""
     first = text.split("\n", 1)[0].strip()
-    if _DECIMAL.fullmatch(first) is None:
+    if _PID.fullmatch(first) is None:
         return None
     pid = int(first)
     return pid if 0 < pid <= _MAX_PID else None
 
 
-def _is_stale(lock: Path, pid: int) -> bool:
-    """True when `pid` no longer exists and `lock` is at least LOCK_STALE_SECONDS old."""
-    try:
-        age = time.time() - os.stat(lock).st_mtime
-    except FileNotFoundError:
+def _is_stale(seen: _LockIdentity) -> bool:
+    """True when `seen` records a PID that no longer exists and the file is old enough.
+
+    A lock with no PID yet (its creator has not written it) is never stale.
+    """
+    if seen.pid is None:
         return False
-    if age < LOCK_STALE_SECONDS:
+    if time.time_ns() - seen.mtime_ns < LOCK_STALE_SECONDS * 1_000_000_000:
         return False
     try:
-        os.kill(pid, 0)
+        os.kill(seen.pid, 0)
     except ProcessLookupError:
         return True
     except PermissionError:
         # The process exists but belongs to another user, so it is alive.
         return False
     return False
+
+
+def _reclaim_if_unchanged(lock: Path, seen: _LockIdentity) -> bool:
+    """Unlink `lock` only if it is still the file `seen` describes. Return True when unlinked.
+
+    `seen` was judged stale earlier. Another waiter may have reclaimed the lock since, and a new
+    holder may own the path now, so the lock is read again and every field of the identity
+    (device, inode, mtime_ns and PID) must match before the unlink. Two gaps remain. They are
+    accepted rather than closed:
+
+    - PID reuse: once the recorded holder has died, an unrelated process may take its PID, and
+      the stale lock then looks held. The caller waits and times out, which is the safe side.
+    - POSIX has no compare-and-unlink, so the re-read and the unlink are separate system calls.
+      A reclaimer can remove a newer lock only if, inside that gap, the dead PID has been reused,
+      the inode has been reused and mtime_ns matches. Closing that fully needs an atomic
+      rename-and-verify scheme, which is more machinery than a one-time host setup needs.
+    """
+    now = _read_lock(lock)
+    if now is None or now != seen:
+        return False
+    lock.unlink(missing_ok=True)
+    return True
 
 
 def _append_line(before: bytes, line: bytes) -> bytes:
