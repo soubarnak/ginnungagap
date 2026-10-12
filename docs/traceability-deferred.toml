@@ -144,8 +144,9 @@ reason = "not covered yet; the roadmap assigns its test to M5"
 
 [[deferred]]
 id = "FR-046"
-milestone = "M5"
-reason = "not covered yet; the roadmap assigns its test to M5"
+milestone = "M6"
+partial = true
+reason = "the session env and the display, audio and authority attach plan are unit-tested (T4.2, T4.3); the menu launch (T5.4) and the audio connection and Wayland renderer on a host (T6.6) are not, so this entry waits on T6.6"
 
 [[deferred]]
 id = "FR-048"
