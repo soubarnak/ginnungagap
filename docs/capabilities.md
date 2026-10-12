@@ -15,10 +15,24 @@ Options every realm carries. None adds a capability or a device.
 
 ## Basic
 
-| Item | Option | Evidence | Status |
-|---|---|---|---|
-| Added options | none | none needed | done |
-| GPU device nodes (FR-061) | `--device /dev/dri`, which also exposes the NVIDIA DRM nodes; NVIDIA through CDI (FR-069) | S-06 sections 2 and 5 (runc only). ADR-012 (Proposed) records the grant. | pending (crun not tested) |
+FR-061 grants exactly: `~/Downloads` (read-write); the external drive mount roots `/run/media/$USER`, `/media` and `/mnt` (read-write); the display socket(s); the audio socket(s); the GPU device nodes; and the host fonts and timezone (read-only). The table lists the options that carry each grant, plus the NVIDIA items of FR-069 that need GPU permission. Each row is marked exercised or design-only. "Exercised" means a spike ran the option on the reference host, and the row names the spike and section. "Design-only" means no spike ran it. `security/caps.py` (T6.1) must produce exactly this set. T4.2 (`runtime/mounts.py`) builds the binds and T4.3 (`runtime/env.py`) builds the environment. The T6.1 argv test compares their combined output with this list.
+
+| Item | Option | Grant | Evidence | Status |
+|---|---|---|---|---|
+| Downloads | `-v <home>/Downloads:<home>/Downloads`, read-write, same path | FR-061, FR-065 | none | design-only (T4.2). ADR-012 records that it was not run. |
+| Mount roots | `-v /run/media/$USER:/run/media/$USER`, `-v /media:/media` and `-v /mnt:/mnt`, read-write, same paths | FR-061, FR-065 | none | design-only (T4.2). Not run. |
+| Display socket | Bind `$XDG_RUNTIME_DIR/wayland-1` to `/run/user/<uid>/wayland-1`; bind `/tmp/.X11-unix`; `-e WAYLAND_DISPLAY -e DISPLAY` | FR-061 | S-06 section 2 (runc) | exercised. The Wayland EGL and X11 GLX renderer checks ran through these binds (S-06 section 3). |
+| Audio socket | Bind `$XDG_RUNTIME_DIR/pipewire-0` to `/run/user/<uid>/pipewire-0`; bind `pulse/native` | FR-061 | S-06 section 2 (runc) | exercised as binds only: both sockets were bound and visible. No connection was made, because the image has no `pactl`. |
+| GPU device nodes | `--device /dev/dri`, which exposes `card0`, `card1`, `renderD128` and `renderD129`, including the NVIDIA DRM nodes | FR-061 | S-06 sections 2 and 3 (runc) | exercised on runc. The AMD renderer checks ran. Pending crun (T6.6). |
+| Host fonts | `-v /usr/share/fonts:/usr/share/fonts:ro` | FR-061 | S-06 section 2 (runc) | exercised |
+| Host timezone | `-v /etc/localtime:/etc/localtime:ro` | FR-061 | S-06 section 2 (runc) | exercised |
+| Runtime directory (support for the socket binds; FR-061 names no directory) | `--tmpfs /run/user/<uid>:mode=0700,U`, with `-e XDG_RUNTIME_DIR=/run/user/<uid>` | ADR-012 Decision | S-06 section 2 (runc) | exercised. `U` gives the realm user as owner. Plain `mode=0700` gives owner 0:0. podman refused `uid=`. |
+| NVIDIA libraries and nodes (FR-069, when the host has the NVIDIA driver) | `--cdi-spec-dir <CDI dir> --device nvidia.com/gpu=all`, with the spec written under the ginn data directory; `LD_LIBRARY_PATH=/usr/lib/ginn-nvidia` | FR-069, GPU permission | S-06 sections 2, 4 and 5 (runc) | exercised: `nvidia-smi` and the GLX, EGL and Vulkan checks ran with the spec attached. Pending T6.6: the CDI `env` field, the mismatch case, and crun. |
+
+Not in this set:
+
+- `--group-add keep-groups`. S-06 passed it on runc, and it had no effect there (S-06 section 2). ADR-012 leaves it undecided until M6 tests it under crun. It is not in the Basic set. The Development table lists it as an option of that tier.
+- `XAUTHORITY`. S-06 mounted the Xauthority file only when the host sets the variable. This host does not, so the mount was not run. FR-061 names no authority file, so it is not in the set.
 
 ## Development
 
@@ -120,7 +134,7 @@ Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the
 ## Not in this document
 
 - FR-085 (Docker in a realm) is deferred. Its options will be added here when it is decided (CL-2).
-- NVIDIA CDI devices (FR-069) are covered by ADR-012 (Proposed).
+- NVIDIA CDI devices (FR-069) are covered by ADR-012 (Accepted in part; see the Basic table for what is pending).
 
 ## Open items for the M6 host test
 
@@ -139,3 +153,5 @@ The M6 host test `tests/integration/test_tiers_real.py` must prove these. The sp
 - The disk and speed cost of the vfs form, if it is chosen.
 - Other distributions (Arch, Fedora, Kali) and other podman versions. Tested so far: a Debian stable image with podman 5.4.2 inside, and podman 5.8.8 outside.
 - Rebuild repeats the `-K` user creation (T8.3).
+- The Basic grant under crun, with and without `keep-groups`. S-06 ran on runc only (ADR-012, pending T6.6).
+- The CDI `env` field for `LD_LIBRARY_PATH` (pending T6.6, ADR-012).

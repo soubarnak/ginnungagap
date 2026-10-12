@@ -4,7 +4,7 @@
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D2). The first decision used setcap helpers and a subordinate ID range inside the realm. The amended decision runs the inner podman in single-ID mode. It needs no setcap, no libcap package and no subordinate range for the realm user. No code implements the first decision (M6 is not started), so nothing migrates.
 - Amended: 2026-10-12 (D3). FR-062 AC-3 passes with the decided set (S-07f case A; scope in Assumptions). The no-new-privileges reason and the containers.conf rationale are recorded in the Decision.
-- Amended: 2026-10-12 (D5). Two statements are corrected to match S-07: the SELinux scope and what podman chose with containers.conf absent. No decision changes.
+- Amended: 2026-10-12 (D5; the count is corrected in D6). Three statements are corrected to match S-07: the SELinux scope, what podman chose with containers.conf absent, and the XDG_RUNTIME_DIR pin disclosure. No decision changes.
 
 ## Context
 

@@ -39,7 +39,7 @@ Key design choices, one reason each:
 - Container name `ginn-<realm>-g<N>`, record stores the ID; rebuild = atomic record swap to the new generation (DR-034).
 - Services off: `--init` (FR-082), with no `--init-path`. Only S-05r ran plain `--init` (services off, no `--init-path`), and it succeeded through podman's lookup path. S-07 and S-08 passed `--init-path`, and S-09 dropped `--init`. Void installs catatonit at `/usr/libexec/catatonit/catatonit`, with podman's lookup link at `/usr/libexec/podman/catatonit` (S-05r). `/usr/bin/catatonit` is absent on the reference host (S-05b). The catatonit pause alone does not prove the `--init` lookup. Services on: `--systemd=always --cgroupns private --cgroup-parent /ginn/<uid>/<realm> --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30 --runtime crun`, added to the realm's create argv and started only through the runit supervisor (ADR-003).
 - Network: non-Kali `--network host` (AS-006); Kali `--network pasta --cap-add NET_RAW` (FR-026/027).
-- No resident Python (NFR-002 8 MiB). Small C helpers: `ginn-wait` (what runit supervises; pidfd on conmon, SIGTERM -> `podman stop`), `ginn-watch` (inotify on realm `/usr/share/applications`, execs `ginn _sync`), `ginn-idle` (60 s idle stop, FR-018), `ginn-agent-filter` (ssh-agent allow-list: identities, sign, extension), `ginn-run` (not built for v1: S-02 measured `podman exec` within 300 ms, ADR-010), `ginn-rebind` (session socket rebind for enter and launch, ADR-008). All policy stays in Python.
+- No resident Python (NFR-002 8 MiB). Small C helpers: `ginn-wait` (what runit supervises; pidfd on conmon, SIGTERM -> `podman stop`), `ginn-watch` (inotify on realm `/usr/share/applications`, execs `ginn _sync`), `ginn-idle` (60 s idle stop, FR-018), `ginn-agent-filter` (ssh-agent allow-list: identities, sign, extension), `ginn-run` (not built for v1: S-02 measured `podman exec` within 300 ms on runc, and ADR-010 returns it to `native/` if T4.9 misses 300 ms on crun), `ginn-rebind` (session socket rebind for enter and launch, ADR-008). All policy stays in Python.
 - GPG: bind host `S.gpg-agent.extra` (restricted by GnuPG design) as the realm's `S.gpg-agent` (FR-067 AC-2).
 - D-Bus: `xdg-dbus-proxy` (Void package, a dependency not copied code) `--filter --talk=org.freedesktop.Notifications --talk=org.freedesktop.portal.*`; Custom tier appends names (FR-068).
 - NVIDIA: ginn generates a CDI JSON under `$XDG_DATA_HOME/ginn/cdi/` from host driver files; `--cdi-spec-dir` + `--device nvidia.com/gpu=all` (FR-069, R-005).
@@ -81,7 +81,13 @@ Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test 
 
 ### M1 Spikes S-01..S-10
 Deliverables: `spikes/*.sh|py`, `spikes/results/S-*.md` (one committed result per spike), ADR-003 (S-01), ADR-004, ADR-005, ADR-006, ADR-007 (S-05), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1 (`src/ginn/trust/data/trust.toml`). All host-only. M2 and M3 run in parallel with M1.
-Status: done, except S-03 (musl). S-03 has no result file, so M1 stays open until it lands. ADR-010 and ADR-012 are written as Proposed.
+Status: M1 spike phase closed; open residuals. Each residual names the task that closes it.
+- S-03 (musl): no result file yet. Closes after M4.
+- S-04 and S-08 (real logout): the real-logout runs were invalid, because the host created no elogind session. The simulated runs (S-04s, S-08s) stand in until the real logout runs. Closes in T7.8.
+- S-05 helper and xdg-dbus-proxy RSS: the helpers that NFR-002 and NFR-003 count were not measured. The proxy's RSS (about 4.7 MiB) comes from S-05 and was not re-measured in S-05r. Closes in T7.7 (helpers) and T6.5 (proxy).
+- S-07 Part B (dockerd, FR-085, CL-2) was skipped. Re-run after M7.
+- S-02 on crun: T4.9. S-06 on crun: T6.6.
+- The capabilities Basic row is now filled, with each option marked exercised or design-only (FR-061, D6). ADR-010 is Accepted on runc, and ADR-012 is Accepted for FR-046 and for the S-06 parts of FR-069.
 `spikes/run-all.sh` and `spikes/RESULTS.md` are dropped. Re-running every host spike, root steps included, buys nothing over the committed per-spike results: each result file records its own environment, and the root steps are one-off host writes that a full run would repeat.
 
 ### M2 Domain, store, podman adapter, distro data (DR-001..013, DR-020, DR-030..035, NFR-SEC-005, NFR-060)
@@ -116,7 +122,7 @@ Status: done, except S-03 (musl). S-03 has no result file, so M1 stays open unti
 - T4.6 `runtime/enter.py` enter/exec/`--root`, exit-code passthrough, `$HOME` = host home path, auto-start (FR-017, FR-042, FR-048, FR-049). The enter and launch path rebinds stale session sockets before exec (ADR-008, IR-025).
 - T4.7 `ops/delete.py` with `--purge-home` confirmation (FR-019, AS-014).
 - T4.8 Owned Paths 0700, `GINN-E-NO-SUCH-REALM` (FR-025).
-- T4.9 `tests/integration/conftest.py` + `test_lifecycle_real.py`: create timed (NFR-007), start p95 <= 2 s (NFR-005), exec p95 <= 300 ms over 100 launches (NFR-004, ADR-010), no `systemd` process (FR-082), delete. Host-only.
+- T4.9 `tests/integration/conftest.py` + `test_lifecycle_real.py`: create timed (NFR-007), start p95 <= 2 s (NFR-005), exec p95 <= 300 ms over 100 launches (NFR-004, ADR-010), no `systemd` process (FR-082), delete. Host-only. The exec p95 is measured on crun, the runtime the base argv names. S-02 measured runc. If p95 exceeds 300 ms, `ginn-run.c` returns to `native/` (ADR-010).
 
 ### M5 Packages, desktop export, bin export, AUR (FR-040..047, FR-012, NFR-009, DR-007)
 - T5.1 `packages/manager.py` verbs from TOML, argv lists never through a shell, `GINN-E-PKG-SIGNATURE` mapping (FR-012, FR-040 AC-2).
@@ -142,8 +148,8 @@ Status: done, except S-03 (musl). S-03 has no result file, so M1 stays open unti
 ### M7 Services mode, runit supervision, autostart (FR-080..085, NFR-003, NFR-033, AS-028)
 - T7.1 services-on argv variant per ADR-003, added to the realm's create argv, with `-e SYSTEMD_LOG_LEVEL=warning` (ADR-007, mitigation d). Supervisor-launch rule (ADR-003): a services-on realm starts only through its runit entry (`sv up`, FR-081), never from the CLI process. The enter and launch path runs the lazy session socket rebind (ADR-008) for services-on realms too.
 - T7.2 `native/ginn-wait.c`.
-- S-05s (spike, runs before T7.3): the create-time forms of the ADR-007 mitigations a+b+d. Pass: systemd treats a char device at a unit path as masked, and the tmpfs journal variant gives the same idle RSS as the S-05r a+b+d row (median 37.63 MiB, about 37.6). Fallback: in-realm files under CL-10. T7.3 does not ship the mitigations until S-05s passes or CL-10 is decided.
-- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default, as create-time mounts and environment and not as files in realm /etc: a tmpfs of 8 MiB at `/var/log/journal`, `/dev/null` bind mounts over the unit paths in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`. These forms ship only after S-05s.
+- S-05s (spike, runs before T7.3): the create-time forms of the ADR-007 mitigations a+b+d. Pass: journald honours the mounted drop-in (`/etc/systemd/journald.conf.d/ginn.conf`, read-only, `Storage=volatile`, `RuntimeMaxUse=8M`), with journald's computed maximum recorded in the result, and the idle median is within ±1 MiB of 37.63 MiB (the S-05r a+b+d median). S-05s does not show that the `/dev/null` masks take effect (ADR-007). Fallback: in-realm files under CL-10. T7.3 does not ship the mitigations until S-05s passes or CL-10 is decided.
+- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default, as create-time mounts and environment and not as files in realm /etc: a read-only bind of the ginn-owned journald drop-in at `/etc/systemd/journald.conf.d/ginn.conf` (`Storage=volatile`, `RuntimeMaxUse=8M`), `/dev/null` bind mounts over the unit paths in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`. These forms ship only after S-05s.
 - T7.4 `services/supervisor.py` via `sv`; `ginn services on|off` (FR-083).
 - T7.5 `services/autostart.py` (`down` file semantics, DR-012).
 - T7.6 `native/ginn-idle.c` wired into services-off start (FR-018).

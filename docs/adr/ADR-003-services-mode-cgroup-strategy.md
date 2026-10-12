@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D5). The keep-id form, the chown scope (S-01 step 6) and the FR-083 generation wording are corrected. No decision changes.
+- Amended: 2026-10-12 (D6). The chown scope and the leaf ownership are stated in full, with the evidence for a root-owned leaf and the reason the user does not need write access to it. No decision changes. F6a changes the code to match.
 
 ## Context
 
@@ -38,7 +39,7 @@ ginn does not add `--cgroups=split`. Podman 5.8.8 rejects it together with `--cg
 
 ginn starts a services-on realm only through its runit supervisor entry (`sv`, FR-081). The `ginn` CLI process does not run `podman run` or `podman start` for a services-on realm. Realm processes sit under `/ginn/<uid>/<realm>` only when a descendant of the supervisor starts them.
 
-Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. S-01 step 6 chowns one directory, `/sys/fs/cgroup/ginn/<uid>`, and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files, to the user. Nothing else under the subtree is chowned, so limit files such as `memory.max` stay root-owned. The `supervisor` leaf is not chowned in S-01: the setup writes the supervisor's pid into the leaf as root. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control` (S-01 step 2, the only controller that was new there). Undo restores the recorded value and does not assume the original one (T3.5).
+Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. Host Setup chowns only `/sys/fs/cgroup/ginn/<uid>` and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files to the user (S-01 step 6). The `supervisor` leaf stays root-owned, and so does everything else under the subtree, so limit files such as `memory.max` stay root-owned too. The run script writes its own pid into the leaf as root before it drops privileges to the user (`runit_system.py`, step 3). Migrating a process out of the leaf needs write access on the common ancestor's `cgroup.procs`, which is `/sys/fs/cgroup/ginn/<uid>`, not on the leaf (a cgroup v2 rule; not measured here). The user therefore needs no write access to the leaf. S-01's runc leg passed variant a with a root-owned launcher leaf. The variant b note in the S-01 variant table records that leaf as root-owned in that setup. F6a changes the code to match this rule. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control` (S-01 step 2, the only controller that was new there). Undo restores the recorded value and does not assume the original one (T3.5).
 
 ## Alternatives considered
 

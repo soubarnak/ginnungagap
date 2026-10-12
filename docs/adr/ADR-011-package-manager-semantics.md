@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-12
+- Amended: 2026-10-12 (D6). Adds the locale rule: every package-manager subprocess whose output ginn parses runs with `LC_ALL=C.UTF-8`. Corrects the consequence about the no-sync-database warning, which the fatal-warning patterns now handle. The decision stands.
 
 ## Context
 
@@ -87,6 +88,8 @@ The rule fails closed. A `warning:` line is not proof of no updates when it says
 
 The loader records the exit statuses in the TOML comments, not as data, because they are observed and not documented. The status rule is code, and `arch_check_status()` is the one place it is written. The fatal-warning patterns are data, because they are text that the manager prints and that a new manager version may change. M4 confirms the statuses and the patterns in a realm before the Control Plane relies on them.
 
+Locale. Every package-manager subprocess whose output ginn parses runs with `LC_ALL=C.UTF-8` in its environment. pacman translates its `warning:` prefix under a non-C locale. A translated warning no longer starts with `warning:`, so the no-updates rule above does not match it, and an up-to-date realm would be reported as an error. T5.1 implements the setting in `packages/manager.py`. That the locale exists in each realm image is untested, and M4 confirms it.
+
 Rules that follow from the table:
 
 1. Arch never refreshes the sync database outside a full upgrade. The `upgrade` verb is `pacman -Syu`, and the update command runs it alone. No Arch argv other than the check-updates step 3 carries `--refresh` without `--sysupgrade`, and no check-updates step names the realm's sync database (tested). This is the Arch Wiki rule.
@@ -150,7 +153,8 @@ Negative, and what the code must and must not do:
 - The Fedora check forces a metadata download each time the Control Plane opens. FR-024 runs the check on open only, so the cost is one download per open.
 - Every value in `stale_metadata_regex` is runtime text. It is checked against sample lines, and it must be verified in M4 on a real host.
 - The check's exit statuses are observed, not documented. The Control Plane must use `arch_check_status()`, which maps exit 1 to "no updates" only when stdout is blank, every non-blank stderr line starts with `warning:`, no stderr line matches a fatal-warning pattern, and step 3 succeeded.
-- pacman prefixes its warnings with `warning:`, so the no-sync-database case in Context may match the warning-only rule. The rule is safe only because step 3 must succeed first, which should leave a sync database in the scratch directory. M4 must confirm that no path with a successful step 3 reaches that warning, or narrow the rule.
+- pacman prefixes its warnings with `warning:`, so the no-sync-database case in Context matches the warning-only prefix. The fatal-warning pattern `database file for .* does not exist` in `check_fatal_warning_regex` sends that case to the error result. It does so whether or not step 3 ran, so the rule no longer depends on step 3 for this case. M4 confirms the pattern's wording in a realm, and checks that no other warning pacman prints says a repository was skipped.
+- Code must run every parsed package-manager call with `LC_ALL=C.UTF-8` (the Locale rule in the Decision). It must not match on translated text.
 - Whether ginn's realm lock covers the check is open. The check takes no lock on the realm's pacman database, because the scratch `--dbpath` has its own lock. So a check can run while `ginn update` runs, and it can read a `local` database that the update is writing. The ops layer does not exist yet, so no caller takes the realm lock for the check. This must be decided before the Control Plane runs the check.
 - The cleanup of `<tmpdir>` must delete the `local` link, not follow it. Following it would delete the realm's installed-package database.
 - The loader cannot check that `<tmpdir>` does not exist yet, or that it is inside the realm. The caller must make both true.
@@ -161,6 +165,7 @@ M4 must confirm, in a realm, before the Control Plane relies on the check:
 - The exit statuses of the four steps, and that `sync/` is created by step 3.
 - Whether a fresh Arch image has a sync database and what its package lists are.
 - The locale step on Arch, which runs `localedef` and not the `locale-gen` that S-10b ran.
+- That `C.UTF-8` exists in each realm image, so the Locale rule holds there.
 - (a) Whether the scratch `--sync --refresh --dbpath` writes the GnuPG lock or the trust database when database signatures are checked. The GnuPG home is `GPGDir` in pacman.conf, which `--dbpath` does not move, so a write there would land in the realm outside `{tmpdir}`.
 - (b) Whether pacman 7's `DownloadUser` sandbox can write into the root-created `{tmpdir}`. If it cannot, step 3 fails, and the check reports an error. Test with the default setting and with `DownloadUser` set.
 - (c) The scratch database lock means a check does not wait for a running `ginn update`. Confirm that the check neither blocks nor reads a half-written `local` database, and decide whether ginn's realm lock covers the check (see Consequences).
@@ -171,7 +176,7 @@ M4 must confirm, in a realm, before the Control Plane relies on the check:
 |---|---|
 | FR-013 | The Arch Integration Package Set is `ca-certificates`, which the image already ships, so the set adds no package. The creation rule is recorded under CL-9. |
 | FR-023 | Only the `upgrade` verb changes installed packages on each distribution, and it is the native full upgrade: `pacman -Syu`, `apt-get dist-upgrade`, `dnf --refresh upgrade`. Refresh, install, resolve, estimate and check-updates never do. Unit tests pin each argv. The proving test for the update command is M8. |
-| FR-024 | Check-updates changes nothing in the realm's package database on any distribution. Arch runs a scratch-database check, and `arch_check_status()` maps its results (M4 confirms the realm's files are unchanged). Debian and Kali read the lists only. Fedora forces a metadata refresh only. |
+| FR-024 | Check-updates changes nothing in the realm's package database on any distribution. Arch runs a scratch-database check, and `arch_check_status()` maps its results (M4 confirms the realm's files are unchanged). Debian and Kali read the lists only. Fedora forces a metadata refresh only. The parsed output is read under `LC_ALL=C.UTF-8`, so the `warning:` prefix is in English (Locale rule). |
 | FR-040 | Install never upgrades installed packages, and Arch install uses the sync database as the last full upgrade left it. A stale Arch database fails install with a 404; the remedy is `ginn update`. |
 | FR-041 | Remove names only the requested packages. Arch refuses dependents natively. Debian, Kali and Fedora define `remove-check`, the dry run that ops reads before remove (T5.3). |
 | NFR-060 | Refresh rules, check-updates steps, stale-metadata patterns, removal mechanisms and the optional `remove-check` verb are data per distribution. A new distribution needs a file, not code. |

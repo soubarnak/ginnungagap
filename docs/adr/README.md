@@ -12,8 +12,14 @@ Architecture decision records (ADRs) record the decisions that shape Ginnungagap
 ## Statuses
 
 - **Proposed**: drafted and under review. The decision is not yet binding.
-- **Accepted**: binding. The code follows it. A change needs a new ADR that supersedes it.
+- **Accepted**: binding. The code follows it. A reversal of the decision needs a new ADR that supersedes it. A change that keeps the decision is an amendment (see Amendments below).
 - **Superseded**: replaced by a later ADR. The status line names the replacement. The file stays in place.
+
+An Accepted ADR may carry a qualifier in its status line, such as the spike it was measured on or the requirement IDs it covers. The qualifier names what the evidence covers, and what is pending.
+
+## Amendments
+
+A dated in-place amendment is allowed when the decision stands and only its realisation changes. Each amendment is a dated `Amended:` line under the header, and it states what changed and what did not. A reversal of the decision needs a superseding ADR, and the superseded file stays in place.
 
 "Planned" is not a status. A planned entry only reserves a number and a title in this index. No file exists for a planned entry until its spike or task starts it. The new file then starts with the status Proposed.
 
@@ -27,12 +33,12 @@ Architecture decision records (ADRs) record the decisions that shape Ginnungagap
 | [ADR-004](ADR-004-runtime-root.md) | Runtime directory and Podman storage root | Accepted | DR-010, DR-033, FR-081, FR-084, FR-123, FR-122, IR-020, CR-003, CR-006, NFR-SEC-005, NFR-040 |
 | [ADR-005](ADR-005-image-channels-and-trust.md) | Image channels and Trust Manifest | Accepted | R-003, DR-040, FR-011, FR-023, FR-121, AS-024, CR-007, IR-021, NFR-008, NFR-SEC-004 |
 | [ADR-006](ADR-006-development-tier-capabilities.md) | Development-tier capability set without SYS_ADMIN | Accepted | NFR-SEC-002, NFR-SEC-001, NFR-SEC-005, NFR-040, FR-013, FR-021, FR-062, FR-063, FR-085, AS-005, CR-002, CR-003, CR-007, DR-010, IR-040 |
-| [ADR-010](ADR-010-launch-path.md) | Launch path (renumbered from ADR-006 on 2026-10-12, because ADR-006 went to the Development tier) | Proposed | R-006, NFR-004, NFR-005, FR-017, FR-046, FR-048, FR-049, NFR-SEC-002 |
+| [ADR-010](ADR-010-launch-path.md) | Launch path (renumbered from ADR-006 on 2026-10-12, because ADR-006 went to the Development tier) | Accepted, on runc (crun re-measure in T4.9) | R-006, NFR-001, NFR-004, NFR-005, FR-017, FR-046, FR-048, FR-049, FR-061, FR-082, NFR-SEC-002 |
 | [ADR-007](ADR-007-idle-memory-budget.md) | Idle memory budget (retitled from "Native helpers and memory budget" on 2026-10-12, because the decision covers only the memory budget) | Accepted | NFR-002, NFR-003, NFR-021, FR-068, CR-007 |
 | [ADR-008](ADR-008-session-socket-rebind.md) | Session socket rebind for long-running realms | Accepted | FR-081, FR-084, IR-025, NFR-001, DR-010, NFR-SEC-005 |
 | ADR-009 | GUI to backend channel | Planned (M9; the roadmap assigns no spike) | FR-105, FR-106, NFR-SEC-009, NFR-010, DR-030 |
 | [ADR-011](ADR-011-package-manager-semantics.md) | Package manager semantics for refresh, update checks and removal | Accepted | FR-013, FR-023, FR-024, FR-040, FR-041, NFR-060, CR-007 |
-| [ADR-012](ADR-012-gpu-nvidia-injection.md) | GPU and NVIDIA injection (renumbered from ADR-008 on 2026-10-12, because ADR-008 went to session socket rebind) | Proposed | FR-046, FR-061, FR-069, IR-025, IR-026, R-005, CR-007 |
+| [ADR-012](ADR-012-gpu-nvidia-injection.md) | GPU and NVIDIA injection (renumbered from ADR-008 on 2026-10-12, because ADR-008 went to session socket rebind) | Accepted for FR-046 and the S-06 parts of FR-069; CDI env field and the rest pending T6.6 | FR-046, FR-061, FR-069, FR-082, DR-010, IR-025, IR-026, R-005, CR-007 |
 
 ## Adding an ADR
 

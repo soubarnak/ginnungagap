@@ -4,6 +4,7 @@
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D3). The keep-id case is tested in simulation (S-08t). The decision is variant (b): the mount namespace only, entered through `podman unshare`.
 - Amended: 2026-10-12 (D5). The rebind order is rewritten in the Decision. The identity record, the compare-and-skip step and the batch form (several paths under one `setns`) are untested. T7.8 proves them.
+- Amended: 2026-10-12 (D6). Step 3.2 treats `EINVAL` from `umount2` as already unmounted, so a half-done rebind is recoverable on the next run. The duplicate exit-code paragraph is removed. The new case is untested, and T7.8 proves it.
 
 ## Context
 
@@ -75,7 +76,7 @@ ginn rebinds stale session sockets with a small native helper, `native/ginn-rebi
 2. `setns` into the container's mount namespace, once. The namespace comes from the container's init process. It is the only namespace the helper enters.
 3. For each realm path in the list:
    1. `stat` the realm path. If its `(st_dev, st_ino)` pair already matches the recorded host identity, skip the path, so a second run changes nothing. **Untested.** T7.8 proves it.
-   2. Otherwise, `umount2` the stale bind on that path.
+   2. Otherwise, `umount2` the stale bind on that path. `EINVAL` is the error `umount2(2)` returns for a path that is not a mount point. That is the state a previous run leaves when `umount2` succeeded and the `move_mount` in step 3.3 then failed. The helper treats `EINVAL` as already unmounted and goes on to step 3.3. Any other error fails the run. **Untested.** T7.8 proves it.
    3. `move_mount` the detached tree from step 1 onto that path.
 4. Exit 0 when every path matched or was rebound. Exit non-zero on any failure. ginn reports the failure as a catalogue error; the code is added with the helper (T7.8).
 
@@ -90,8 +91,6 @@ podman --remote=false --root <root> --runroot <runroot> --tmpdir <tmpdir> --runt
 Of the forms tried in S-08s, this is the only one that worked. A plain session cannot call `open_tree`. The call returns EPERM (S-08s rows 4 and 6). So the rebind must run inside `podman unshare`. The helper needs no root, and it runs no resident process.
 
 The trigger is lazy, and it stays in Python. The enter and launch path compares the `(st_dev, st_ino)` pair of each host socket with the container's before it execs the app. It starts the helper only when a pair differs. The pre-check keeps a `podman unshare` call off the launch path when nothing is stale. S-02 measured `podman exec` on that path, not `podman unshare`. How the Python side reads the container's identity without entering the namespace is not decided, and it is untested. The enter and launch path is T4.6 for every realm, and T7.1 for services-on realms. Services do not use session sockets, so there is no login hook. A services-on realm that never launches a GUI app never runs the helper.
-
-The helper exits 0 when every path matches or was rebound. It exits non-zero on any failure, and ginn reports that failure as a catalogue error. The catalogue code is added with the helper (T7.8).
 
 ## Alternatives considered
 
@@ -111,9 +110,9 @@ The helper exits 0 when every path matches or was rebound. It exits non-zero on 
 - Processes that already hold the old socket descriptor keep it. Their state after the rebind was not measured.
 - A stale socket stays in place until the next enter or launch of that realm. The rebind is lazy by design.
 - The helper touches only the paths it is given, and only inside the container's mount namespace. It writes no Owned Path (DR-010). Its arguments are an argv list (NFR-SEC-005).
-- Untested in this decision, and proven by T7.8: the step-1 identity record, the compare-and-skip in step 3.1 (a second run must change nothing), and the batch form (several paths under one `setns`). The T7.8 test must run each of them.
+- Untested in this decision, and proven by T7.8: the step-1 identity record, the compare-and-skip in step 3.1 (a second run must change nothing), the batch form (several paths under one `setns`), and the `EINVAL` case in step 3.2. The T7.8 test must run each of them. For the `EINVAL` case, it leaves a realm path after `umount2` succeeds and `move_mount` fails, then checks that the next run completes the rebind.
 - The helper is built and shipped with the package (T7.8). Its error code needs a catalogue entry.
-- Tested on podman 5.8.8 and crun 1.30.1 only. The T7.8 host-only test must run the rebind after a real logout. That needs the S-04 precondition: an elogind session for the test login. The T7.8 test must cover a keep-id container as well as a control container.
+- Tested on podman 5.8.8 and crun 1.30.1 only. The T7.8 host-only test must run the rebind after a real logout. That needs the S-04 precondition: an elogind session for the test login. The T7.8 test must cover a keep-id container as well as a control container, and the half-done case of step 3.2.
 - Follow-up tasks: T4.6 and T7.1 (the lazy trigger), and T7.8 (the helper and its test). The SRS wording for CL-5 is open for v1.1.
 
 ## Requirement IDs

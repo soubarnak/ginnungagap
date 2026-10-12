@@ -1,7 +1,8 @@
 # ADR-010: Launch path for a command in a running realm
 
-- Status: Proposed
+- Status: Accepted, on runc. The crun re-measure is T4.9 (see Decision).
 - Date: 2026-10-12
+- Amended: 2026-10-12 (D6). Status is Accepted. The crun re-measure rule is added to the Decision, and the FR-082 wording is corrected. The runc caveat stands.
 
 ## Context
 
@@ -57,6 +58,8 @@ The launch path does not call `podman inspect`, because the state record holds t
 
 Performance does not decide the choice, because NFR-004 is a threshold and `podman exec` meets it. Isolation decides between the two paths that pass it: the helper drops the container's seccomp filter, bounding set and groups (parity table), and `podman exec` keeps them.
 
+The measurements above are on runc, and the base argv names crun (`docs/capabilities.md`). T4.9 re-measures `podman exec` p95 on crun. If it exceeds 300 ms, `ginn-run.c` returns to `native/`, and it must match the parity table before it ships (S-02 section 7).
+
 ## Alternatives considered
 
 - `ginn-run`, the C setns helper (`s02_run`, row C). Faster: p95 1.7 to 1.8 ms. Rejected for v1. It runs without the container's seccomp filter, with the full bounding set and no supplementary groups. Those are the isolation properties that FR-061 and NFR-SEC-002 rely on, and ranked characteristic 2 decides against it. S-02 section 7 would revisit the helper only if `podman exec` misses 300 ms on target hardware, and then only after the helper matches the parity table.
@@ -71,7 +74,7 @@ Performance does not decide the choice, because NFR-004 is a threshold and `podm
 - Margin: 88 to 164 ms, from two runs on one noisy host, on runc.
 - The measured launcher is a spike script. The shipped launcher must keep its imports lean and must be measured again. T4.6 builds it. T4.9 carries the NFR-004 check (100 launches, p95 <= 300 ms), which the roadmap did not assign before this ADR.
 - The socket pre-check of ADR-008 runs before exec on this path. It adds cost that S-02 did not measure.
-- S-02 ran without `--init`, because catatonit was absent. FR-082 requires catatonit in services-off realms (ADR-007, roadmap T0.6). Without an init, PID 1 ignores signals it has no handler for. The cold path therefore stopped the container with `podman stop -t 0`, not with a signal.
+- S-02 ran without `--init`, because catatonit was absent. FR-082 requires a minimal init process in services-off realms. ginn ships catatonit for it (ADR-007, roadmap T0.6). Without an init, PID 1 ignores signals it has no handler for. The cold path therefore stopped the container with `podman stop -t 0`, not with a signal.
 - Cold start (FR-017, NFR-005): 20 cycles, not the 50 per distribution that NFR-005 requires. p95 96.6 to 121.9 ms, far inside 2 s. NFR-005 is not proven.
 - A restarted realm gets a new init PID, so the state record must be rewritten on each start. S-02 tested only the start-time happy path. The stale-PID path was not tested.
 - Not measured: crun (S-02 ran runc), musl (S-03 has no result), target hardware, the Kali pasta network (S-02 used `--network host`, so Kali realms will be slower, not measured), and `ginn enter`, which S-02 did not run.
@@ -89,3 +92,6 @@ Performance does not decide the choice, because NFR-004 is a threshold and `podm
 | FR-048 | `ginn enter` uses the same exec mechanism. S-02 did not run `ginn enter`. |
 | FR-049 | `ginn exec` returns the command's exit code. S-02 checked `sh -c 'exit 7'` under `podman exec` before timing. |
 | NFR-SEC-002 | The parity table: the helper path has no seccomp filter and a full bounding set; the exec path keeps both. This is why the helper is rejected. |
+| FR-061 | The Basic and Development grants run inside the realm's seccomp filter, bounding set and groups. The exec path keeps all three (parity table), and the helper path loses them. |
+| FR-082 | Services-off realms run a minimal init process. The S-02 runs had no init, because catatonit was absent on the host, so PID 1 behaviour under `--init` was not measured here. |
+| NFR-001 | The launch path adds no resident process. The Python launcher is short-lived, and the podman CLI is the interface (ADR-002). |
