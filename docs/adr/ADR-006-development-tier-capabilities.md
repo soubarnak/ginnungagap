@@ -4,6 +4,7 @@
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D2). The first decision used setcap helpers and a subordinate ID range inside the realm. The amended decision runs the inner podman in single-ID mode. It needs no setcap, no libcap package and no subordinate range for the realm user. No code implements the first decision (M6 is not started), so nothing migrates.
 - Amended: 2026-10-12 (D3). FR-062 AC-3 passes with the decided set (S-07f case A; scope in Assumptions). The no-new-privileges reason and the containers.conf rationale are recorded in the Decision.
+- Amended: 2026-10-12 (D5). Two statements are corrected to match S-07: the SELinux scope and what podman chose with containers.conf absent. No decision changes.
 
 ## Context
 
@@ -27,7 +28,8 @@ Assumptions and gaps, each with the test that confirms it:
 - K1 tests open() only. The KVM ioctls were not run.
 - `setdomainname` is not ungated. An inner container that sets `--domainname` was not tested (S-07e follow-up 2).
 - A realm created as Basic and later changed to Development was not tested. The `-K` rule applies at create time.
-- Void hosts have no SELinux, so `label=disable` is omitted. The test host confirmed this for the older design only.
+- The reference host has no SELinux (S-07, environment), and `label=disable` is omitted. The older design passed without it (S-07 C3c-g2), and so did the single-ID set (S-07e E1o). S-07 notes the label option may be inert on this host, so an SELinux host is untested.
+- S-07c, S-07d, S-07e and S-07e2 did not pin `XDG_RUNTIME_DIR` (S-07 disclosures), so their podman calls could have joined the user's own pause process. The decided set rests on S-07f, which pinned it.
 
 Open items. Each is also listed in `docs/capabilities.md`:
 
@@ -54,7 +56,7 @@ A Development realm gets no added capability. ginn adds no `--cap-add`, no SYS_A
 
 The realm user is created without subordinate IDs. ginn runs `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, so the realm's `/etc/subuid` and `/etc/subgid` get no line for it. Inside the realm, podman then uses the single mapping `0 1000 1`.
 
-ginn writes two files into the Realm Home, `~/.config/containers/storage.conf` and `~/.config/containers/containers.conf`. The storage file uses the overlay driver with fuse-overlayfs and `ignore_chown_errors = "true"`. The vfs form also passes and is kept as an alternative. The containers file sets `cgroup_manager = "cgroupfs"` and `events_logger = "file"`. These pin choices that podman otherwise infers. S-07f showed that podman infers both in a services-off realm, and AC-3 passes without the file (cases B and D). In a services-on realm podman would infer systemd and journald, and nested rootless podman has no user systemd to talk to. So the file is not needed for AC-3. It is required for services-on realms. Status: pins choices podman otherwise infers; required for services-on realms; untested until M7. The user runs the inner podman with no `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`.
+ginn writes two files into the Realm Home, `~/.config/containers/storage.conf` and `~/.config/containers/containers.conf`. The storage file uses the overlay driver with fuse-overlayfs and `ignore_chown_errors = "true"`. The vfs form also passes and is kept as an alternative. The containers file sets `cgroup_manager = "cgroupfs"` and `events_logger = "file"`. These pin choices. With the file absent, S-07f (cases B and D, services-off) reported `cgroupManager=cgroupfs` and `eventLogger=file`, and the image's system containers.conf sets neither key, so podman chose both values itself. AC-3 passes without the file (cases B and D), so the file is not needed for AC-3. For services-on realms the file is expected to be needed, because podman would otherwise infer systemd and journald, and nested rootless podman has no user systemd to talk to. That expectation is not tested. Status: pins choices podman made by itself in a services-off realm (S-07f); expected to be needed for services-on realms; untested until M7. The user runs the inner podman with no `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`.
 
 Podman and its helpers enter the realm as requested packages (CR-007). ginn does not add them itself.
 
@@ -96,7 +98,7 @@ The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must 
 | FR-021 | The rebuild must repeat the user creation step. FR-021 names only the Install Manifest, so the replay is a design choice (T8.3). The SRS does not say it. |
 | NFR-SEC-001 | Realms are never privileged. The argv builder refuses `--privileged`. |
 | CR-003 | Rootless only. No capability is added to the host. |
-| CR-002 | Host platform is Void. The decision omits `label=disable` because Void hosts have no SELinux. |
+| CR-002 | Host platform is Void. The decision omits `label=disable` because the reference host has no SELinux (S-07). An SELinux host is untested. |
 | DR-010 | The generated seccomp profile and the Realm Home config files are written under Owned Paths. |
 | IR-040 | `/dev/kvm` is added only when the host has it. |
 | FR-063 | Custom toggles add only options listed in this ADR. |

@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-12
+- Amended: 2026-10-12 (D5). The keep-id form, the chown scope (S-01 step 6) and the FR-083 generation wording are corrected. No decision changes.
 
 ## Context
 
@@ -31,13 +32,13 @@ ginn starts a services-on realm with these podman options, added to the realm's 
 --stop-signal SIGRTMIN+3 --stop-timeout 30 --runtime crun
 ```
 
-`/ginn/<uid>/<realm>` is relative to `/sys/fs/cgroup`. This is the set S-01 ran for the crun roadmap row. S-01 also added `-d`, `--name`, the image and `/sbin/init`. The realm's own options stay in place. For non-Kali realms that means `--userns=keep-id:uid=<uid>,gid=<gid>` and `--network host`. S-01 ran both flavors, the bare set with pasta networking and the set with `--userns keep-id --network host`. Both reach `running` with zero failed units on crun and on runc.
+`/ginn/<uid>/<realm>` is relative to `/sys/fs/cgroup`. This is the set S-01 ran for the crun roadmap row. S-01 also added `-d`, `--name`, the image and `/sbin/init`. The realm's own options stay in place. For non-Kali realms that means `--userns keep-id` and `--network host`. S-01 ran both flavors, the bare set with pasta networking and the set with `--userns keep-id --network host`. Both reach `running` with zero failed units on crun and on runc.
 
 ginn does not add `--cgroups=split`. Podman 5.8.8 rejects it together with `--cgroup-parent`.
 
 ginn starts a services-on realm only through its runit supervisor entry (`sv`, FR-081). The `ginn` CLI process does not run `podman run` or `podman start` for a services-on realm. Realm processes sit under `/ginn/<uid>/<realm>` only when a descendant of the supervisor starts them.
 
-Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. The chown covers only the directories and the `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files to the user. Limit files such as `memory.max` stay root-owned. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control`. Undo restores the recorded value and does not assume the original one (T3.5).
+Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script recreates it at each start. S-01 step 6 chowns one directory, `/sys/fs/cgroup/ginn/<uid>`, and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control` files, to the user. Nothing else under the subtree is chowned, so limit files such as `memory.max` stay root-owned. The `supervisor` leaf is not chowned in S-01: the setup writes the supervisor's pid into the leaf as root. On this host, Host Setup also adds `pids` to the root `cgroup.subtree_control` (S-01 step 2, the only controller that was new there). Undo restores the recorded value and does not assume the original one (T3.5).
 
 ## Alternatives considered
 
@@ -51,12 +52,13 @@ Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script re
 
 - The services-on argv gives systemd as PID 1 and reaches `running` with zero failed units on both runtimes. Root writes happen at Host Setup and at each start of the supervisor service, never per realm start.
 - The services-on realm must start through `sv` (T7.4). The CLI never starts it directly.
+- Services mode is fixed at create. `ginn services on|off` creates a new container generation, and the toggle takes effect at that generation's first start (FR-083). The Install Manifest replay (FR-021, T8.3) must carry installed packages across the new generation. That replay is not measured, so FR-083 AC-1 (htop stays installed) is open.
 - The services-on create argv keeps the flags above, with no `--cgroups=split`.
 - Host Setup keeps the chown limited to the paths listed above.
 - `ginn exec` placement is not verified. S-01 saw `exec`, `stop` and `top` succeed from the session scope, but it did not check where exec'd processes land. ginn does not rely on that placement.
 - T3.3 already has the placement step (run script, step 3). T7.1 carries the argv and T7.4 carries the supervisor start. T7.7 runs the test.
 - Stale text: the `cgroups.py` module docstring says routing for services-on realms is designed in T3.4 and M7. This ADR puts it in T7.1 and T7.4. The code is not changed here.
-- Packaging: the Void template depends on `crun` (`packaging/void/srcpkgs/ginn/template`). Roadmap T0.6 still lists `runc`. Align T0.6 with the template as a follow-up.
+- Packaging: the Void template depends on `crun` and `containers-common` (`packaging/void/srcpkgs/ginn/template`). Roadmap T0.6 lists the same runtime dependency, crun and not runc, and containers-common.
 - R-001 stays open. S-01 is the early spike that R-001 asks for. The items still open are:
   - FR-080 AC-1 and AC-2 (cron install, restart). S-01 ran them only on the earlier unpinned runc leg, not on crun or under the pin.
   - A check of `cgroup.controllers` inside the container. It was not read for the crun rows.
@@ -76,6 +78,6 @@ Host Setup creates `/sys/fs/cgroup/ginn/<uid>/supervisor`, and the run script re
 | FR-001 | Host Setup creates the subtree and the `supervisor` leaf. The run script moves itself into the leaf as root at each start of the service (`runit_system.py` step 3). Neither runs per realm start. |
 | FR-080 | The services-on argv gives systemd as PID 1, running with zero failed units on crun and runc (S-01). FR-080 AC-1 and AC-2 are not yet run under this argv on crun. |
 | FR-081 | A services-on realm starts through its runit entry, so its podman calls run inside `ginn/<uid>/supervisor`. |
-| FR-083 | The services mode picks the argv at start, so a toggle applies at the next start. |
+| FR-083 | Services flags are create-time flags. `ginn services on\|off` recreates the container as a new generation, so the toggle applies at the next start of that generation. Whether installed packages survive depends on the manifest replay (FR-021, T8.3), which is not measured. |
 | NFR-003 | The memory budget for this argv is in ADR-007. The NFR-003 runs used the same flags, except that they omitted `--stop-timeout 30`. |
 | R-001 | S-01 is the early spike. Host Setup delegation and the supervisor leaf close the placement gap. R-001 stays open for musl, Arch, Fedora and the open FR-080 checks. |

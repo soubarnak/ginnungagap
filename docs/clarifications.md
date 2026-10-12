@@ -15,6 +15,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-7 | Distribution ID is an enum | DR-005, NFR-060, DR-003 | open, for SRS v1.1 |
 | CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | withdrawn (2026-10-12, D2) |
 | CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
+| CL-10 | Create-time mitigations for services-on realms | CR-007, FR-013, NFR-003, FR-080 | open, for SRS v1.1 (needed only if S-05s fails) |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -83,3 +84,12 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Proposed wording: "The Integration Package Set is installed against package versions current at creation; on rolling distributions creation includes a full synchronisation of the image's packages."
 - How ginn works now: creation runs `refresh` once, then installs the Integration Package Set, on every distribution. On Arch the refresh is the full upgrade. ADR-011 gives the reading under which this complies with the SRS as written. The register does not claim compliance, because the wording is open.
 - Evidence: `spikes/results/S-10.md` section 5 and section 7 (the Arch image ships `ca-certificates`). S-10 does not record the image's sync database or package lists. M4 records both, and ADR-011 lists the check.
+
+## CL-10: create-time mitigations for services-on realms
+
+- Requirement IDs: CR-007, FR-013, NFR-003, FR-080.
+- Issue: the a+b+d mitigations of ADR-007 change the realm's /etc: a journald configuration file, symlinks that mask ten units, and, for the unit paths the Debian image lacks, the placeholder files that a bind mount creates. CR-007 limits realm contents to the official image, the Integration Package Set and requested packages with their declared dependencies. FR-013 is read the same way. Config files and mask links are not on that list.
+- Proposed wording: "CR-007 does not count bind mounts and environment that ginn sets at realm creation. Where a services-on mitigation needs a file in the realm's /etc, ginn may write it, and the file is listed in docs/capabilities.md."
+- How ginn works now: the product form uses create-time mounts and environment: a tmpfs at `/var/log/journal`, `/dev/null` bind mounts over the unit paths, and `SYSTEMD_LOG_LEVEL=warning` in the environment (ADR-007). The image and its /etc are not changed, except for the placeholder files a bind creates where the image has no unit file. S-05s checks that before T7.3.
+- Evidence: S-05r measured the a+b+d PASS with the mitigations as image layers (`spikes/s05/Dockerfile.mit`). Those layers write the journald file and the mask symlinks into /etc. S-05s has not run, so the create-time forms are unmeasured.
+- Status: open, for SRS v1.1. The entry is needed only if S-05s shows that the create-time forms fail. The fallback writes files into the realm's /etc, and CR-007 then needs this wording to allow it.

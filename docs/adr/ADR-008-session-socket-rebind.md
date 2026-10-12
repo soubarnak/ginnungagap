@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D3). The keep-id case is tested in simulation (S-08t). The decision is variant (b): the mount namespace only, entered through `podman unshare`.
+- Amended: 2026-10-12 (D5). The rebind order is rewritten in the Decision. The identity record, the compare-and-skip step and the batch form (several paths under one `setns`) are untested. T7.8 proves them.
 
 ## Context
 
@@ -64,29 +65,31 @@ Assumptions and gaps:
 - The rebind ran as the container's owner, uid 1000. A container with another owner was not tested.
 - Rebind into a keep-id container was run in simulation only (S-08t, uid 1000, podman 5.8.8, crun 1.30.1). The real-logout path under keep-id is not tested.
 - Tested on podman 5.8.8 and crun 1.30.1 only.
+- The spike ran one path per helper call. Every S-08 run used one socket path (S-08s rows 1 to 6, S-08t rows a and b). The batch form and the compare step in the Decision below were not run.
 
 ## Decision
 
-ginn rebinds stale session sockets with a small native helper, `native/ginn-rebind.c`. The helper is at most 200 lines of C. It runs in the store's user namespace, which `podman unshare` enters. It does not join the container's user namespace. This is variant (b): the mount namespace only. For each path in its list, the helper does four steps:
+ginn rebinds stale session sockets with a small native helper, `native/ginn-rebind.c`, at most 200 lines of C. It runs in the store's user namespace, which `podman unshare` enters. It never joins the container's user namespace: this is variant (b), the mount namespace only. The helper takes its path list from `runtime/env.py`, which decides which sockets are bound. It does not read the mount table and does not discover mounts. Each pair of arguments is a host socket path and its realm path. For the list, the helper runs four steps in this order:
 
-1. It enters the container's mount namespace with `setns`. The namespace comes from the container's init process. It is the only namespace the helper enters.
-2. It compares the `(st_dev, st_ino)` pair of the path with the host socket. If the pair in the container already matches, it skips the path. A second run therefore changes nothing.
-3. It calls `umount2` on the stale path only.
-4. It opens a clone of the host socket with `open_tree`, and it moves that clone onto the path with `move_mount`.
+1. In the caller's namespace, for each host socket path: open it with `open_tree(OPEN_TREE_CLONE)`, keep the detached tree as a file descriptor, and record the `(st_dev, st_ino)` pair of the host socket. This step runs before `setns`. After `setns` into the realm's mount namespace the host path is not visible (S-08s row 1).
+2. `setns` into the container's mount namespace, once. The namespace comes from the container's init process. It is the only namespace the helper enters.
+3. For each realm path in the list:
+   1. `stat` the realm path. If its `(st_dev, st_ino)` pair already matches the recorded host identity, skip the path, so a second run changes nothing. **Untested.** T7.8 proves it.
+   2. Otherwise, `umount2` the stale bind on that path.
+   3. `move_mount` the detached tree from step 1 onto that path.
+4. Exit 0 when every path matched or was rebound. Exit non-zero on any failure. ginn reports the failure as a catalogue error; the code is added with the helper (T7.8).
 
-Variant (b) is the decided path. It is the one code path that ran in both layouts. In the non-keep-id control the two user namespaces are the same, so a user-namespace step would change nothing. Under keep-id the spike skipped that step with `--no-setns-user` (S-08t row b). Variant (a) joins the user namespace first, then the mount namespace. It also works under keep-id (S-08t row a). It is recorded as an alternative, not chosen.
-
-The helper takes an explicit path list from `runtime/env.py`. That module decides which sockets are bound. The helper does not read the mount table, and it does not discover mounts itself.
+What ran. The spike helper (`spikes/s04s_s08s_rebind.py`) ran, for one path per call, `open_tree` clone, then `setns` user (skipped in the non-keep-id control), then `setns` mnt, then `umount2`, then `move_mount`, under `podman unshare` (S-08s row 5; S-08t rows a and b, where row b passed `--no-setns-user`). It recorded no identity and made no compare. The ordering above keeps the spike's open-before-`setns` order and adds the record and the compare. The batch form, with several paths under one `setns`, was not run. The record, the compare and the batch form are untested. T7.8 proves them, with the real-logout test below.
 
 ginn runs the helper through podman, with the global flags that ADR-004 requires:
 
 ```
-podman --remote=false --root <root> --runroot <runroot> --tmpdir <tmpdir> --runtime crun unshare ginn-rebind <init-pid> <path>...
+podman --remote=false --root <root> --runroot <runroot> --tmpdir <tmpdir> --runtime crun unshare ginn-rebind <init-pid> <host-path> <realm-path> [<host-path> <realm-path>]...
 ```
 
 Of the forms tried in S-08s, this is the only one that worked. A plain session cannot call `open_tree`. The call returns EPERM (S-08s rows 4 and 6). So the rebind must run inside `podman unshare`. The helper needs no root, and it runs no resident process.
 
-The trigger is lazy. The enter and launch path compares the `(st_dev, st_ino)` pair of each host socket with the container's before it execs the app. It runs the helper only when a path differs. The enter and launch path is T4.6 for every realm, and T7.1 for services-on realms. Services do not use session sockets, so there is no login hook. A services-on realm that never launches a GUI app never runs the helper.
+The trigger is lazy, and it stays in Python. The enter and launch path compares the `(st_dev, st_ino)` pair of each host socket with the container's before it execs the app. It starts the helper only when a pair differs. The pre-check keeps a `podman unshare` call off the launch path when nothing is stale. S-02 measured `podman exec` on that path, not `podman unshare`. How the Python side reads the container's identity without entering the namespace is not decided, and it is untested. The enter and launch path is T4.6 for every realm, and T7.1 for services-on realms. Services do not use session sockets, so there is no login hook. A services-on realm that never launches a GUI app never runs the helper.
 
 The helper exits 0 when every path matches or was rebound. It exits non-zero on any failure, and ginn reports that failure as a catalogue error. The catalogue code is added with the helper (T7.8).
 
@@ -108,6 +111,7 @@ The helper exits 0 when every path matches or was rebound. It exits non-zero on 
 - Processes that already hold the old socket descriptor keep it. Their state after the rebind was not measured.
 - A stale socket stays in place until the next enter or launch of that realm. The rebind is lazy by design.
 - The helper touches only the paths it is given, and only inside the container's mount namespace. It writes no Owned Path (DR-010). Its arguments are an argv list (NFR-SEC-005).
+- Untested in this decision, and proven by T7.8: the step-1 identity record, the compare-and-skip in step 3.1 (a second run must change nothing), and the batch form (several paths under one `setns`). The T7.8 test must run each of them.
 - The helper is built and shipped with the package (T7.8). Its error code needs a catalogue entry.
 - Tested on podman 5.8.8 and crun 1.30.1 only. The T7.8 host-only test must run the rebind after a real logout. That needs the S-04 precondition: an elogind session for the test login. The T7.8 test must cover a keep-id container as well as a control container.
 - Follow-up tasks: T4.6 and T7.1 (the lazy trigger), and T7.8 (the helper and its test). The SRS wording for CL-5 is open for v1.1.

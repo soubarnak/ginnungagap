@@ -24,7 +24,7 @@ src/ginn/
   security/     caps.py dbus_filter.py agent.py nvidia.py                   NFR-SEC-002, FR-067..069
   ops/          create.py rebuild.py update.py delete.py retry.py disk.py recovery.py   FR-010/019/021/023, FR-120..122
   gui/          app.py backend.py viewmodels/*.py views/*.py                FR-100..107
-native/   ginn-wait.c ginn-watch.c ginn-idle.c ginn-agent-filter.c ginn-run.c ginn-rebind.c  (each <= 200 lines)
+native/   ginn-wait.c ginn-watch.c ginn-idle.c ginn-agent-filter.c ginn-rebind.c  (each <= 200 lines; no ginn-run.c for v1, ADR-010)
 spikes/   docs/adr/  docs/errors.md  docs/traceability.md  docs/capabilities.md  docs/reference/
 packaging/void/srcpkgs/ginn/template  tools/{release.sh,xbps-build.sh,provenance-scan.sh,traceability.py}
 tests/{unit,property,integration,gui,fakes,shims,fixtures}
@@ -34,12 +34,12 @@ Key design choices, one reason each:
 
 - Podman CLI with `--format json`, not libpod REST: REST needs a resident `podman system service`, which breaks NFR-001.
 - Dedicated `--root $XDG_DATA_HOME/ginn/podman --runroot <runtime>/podman`: isolates realms from the user's own podman; is an Owned Path.
-- `--userns=keep-id:uid=<uid>,gid=<gid>`: Realm Home files owned by the host uid; services-on adds `--user 0:0` so systemd is PID 1.
+- `--userns keep-id`: Realm Home files owned by the host uid; services-on adds `--user 0:0` so systemd is PID 1.
 - Pull by digest `repo@sha256:...` from `trust.toml`: mismatch leaves no layers (FR-011 AC-1 intrinsic).
 - Container name `ginn-<realm>-g<N>`, record stores the ID; rebuild = atomic record swap to the new generation (DR-034).
-- Services off: `--init` (FR-082), with no `--init-path`. Podman's own lookup finds the Void catatonit package, as confirmed in S-07f, S-01 and S-09. Void installs it at `/usr/libexec/catatonit/catatonit`, with podman's lookup symlink at `/usr/libexec/podman/catatonit`. `/usr/bin/catatonit` does not exist on Void. Services on: `--systemd=always --cgroupns private --cgroup-parent /ginn/<uid>/<realm> --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30 --runtime crun`, added to the realm's create argv and started only through the runit supervisor (ADR-003).
+- Services off: `--init` (FR-082), with no `--init-path`. Only S-05r ran plain `--init` (services off, no `--init-path`), and it succeeded through podman's lookup path. S-07 and S-08 passed `--init-path`, and S-09 dropped `--init`. Void installs catatonit at `/usr/libexec/catatonit/catatonit`, with podman's lookup link at `/usr/libexec/podman/catatonit` (S-05r). `/usr/bin/catatonit` is absent on the reference host (S-05b). The catatonit pause alone does not prove the `--init` lookup. Services on: `--systemd=always --cgroupns private --cgroup-parent /ginn/<uid>/<realm> --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30 --runtime crun`, added to the realm's create argv and started only through the runit supervisor (ADR-003).
 - Network: non-Kali `--network host` (AS-006); Kali `--network pasta --cap-add NET_RAW` (FR-026/027).
-- No resident Python (NFR-002 8 MiB). Small C helpers: `ginn-wait` (what runit supervises; pidfd on conmon, SIGTERM -> `podman stop`), `ginn-watch` (inotify on realm `/usr/share/applications`, execs `ginn _sync`), `ginn-idle` (60 s idle stop, FR-018), `ginn-agent-filter` (ssh-agent allow-list: identities, sign, extension), `ginn-run` (fast launch via setns if S-02 shows `podman exec` misses 300 ms), `ginn-rebind` (session socket rebind for enter and launch, ADR-008). All policy stays in Python.
+- No resident Python (NFR-002 8 MiB). Small C helpers: `ginn-wait` (what runit supervises; pidfd on conmon, SIGTERM -> `podman stop`), `ginn-watch` (inotify on realm `/usr/share/applications`, execs `ginn _sync`), `ginn-idle` (60 s idle stop, FR-018), `ginn-agent-filter` (ssh-agent allow-list: identities, sign, extension), `ginn-run` (not built for v1: S-02 measured `podman exec` within 300 ms, ADR-010), `ginn-rebind` (session socket rebind for enter and launch, ADR-008). All policy stays in Python.
 - GPG: bind host `S.gpg-agent.extra` (restricted by GnuPG design) as the realm's `S.gpg-agent` (FR-067 AC-2).
 - D-Bus: `xdg-dbus-proxy` (Void package, a dependency not copied code) `--filter --talk=org.freedesktop.Notifications --talk=org.freedesktop.portal.*`; Custom tier appends names (FR-068).
 - NVIDIA: ginn generates a CDI JSON under `$XDG_DATA_HOME/ginn/cdi/` from host driver files; `--cdi-spec-dir` + `--device nvidia.com/gpu=all` (FR-069, R-005).
@@ -48,7 +48,7 @@ Key design choices, one reason each:
 - Host Setup (root, FR-001): subids >= 524288, `/etc/sv/ginn-<user>` run script (create + chown delegated cgroup `/sys/fs/cgroup/ginn/<uid>`, create `/run/ginn/<uid>`, move itself into the `supervisor` leaf (ADR-003), `setpriv` to the user, `exec runsvdir $XDG_STATE_HOME/ginn/sv`), symlink into `/var/service`, Host Setup Record `/etc/ginn/setup-<user>.json` with pre-images for undo.
 - One choke point `ops/_mutating.py`: lock, integrity before/after, journal, audit entry for every mutating op (DR-032, FR-123, FR-124).
 
-## Spikes (M1), each writes a section of `spikes/RESULTS.md` and closes an ADR
+## Spikes (M1), each writes `spikes/results/S-NN.md` and closes an ADR
 
 | ID | Risk | Question | Pass criterion |
 |---|---|---|---|
@@ -75,12 +75,14 @@ Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test 
 - T0.3 `errors.py` + `tools/gen_errors_doc.py` -> `docs/errors.md`; test: every `GINN-[EW]-*` code in the SRS exists in the catalogue.
 - T0.4 `.github/workflows/ci.yaml`: pytest as non-root on `void-glibc` and `void-musl` containers, ruff, mypy, coverage >= 80 % non-GUI, traceability check, provenance job.
 - T0.5 `tools/traceability.py`; `fr` marker registered in `pyproject.toml`; fails when a Must FR has no test.
-- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman runc conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux; `ginn-gui` subpackage deferred to M9 (T9.9)), `tools/xbps-build.sh`, `tools/release.sh` designed from public xbps-src docs: build the package, sign repodata with a locally held key, publish the repository as GitHub release assets.
+- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux containers-common; `ginn-gui` subpackage deferred to M9 (T9.9)), `tools/xbps-build.sh`, `tools/release.sh` designed from public xbps-src docs: build the package, sign repodata with a locally held key, publish the repository as GitHub release assets.
 - T0.7 `tests/shims/xbps-fail/` PATH shim; `test_fr004_no_xbps.py` asserts no `xbps-*` call during the suite (FR-004).
 - T0.8 ADR-001 Python + GTK4/libadwaita, ADR-002 podman CLI over REST, ADR template.
 
 ### M1 Spikes S-01..S-10
-Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01, done), ADR-004, ADR-005, ADR-006, ADR-007 (S-05, done), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1. All host-only. M2 and M3 run in parallel with M1.
+Deliverables: `spikes/*.sh|py`, `spikes/results/S-*.md` (one committed result per spike), ADR-003 (S-01), ADR-004, ADR-005, ADR-006, ADR-007 (S-05), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1 (`src/ginn/trust/data/trust.toml`). All host-only. M2 and M3 run in parallel with M1.
+Status: done, except S-03 (musl). S-03 has no result file, so M1 stays open until it lands. ADR-010 and ADR-012 are written as Proposed.
+`spikes/run-all.sh` and `spikes/RESULTS.md` are dropped. Re-running every host spike, root steps included, buys nothing over the committed per-spike results: each result file records its own environment, and the root steps are one-off host writes that a full run would repeat.
 
 ### M2 Domain, store, podman adapter, distro data (DR-001..013, DR-020, DR-030..035, NFR-SEC-005, NFR-060)
 - T2.1..T2.3 `domain/names.py`, `packages.py`, `paths.py` with hypothesis property tests (10k inputs under `GINN_FUZZ=1`, shell metacharacters, unicode); forbidden-path table (NFR-SEC-006).
@@ -106,15 +108,15 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01, done), ADR-0
 - T3.9 `ops/_mutating.py` choke point; ordering test (DR-032).
 
 ### M4 Realm lifecycle for arch, debian, fedora (FR-010..013, FR-015..017, FR-019, FR-020, FR-025, FR-026, FR-048, FR-049, FR-082, NFR-005, NFR-SEC-001/004)
-- T4.1 `runtime/spec.py` RealmSpec -> `podman create` argv, Basic + services off; golden argv; assert `--privileged` never present.
+- T4.1 `runtime/spec.py` RealmSpec -> `podman create` argv, Basic + services off; golden argv; assert `--privileged` never present. It passes `--http-proxy=false`, so podman does not copy the host's proxy variables into the realm (design; no spike).
 - T4.2 `runtime/mounts.py` Basic binds, missing-folder skip (FR-064), identical paths (FR-065).
-- T4.3 `runtime/env.py` session env discovery (Wayland, X11, PipeWire/Pulse, LANG, TZ).
+- T4.3 `runtime/env.py` session env discovery (Wayland, X11, PipeWire/Pulse, LANG, TZ), and the proxy variables, which it injects at exec and launch from the session env because T4.1 passes `--http-proxy=false` (design; no spike).
 - T4.4 `ops/create.py`: disk precheck hook, pull by digest with retry hook, create gen-1, start, realm user account, Integration Package Set, `--with`, record, audit; full rollback (FR-010 AC-1..3, FR-011, FR-013, FR-015).
 - T4.5 `ops/lifecycle.py` start/stop/status/list `--json` with disk usage (FR-016, FR-020).
 - T4.6 `runtime/enter.py` enter/exec/`--root`, exit-code passthrough, `$HOME` = host home path, auto-start (FR-017, FR-042, FR-048, FR-049). The enter and launch path rebinds stale session sockets before exec (ADR-008, IR-025).
 - T4.7 `ops/delete.py` with `--purge-home` confirmation (FR-019, AS-014).
 - T4.8 Owned Paths 0700, `GINN-E-NO-SUCH-REALM` (FR-025).
-- T4.9 `tests/integration/conftest.py` + `test_lifecycle_real.py`: create timed (NFR-007), start p95 <= 2 s (NFR-005), exec, no `systemd` process (FR-082), delete. Host-only.
+- T4.9 `tests/integration/conftest.py` + `test_lifecycle_real.py`: create timed (NFR-007), start p95 <= 2 s (NFR-005), exec p95 <= 300 ms over 100 launches (NFR-004, ADR-010), no `systemd` process (FR-082), delete. Host-only.
 
 ### M5 Packages, desktop export, bin export, AUR (FR-040..047, FR-012, NFR-009, DR-007)
 - T5.1 `packages/manager.py` verbs from TOML, argv lists never through a shell, `GINN-E-PKG-SIGNATURE` mapping (FR-012, FR-040 AC-2).
@@ -132,19 +134,20 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01, done), ADR-0
 - T6.2 `ginn tier` / `ginn perms`, Custom toggles and shared paths (DR-004), restart-required flag (FR-060, FR-063, FR-066).
 - T6.3 `native/ginn-agent-filter.c`; hypothesis test over framing with a fake agent (FR-067 AC-1, NFR-SEC-007).
 - T6.4 `security/agent.py` filter + gpg extra socket lifecycle, Development realms only.
-- T6.5 `security/dbus_filter.py` xdg-dbus-proxy argv and lifecycle (FR-068). The proxy starts lazily, not with the realm, because S-05 measured 4.7 MiB RSS for one resident proxy (NFR-002).
-- T6.6 `security/nvidia.py` detection, CDI generation, `ldconfig` once per driver version, musl informational (FR-069).
+- T6.5 `security/dbus_filter.py` xdg-dbus-proxy argv and lifecycle (FR-068). The proxy starts lazily, not with the realm, because S-05 measured 4.7 MiB RSS for one resident proxy (NFR-002). One proxy per realm: it starts on the first ginn launch that needs it and exits with the last ginn-launched app, so an idle realm has none (ADR-007).
+- T6.6 `security/nvidia.py` detection, CDI generation with `LD_LIBRARY_PATH=/usr/lib/ginn-nvidia` in the spec env (test the CDI env field first), `ldconfig` as container root as the fallback, musl informational (FR-069, ADR-012).
 - T6.7 Development realm: create the realm user without subuid lines (`useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`), write the Realm Home `storage.conf` (and `containers.conf`), generate the seccomp profile (FR-062 AC-3, ADR-006).
 - Host-only `test_tiers_real.py` (FR-061 AC-1/2, FR-062 AC-1..4, FR-063 AC-1).
 
 ### M7 Services mode, runit supervision, autostart (FR-080..085, NFR-003, NFR-033, AS-028)
 - T7.1 services-on argv variant per ADR-003, added to the realm's create argv, with `-e SYSTEMD_LOG_LEVEL=warning` (ADR-007, mitigation d). Supervisor-launch rule (ADR-003): a services-on realm starts only through its runit entry (`sv up`, FR-081), never from the CLI process. The enter and launch path runs the lazy session socket rebind (ADR-008) for services-on realms too.
 - T7.2 `native/ginn-wait.c`.
-- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default: journald `Storage=volatile` with `RuntimeMaxUse=8M`, the base unit masks in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`.
+- S-05s (spike, runs before T7.3): the create-time forms of the ADR-007 mitigations a+b+d. Pass: systemd treats a char device at a unit path as masked, and the tmpfs journal variant gives the same idle RSS as the S-05r a+b+d row (median 37.63 MiB, about 37.6). Fallback: in-realm files under CL-10. T7.3 does not ship the mitigations until S-05s passes or CL-10 is decided.
+- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default, as create-time mounts and environment and not as files in realm /etc: a tmpfs of 8 MiB at `/var/log/journal`, `/dev/null` bind mounts over the unit paths in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`. These forms ship only after S-05s.
 - T7.4 `services/supervisor.py` via `sv`; `ginn services on|off` (FR-083).
 - T7.5 `services/autostart.py` (`down` file semantics, DR-012).
 - T7.6 `native/ginn-idle.c` wired into services-off start (FR-018).
-- T7.7 Host-only `test_services_real.py`: FR-080, FR-081 AC-1..3, FR-083, FR-084, NFR-003 RSS table, on glibc and musl. FR-080 AC-1 and AC-2 run under the crun argv (ADR-003), which S-01 did not test. The logind mask (`spikes/s05/masks-logind.txt`) is tested here against the FR-080 apps first, and stays out of the default unless they pass. NFR-003 is re-measured per distro with the ADR-003 argv, because the a+b+d margin is thin (ADR-007).
+- T7.7 Host-only `test_services_real.py`: FR-080, FR-081 AC-1..3, FR-083, FR-084, NFR-003 RSS table, on glibc and musl. FR-080 AC-1 and AC-2 run under the crun argv (ADR-003), which S-01 did not test. The logind mask (`spikes/s05/masks-logind.txt`) is tested here against the FR-080 apps first, and stays out of the default unless they pass. NFR-003 is re-measured per distro with the ADR-003 argv, because the a+b+d margin is thin (ADR-007). It also measures the helpers that NFR-002 and NFR-003 count (`ginn-watch`, `ginn-idle`, `runsv`, `ginn-wait`), which S-05r did not measure, and NFR-021 (five idle realms, Should) with the same RSS harness (ADR-007).
 - T7.8 `native/ginn-rebind.c` (at most 200 lines), its wiring in the enter and launch path, and a host-only `tests/integration/test_rebind_real.py`: a stale session socket is rebound after a real logout, with no realm restart (ADR-008, IR-025, FR-084).
 
 ### M8 Rebuild, update, failure handling (FR-021..024, FR-120..123, NFR-030/031, DR-034)
@@ -188,7 +191,7 @@ Dependencies: M1 before M4 (ADR-004, ADR-006 and ADR-010 shape `runtime/`; ADR-0
 
 ```
 M0  pytest -q; ruff check src tests; mypy src/ginn; tools/traceability.py --check
-M1  bash spikes/run-all.sh > spikes/RESULTS.md        # host; S-01 setup step needs root
+M1  ls spikes/results/S-*.md                           # one committed result per spike; S-03 (musl) has none yet
 M2  pytest tests/unit tests/property -q --cov=ginn --cov-fail-under=80; GINN_FUZZ=1 pytest tests/property -q
 M3  pytest tests/unit/test_hostsetup*.py tests/unit/test_doctor*.py tests/unit/test_integrity*.py -q
     sudo ginn host-setup --user $USER; ginn doctor; sudo ginn host-setup --user $USER | grep 'already configured'

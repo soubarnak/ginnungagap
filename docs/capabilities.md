@@ -9,7 +9,7 @@ The set is accepted (decision of 2026-10-12). The Development part follows ADR-0
 Options every realm carries. None adds a capability or a device.
 
 - `--runtime crun`, and the global flags `--root`, `--runroot` and `--tmpdir` (ADR-004, IR-020).
-- `--name`, `--userns keep-id` (roadmap, design choices), `--network host` for non-Kali realms (AS-006), and `--init` when services are off (FR-082). No `--init-path` is passed. Podman's own lookup finds the Void catatonit package, as confirmed in S-07f, S-01 and S-09. Void installs it at `/usr/libexec/catatonit/catatonit`, with podman's lookup symlink at `/usr/libexec/podman/catatonit`. `/usr/bin/catatonit` does not exist on Void.
+- `--name`, `--userns keep-id` (roadmap, design choices), `--network host` for non-Kali realms (AS-006), and `--init` when services are off (FR-082). No `--init-path` is passed. Only S-05r ran plain `--init` (services off, no `--init-path`), and it succeeded through podman's lookup path. S-07 and S-08 passed `--init-path`, and S-09 dropped `--init`. Void installs catatonit at `/usr/libexec/catatonit/catatonit`, with podman's lookup link at `/usr/libexec/podman/catatonit` (S-05r). `/usr/bin/catatonit` is absent on the reference host (S-05b).
 - Creation from a digest reference in the Trust Manifest (FR-011, ADR-005).
 - No `--privileged`, and no `--cap-add ALL`. The argv builder in `src/ginn/podman/adapter.py` refuses both (NFR-SEC-001).
 
@@ -18,7 +18,7 @@ Options every realm carries. None adds a capability or a device.
 | Item | Option | Evidence | Status |
 |---|---|---|---|
 | Added options | none | none needed | done |
-| GPU device nodes (FR-061) | `--device` for each GPU node; NVIDIA through CDI (FR-069) | S-06 and ADR-012 (planned) decide the node list. Not in this document yet. | pending |
+| GPU device nodes (FR-061) | `--device /dev/dri`, which also exposes the NVIDIA DRM nodes; NVIDIA through CDI (FR-069) | S-06 sections 2 and 5 (runc only). ADR-012 (Proposed) records the grant. | pending (crun not tested) |
 
 ## Development
 
@@ -73,7 +73,7 @@ These options and actions must not appear in a Development realm.
 | No setcap, no libcap package, no change to a helper binary. | They conflict with FR-013 and CR-007 (CL-8). The single-ID set does not need them. | S-07e E1o-realm (helpers unused), S-07e2 E1d-u2 (no setcap, no libcap). |
 | No `/etc/subuid` or `/etc/subgid` line for the realm user. | A line makes inner podman call newuidmap, which fails. | S-07e E0 (rc 125). S-07e2 E1d-u1 (rc 125). |
 | No host ACL on `/dev/kvm`. | keep-groups already opens the device. An ACL would need a root step. | S-07c K1. |
-| No `label=disable`. | Void hosts have no SELinux. The passing runs do not use it. | S-07e E1o (passes without it). Revisit on an SELinux host. |
+| No `label=disable`. | The reference host has no SELinux, and S-07 notes that the option may be inert there. The passing runs do not use it. | S-07e E1o and S-07 C3c-g2 (pass without it). An SELinux host is untested. |
 | No `no-new-privileges`. | NNP is compatible with the nested-podman set (S-07f case C). It is not adopted because setuid and file-capability workflows inside a realm are untested: sudo, su, passwd, ping, and the FR-043 AUR flow where makepkg escalates. Revisit in M6 with that list. | S-07f case C passes (outer rc 0, inner rc 0). S-07 M5 (old set: blocks the setuid helper). |
 | Inner podman takes no `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`. | Podman 5.4.2 drops the storage.conf options when `--root` is on the command line. | S-07e Finding 1 (E1 fails). S-07e2 (plain run passes). |
 
@@ -110,8 +110,8 @@ Kali is a distro, not a tier (FR-026, FR-027). Its extra options:
 
 | Item | Option | Why | Evidence | Status |
 |---|---|---|---|---|
-| Isolated network | `--network pasta` in place of `--network host` | FR-026: Kali uses its own network namespace | S-09 A (outbound TCP works through pasta); S-09 P2 (publish on 127.0.0.1 only) | proven |
-| Raw sockets | `--cap-add NET_RAW` | FR-027 AC-1: raw sockets inside the realm's own namespace | S-09 A: copied nmap SYN and ACK scans, tcpdump AF_PACKET capture | proven. NET_RAW was not tested alone (no pasta run without it that opens a raw socket). |
+| Isolated network | `--network pasta` in place of `--network host` | FR-026: Kali uses its own network namespace | S-09 A (outbound TCP through pasta) and P2 (publish on 127.0.0.1 only), both from the first pass, which did not pin `XDG_RUNTIME_DIR`. The pinned rerun covers the product argv for AC-2 only. | proven on the first pass; pinned for the product argv under AC-2 only |
+| Raw sockets | `--cap-add NET_RAW` | FR-027 AC-1: raw sockets inside the realm's own namespace | S-09 rerun ("S-09 Run C rerun"): FR-027 AC-1 and AC-2 PASS with the product argv `--network pasta --cap-add NET_RAW`, `XDG_RUNTIME_DIR` pinned. First pass (S-09 A, not pinned): copied nmap SYN and ACK scans, tcpdump AF_PACKET capture. | proven by the rerun. The stock nmap does not run under NET_RAW alone (S-09 Finding 2). The fix for that is not tested. |
 
 Not added: NET_ADMIN. S-09 C shows that NET_ADMIN lets the stock nmap run, but the stock binary is not needed (S-09 Finding 2 and 6).
 
@@ -120,7 +120,7 @@ Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the
 ## Not in this document
 
 - FR-085 (Docker in a realm) is deferred. Its options will be added here when it is decided (CL-2).
-- NVIDIA CDI devices (FR-069) are covered by ADR-012, which is planned.
+- NVIDIA CDI devices (FR-069) are covered by ADR-012 (Proposed).
 
 ## Open items for the M6 host test
 
