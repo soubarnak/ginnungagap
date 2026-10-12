@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ginn.domain import (
+    REMOVED,
     DistroId,
     RealmName,
     RealmSettings,
@@ -32,6 +33,8 @@ from ginn.store._time import parse_utc, utc_from_epoch, utc_iso
 from ginn.store.paths import OwnedPaths
 
 _PREVIOUS_BOUND: frozenset[RealmState] = frozenset({RealmState.UPDATING, RealmState.REBUILDING})
+_RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.RUNNING})
+"""The only states that lead to `updating` or `rebuilding`, so the only valid previous states."""
 
 
 def write_json_atomic(path: Path, obj: object) -> None:
@@ -138,7 +141,8 @@ def _str_list(value: object) -> list[str]:
 
 @dataclass
 class RealmRecord:
-    """The stored state of one realm (DR-001). The settings are validated at construction."""
+    """The stored state of one realm (DR-001). The settings and previous_state are validated at
+    construction (DR-020)."""
 
     schema_version: ClassVar[int] = 1
 
@@ -153,6 +157,19 @@ class RealmRecord:
     updated_at: datetime
     restart_required: bool = False
     share_skipped: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Refuse a `previous_state` that DR-020 does not allow for this state.
+
+        `updating` and `rebuilding` must record `stopped` or `running` as the state they return
+        to. Every other state must record none. `from_json` builds through this constructor, so a
+        stored record that breaks the rule is reported as GINN-E-INTERNAL.
+        """
+        if self.state in _PREVIOUS_BOUND:
+            if self.previous_state not in _RESTORE_TO:
+                raise ValueError(f"{self.state.value} needs previous_state stopped or running")
+        elif self.previous_state is not None:
+            raise ValueError(f"{self.state.value} must not record previous_state")
 
     @property
     def name(self) -> RealmName:
@@ -257,6 +274,13 @@ class RealmStore:
         return names
 
     def delete(self, name: RealmName) -> None:
+        """Remove the record. DR-020 allows this from `creating` (rollback) and `deleting` only.
+
+        Any other state raises IllegalTransition and the record stays. The check uses the same
+        `transition` table as `set_state`, so removal has one rule.
+        """
+        record = self.load(name)
+        transition(record.state, REMOVED, record.previous_state)
         path = self._file(name)
         try:
             path.unlink()

@@ -15,11 +15,14 @@ root rule, so `/etc` reports its own rule.
 
 `FORBIDDEN_RULES` is the data that docs/capabilities.md and the GUI render. The rules are checked
 against resolved paths, so a symlink to a forbidden target is refused like the target itself.
+The two AS-011 desktop and autostart rules also follow `XDG_DATA_HOME` and `XDG_CONFIG_HOME` when
+those are set to absolute paths (`_xdg_rules`). The hard-coded defaults always apply as well.
 Validation happens at share time. Symlinks created inside a share later are not checked here.
+`SharedPath.revalidate()` runs the checks again for the mount builder at create and start.
 """
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, Self
@@ -105,9 +108,30 @@ def _strictly_under(path: Path, ancestor: Path) -> bool:
     return ancestor in path.parents
 
 
-def _forbidden(home: Path, owned: Sequence[Path]) -> list[tuple[ForbiddenRule, Path]]:
+def _xdg_rules(env: Mapping[str, str]) -> tuple[ForbiddenRule, ...]:
+    """AS-011 rules for `$XDG_DATA_HOME/applications` and `$XDG_CONFIG_HOME/autostart`.
+
+    The host desktop and autostart directories move when these variables are set. Only absolute
+    values count, as in the XDG Base Directory spec. An empty or relative value is ignored, so
+    the defaults in FORBIDDEN_RULES are the only rules that apply.
+    """
+    rules: list[ForbiddenRule] = []
+    data_home = env.get("XDG_DATA_HOME", "")
+    if os.path.isabs(data_home):
+        apps = str(Path(data_home) / "applications")
+        rules.append(ForbiddenRule("AS-011.applications", apps, "host desktop entries"))
+    config_home = env.get("XDG_CONFIG_HOME", "")
+    if os.path.isabs(config_home):
+        autostart = str(Path(config_home) / "autostart")
+        rules.append(ForbiddenRule("AS-011.autostart", autostart, "host autostart entries"))
+    return tuple(rules)
+
+
+def _forbidden(
+    home: Path, owned: Sequence[Path], extra: Sequence[ForbiddenRule]
+) -> list[tuple[ForbiddenRule, Path]]:
     pairs: list[tuple[ForbiddenRule, Path]] = []
-    for rule in FORBIDDEN_RULES:
+    for rule in (*FORBIDDEN_RULES, *extra):
         if rule.path == OWNED:
             pairs.extend((rule, _real(path)) for path in owned)
         else:
@@ -152,17 +176,44 @@ class SharedPath:
     """A host path validated for sharing with a realm. Build it with `parse`.
 
     `path` is the resolved target. `target_exists` is False when the target is missing, which is
-    allowed but reported. The `_token` field refuses direct construction without validation.
+    allowed but reported. `_raw`, `_home` and `_owned` are the parse inputs, kept so that
+    `revalidate` can run the same checks again. The `_token` field refuses direct construction
+    without validation.
     """
 
     path: Path
     mode: Mode
     target_exists: bool
+    _raw: str
+    _home: Path
+    _owned: tuple[Path, ...]
     _token: object
 
     def __post_init__(self) -> None:
         if self._token is not _TOKEN:
             raise TypeError("SharedPath is built with SharedPath.parse(), which validates it")
+
+    def revalidate(self) -> None:
+        """Run the share checks again. Refuse if the source now resolves to another target.
+
+        `parse` runs once, when the share is added. A symlink on the source path can be replaced
+        after that, so a share that was valid then may now resolve to a forbidden or different
+        target. The mount builder (runtime/mounts.py in M4, and the start path in M6) must call
+        this at realm create and at every start, before it passes `self.path` to podman.
+
+        Raises GINN-E-PATH-FORBIDDEN when the source no longer validates, or when it resolves to a
+        target other than `self.path`. This narrows the window but does not close it. Podman
+        resolves the path again when it creates the mount, so a swap between this check and the
+        mount still gets through. Returns None when the share is unchanged.
+        """
+        fresh = SharedPath.parse(
+            self._raw, home=self._home, owned_paths=self._owned, mode=self.mode
+        )
+        if fresh.path != self.path:
+            raise _refuse(
+                self._raw,
+                f"resolved target changed from {self.path} to {fresh.path} after validation",
+            )
 
     @classmethod
     def parse(
@@ -191,7 +242,7 @@ class SharedPath:
         target = _real(raw)
         if _podman_separator(str(target)):
             raise _refuse(raw, f"resolves to a path that {_SEPARATOR_REASON}")
-        for rule, forbidden in _forbidden(home_real, owned_real):
+        for rule, forbidden in _forbidden(home_real, owned_real, _xdg_rules(os.environ)):
             if _conflicts(target, forbidden, rule, mode):
                 raise _refuse(raw, f"{rule.rule_id}: {rule.description}")
         if not any(_strictly_under(target, root) for root in _roots(home_real)):
@@ -200,6 +251,9 @@ class SharedPath:
             path=target,
             mode=mode,
             target_exists=os.path.exists(target),
+            _raw=raw,
+            _home=home,
+            _owned=tuple(owned_paths),
             _token=_TOKEN,
         )
 

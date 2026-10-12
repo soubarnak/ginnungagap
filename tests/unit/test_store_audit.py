@@ -111,8 +111,9 @@ def test_append_is_flushed_to_disk_before_it_returns(
     monkeypatch.setattr(os, "fsync", counting_fsync)
     log = AuditLog(paths, clock=FakeClock())
     log.append(_entry("install"))
+    assert len(synced) == 2  # the file, then the directory that now holds it (DR-035)
     log.append(_entry("export"))
-    assert len(synced) == 2
+    assert len(synced) == 3  # a later append syncs the file only
 
 
 @pytest.mark.fr("DR-050")
@@ -232,6 +233,93 @@ def test_torn_last_line_is_skipped_but_corruption_elsewhere_is_an_error(
         list(log.read())
     assert excinfo.value.code == "GINN-E-INTERNAL"
     assert excinfo.value.details["line"] == 1
+
+
+TORN = b'{"ts": "2027-01-15T08:00:00.000Z", "us'  # a record cut short by a crash, no newline
+
+
+@pytest.mark.fr("FR-124")
+@pytest.mark.fr("NFR-030")
+def test_append_after_a_torn_tail_cuts_the_torn_bytes_and_keeps_the_log_readable(
+    paths: OwnedPaths,
+) -> None:
+    log = AuditLog(paths, clock=FakeClock())
+    log.append(_entry("install"))
+    with paths.audit_log.open("ab") as handle:
+        handle.write(TORN)
+
+    log.append(_entry("export"))
+
+    assert _ops(log) == ["install", "export"]
+    raw = paths.audit_log.read_bytes()
+    assert TORN not in raw
+    assert raw.endswith(b"\n")
+    assert [json.loads(line)["op"] for line in raw.splitlines()] == ["install", "export"]
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.parametrize("torn_bytes", [1, 4095, 4096, 4097, 12_300])
+def test_torn_tails_longer_than_one_read_are_cut_back_to_the_last_newline(
+    paths: OwnedPaths, torn_bytes: int
+) -> None:
+    log = AuditLog(paths, clock=FakeClock())
+    log.append(_entry("install"))
+    log.append(_entry("export"))
+    complete = paths.audit_log.read_bytes()
+    with paths.audit_log.open("ab") as handle:
+        handle.write(b"a" * torn_bytes)
+
+    log.append(_entry("tier-change"))
+
+    assert _ops(log) == ["install", "export", "tier-change"]
+    assert paths.audit_log.read_bytes().startswith(complete)
+
+
+@pytest.mark.fr("NFR-030")
+def test_a_log_holding_only_a_torn_tail_is_emptied_before_the_append(paths: OwnedPaths) -> None:
+    paths.audit_log.write_bytes(TORN)
+    log = AuditLog(paths, clock=FakeClock())
+    assert _ops(log) == []
+
+    log.append(_entry("install"))
+
+    assert _ops(log) == ["install"]
+    assert paths.audit_log.read_bytes().count(b"\n") == 1
+
+
+@pytest.mark.fr("DR-019")
+@pytest.mark.fr("NFR-030")
+def test_rotation_still_happens_after_a_torn_tail_is_cut(paths: OwnedPaths) -> None:
+    log = AuditLog(paths, clock=FakeClock(), max_bytes=150, keep=3)
+    log.append(_entry("op-000"))
+    full = paths.audit_log.stat().st_size
+    assert full >= 150, "one entry must reach the threshold"
+    with paths.audit_log.open("ab") as handle:
+        handle.write(TORN)
+
+    log.append(_entry("op-001"))
+
+    assert _rotated_names(paths) == ["audit.log.1"]
+    rotated = (paths.state / "audit.log.1").read_bytes()
+    assert rotated.endswith(b"\n")
+    assert TORN not in rotated, "the torn bytes were cut before the file was rotated"
+    assert _ops(log) == ["op-000", "op-001"]
+
+
+@pytest.mark.fr("DR-035")
+def test_creating_the_audit_log_fsyncs_its_directory_once(
+    paths: OwnedPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flushed: list[Path] = []
+
+    def record(directory: Path) -> None:
+        flushed.append(directory)
+
+    monkeypatch.setattr("ginn.store.audit.fsync_dir", record)
+    log = AuditLog(paths, clock=FakeClock())
+    log.append(_entry("install"))
+    log.append(_entry("export"))
+    assert flushed == [paths.state]
 
 
 @pytest.mark.fr("NFR-043")

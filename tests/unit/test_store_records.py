@@ -143,8 +143,8 @@ def test_read_json_rejects_malformed_and_wrong_version_files(tmp_path: Path) -> 
 @pytest.mark.fr("DR-001")
 def test_realm_record_round_trips_through_json(tmp_path: Path) -> None:
     record = _record(
-        state=RealmState.RUNNING,
-        previous_state=RealmState.STOPPED,
+        state=RealmState.REBUILDING,
+        previous_state=RealmState.RUNNING,
         restart_required=True,
         share_skipped=["/etc/shadow"],
         settings=_settings("debian", DistroId.DEBIAN, services=True, autostart=True),
@@ -168,6 +168,64 @@ def test_realm_record_with_an_invalid_field_is_reported_as_internal(tmp_path: Pa
         RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
     assert excinfo.value.code == "GINN-E-INTERNAL"
     assert "reason" in excinfo.value.details
+
+
+LEGAL_PREVIOUS = [
+    (RealmState.UPDATING, RealmState.RUNNING),
+    (RealmState.UPDATING, RealmState.STOPPED),
+    (RealmState.REBUILDING, RealmState.RUNNING),
+    (RealmState.REBUILDING, RealmState.STOPPED),
+]
+ILLEGAL_PREVIOUS = [
+    (RealmState.UPDATING, None),
+    (RealmState.REBUILDING, None),
+    (RealmState.UPDATING, RealmState.FAILED),
+    (RealmState.REBUILDING, RealmState.BROKEN),
+    (RealmState.UPDATING, RealmState.REBUILDING),
+    (RealmState.STOPPED, RealmState.RUNNING),
+    (RealmState.RUNNING, RealmState.STOPPED),
+    (RealmState.BROKEN, RealmState.STOPPED),
+    (RealmState.CREATING, RealmState.RUNNING),
+]
+NO_PREVIOUS_STATE = [s for s in RealmState if s not in (RealmState.UPDATING, RealmState.REBUILDING)]
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", NO_PREVIOUS_STATE)
+def test_states_that_carry_no_previous_state_construct_without_one(state: RealmState) -> None:
+    assert _record(state=state).previous_state is None
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(("state", "previous"), LEGAL_PREVIOUS)
+def test_a_legal_previous_state_survives_a_json_round_trip(
+    state: RealmState, previous: RealmState
+) -> None:
+    record = _record(state=state, previous_state=previous)
+    assert RealmRecord.from_json(json.loads(json.dumps(record.to_json()))) == record
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(("state", "previous"), ILLEGAL_PREVIOUS)
+def test_an_illegal_previous_state_is_refused_when_the_record_is_built(
+    state: RealmState, previous: RealmState | None
+) -> None:
+    with pytest.raises(ValueError, match="previous_state"):
+        _record(state=state, previous_state=previous)
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(("state", "previous"), ILLEGAL_PREVIOUS)
+def test_a_stored_record_with_an_illegal_previous_state_is_reported_as_internal(
+    tmp_path: Path, state: RealmState, previous: RealmState | None
+) -> None:
+    data = _record(state=RealmState.STOPPED).to_json()
+    data["state"] = state.value
+    data["previous_state"] = None if previous is None else previous.value
+    with pytest.raises(GinnError) as excinfo:
+        RealmRecord.from_json(data, source=str(tmp_path / "arch.json"))
+    assert excinfo.value.code == "GINN-E-INTERNAL"
+    assert "previous_state" in excinfo.value.details["reason"]
 
 
 @pytest.mark.fr("DR-001")
@@ -208,7 +266,7 @@ def test_load_of_a_missing_realm_raises_no_such_realm(tmp_path: Path) -> None:
 @pytest.mark.fr("DR-001")
 def test_delete_removes_the_record_and_missing_delete_is_an_error(tmp_path: Path) -> None:
     store = RealmStore(_paths(tmp_path), clock=FakeClock())
-    store.save(_record("arch"))
+    store.save(_record("arch", state=RealmState.DELETING))
     store.delete(RealmName("arch"))
     assert not store.exists(RealmName("arch"))
     with pytest.raises(GinnError) as excinfo:
@@ -270,3 +328,41 @@ def test_set_state_refuses_removal_which_is_delete_instead(tmp_path: Path) -> No
     with pytest.raises(ValueError, match="delete"):
         store.set_state(RealmName("arch"), REMOVED)
     assert store.load(RealmName("arch")).state is RealmState.DELETING
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", [RealmState.CREATING, RealmState.DELETING])
+def test_delete_removes_a_record_from_the_two_states_that_lead_to_removal(
+    tmp_path: Path, state: RealmState
+) -> None:
+    store = RealmStore(_paths(tmp_path), clock=FakeClock())
+    store.save(_record("arch", state=state))
+    store.delete(RealmName("arch"))
+    assert not store.exists(RealmName("arch"))
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(
+    ("state", "previous"),
+    [
+        (RealmState.STOPPED, None),
+        (RealmState.RUNNING, None),
+        (RealmState.UPDATING, RealmState.RUNNING),
+        (RealmState.REBUILDING, RealmState.STOPPED),
+        (RealmState.FAILED, None),
+        (RealmState.BROKEN, None),
+    ],
+)
+def test_delete_is_refused_from_every_state_that_does_not_lead_to_removal(
+    tmp_path: Path, state: RealmState, previous: RealmState | None
+) -> None:
+    paths = _paths(tmp_path)
+    store = RealmStore(paths, clock=FakeClock())
+    store.save(_record("arch", state=state, previous_state=previous))
+    record_file = paths.realms / "arch.json"
+    before = record_file.read_bytes()
+
+    with pytest.raises(IllegalTransition):
+        store.delete(RealmName("arch"))
+
+    assert record_file.read_bytes() == before

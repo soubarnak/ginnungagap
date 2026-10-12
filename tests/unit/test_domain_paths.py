@@ -25,6 +25,13 @@ OWNED_PATH = HOME / ".local" / "share" / "ginn"
 OWNED_PATHS: Sequence[Path] = [OWNED_PATH]
 
 
+@pytest.fixture(autouse=True)
+def _xdg_roots_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default rules assume the XDG roots are unset. A test that sets one does it itself."""
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 def share(raw: str, mode: Mode = "rw", home: Path = HOME) -> SharedPath:
     return SharedPath.parse(raw, home=home, owned_paths=OWNED_PATHS, mode=mode)
 
@@ -181,7 +188,15 @@ def test_refusal_names_the_rule_that_matched() -> None:
 
 def test_direct_construction_without_parse_is_refused() -> None:
     with pytest.raises(TypeError):
-        SharedPath(path=HOME / "Music", mode="rw", target_exists=False, _token=object())
+        SharedPath(
+            path=HOME / "Music",
+            mode="rw",
+            target_exists=False,
+            _raw="/home/alice/Music",
+            _home=HOME,
+            _owned=(),
+            _token=object(),
+        )
 
 
 def test_home_must_be_absolute() -> None:
@@ -259,3 +274,86 @@ def test_symlink_inside_home_is_accepted_at_its_target(real_home: Path) -> None:
     (real_home / "Docs").symlink_to(real_home / "Music")
     shared = SharedPath.parse(str(real_home / "Docs"), home=real_home, owned_paths=[], mode="rw")
     assert shared.path == (real_home / "Music").resolve()
+
+
+@pytest.mark.fr("AS-011")
+@pytest.mark.fr("NFR-SEC-006")
+def test_xdg_data_home_moves_the_desktop_entry_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(HOME / "share"))
+    err = refusal(str(HOME / "share" / "applications"), "rw")
+    assert err.details["reason"].startswith("AS-011.applications")
+    refusal(str(HOME / "share" / "applications" / "ginn-x.desktop"), "ro")  # subtree
+    refusal(str(HOME / "share"), "rw")  # an ancestor of the forbidden path
+    assert share(str(HOME / "share" / "Music"), "rw").mode == "rw"  # the rest stays shareable
+
+
+@pytest.mark.fr("AS-011")
+@pytest.mark.fr("NFR-SEC-006")
+def test_hard_coded_desktop_entry_rule_still_applies_when_xdg_data_home_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", str(HOME / "share"))
+    err = refusal(str(HOME / ".local" / "share" / "applications"), "rw")
+    assert err.details["reason"].startswith("AS-011.applications")
+
+
+@pytest.mark.fr("AS-011")
+@pytest.mark.fr("NFR-SEC-006")
+def test_xdg_config_home_moves_the_autostart_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(HOME / "cfg"))
+    err = refusal(str(HOME / "cfg" / "autostart" / "x.desktop"), "ro")
+    assert err.details["reason"].startswith("AS-011.autostart")
+    refusal(str(HOME / "cfg"), "rw")  # an ancestor of the forbidden path
+    assert share(str(HOME / "cfg" / "fish"), "ro").mode == "ro"  # other config stays shareable
+    refusal(str(HOME / ".config" / "autostart" / "x.desktop"), "ro")  # the default still applies
+
+
+@pytest.mark.fr("AS-011")
+@pytest.mark.parametrize("value", ["", "share"])
+def test_empty_or_relative_xdg_values_add_no_rule(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("XDG_DATA_HOME", value)
+    monkeypatch.setenv("XDG_CONFIG_HOME", value)
+    assert share(str(HOME / "share" / "applications"), "rw").mode == "rw"
+    assert share(str(HOME / "share" / "autostart" / "x.desktop"), "ro").mode == "ro"
+
+
+@pytest.mark.fr("DR-004")
+@pytest.mark.fr("NFR-SEC-006")
+def test_revalidate_accepts_an_unchanged_share(real_home: Path) -> None:
+    (real_home / "Docs").symlink_to(real_home / "Music")
+    shared = SharedPath.parse(str(real_home / "Docs"), home=real_home, owned_paths=[], mode="rw")
+    shared.revalidate()
+    assert shared.path == (real_home / "Music").resolve()
+
+
+@pytest.mark.fr("DR-004")
+@pytest.mark.fr("NFR-SEC-006")
+def test_revalidate_refuses_a_link_swapped_to_another_target(real_home: Path) -> None:
+    (real_home / "Other").mkdir()
+    (real_home / "live").symlink_to(real_home / "Music")
+    shared = SharedPath.parse(str(real_home / "live"), home=real_home, owned_paths=[], mode="rw")
+    (real_home / "live").unlink()
+    (real_home / "live").symlink_to(real_home / "Other")
+
+    with pytest.raises(GinnError) as info:
+        shared.revalidate()
+
+    assert info.value.code == "GINN-E-PATH-FORBIDDEN"
+    assert info.value.details["path"] == str(real_home / "live")
+    assert "changed" in info.value.details["reason"]
+
+
+@pytest.mark.fr("DR-004")
+@pytest.mark.fr("NFR-SEC-006")
+def test_revalidate_refuses_a_link_swapped_to_a_forbidden_target(real_home: Path) -> None:
+    (real_home / "live").symlink_to(real_home / "Music")
+    shared = SharedPath.parse(str(real_home / "live"), home=real_home, owned_paths=[], mode="rw")
+    (real_home / "live").unlink()
+    (real_home / "live").symlink_to(real_home / ".ssh")
+
+    with pytest.raises(GinnError) as info:
+        shared.revalidate()
+
+    assert info.value.details["reason"].startswith("DR-004.ssh")

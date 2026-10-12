@@ -8,7 +8,10 @@ AS-021) it is shifted to `audit.log.1`, older rotated files move up one index, a
 beyond `keep` (5) is removed. Every append is fsynced before it returns.
 
 There is no delete or rewrite API. A torn last line, left by a crash mid-write, is skipped by
-`read`. Any other unparseable line raises GINN-E-INTERNAL.
+`read`. Before each append, under the same lock, the torn bytes are cut off the end of the file.
+Without that cut the new entry would be glued onto them and every later read would fail. The cut
+is not an edit of a complete entry: an append that never returned was never reported as done
+(FR-124, NFR-030). Any other unparseable line raises GINN-E-INTERNAL.
 
 Timestamps come from `clock`, which returns epoch seconds, unless the entry already has `ts`.
 """
@@ -32,6 +35,7 @@ from ginn.store.records import fsync_dir
 
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # DR-019, AS-021
 DEFAULT_KEEP = 5  # DR-019, AS-021
+_TAIL_CHUNK = 4096  # bytes read per step when looking backwards for the last newline
 
 
 @dataclass(frozen=True)
@@ -134,13 +138,18 @@ class AuditLog:
         lock_fd = os.open(audit_lock_path(self._paths), os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            log = self._paths.audit_log
+            _cut_torn_tail(log)
             self._rotate_if_full()
-            fd = os.open(self._paths.audit_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            created = not log.exists()
+            fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             try:
                 _write_all(fd, line)
                 os.fsync(fd)
             finally:
                 os.close(fd)
+            if created:
+                fsync_dir(log.parent)  # DR-035: the new directory entry is durable too
         finally:
             os.close(lock_fd)
         return stamped
@@ -224,6 +233,38 @@ def _line_error(path: Path, number: int, reason: str) -> GinnError:
     err = make("GINN-E-INTERNAL")
     err.details.update({"path": str(path), "line": number, "reason": reason})
     return err
+
+
+def _cut_torn_tail(log: Path) -> None:
+    """Truncate `log` to just after its last newline when the final line has none.
+
+    Callers hold the audit lock. A complete entry always ends in a newline, so only a record cut
+    short by a crash is removed. A file with no newline at all is emptied.
+    """
+    try:
+        fd = os.open(log, os.O_RDWR)
+    except FileNotFoundError:
+        return
+    try:
+        size = os.fstat(fd).st_size
+        if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+            return
+        os.ftruncate(fd, _last_newline_end(fd, size))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _last_newline_end(fd: int, size: int) -> int:
+    """Return the offset just after the last newline in the first `size` bytes, or 0 if none."""
+    end = size
+    while end > 0:
+        start = max(0, end - _TAIL_CHUNK)
+        found = os.pread(fd, end - start, start).rfind(b"\n")
+        if found != -1:
+            return start + found + 1
+        end = start
+    return 0
 
 
 def _write_all(fd: int, data: bytes) -> None:
