@@ -14,8 +14,9 @@ Modes:
              written.
 
 Only `digest` is rewritten. The sizes, the signature kind and `verified_on` describe the pulled
-image, so they need the measurement steps in spikes/results/S-10.md section 6 (steps 3 to 5). After
-a write the tool says so, rather than leaving them stale without notice.
+image, so they need the by-hand steps in spikes/results/S-10.md section 6 (steps 2 to 4, and the
+other fields of step 5). After a write the tool says so, rather than leaving them stale without
+notice.
 
 Resolution uses argv lists only, never a shell (NFR-SEC-005). A registry answer has one of two
 shapes:

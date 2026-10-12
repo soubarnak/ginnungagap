@@ -23,12 +23,12 @@ Architecture decision records (ADRs) record the decisions that shape Ginnungagap
 |---|---|---|---|
 | [ADR-001](ADR-001-language-and-gui-toolkit.md) | Language and GUI toolkit | Accepted | CR-002, CR-009, NFR-001, NFR-002, NFR-004, NFR-061, NFR-062, FR-105, FR-106 |
 | [ADR-002](ADR-002-podman-cli-over-rest.md) | Drive Podman through its command line, not the REST API | Accepted | CR-002, CR-003, NFR-001, NFR-002, NFR-004, NFR-040, NFR-042, NFR-061, NFR-SEC-005, NFR-SEC-009, DR-010, FR-011 |
-| ADR-003 | Services-mode cgroup strategy | Planned (decided by spike S-01 in M1) | R-001, FR-080, FR-081 |
+| [ADR-003](ADR-003-services-mode-cgroup-strategy.md) | Services-mode cgroup strategy | Accepted | R-001, FR-001, FR-080, FR-081, FR-083, NFR-003 |
 | [ADR-004](ADR-004-runtime-root.md) | Runtime directory and Podman storage root | Accepted | DR-010, DR-033, FR-081, FR-084, FR-123, FR-122, IR-020, CR-003, CR-006, NFR-SEC-005, NFR-040 |
 | [ADR-005](ADR-005-image-channels-and-trust.md) | Image channels and Trust Manifest | Accepted | R-003, DR-040, FR-011, FR-023, FR-121, AS-024, CR-007, IR-021, NFR-008, NFR-SEC-004 |
 | [ADR-006](ADR-006-development-tier-capabilities.md) | Development-tier capability set without SYS_ADMIN | Accepted | NFR-SEC-002, NFR-SEC-001, NFR-SEC-005, NFR-040, FR-013, FR-021, FR-062, FR-063, FR-085, AS-005, CR-002, CR-003, CR-007, DR-010, IR-040 |
 | ADR-010 | Launch path (renumbered from ADR-006 on 2026-10-12, because ADR-006 went to the Development tier) | Planned (decided by spike S-02 in M1) | R-006, NFR-004, FR-048, FR-049 |
-| ADR-007 | Native helpers and memory budget | Planned (decided by spike S-05 in M1) | NFR-002, NFR-003, FR-067 |
+| [ADR-007](ADR-007-idle-memory-budget.md) | Idle memory budget (retitled from "Native helpers and memory budget" on 2026-10-12, because the decision covers only the memory budget) | Accepted | NFR-002, NFR-003, NFR-021, FR-068 |
 | [ADR-008](ADR-008-session-socket-rebind.md) | Session socket rebind for long-running realms | Accepted | FR-081, FR-084, IR-025, NFR-001, DR-010, NFR-SEC-005 |
 | ADR-009 | GUI to backend channel | Planned (M9; the roadmap assigns no spike) | FR-105, FR-106, NFR-SEC-009, NFR-010, DR-030 |
 | [ADR-011](ADR-011-package-manager-semantics.md) | Package manager semantics for refresh, update checks and removal | Accepted | FR-013, FR-023, FR-024, FR-040, FR-041, NFR-060, CR-007 |

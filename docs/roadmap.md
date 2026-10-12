@@ -37,7 +37,7 @@ Key design choices, one reason each:
 - `--userns=keep-id:uid=<uid>,gid=<gid>`: Realm Home files owned by the host uid; services-on adds `--user 0:0` so systemd is PID 1.
 - Pull by digest `repo@sha256:...` from `trust.toml`: mismatch leaves no layers (FR-011 AC-1 intrinsic).
 - Container name `ginn-<realm>-g<N>`, record stores the ID; rebuild = atomic record swap to the new generation (DR-034).
-- Services off: `--init` (FR-082), with no `--init-path`. Podman's own lookup finds the Void catatonit package, as confirmed in S-07f, S-01 and S-09. Void installs it at `/usr/libexec/catatonit/catatonit`, with podman's lookup symlink at `/usr/libexec/podman/catatonit`. `/usr/bin/catatonit` does not exist on Void. Services on: `--systemd=always --cgroupns private --cgroup-parent /ginn/<uid>/<realm> --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30` (ADR-003 after S-01).
+- Services off: `--init` (FR-082), with no `--init-path`. Podman's own lookup finds the Void catatonit package, as confirmed in S-07f, S-01 and S-09. Void installs it at `/usr/libexec/catatonit/catatonit`, with podman's lookup symlink at `/usr/libexec/podman/catatonit`. `/usr/bin/catatonit` does not exist on Void. Services on: `--systemd=always --cgroupns private --cgroup-parent /ginn/<uid>/<realm> --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30 --runtime crun`, added to the realm's create argv and started only through the runit supervisor (ADR-003).
 - Network: non-Kali `--network host` (AS-006); Kali `--network pasta --cap-add NET_RAW` (FR-026/027).
 - No resident Python (NFR-002 8 MiB). Small C helpers: `ginn-wait` (what runit supervises; pidfd on conmon, SIGTERM -> `podman stop`), `ginn-watch` (inotify on realm `/usr/share/applications`, execs `ginn _sync`), `ginn-idle` (60 s idle stop, FR-018), `ginn-agent-filter` (ssh-agent allow-list: identities, sign, extension), `ginn-run` (fast launch via setns if S-02 shows `podman exec` misses 300 ms), `ginn-rebind` (session socket rebind for enter and launch, ADR-008). All policy stays in Python.
 - GPG: bind host `S.gpg-agent.extra` (restricted by GnuPG design) as the realm's `S.gpg-agent` (FR-067 AC-2).
@@ -45,7 +45,7 @@ Key design choices, one reason each:
 - NVIDIA: ginn generates a CDI JSON under `$XDG_DATA_HOME/ginn/cdi/` from host driver files; `--cdi-spec-dir` + `--device nvidia.com/gpu=all` (FR-069, R-005).
 - GUI <-> backend: GUI reads the state dir and runs `ginn --json <cmd>` as a subprocess (same uid), progress as JSON lines, SIGINT = cancel; `Gio.FileMonitor` on the realm records for NFR-010. No socket, so NFR-SEC-009 holds by 0700 Owned Paths.
 - Integrity: sha256 over sorted stat tuples of AS-020 paths, stat-only so 5000 files <= 1 s (NFR-011); pending warning blocks mutating ops until `ginn integrity --ack`.
-- Host Setup (root, FR-001): subids >= 524288, `/etc/sv/ginn-<user>` run script (create + chown delegated cgroup `/sys/fs/cgroup/ginn/<uid>`, create `/run/ginn/<uid>`, `setpriv` to the user, `exec runsvdir $XDG_STATE_HOME/ginn/sv`), symlink into `/var/service`, Host Setup Record `/etc/ginn/setup-<user>.json` with pre-images for undo.
+- Host Setup (root, FR-001): subids >= 524288, `/etc/sv/ginn-<user>` run script (create + chown delegated cgroup `/sys/fs/cgroup/ginn/<uid>`, create `/run/ginn/<uid>`, move itself into the `supervisor` leaf (ADR-003), `setpriv` to the user, `exec runsvdir $XDG_STATE_HOME/ginn/sv`), symlink into `/var/service`, Host Setup Record `/etc/ginn/setup-<user>.json` with pre-images for undo.
 - One choke point `ops/_mutating.py`: lock, integrity before/after, journal, audit entry for every mutating op (DR-032, FR-123, FR-124).
 
 ## Spikes (M1), each writes a section of `spikes/RESULTS.md` and closes an ADR
@@ -80,7 +80,7 @@ Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test 
 - T0.8 ADR-001 Python + GTK4/libadwaita, ADR-002 podman CLI over REST, ADR template.
 
 ### M1 Spikes S-01..S-10
-Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, ADR-005, ADR-006, ADR-007 (S-05), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1. All host-only. M2 and M3 run in parallel with M1.
+Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01, done), ADR-004, ADR-005, ADR-006, ADR-007 (S-05, done), ADR-008 (S-08), ADR-010 (S-02), ADR-011, ADR-012 (S-06); ADR-009 is reserved for M9 and is not an M1 deliverable. `docs/capabilities.md` draft (per-tier argv, device and capability set for NFR-SEC-002), `trust.toml` v1. All host-only. M2 and M3 run in parallel with M1.
 
 ### M2 Domain, store, podman adapter, distro data (DR-001..013, DR-020, DR-030..035, NFR-SEC-005, NFR-060)
 - T2.1..T2.3 `domain/names.py`, `packages.py`, `paths.py` with hypothesis property tests (10k inputs under `GINN_FUZZ=1`, shell metacharacters, unicode); forbidden-path table (NFR-SEC-006).
@@ -97,7 +97,7 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, AD
 ### M3 Host setup, doctor, integrity (FR-001..007, NFR-011, NFR-041)
 - T3.1 `hostsetup/subids.py` append >= 524288 non-overlapping to `/etc/subuid|subgid`.
 - T3.2 `hostsetup/cgroups.py` delegated subtree (mkdir, chown, `subtree_control`); test on a fake cgroupfs tree.
-- T3.3 `hostsetup/runit_system.py` renders `/etc/sv/ginn-<user>/{run,finish,log/run}`; golden file + shellcheck.
+- T3.3 `hostsetup/runit_system.py` renders `/etc/sv/ginn-<user>/{run,finish,log/run}`; golden file + shellcheck. The run script moves its own pid into `ginn/<uid>/supervisor/cgroup.procs` before the drop to the user, so runsvdir and every service it starts sit in the delegated subtree (ADR-003). Step 3 of the script does this.
 - T3.4 `hostsetup/record.py`, `setup.py`: root check `GINN-E-SETUP-ROOT`, idempotent "already configured", record with pre-images; tests under a `--root-dir` prefix (FR-001 AC-2, FR-002). Setup runs before `/run/ginn/<uid>` exists, and it must not stop on that (ADR-004).
 - T3.5 `hostsetup/undo.py` `GINN-E-UNDO-REALMS-EXIST` (FR-003). Undo restores the recorded root cgroup `subtree_control` pre-image. Host Setup adds `pids` there (S-01), so undo must not assume the original value.
 - T3.6 `doctor/checks.py`: podman rootless, subids, runtime dir (FAIL "supervisor not running" when `/run/ginn/<uid>` is missing), user runsvdir, cgroup delegation, userns sysctl, overlay/fuse, free disk, NVIDIA-on-musl informational; every FAIL prints its fix command (FR-007, FR-069 AC-2, NFR-041). elogind `KillUserProcesses` is checked: a FAIL when the effective value is `yes`. The check reads `/etc/elogind/logind.conf` and `/etc/elogind/logind.conf.d/*.conf`, the last value wins, and an unset value counts as no. The printed fix sets it to `no` and restarts elogind (ADR-004).
@@ -138,13 +138,13 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003 (S-01), ADR-004, AD
 - Host-only `test_tiers_real.py` (FR-061 AC-1/2, FR-062 AC-1..4, FR-063 AC-1).
 
 ### M7 Services mode, runit supervision, autostart (FR-080..085, NFR-003, NFR-033, AS-028)
-- T7.1 services-on argv variant per ADR-003. The enter and launch path runs the lazy session socket rebind (ADR-008) for services-on realms too.
+- T7.1 services-on argv variant per ADR-003, added to the realm's create argv, with `-e SYSTEMD_LOG_LEVEL=warning` (ADR-007, mitigation d). Supervisor-launch rule (ADR-003): a services-on realm starts only through its runit entry (`sv up`, FR-081), never from the CLI process. The enter and launch path runs the lazy session socket rebind (ADR-008) for services-on realms too.
 - T7.2 `native/ginn-wait.c`.
-- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3).
+- T7.3 `services/runit_user.py` per-realm service dir `$XDG_STATE_HOME/ginn/sv/<realm>/{run,finish,down}`; `finish` counts crashes, 5 in 60 s -> `down` + state `failed` (FR-081 AC-3). Services-on realms ship the ADR-007 mitigations a+b+d by default: journald `Storage=volatile` with `RuntimeMaxUse=8M`, the base unit masks in `spikes/s05/masks-base.txt`, and `SYSTEMD_LOG_LEVEL=warning`.
 - T7.4 `services/supervisor.py` via `sv`; `ginn services on|off` (FR-083).
 - T7.5 `services/autostart.py` (`down` file semantics, DR-012).
 - T7.6 `native/ginn-idle.c` wired into services-off start (FR-018).
-- T7.7 Host-only `test_services_real.py`: FR-080, FR-081 AC-1..3, FR-083, FR-084, NFR-003 RSS table, on glibc and musl.
+- T7.7 Host-only `test_services_real.py`: FR-080, FR-081 AC-1..3, FR-083, FR-084, NFR-003 RSS table, on glibc and musl. FR-080 AC-1 and AC-2 run under the crun argv (ADR-003), which S-01 did not test. The logind mask (`spikes/s05/masks-logind.txt`) is tested here against the FR-080 apps first, and stays out of the default unless they pass. NFR-003 is re-measured per distro with the ADR-003 argv, because the a+b+d margin is thin (ADR-007).
 - T7.8 `native/ginn-rebind.c` (at most 200 lines), its wiring in the enter and launch path, and a host-only `tests/integration/test_rebind_real.py`: a stale session socket is rebound after a real logout, with no realm restart (ADR-008, IR-025, FR-084).
 
 ### M8 Rebuild, update, failure handling (FR-021..024, FR-120..123, NFR-030/031, DR-034)

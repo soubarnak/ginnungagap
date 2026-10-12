@@ -53,7 +53,7 @@ Refresh procedure, as built by T2.14. `tools/refresh-trust-manifest.py` is a dev
 
 1. Run it with no option, or with `--check`, to print each pinned and current digest. `--check` exits 1 when a digest moved. Nothing is written.
 2. Run it with `--write` to rewrite the `digest` line of each moved entry. Comments and other fields are kept. The new file is parsed with `ginn.trust.manifest.parse` before it is written.
-3. Measure the changed images by hand (S-10 section 6, steps 3 to 5). Pull each one by its new digest into a throwaway storage root, read `podman image inspect --format '{{.Size}}'`, and update `compressed_size_bytes`, `estimated_installed_bytes`, `measured_installed_bytes`, `signature` and `verified_on`. The tool prints a reminder for these fields.
+3. Measure the changed images by hand (S-10 section 6, steps 2 to 4 and the other fields of step 5). Pull each one by its new digest into a throwaway storage root, read `podman image inspect --format '{{.Size}}'`, and update `compressed_size_bytes`, `estimated_installed_bytes`, `measured_installed_bytes`, `signature` and `verified_on`. The tool prints a reminder for these fields.
 4. For Arch, confirm the signature on each refresh. The payload's manifest digest must match the new digest. Cosign must verify the bundle against the Arch CI identity, with the Sigstore TUF root. This is a dev-time check, not ginn code.
 5. Test that the file parses and every digest is `sha256:` followed by 64 hex characters. Then commit `trust.toml` and cite the refresh (FR-011, DR-040).
 
