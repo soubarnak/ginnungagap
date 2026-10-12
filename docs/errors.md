@@ -19,7 +19,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
 | 73 | not enough disk space |
-| 75 | realm, subordinate ID file or Host Setup busy (EX_TEMPFAIL) |
+| 75 | realm, subordinate ID file or Host Setup busy, or a service still running at undo (EX_TEMPFAIL) |
 | 77 | Host Setup must run as root, has not run for this user, or refuses an unsafe path it cannot repair (EX_NOPERM) |
 | 125 | reserved; see EXEC_GINN_FAILURE |
 | 130 | interrupted by the user |
@@ -57,6 +57,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-SUBID-LOCKED` | 75 | subordinate ID lock {lock} is held by another process ({holder}) | check for a running 'ginn host-setup'; if none is running, remove {lock} by hand, then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
 | `GINN-E-TRUST-DATA` | 70 | shipped trust data {source} is invalid: {problem} | the shipped trust data is invalid; reinstall ginn, or report a bug with this message | DR-040 (ginn-defined; not an SRS code) |
 | `GINN-E-UNDO-REALMS-EXIST` | 4 | undo refused: user {user} still has realms | delete those realms first with 'ginn delete &lt;realm&gt;' | FR-003 AC-2 |
+| `GINN-E-UNDO-SERVICE-RUNNING` | 75 | service ginn-{user} is still running after {seconds} s; undo stopped before its cleanup | run 'sudo sv down ginn-{user}', wait until it stops, then run 'sudo ginn host-setup --undo --user {user}' again; the Host Setup Record is kept | FR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |
 | `GINN-W-HOST-CHANGED` | 0 | host files changed since baseline: {paths} | review the listed paths, then run 'ginn integrity --ack' | FR-006 AC-1; FR-104 AC-1 |
 | `GINN-W-REPLAY-MISSING` | 0 | package {package} is no longer available upstream | reinstall it later with 'ginn install' if it returns | FR-022 AC-1 |

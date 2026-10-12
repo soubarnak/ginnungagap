@@ -6,8 +6,9 @@ ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-
 GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
 GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
 (NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
-(FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009) and
-GINN-E-SETUP-BUSY (FR-001). `source` cites the requirement that defines the failure.
+(FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009),
+GINN-E-SETUP-BUSY (FR-001) and GINN-E-UNDO-SERVICE-RUNNING (FR-003). `source` cites the
+requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -169,6 +170,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         summary="undo refused: user {user} still has realms",
         remedy="delete those realms first with 'ginn delete <realm>'",
         source="FR-003 AC-2",
+    ),
+    ErrorSpec(
+        code="GINN-E-UNDO-SERVICE-RUNNING",
+        exit_code=75,
+        summary="service ginn-{user} is still running after {seconds} s; undo stopped before its "
+        "cleanup",
+        remedy="run 'sudo sv down ginn-{user}', wait until it stops, then run 'sudo ginn "
+        "host-setup --undo --user {user}' again; the Host Setup Record is kept",
+        source="FR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-HOST-CHANGED",
@@ -348,7 +358,11 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
-    (75, "realm, subordinate ID file or Host Setup busy (EX_TEMPFAIL)"),
+    (
+        75,
+        "realm, subordinate ID file or Host Setup busy, or a service still running at undo "
+        "(EX_TEMPFAIL)",
+    ),
     (
         77,
         "Host Setup must run as root, has not run for this user, or refuses an unsafe path it "
