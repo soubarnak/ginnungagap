@@ -5,8 +5,9 @@ Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
 GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
 GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
-(NFR-060), GINN-E-SUBID-LOCKED (FR-001) and GINN-E-TRUST-DATA (DR-040). `source` cites the
-requirement that defines the failure.
+(NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
+(FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002) and GINN-E-SETUP-PATH-UNSAFE (FR-001,
+DR-009). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -125,6 +126,30 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="check for a running 'ginn host-setup'; if none is running, remove {lock} by hand, "
         "then run 'sudo ginn host-setup --user <name>' again",
         source="FR-001 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-NO-SUCH-USER",
+        exit_code=2,
+        summary="no account named '{user}' on this host",
+        remedy="create that account first, or run 'sudo ginn host-setup --user <name>' with the "
+        "name of an existing account",
+        source="FR-001 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SUBID-CONFLICT",
+        exit_code=4,
+        summary="subordinate ID range {start}:{count} for {user} is no longer free in {path}",
+        remedy="free the overlapping line in {path} without changing the recorded range, then run "
+        "'sudo ginn host-setup --user {user}' again; Host Setup never picks another range",
+        source="FR-001 AC-1, FR-002 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SETUP-PATH-UNSAFE",
+        exit_code=77,
+        summary="Host Setup refuses {path}: {reason}",
+        remedy="move {path} aside by hand, keeping a copy if it is a Host Setup Record, because it "
+        "holds the pre-images; then run 'sudo ginn host-setup --user <name>' again",
+        source="FR-001, DR-009 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-UNDO-REALMS-EXIST",

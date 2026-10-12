@@ -10,13 +10,13 @@
 id = "FR-001"
 milestone = "M3"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
+reason = "the root check, the Host Setup Record and the subid, service and link writes are unit-tested (T3.4); AC-1 needs ginn doctor run as the user on a Void host (T3.6)"
 
 [[deferred]]
 id = "FR-002"
 milestone = "M3"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M3"
+reason = "a rerun that changes no byte or mtime is unit-tested (T3.4); the host-level rerun and its doctor check need a Void host (T3.6)"
 
 [[deferred]]
 id = "FR-005"

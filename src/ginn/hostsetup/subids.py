@@ -206,6 +206,81 @@ def ensure_range(
         return Change(before=before, after=after, changed=True, added=added)
 
 
+def ensure_single(
+    path: Path,
+    user: str,
+    size: int = DEFAULT_SIZE,
+    *,
+    root_dir: Path,
+    uid: int | None = None,
+    floor: int = DEFAULT_FLOOR,
+    ceiling: int = DEFAULT_CEILING,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+) -> tuple[Change, SubIdEntry]:
+    """Make sure `user` holds one line of at least `size` IDs, and return that line.
+
+    Host Setup records one range per file, so unlike `ensure_range` the total of several lines
+    does not count. A line that matches by name (or by `str(uid)`) and holds at least `size` IDs
+    is kept as it is. Otherwise a full-size line is appended, placed by `allocate`. Runs under the
+    same lock as `ensure_range`.
+    """
+    _check_name(user)
+    _check_size(size)
+    with _lock(path, root_dir, lock_timeout):
+        before = _read_bytes(path)
+        entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
+        names = {user} if uid is None else {user, str(uid)}
+        for entry in entries:
+            if entry.name in names and entry.count >= size:
+                return Change(before=before, after=before, changed=False), entry
+        added = allocate(entries, user, size, floor=floor, ceiling=ceiling)
+        after = _append_line(before, added.render().encode("utf-8"))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        return Change(before=before, after=after, changed=True, added=added), added
+
+
+def ensure_exact(
+    path: Path,
+    entry: SubIdEntry,
+    *,
+    root_dir: Path,
+    lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+) -> Change:
+    """Make sure the file holds `entry` as one line, and never choose another range.
+
+    Used on a repair, to reuse the range that the Host Setup Record stored. If the line is already
+    there, nothing is written. If another line overlaps the range, GINN-E-SUBID-CONFLICT is raised
+    and the file is left alone. Otherwise the line is appended under the lock that `ensure_range`
+    uses.
+    """
+    _check_name(entry.name)
+    _check_size(entry.count)
+    with _lock(path, root_dir, lock_timeout):
+        before = _read_bytes(path)
+        entries = parse_entries(before.decode("utf-8", errors="surrogateescape"))
+        if entry in entries:
+            return Change(before=before, after=before, changed=False)
+        for other in entries:
+            if other.count and other.start < entry.end and entry.start < other.end:
+                raise make(
+                    "GINN-E-SUBID-CONFLICT",
+                    start=entry.start,
+                    count=entry.count,
+                    user=entry.name,
+                    path=str(path),
+                )
+        after = _append_line(before, entry.render().encode("utf-8"))
+        atomic_write(path, after, file_mode(path, DEFAULT_MODE))
+        return Change(before=before, after=after, changed=True, added=entry)
+
+
+def _read_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+
+
 def newuidmap_present(root_dir: Path) -> bool:
     """Report whether usr/bin/newuidmap and usr/bin/newgidmap exist and are setuid.
 

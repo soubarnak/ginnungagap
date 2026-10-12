@@ -145,14 +145,25 @@ def install(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
 
     Every path that changed is recorded with its pre-image, so undo can restore it. A path that
     exists but is not a regular file (or, for the link, not a symlink) is refused, because undo
-    could not restore it.
+    could not restore it. Host Setup calls `install_scripts` and `install_link` separately, so it
+    can record its progress between them.
     """
     service = _service_name(rendered)
-    link = root_dir / LINK_PARENT / service
-    # Every refusal is checked before the first write, so a refused call leaves nothing behind
-    # that the caller has no record of.
+    # The link is refused before the first write, so a refused call leaves nothing behind.
+    _check_link(root_dir / LINK_PARENT / service)
+    plan = install_scripts(root_dir, rendered)
+    install_link(root_dir, rendered, plan)
+    return plan
+
+
+def install_scripts(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
+    """Write the scripts of the rendered service, as `install` does, and leave the link alone.
+
+    Every refusal is checked before the first write. The plan lists the directories and the
+    scripts that changed.
+    """
+    _service_name(rendered)
     existing = {rel: _read_script(root_dir / rel) for rel in sorted(rendered)}
-    _check_link(link)
     plan = InstallPlan()
     for rel in sorted(rendered):
         target = root_dir / rel
@@ -167,9 +178,20 @@ def install(root_dir: Path, rendered: Mapping[str, str]) -> InstallPlan:
         else:
             plan.replaced.append(target)
             plan.pre_images[target] = before[0]
+    return plan
+
+
+def install_link(root_dir: Path, rendered: Mapping[str, str], plan: InstallPlan) -> None:
+    """Link the rendered service into var/service, adding the changes to `plan`.
+
+    The link is refused when it exists and is not a symbolic link. An existing link to another
+    target is replaced, and its old target is recorded in `plan`.
+    """
+    service = _service_name(rendered)
+    link = root_dir / LINK_PARENT / service
+    _check_link(link)
     _ensure_dirs(link.parent, root_dir, plan)
     _ensure_link(link, f"/{SV_PARENT}/{service}", plan)
-    return plan
 
 
 def _run_script(v: Mapping[str, str], uid: int) -> str:
