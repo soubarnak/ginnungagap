@@ -30,7 +30,8 @@ CG_ROOT=/sys/fs/cgroup
 CG_USER="$CG_ROOT/ginn/$MY_UID"
 IMAGE=localhost/ginn-s01:debian-stable
 SPIKE_XRD="/run/user/$MY_UID/ginn-spike-s01c-xrd"
-STORE="${GINN_S01C_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike-s01c/podman}"
+STORE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike-s01c"
+STORE="${GINN_S01C_STORE:-$STORE_BASE/podman}"
 RUNROOT="$SPIKE_XRD/runroot"
 TMPDIR_P="$SPIKE_XRD/libpod-tmp"
 OUT="${GINN_S01C_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s01c}"
@@ -38,6 +39,17 @@ GATE_TIMEOUT=900
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# check_under BASE PATH: abort unless PATH is BASE or lies under it, with no ".." in it. Both
+# arguments must be non-empty, so an unset variable can never widen a later rm -rf.
+check_under() {
+  local base=${1:?check_under: base is empty} p=${2:?check_under: path is empty}
+  case $p in *..*) die "refusing rm of '$p': path contains '..'" ;; esac
+  case $p in
+    "$base"|"$base"/*) ;;
+    *) die "refusing rm of '$p': not under $base" ;;
+  esac
+}
 
 # require_pin: refuse unless the pinned XDG dir is this uid's own 0700 directory at the exact path.
 require_pin() {
@@ -257,13 +269,16 @@ cmd_teardown() {
     "$SELF" --podman rm -af >/dev/null 2>&1 || true
     "$SELF" --podman rmi -af >/dev/null 2>&1 || true
     # unshare maps subuid-owned storage files so rm can delete them; see spikes/s01_systemd_rootless.sh.
+    check_under "$STORE_BASE" "$STORE"
     "$SELF" --podman unshare rm -rf "$STORE" 2>/dev/null || true
   fi
+  check_under "$STORE_BASE" "$STORE"
   rm -rf "$STORE" 2>/dev/null || log "storage removal incomplete: $STORE"
   rmdir "$(dirname "$STORE")" 2>/dev/null || true
   # Processes first: the pause process sits in a launcher leaf, and a leaf can only be removed empty.
   kill_spike_procs
   remove_leaves
+  check_under "/run/user/$MY_UID/ginn-spike-s01c-xrd" "$SPIKE_XRD"
   rm -rf "$SPIKE_XRD"
   log "verify pinned dir: $(ls -d "$SPIKE_XRD" 2>&1)"
   log "verify storage: $(ls -d "$STORE" 2>&1)"

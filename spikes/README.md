@@ -25,7 +25,7 @@ Run spikes one at a time on a host, and run `teardown` when done. Teardown resto
 
 ## Results
 
-Each spike writes one Markdown file under `spikes/results/`, named after the spike ID (for example `S-01.md`). A result file holds the environment facts, a table of variants, the exact flags or settings recommended, the root steps the product must perform, the measured numbers, and a verdict line (`S-01: PASS|FAIL|PARTIAL`) with the reasoning against the roadmap's pass criterion.
+Each spike writes one Markdown file under `spikes/results/`, named after the spike ID (for example `S-01.md`). The current results are `spikes/results/S-*.md`, one file per spike. S-03 (musl) is still open: it has no results file yet. A result file holds the environment facts, a table of variants, the exact flags or settings recommended, the root steps the product must perform, the measured numbers, and a verdict line (`S-01: PASS|FAIL|PARTIAL`) with the reasoning against the roadmap's pass criterion.
 
 Raw logs and temporary files stay out of the repository.
 
@@ -34,3 +34,5 @@ Raw logs and temporary files stay out of the repository.
 - `s01_systemd_rootless.sh`: S-01 procedure (systemd as PID 1 in rootless Podman under a delegated cgroup).
 - `Dockerfile.s01`: image for S-01 (Debian stable with systemd and dbus).
 - `results/S-01.md`: S-01 results and verdict.
+- `results/S-*.md`: results and verdict of every other spike, one file each.
+- `s09/`: S-09 teardown and cleanup logs and the root-command extract, with MAC and IP addresses redacted. `results/S-09.md` (Deviations) refers to them.

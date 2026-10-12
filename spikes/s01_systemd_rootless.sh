@@ -24,8 +24,9 @@ SPIKE_DIR="$(dirname "$SELF")"
 CG_ROOT=/sys/fs/cgroup
 CTL_SET=(cpu memory pids io cpuset)
 IMAGE=localhost/ginn-s01:debian-stable
-SPIKE_XRD="/run/user/$(id -u)/ginn-spike-s01c-xrd"
-GINN_SPIKE_ROOT="${GINN_SPIKE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike/podman}"
+SPIKE_XRD="/run/user/$(id -u)/ginn-spike-s01-xrd"
+GINN_SPIKE_BASE="${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike"
+GINN_SPIKE_ROOT="${GINN_SPIKE_ROOT:-$GINN_SPIKE_BASE/podman}"
 GINN_SPIKE_RUNROOT="$SPIKE_XRD/runroot"
 GINN_SPIKE_TMP="$SPIKE_XRD/libpod-tmp"
 OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s01}"
@@ -37,11 +38,21 @@ COMMON_FLAGS=(--systemd=always --cgroupns private --userns keep-id --user 0:0
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# check_under BASE PATH: abort unless PATH is BASE or lies under it, with no ".." in it. Both
+# arguments must be non-empty, so an unset variable can never widen a later rm -rf.
+check_under() {
+  local base=${1:?check_under: base is empty} p=${2:?check_under: path is empty}
+  case $p in *..*) die "refusing rm of '$p': path contains '..'" ;; esac
+  case $p in
+    "$base"|"$base"/*) ;;
+    *) die "refusing rm of '$p': not under $base" ;;
+  esac
+}
 need_root() { [[ $(id -u) -eq 0 ]] || die "$1 must run as root (sudo)"; }
 
 # require_pin: refuse unless the pinned XDG dir is this uid's own 0700 directory at the exact path.
 require_pin() {
-  [[ $SPIKE_XRD == "/run/user/$(id -u)/ginn-spike-s01c-xrd" ]] || die "refusing: pin is '$SPIKE_XRD'"
+  [[ $SPIKE_XRD == "/run/user/$(id -u)/ginn-spike-s01-xrd" ]] || die "refusing: pin is '$SPIKE_XRD'"
   [[ -d $SPIKE_XRD && ! -L $SPIKE_XRD ]] || die "refusing: pinned dir $SPIKE_XRD does not exist"
   [[ $(stat -c '%u %a' "$SPIKE_XRD") == "$(id -u) 700" ]] \
     || die "refusing: $SPIKE_XRD is not uid $(id -u) with mode 700"
@@ -364,19 +375,22 @@ cmd_teardown() {
     # bind-mounts its overlay dir onto itself inside its own mount namespace,
     # which makes unshare rm fail with EBUSY; the host namespace has no such
     # mount, so a plain rm removes what is left (user-owned files only).
+    check_under "$GINN_SPIKE_BASE" "$GINN_SPIKE_ROOT"
     "${PM[@]}" unshare rm -rf "$GINN_SPIKE_ROOT" 2>/dev/null || true
+    check_under "$GINN_SPIKE_BASE" "$GINN_SPIKE_ROOT"
     rm -rf "$GINN_SPIKE_ROOT" 2>/dev/null || log "storage removal incomplete: $GINN_SPIKE_ROOT"
   fi
   # The rootless pause process keeps the pinned XDG; stop it by exact pid before removing the dir.
   kill_spike_procs
   remove_own_leaves
+  check_under "/run/user/$(id -u)/ginn-spike-s01-xrd" "$SPIKE_XRD"
   rm -rf "$SPIKE_XRD"
   log "teardown done (no root writes); logs kept in $OUT"
 }
 
 usage() {
   cat <<'EOF'
-usage: XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01c-xrd s01_systemd_rootless.sh run | teardown
+usage: XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01-xrd s01_systemd_rootless.sh run | teardown
        s01_systemd_rootless.sh --podman <podman args>            (pinned wrapper, used internally)
        s01_systemd_rootless.sh --root-setup <uid> <gid> <out>   (root only)
        s01_systemd_rootless.sh --root-move <uid> <pid> <out>    (root only)

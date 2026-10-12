@@ -1,0 +1,8 @@
+# Root commands of the S-09 rerun (rerun-c-20261012T143510), extracted from dummy0-cleanup.log.
+# Extract, not a reconstruction: the lines below are the trace lines of that log that show a sudo call and its result, copied unchanged (lines 13, 15 to 18). No other line is copied.
+# The root commands were the cleanup step after its gate: sudo -n true (gate), sudo -n ip link del dummy0, sudo -n rmmod dummy.
+sudo -n ok
++ sudo -n ip link del dummy0
+rc=0
++ sudo -n rmmod dummy
+rc=0

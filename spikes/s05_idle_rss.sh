@@ -10,7 +10,9 @@
 #   check            first podman calls under the pin; the spike pause must have comm catatonit
 #   prepare          pull the base image, build the services-on images (base, ab), probe --init
 #   new-sweep        start a sweep id; rows carry it, and summary reads only the current one
-#   off              services-off sweep: RUNS realms, WINDOW seconds idle each
+#   off              services-off sweep: RUNS counted realms, WINDOW seconds idle each. An attempt
+#                    whose pause lost its RSS, or whose realm swapped, is kept as excluded-pressure
+#                    and the run is measured again (see off_status)
 #   on-trial CFG     one services-on start (base|abd) under the launch leaf: podman result and
 #                    settle; it gates the sweeps (passes only when settled with 0 failed units)
 #   on CFG           services-on sweep (base|abd); needs the launcher inside s05r-launch
@@ -95,6 +97,10 @@ ONSAMPLE_HEADER=$'sweep_id\tcfg\tattempt\ttime\tMemAvailable_kB\tpsi_some_avg10\
 MEM_MIN_KIB=1572864     # 1.5 GiB of MemAvailable
 PSI_MAX=1.0             # /proc/pressure/memory some avg10 must stay below this
 GATE_TIMEOUT_S=900      # wait at most 15 min for the gate, re-check every 30 s
+# Services-off exclusion floor. A live catatonit pause measured 640 to 750 KiB in the counted
+# S-05r rows. The excluded first-pass rows 9 and 10 had 12 KiB left, after the pages were
+# reclaimed. 256 KiB separates the two. Chosen after the fact to reproduce that decision.
+OFF_PAUSE_MIN_KIB=256
 ON_TAG=
 ON_FLAGS=()
 
@@ -152,11 +158,12 @@ append_row() {
   printf '%s\n' "$*" >> "$OUT/runs.tsv"
 }
 
-# done_run SWEEP CFG RUN: true when runs.tsv has a usable row (resume). Rows marked
-# excluded-pressure do not count, so the run is measured again under the same sweep id.
+# done_run SWEEP CFG RUN: true when runs.tsv has a counted row (status ok) for this run. Any other
+# status (excluded-pressure, fail-run, unsettled) does not count, so the run is measured again
+# under the same sweep id.
 done_run() {
   awk -F'\t' -v s="$1" -v c="$2" -v r="$3" \
-    '$1 == s && $2 == c && $3 == r && $4 != "excluded-pressure" {f = 1} END {exit !f}' \
+    '$1 == s && $2 == c && $3 == r && $4 == "ok" {f = 1} END {exit !f}' \
     "$OUT/runs.tsv" 2>/dev/null
 }
 
@@ -408,27 +415,51 @@ cmd_new_sweep() {
   log "sweep id $id"
 }
 
+# off_status ROW RAWJSON: "ok", or "excluded-pressure" when the pause lost its resident set (pause
+# RSS below OFF_PAUSE_MIN_KIB) or the realm's own VmSwap is above 0. ROW is the measure_realm line
+# (field 3 is pause_rss_kib). The realm swap comes from the raw JSON, because swap_kib in the row
+# also counts the pause.
+off_status() {
+  local -a f
+  local swap
+  read -r -a f <<<"$1"
+  swap=$(realm_swap_kib "$2")
+  if (( f[2] < OFF_PAUSE_MIN_KIB )) || (( swap > 0 )); then
+    echo excluded-pressure
+  else
+    echo ok
+  fi
+}
+
 cmd_off() {
   init_out
-  local sweep r name=s05r-off con init row
+  local sweep r name=s05r-off con init row raw status attempt max_attempts
   sweep=$(current_sweep)
+  max_attempts=$(( RUNS + 5 ))
   for r in $(seq 1 "$RUNS"); do
-    done_run "$sweep" off "$r" && continue
-    pm rm -f "$name" >/dev/null 2>&1 || true
-    if ! pm run -d --name "$name" --userns keep-id --network host --init "$DEBIAN" \
-         sleep infinity >"$OUT/logs/off-$r.run" 2>&1; then
-      append_row "$sweep" off "$r" fail-run "$DEBIAN" na - - - $NA_ROW
-      continue
-    fi
-    con=$(pm inspect --format '{{.State.ConmonPid}}' "$name")
-    init=$(pm inspect --format '{{.State.Pid}}' "$name")
-    sleep "$WINDOW"
-    record_mem "$sweep" off "$r"
-    row=$(measure_realm "$con" "$init" "$OUT/raw/off-$r.json") \
-      || die "measurement invalid for off run $r (pause check or accounting)"
-    pm rm -f "$name" >/dev/null 2>&1 || true
-    append_row "$sweep" off "$r" ok "$DEBIAN" na - - - $row
-    log "off run $r: $row"
+    attempt=0
+    # A run repeats until it has a counted row. Excluded attempts stay in runs.tsv, as cmd_on does.
+    until done_run "$sweep" off "$r"; do
+      attempt=$(( attempt + 1 ))
+      (( attempt > max_attempts )) && die "off run $r: no counted row after $max_attempts attempts; stopping"
+      pm rm -f "$name" >/dev/null 2>&1 || true
+      if ! pm run -d --name "$name" --userns keep-id --network host --init "$DEBIAN" \
+           sleep infinity >"$OUT/logs/off-$r-a$attempt.run" 2>&1; then
+        append_row "$sweep" off "$r" fail-run "$DEBIAN" na - - - $NA_ROW
+        continue
+      fi
+      con=$(pm inspect --format '{{.State.ConmonPid}}' "$name")
+      init=$(pm inspect --format '{{.State.Pid}}' "$name")
+      sleep "$WINDOW"
+      record_mem "$sweep" off "$r"
+      raw="$OUT/raw/off-$r.json"
+      row=$(measure_realm "$con" "$init" "$raw") \
+        || die "measurement invalid for off run $r (pause check or accounting)"
+      pm rm -f "$name" >/dev/null 2>&1 || true
+      status=$(off_status "$row" "$raw")
+      append_row "$sweep" off "$r" "$status" "$DEBIAN" na - - - $row
+      log "off run $r attempt $attempt: $status $row"
+    done
   done
 }
 

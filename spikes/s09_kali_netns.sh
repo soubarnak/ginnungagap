@@ -19,7 +19,8 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 XRD_EXPECT="/run/user/$(id -u)/ginn-spike-s09c-xrd"
 XRD="${S09_XDG:-$XRD_EXPECT}"
-ROOT="${S09_ROOT:-$HOME/.local/share/ginn-spike-s09/podman}"
+ROOT_BASE="$HOME/.local/share/ginn-spike-s09"
+ROOT="${S09_ROOT:-$ROOT_BASE/podman}"
 RUNROOT="$XRD/runroot"
 TMPROOT="$XRD/libpod-tmp"
 OUT="${S09_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s09}"
@@ -75,6 +76,16 @@ exit($n > 0 ? 0 : 1);'
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+# check_under BASE PATH: abort unless PATH is BASE or lies under it, with no ".." in it. Both
+# arguments must be non-empty, so an unset variable can never widen a later rm -rf.
+check_under() {
+  local base=${1:?check_under: base is empty} p=${2:?check_under: path is empty}
+  case $p in *..*) die "refusing rm of '$p': path contains '..'" ;; esac
+  case $p in
+    "$base"|"$base"/*) ;;
+    *) die "refusing rm of '$p': not under $base" ;;
+  esac
+}
 
 # pin_guard: refuse to run podman unless XDG_RUNTIME_DIR is pinned to the spike-owned XRD.
 # P sets XDG_RUNTIME_DIR to XRD on every podman call. Each entry point runs this guard first.
@@ -213,6 +224,7 @@ build() {
   log "build $IMAGE from $HERE/Dockerfile.s09"
   "${P[@]}" build --pull=never --network host -f "$HERE/Dockerfile.s09" -t "$IMAGE" "$ctx" \
     > "$OUT/build.log" 2>&1
+  check_under "$OUT" "$ctx"
   rm -rf "$ctx"
   "${P[@]}" image inspect --format '{{.Id}}' "$IMAGE" > "$OUT/image-id.txt"
 }
@@ -449,10 +461,14 @@ cmd_teardown() {
   for c in "${CTRS[@]}"; do "${P[@]}" rm -f "$c" >/dev/null 2>&1 || true; done
   "${P[@]}" rmi -f "$IMAGE" "$SRC" >/dev/null 2>&1 || true
   # Podman calls above may recreate the storage skeleton, so remove the roots last and do not call podman after.
+  check_under "$ROOT_BASE" "$ROOT"
+  check_under "$XRD_EXPECT" "$RUNROOT"
   rm -rf "$ROOT" "$RUNROOT" 2>/dev/null || true
   if [[ -e $ROOT || -e $RUNROOT ]]; then
     # Subuid-owned layers: retry inside the user namespace.
+    check_under "$ROOT_BASE" "$ROOT"
     "${P[@]}" unshare rm -rf "$ROOT" >/dev/null 2>&1 || true
+    check_under "$XRD_EXPECT" "$RUNROOT"
     rm -rf "$RUNROOT" 2>/dev/null || true
   fi
   if [[ -e $ROOT || -e $RUNROOT ]]; then
@@ -463,6 +479,7 @@ cmd_teardown() {
   leftover=$(spike_procs)
   [[ -z $leftover ]] || die "spike processes remain, XDG dir kept: $leftover"
   if grep -qF "$XRD" /proc/self/mountinfo; then die "mounts remain under $XRD, XDG dir kept"; fi
+  check_under "$XRD_EXPECT" "$XRD"
   rm -rf "$XRD"
   [[ ! -e $XRD ]] || die "XDG dir not removed: $XRD"
   printf 'teardown ok: %s %s %s removed; no spike processes\n' "$ROOT" "$RUNROOT" "$XRD"
