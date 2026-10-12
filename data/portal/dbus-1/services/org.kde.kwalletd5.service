@@ -1,3 +1,0 @@
-[D-BUS Service]
-Name=org.kde.kwalletd5
-Exec=/run/spaces-host/bin/spaces-secret-helper --activation-name org.kde.kwalletd5

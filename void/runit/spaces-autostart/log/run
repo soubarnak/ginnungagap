@@ -1,3 +1,0 @@
-#!/bin/sh
-mkdir -p /var/log/spaces/autostart
-exec svlogd -tt /var/log/spaces/autostart

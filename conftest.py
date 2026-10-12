@@ -1,10 +1,14 @@
-"""Run the tests against the checkout's sources, not against an installed copy of Spaces.
-
-Added for the Void port (void/docs/void.md): with the package installed, a plain
-`python3 -m pytest` would otherwise test the installed code.
-"""
+# SPDX-License-Identifier: Apache-2.0
+"""Root pytest configuration: SRS marker registration and import path."""
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+SRC = Path(__file__).resolve().parent / "src"
+
+if SRC.is_dir() and str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "fr(id): SRS requirement id")

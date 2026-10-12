@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Space (Ubuntu)
-Comment=Access and install Ubuntu applications
-TryExec=/usr/bin/spaces
-Exec=/usr/bin/spaces enter ubuntu
-Icon=spaces-ubuntu
-Terminal=true
-Categories=Development;

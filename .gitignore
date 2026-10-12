@@ -1,24 +1,17 @@
-venv
-*.egg-
-test
+__pycache__/
 *.pyc
-*.egg-info
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 build/
 dist/
-pkg/
-!pkg/PKGBUILD
-
-# Native authentication build outputs
-/native/pam_spaces.so
-/native/spaces-pam
-/native/spaces
-/native/spaces-secret-helper
-/native/spaces-portal
-/native/spaces-open
-/native/spaces-broker
-
-/native/spaces-system-broker
-
-# Never commit signing keys
+*.egg-info/
+spikes/out/
+native/ginn-*
+!native/*.c
 *.pem
 *.key
+CLAUDE.local.md
+.claude/settings.local.json
