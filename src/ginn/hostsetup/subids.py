@@ -14,6 +14,7 @@ same stale lock (see `_reclaim_stale`).
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import os
 import re
@@ -62,6 +63,10 @@ class SubIdLocked(Exception):
 
     The lock is not removed while its holder is alive, and the message names the holder's PID
     when the lock records one. Host Setup should be run again later.
+
+    It is also raised when the reclaim gate `<name>.lock.reclaim` is a symbolic link. The stale
+    lock then cannot be reclaimed, and the message names the gate. Running again does not help
+    until the link is removed. No catalogue code is defined for this case.
     """
 
 
@@ -241,14 +246,33 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
 
 
 def _create_lock(lock: Path) -> bool:
-    """Create `lock` exclusively, write this process's PID into it. False if it already exists."""
+    """Create `lock` exclusively, write this process's PID into it. False if it already exists.
+
+    If the PID write, its fsync or the close fails, the lock this call created is removed before
+    the error propagates. A lock with no PID is never stale (see `_is_stale`), so leaving it would
+    block every later run until the timeout.
+    """
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
-    with os.fdopen(fd, "w", encoding="ascii") as handle:
-        handle.write(f"{os.getpid()}\n")
+    try:
+        try:
+            _write_all(fd, f"{os.getpid()}\n".encode("ascii"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        lock.unlink(missing_ok=True)
+        raise
     return True
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
 
 
 def _read_lock(lock: Path) -> _LockIdentity | None:
@@ -308,9 +332,18 @@ def _reclaim_stale(lock: Path, seen: _LockIdentity) -> bool:
     re-reads the lock. The sidecar is opened with O_NOFOLLOW, so a symbolic link in its place is
     refused. The gate is not removed after use: an empty file is harmless, and removing it would
     reopen the race. See `_reclaim_locked` for what runs under the gate.
+
+    A symbolic link in place of the gate fails the open with ELOOP. That is raised as SubIdLocked,
+    because the stale lock cannot be reclaimed. Any other error from the open propagates as it is.
     """
     gate_path = lock.with_name(f"{lock.name}.reclaim")
-    gate = os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        gate = os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            reason = f"{gate_path} is a symbolic link"
+            raise SubIdLocked(f"{lock} cannot be reclaimed: {reason}") from exc
+        raise
     try:
         fcntl.flock(gate, fcntl.LOCK_EX)
         return _reclaim_locked(lock, seen)

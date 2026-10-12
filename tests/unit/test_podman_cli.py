@@ -506,6 +506,46 @@ def test_session_and_supervisor_podman_both_see_the_one_runtime_root(
     assert all(entry["argv"][0 : len(flags)] == flags for entry in logged(shim))
 
 
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("NFR-040")
+def test_a_fresh_tree_needs_no_setup_before_a_from_paths_call(shim: Path, tmp_path: Path) -> None:
+    # Only the runtime root exists, as the supervisor leaves it. No owned directory or config yet.
+    paths = host_paths(tmp_path)
+    assert not paths.data.exists()
+    assert not paths.config.exists()
+    PodmanCli.from_paths(paths).info()
+    assert _mode(paths.image_tmp) == 0o700
+    assert _mode(paths.podman_containers_conf) == 0o600
+    assert _mode(paths.podman_storage_conf) == 0o600
+    assert len(logged(shim)) == 1
+
+
+@pytest.mark.fr("DR-010")
+@pytest.mark.fr("NFR-040")
+@pytest.mark.parametrize("damage", ["missing", "wrong-mode"])
+def test_from_paths_never_creates_or_repairs_the_runtime_root(
+    shim: Path, tmp_path: Path, damage: str
+) -> None:
+    # The runtime root belongs to the supervisor (ADR-004). A call refuses it and changes nothing.
+    paths = host_paths(tmp_path)
+    if damage == "missing":
+        paths.runtime.rmdir()
+    else:
+        os.chmod(paths.runtime, 0o755)  # noqa: S103 - fixture mode bits, not a host file
+    cli = PodmanCli.from_paths(paths)
+    err = expect_error(cli.info)
+    if damage == "missing":
+        assert err.code == "GINN-E-HOST-NOT-SET-UP"
+        assert not paths.runtime.exists()
+    else:
+        assert err.code == "GINN-E-RUNTIME-DIR-UNSAFE"
+        assert _mode(paths.runtime) == 0o755
+    assert not paths.data.exists()
+    assert not paths.config.exists()
+    assert cli.history == []
+    assert logged(shim) == []
+
+
 @pytest.mark.fr("FR-011")
 def test_pull_by_tag_is_refused_before_podman_runs(shim: Path, tmp_path: Path) -> None:
     lines: list[str] = []

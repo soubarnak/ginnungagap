@@ -20,6 +20,8 @@ passed to `verbose` as one shell-quoted line, so a user can copy it and run it b
 Failures map to catalogue codes here and nowhere else (NFR-040):
 - exit 125 with a registry or network message: GINN-E-NETWORK;
 - a digest pull that the registry rejects: GINN-E-IMAGE-UNVERIFIED (FR-011);
+- a runtime root that is missing or unsafe: GINN-E-HOST-NOT-SET-UP or GINN-E-RUNTIME-DIR-UNSAFE,
+  from the shared check in `ginn.store.paths` (DR-010, ADR-004);
 - anything else: GINN-E-INTERNAL, with the decisive stderr line in details.
 Exit 125 from `exec` is podman's own failure and is never returned as the command's status.
 """
@@ -43,7 +45,7 @@ from ginn.podman.adapter import (
     with_network_retry,
 )
 from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
-from ginn.store.paths import OwnedPaths
+from ginn.store.paths import OwnedPaths, _check_runtime_dir
 
 _NETWORK_PATTERNS: Final = (
     re.compile(r"dial tcp", re.IGNORECASE),
@@ -190,8 +192,10 @@ class PodmanCli:
 
         Root and runroot come from the data and runtime roots, the tmpdir is the runtime's
         podman-tmp, TMPDIR is the image tmpdir on disk, and CONTAINERS_CONF and
-        CONTAINERS_STORAGE_CONF are ginn's own files. Each call writes those files when they are
-        missing (`OwnedPaths.ensure_config()`, which is idempotent), so no caller has to.
+        CONTAINERS_STORAGE_CONF are ginn's own files. Each call first checks the runtime root,
+        then makes the owned directories and ginn's config files with `OwnedPaths.ensure()` and
+        `OwnedPaths.ensure_config()`. Both are idempotent, so a fresh tree needs no prior setup
+        and no caller has to call them. The runtime root itself is never created here (ADR-004).
         """
         return cls(
             paths.podman_root,
@@ -298,8 +302,9 @@ class PodmanCli:
         not exist (checked 2026-10-12, ADR-004), so every call would fail. Each config path must be
         a regular file under lstat, so a symbolic link is refused: podman would read its target.
         The image tmpdir must be a real directory, for the same reason. A failure here is
-        GINN-E-INTERNAL, and the detail names the path. `from_paths` writes the config files before
-        this check (see `_prepare`), so only the explicit constructor reaches it with missing files.
+        GINN-E-INTERNAL, and the detail names the path. `from_paths` makes the config files and the
+        owned directories before this check (see `_prepare`), so only the explicit constructor
+        reaches it with missing files.
         """
         for path in (self.containers_conf, self.storage_conf):
             if not _is_regular_file(path):
@@ -316,15 +321,20 @@ class PodmanCli:
     def _prepare(self, args: Sequence[str]) -> list[str]:
         """Build the full argv, record it, and echo it to `verbose` before it runs (NFR-042).
 
-        An adapter from `from_paths` first writes ginn's config files, so a call never fails only
-        because they are not there yet. ensure_config is idempotent: a file that is already right
-        is not rewritten.
+        An adapter from `from_paths` first checks the runtime root, then makes the owned
+        directories and ginn's config files, so a call never fails only because they are not
+        there yet. The runtime check runs first and is the same check `OwnedPaths.from_env`
+        makes. `ensure()` would create a missing runtime root and chmod a wrong-mode one, and
+        ADR-004 forbids both, so a missing or unsafe root is refused here. Both steps are
+        idempotent: what is already right is not rewritten.
         """
         if self.owned_paths is not None:
+            _check_runtime_dir(self.owned_paths.runtime, os.getuid())
             try:
+                self.owned_paths.ensure()
                 self.owned_paths.ensure_config()
             except OSError as exc:
-                raise _internal(f"cannot write podman config: {exc}") from exc
+                raise _internal(f"cannot prepare Owned Paths for podman: {exc}") from exc
         self._require_config()
         argv = [*self._global_flags(), *args]
         self.history.append(argv)

@@ -7,6 +7,7 @@ Covers FR-001 (ranges written for the user), FR-002 (second run changes nothing)
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
@@ -466,12 +467,52 @@ def test_a_symbolic_link_in_place_of_the_reclaim_gate_is_refused(tmp_path: Path)
     lock.write_text(f"{_dead_pid()}\n")
     _age(lock, 60)
     elsewhere = tmp_path / "elsewhere"
-    lock.with_name(f"{lock.name}.reclaim").symlink_to(elsewhere)
-    with pytest.raises(OSError):
+    gate = lock.with_name(f"{lock.name}.reclaim")
+    gate.symlink_to(elsewhere)
+    with pytest.raises(SubIdLocked, match="symbolic link") as refused:
         ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert str(gate) in str(refused.value)
+    cause = refused.value.__cause__
+    assert isinstance(cause, OSError)
+    assert cause.errno == errno.ELOOP
     assert not elsewhere.exists()
     assert lock.exists()
     assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.parametrize("failing", ["write", "fsync"])
+def test_a_failed_pid_write_or_fsync_removes_the_lock_it_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    # A lock with no PID is never stale, so one left behind would block every later Host Setup.
+    path = _subuid(tmp_path, SAMPLE)
+    real_write = os.write
+    pid_line = f"{os.getpid()}\n".encode("ascii")
+
+    def refuse_pid_write(fd: int, data: bytes | memoryview) -> int:
+        if bytes(data) == pid_line:
+            raise OSError(errno.ENOSPC, "simulated: no space left on device")
+        return real_write(fd, data)
+
+    def refuse_fsync(fd: int) -> None:
+        raise OSError(errno.EIO, "simulated: input/output error")
+
+    if failing == "write":
+        monkeypatch.setattr(os, "write", refuse_pid_write)
+        expected = errno.ENOSPC
+    else:
+        monkeypatch.setattr(os, "fsync", refuse_fsync)
+        expected = errno.EIO
+    with pytest.raises(OSError) as failed:
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
+    assert failed.value.errno == expected
+    monkeypatch.undo()
+    assert _names(path.parent) == ["subuid"]
+    assert path.read_bytes() == SAMPLE
+    change = ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
+    assert change.changed is True
+    assert _names(path.parent) == ["subuid"]
 
 
 @pytest.mark.fr("FR-001")
