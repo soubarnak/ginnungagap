@@ -13,14 +13,18 @@ F11 changes):
 2. Wait for runsv to exit. The waiter follows the supervise link of the service directory, with
    its absolute target re-rooted under the root directory (`_rooted_waiter`). The links are still in
    place, so the waiter can open `supervise/ok`. A regular file at `supervise/ok` is refused with
-   GINN-E-UNDO-SUPERVISE-STATE (`_state_running` checks for a FIFO first). A timeout raises
-   GINN-E-UNDO-SERVICE-RUNNING and leaves the record in place, so a rerun continues from here.
+   GINN-E-UNDO-SUPERVISE-STATE (`_state_running` checks for a FIFO first). runsv may not have
+   created its state directory yet, so the waiter first polls for it, for up to
+   STATE_APPEAR_SECONDS. A timeout raises GINN-E-UNDO-SERVICE-RUNNING and leaves the record in
+   place, so a rerun continues from here.
 3. Per-user cleanup, after the wait confirmed the exit. First the other symbolic links (the runsv
    supervise links), each matched against its own target. Then the per-user service directories,
    leaf first; the runsv state directories under /run/runit, which hold only runit's names; the
    subordinate ID lines that setup appended (`subids.remove_exact`, which also reports every
    differing line of the user, on every undo); and the per-user files and directories, restored
-   from their pre-images or removed.
+   from their pre-images or removed. A per-user cgroup directory that stays busy after the retries
+   of `CGROUP_BUSY_DELAYS` stops undo with GINN-E-UNDO-CGROUP-BUSY, and the record stays for a
+   rerun (ADR-013, Decision 26).
 4. Shared state. Applied only when this is the last record. Each shared directory whose pre-image
    is absent is removed with rmdir, leaf first. Then the root cgroup.subtree_control gets `-<ctrl>`
    for each controller that is present now and absent from its pre-image, and only in the boot that
@@ -90,6 +94,15 @@ SHARED_RELPATH = rec.SHARED_RELPATH
 CGROUP_RELPATH = str(DEFAULT_CGROUP_ROOT).lstrip("/")
 SERVICE_WAIT_SECONDS = 30.0
 SERVICE_POLL_SECONDS = 0.1
+STATE_APPEAR_SECONDS = 6.0
+"""How long the waiter waits for runsv to create its state directory (ADR-013, Decision 26).
+
+Setup links the service, and runsvdir rescans its directory about every 5 s (runsvdir(8)). Six
+seconds covers one rescan and the start of runsv. The wait is also capped by SERVICE_WAIT_SECONDS.
+"""
+CGROUP_BUSY_DELAYS: tuple[float, ...] = (0.1, 0.2, 0.4, 0.8, 1.5)
+"""The pauses between the tries of a cgroup rmdir that fails with EBUSY (ADR-013, Decision 26)."""
+CGROUP_BUSY_SECONDS = sum(CGROUP_BUSY_DELAYS)
 UNDO_STEPS: tuple[str, ...] = (
     "link",
     "wait",
@@ -117,6 +130,10 @@ RUNSV_NAMES: frozenset[str] = frozenset({"control", "lock", "ok", "pid", "stat",
 """The entries that runsv keeps in its state directory (runit's own names)."""
 
 REASON_SHARED = "shared, used by another record"
+REASON_SHARED_BUSY = (
+    "still busy after the retries, so undo leaves it; stop or remove what is in it, then rmdir "
+    "this directory by hand"
+)
 REASON_PRE_PRESENT = "pre-image present"
 REASON_ADMIN_LINE = "admin line, present before setup, kept"
 REASON_DIFFERING = "differing line kept, not the recorded range"
@@ -139,6 +156,8 @@ REASON_ORIGINAL_BYTES = (
 )
 
 FaultHook = Callable[[str], None]
+Clock = Callable[[], float]
+Pause = Callable[[float], None]
 ServiceWait = Callable[[Path, float], None]
 RealmNames = Callable[[Path, str], Sequence[str]]
 """Lists the realm names under a recorded home, re-rooted under the root (tests inject it)."""
@@ -194,6 +213,7 @@ class _Ctx:
     wait: ServiceWait
     rmdir_cgroup: RemoveDir
     write_control: WriteControl
+    sleep: Pause
     left: list[LeftPath]
     notes: list[str]
 
@@ -235,6 +255,8 @@ def run_undo(
     write_control: WriteControl | None = None,
     owner_of: OwnerOf | None = None,
     lock_timeout: float = LOCK_TIMEOUT_SECONDS,
+    clock: Clock | None = None,
+    sleep: Pause | None = None,
 ) -> UndoResult:
     """Undo Host Setup for `user` with every host path under `root_dir`. See the module docstring.
 
@@ -243,8 +265,11 @@ def run_undo(
     and the check runs again under the lock. `realm_names` lists the realms under a recorded home
     (tests inject it), `wait_service` waits for runsv, `rmdir_cgroup` removes a cgroup directory and
     `write_control` writes one controller change. Tests inject the last two, because a plain rmdir
-    of a tmp_path directory with files does not behave like cgroupfs. `owner_of` gives the owner of
-    a real directory, which every parent must have (uid 0).
+    of a tmp_path directory with files does not behave like cgroupfs. `clock` and `sleep` time the
+    runsv wait and the retries of a busy cgroup directory. They default to the monotonic clock and
+    time.sleep. `owner_of` gives the owner of a real directory. Every parent must be owned by uid
+    0, except the two delegated directories of the record's uid, `sys/fs/cgroup/ginn/<uid>` and
+    `run/ginn/<uid>` (ADR-013, Decision 27).
     """
     if (os.geteuid() if euid is None else euid) != 0:
         raise make("GINN-E-SETUP-ROOT")
@@ -272,13 +297,16 @@ def run_undo(
         # (ADR-003, ADR-013 Decision 27).
         host = replace(host, delegated=delegated_dirs(current.uid))
         _sweep_tmp(host)
+        now: Clock = clock or time.monotonic
+        pause: Pause = sleep or time.sleep
         ctx = _Ctx(
             host=host,
             user=user,
             fault=fault,
-            wait=wait_service or _rooted_waiter(root),
+            wait=wait_service or _rooted_waiter(root, now, pause),
             rmdir_cgroup=rmdir_cgroup or os.rmdir,
             write_control=write_control or _write_control,
+            sleep=pause,
             left=[],
             notes=_account_notes(user, current, lookup_user or _pwd_lookup),
         )
@@ -286,19 +314,29 @@ def run_undo(
 
 
 def wait_until_stopped(
-    svdir: Path, seconds: float, *, running: Callable[[Path], bool] | None = None
+    svdir: Path,
+    seconds: float,
+    *,
+    running: Callable[[Path], bool] | None = None,
+    clock: Clock | None = None,
+    sleep: Pause | None = None,
 ) -> None:
-    """Poll until `running` reports that runsv has exited, or raise after `seconds`."""
+    """Poll until `running` reports that runsv has exited, or raise after `seconds`.
+
+    `clock` and `sleep` default to the monotonic clock and time.sleep. Tests pass a virtual pair.
+    """
     check = runsv_running if running is None else running
-    deadline = time.monotonic() + seconds
+    now: Clock = clock or time.monotonic
+    pause: Pause = sleep or time.sleep
+    deadline = now() + seconds
     while check(svdir):
-        if time.monotonic() >= deadline:
+        if now() >= deadline:
             raise make(
                 "GINN-E-UNDO-SERVICE-RUNNING",
                 user=svdir.name.removeprefix("ginn-"),
                 seconds=f"{seconds:g}",
             )
-        time.sleep(SERVICE_POLL_SECONDS)
+        pause(SERVICE_POLL_SECONDS)
 
 
 def runsv_running(svdir: Path) -> bool:
@@ -351,20 +389,35 @@ def _kind_word(mode: int) -> str:
     return "special file"
 
 
-def _rooted_waiter(root: Path) -> ServiceWait:
+def _rooted_waiter(root: Path, clock: Clock, sleep: Pause) -> ServiceWait:
     """The default waiter: it follows the supervise link of the service, re-rooted under `root`.
 
     The link's absolute target (/run/runit/supervise.ginn-<user>) is read with readlink and taken
     under `root`, so a test or an alternate root never reaches the real /run/runit. A missing link
-    or target means runsv is not running, and the wait returns at once.
+    means runsv was never set up, and the wait returns at once.
+
+    The state directory can be missing for a while after setup, because runsvdir starts runsv on
+    its next rescan. While the link exists and its target does not, the waiter polls for up to
+    STATE_APPEAR_SECONDS, within `seconds`. A target that never appears means runsv is not running.
     """
 
     def wait(svdir: Path, seconds: float) -> None:
+        deadline = clock() + seconds
+        appear = clock() + min(STATE_APPEAR_SECONDS, seconds)
         state = _state_under_root(root, svdir)
+        while state is None and _probe(svdir / "supervise")[0] == "symlink" and clock() < appear:
+            sleep(SERVICE_POLL_SECONDS)
+            state = _state_under_root(root, svdir)
         if state is None:
             return
         user = svdir.name.removeprefix("ginn-")
-        wait_until_stopped(svdir, seconds, running=lambda _svdir: _state_running(state, user))
+        wait_until_stopped(
+            svdir,
+            max(0.0, deadline - clock()),
+            running=lambda _svdir: _state_running(state, user),
+            clock=clock,
+            sleep=sleep,
+        )
 
     return wait
 
@@ -607,7 +660,7 @@ def _undo_service_dir(ctx: _Ctx, entry: rec.PathEntry) -> None:
     if is_runsv_state(rel, ctx.user):
         _remove_runsv_dir(ctx, rel)
     elif _is_cgroup(rel):
-        _remove_dir(ctx, rel)
+        _remove_dir(ctx, rel, busy_stops=True)
     else:
         _remove_tree(ctx, rel)
 
@@ -907,8 +960,14 @@ def _undo_shared_dir(ctx: _Ctx, entry: rec.PathEntry) -> None:
     _remove_dir(ctx, rel)
 
 
-def _remove_dir(ctx: _Ctx, rel: str) -> None:
-    """rmdir one directory. Absent is done. A non-empty one is left and reported."""
+def _remove_dir(ctx: _Ctx, rel: str, *, busy_stops: bool = False) -> None:
+    """rmdir one directory. Absent is done. A non-empty one is left and reported.
+
+    A cgroup directory that stays busy after the retries of `_rmdir_cgroup` is handled in one of
+    two ways. A per-user one (`busy_stops`, step 3) stops undo with GINN-E-UNDO-CGROUP-BUSY, and
+    the record stays for a rerun. Its processes are ours to stop. A shared one (step 4) is left and
+    reported, because Decision 15 (iii) keeps a directory that another party still uses.
+    """
     path = ctx.path(rel)
     state = _probe(path)[0]
     if state == "absent":
@@ -916,16 +975,49 @@ def _remove_dir(ctx: _Ctx, rel: str) -> None:
     if state != "dir":
         ctx.leave(rel, _state_reason(state))
         return
-    remove: RemoveDir = ctx.rmdir_cgroup if _is_cgroup(rel) else os.rmdir
+    cgroup = _is_cgroup(rel)
     try:
-        remove(path)
+        if cgroup:
+            _rmdir_cgroup(ctx, path)
+        else:
+            os.rmdir(path)
     except FileNotFoundError:
         return
     except OSError as exc:
         if exc.errno == errno.ENOTEMPTY:
             ctx.leave(rel, REASON_NOT_EMPTY)
+        elif exc.errno == errno.EBUSY and cgroup and busy_stops:
+            raise make(
+                "GINN-E-UNDO-CGROUP-BUSY",
+                path=str(path),
+                seconds=f"{CGROUP_BUSY_SECONDS:g}",
+                user=ctx.user,
+            ) from exc
+        elif exc.errno == errno.EBUSY and cgroup:
+            ctx.leave(rel, REASON_SHARED_BUSY)
         else:
             ctx.leave(rel, f"could not be removed: {exc.strerror}")
+
+
+def _rmdir_cgroup(ctx: _Ctx, path: Path) -> None:
+    """rmdir one cgroup directory. EBUSY is retried over CGROUP_BUSY_DELAYS, then raised.
+
+    cgroupfs answers EBUSY while processes or child cgroups are still in the directory. A process
+    that undo has just signalled can still be in it for a moment, so the retries cover that. Any
+    other error is raised at once.
+    """
+    attempts = len(CGROUP_BUSY_DELAYS) + 1
+    for attempt in range(attempts):
+        if attempt:
+            ctx.sleep(CGROUP_BUSY_DELAYS[attempt - 1])
+        try:
+            ctx.rmdir_cgroup(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno != errno.EBUSY or attempt == attempts - 1:
+                raise
 
 
 def _remove_tree(ctx: _Ctx, rel: str) -> None:

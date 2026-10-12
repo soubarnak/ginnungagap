@@ -1,3 +1,44 @@
 #!/bin/sh
-# Runs after runsvdir exits. The cgroup leaf persists, and run recreates what is missing.
+# Runs after run exits, which runsv does when it stops the service (runsv(8)). runsvdir exits at
+# once on TERM and leaves its runsv children running (runsvdir(8)). This script stops them the way
+# runsvdir does on HUP: it sends TERM to each runsv process in the supervisor leaf, then waits until
+# the leaf is empty, so runsv does not exit while a service is still up (ADR-013, Decision 26).
+set -u
+
+PATH=/usr/bin:/bin
+export PATH
+
+LEAF=/sys/fs/cgroup/ginn/1000/supervisor
+DRAIN_SECONDS=20
+
+log() {
+    printf '%s\n' "ginn-supervisor-finish: $*" >&2
+}
+
+# Only a process named runsv gets the signal. The services themselves stop through their runsv.
+stop_runsv() {
+    while read -r pid; do
+        read -r name 2>/dev/null < "/proc/$pid/comm" || continue
+        if [ "$name" = runsv ]; then
+            kill -TERM "$pid" 2>/dev/null || :
+        fi
+    done < "$LEAF/cgroup.procs"
+}
+
+# populated succeeds while the leaf, or a cgroup below it, holds a process. The size of a cgroup
+# file is 0 on cgroupfs, so cgroup.procs is read for its pids and never tested for size.
+populated() {
+    grep -q '^populated 1' "$LEAF/cgroup.events" 2>/dev/null
+}
+
+stop_runsv
+waited=0
+while populated; do
+    if [ "$waited" -ge "$DRAIN_SECONDS" ]; then
+        log "$LEAF still holds processes after $DRAIN_SECONDS s; undo may report it busy"
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
 exit 0

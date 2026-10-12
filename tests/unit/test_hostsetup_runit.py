@@ -10,9 +10,15 @@ that.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import shlex
 import shutil
+import signal
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -211,8 +217,15 @@ def test_log_run_creates_the_directory_as_the_user_before_svlogd() -> None:
     assert words[7:] == ["svlogd", "-tt", "$LOG_DIR"]
 
 
-def test_finish_only_exits_zero() -> None:
-    assert _alice()[FINISH].splitlines()[-1] == "exit 0"
+def test_finish_stops_the_runsv_children_it_finds_in_the_supervisor_leaf() -> None:
+    """runsvdir exits at once on TERM and leaves its runsv children running (runsvdir(8)). The
+    finish script sends them TERM, as runsvdir does on HUP, and only to processes named runsv
+    (ADR-013, Decision 26)."""
+    script = _alice()[FINISH]
+    assert "LEAF=/sys/fs/cgroup/ginn/1000/supervisor\n" in script
+    assert 'kill -TERM "$pid"' in script
+    assert 'if [ "$name" = runsv ]; then' in script
+    assert script.splitlines()[-1] == "exit 0"
 
 
 def test_values_are_quoted_so_odd_paths_cannot_inject_commands() -> None:
@@ -262,3 +275,298 @@ def test_primary_gid_is_numeric_and_never_derived_from_the_user_name() -> None:
     assert "GID_NUM=100" in script
     assert _exec_command(script)[3] == "--regid=$GID_NUM"
     assert "chown 1000:100 /sys/fs/cgroup/ginn/1000 " in script
+
+
+def test_the_run_wait_sleeps_in_the_background_under_a_trap() -> None:
+    """A signal to the shell ends the pending sleep too, and the trap is set before the loop and
+    reset after it (ADR-013, Decision 26). The kill is followed by a wait that reaps the sleep."""
+    script = _alice()[RUN]
+    trap_at = script.index("trap stop_wait TERM INT HUP")
+    loop_at = script.index('while [ ! -d "$SV_DIR" ]; do')
+    reset_at = script.index("trap - TERM INT HUP")
+    assert trap_at < loop_at < reset_at
+    assert "sleep 1 &" in script
+    assert 'wait "$sleep_pid"' in script
+    assert (
+        'kill "$sleep_pid" 2>/dev/null || :\n        wait "$sleep_pid" 2>/dev/null || :' in script
+    )
+
+
+def test_the_log_wait_holds_a_reader_on_its_input_and_stops_it_before_svlogd() -> None:
+    script = _alice()[LOG_RUN]
+    assert "exec 3<&0\ncat <&3 >/dev/null &\nreader=$!" in script
+    assert 'if ! kill -0 "$reader" 2>/dev/null; then' in script
+    assert "trap stop_wait TERM INT HUP" in script
+    assert script.index("\nstop_reader\n") < script.index("exec setpriv")
+    assert script.index("exec 3<&-") < script.index("exec setpriv")
+
+
+def _group_members(pgid: int) -> list[tuple[str, str]]:
+    """(command, state) of each process in process group `pgid`, read from /proc (Linux only)."""
+    members: list[tuple[str, str]] = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            text = Path("/proc", entry, "stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        head, _, rest = text.rpartition(")")
+        fields = rest.split()
+        if len(fields) > 2 and int(fields[2]) == pgid:
+            members.append((head.partition("(")[2], fields[0]))
+    return members
+
+
+def _live(pgid: int) -> list[tuple[str, str]]:
+    """The members of `pgid` that are not zombies."""
+    return [member for member in _group_members(pgid) if member[1] != "Z"]
+
+
+def _wait_for(condition: Callable[[], bool], seconds: float) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition not met in time")
+        time.sleep(0.01)
+
+
+def _extract_block(script: str, start: str, end: str) -> str:
+    """The lines strictly between the line that starts with `start` and the one with `end`."""
+    lines = script.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith(start))
+    last = next(i for i, line in enumerate(lines) if line.startswith(end))
+    return "\n".join(lines[first + 1 : last])
+
+
+def _wait_harness(block: str, sv_dir: Path) -> str:
+    return (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        "log() {\n"
+        "    printf '%s\\n' \"$*\" >&2\n"
+        "}\n"
+        f"SV_DIR={sv_dir}\n" + block + "\nexit 2\n"
+    )
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_a_term_during_the_run_wait_ends_the_shell_and_its_sleep_within_0_3_seconds(
+    tmp_path: Path,
+) -> None:
+    """The rendered wait runs on the real sh, with a 30 s sleep so that the shell is blocked in
+    `wait`. TERM must end the shell and the sleep within 0.3 s. A trap without the kill leaves the
+    sleep running, and a trap that does not interrupt `wait` leaves the shell blocked on it."""
+    sh = shutil.which("sh")
+    assert sh is not None
+    block = _extract_block(_alice()[RUN], "# 4.", "# 5.")
+    assert "sleep 1 &" in block
+    script = tmp_path / "wait.sh"
+    script.write_text(_wait_harness(block.replace("sleep 1 &", "sleep 30 &"), tmp_path / "never"))
+    proc = subprocess.Popen([sh, str(script)], start_new_session=True)  # noqa: S603
+    try:
+        _wait_for(lambda: ("sleep", "S") in _group_members(proc.pid), 5.0)
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=0.3) == 0
+        _wait_for(lambda: not _live(proc.pid), 0.3 - (time.monotonic() - started))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+def _log_script(tmp_path: Path) -> Path:
+    """The rendered log script, with its state directory pointed at a path that never appears."""
+    text = _alice()[LOG_RUN]
+    rendered = "SV_DIR=/home/alice/.local/state/ginn/sv"
+    assert text.count(rendered) == 1
+    path = tmp_path / "log-run.sh"
+    path.write_text(text.replace(rendered, f"SV_DIR={tmp_path / 'never'}"), encoding="utf-8")
+    return path
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_closing_the_log_input_ends_the_log_wait_promptly(tmp_path: Path) -> None:
+    """runsv ends the log wait by closing the input (runsv(8), command x). The wait goes on while
+    the input is open, and ends within about two ticks of the close (ADR-013, Decision 26)."""
+    sh = shutil.which("sh")
+    assert sh is not None
+    proc = subprocess.Popen(  # noqa: S603
+        [sh, str(_log_script(tmp_path))], stdin=subprocess.PIPE, start_new_session=True
+    )
+    try:
+        time.sleep(1.5)
+        assert proc.poll() is None, "the wait ended while its input was still open"
+        started = time.monotonic()
+        assert proc.stdin is not None
+        proc.stdin.close()
+        assert proc.wait(timeout=4.0) == 0
+        assert time.monotonic() - started < 3.0
+        assert not _live(proc.pid), "the reader or the sleep is still in the group"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_a_term_during_the_log_wait_ends_its_reader_and_sleep_within_0_3_seconds(
+    tmp_path: Path,
+) -> None:
+    sh = shutil.which("sh")
+    assert sh is not None
+    proc = subprocess.Popen(  # noqa: S603
+        [sh, str(_log_script(tmp_path))], stdin=subprocess.PIPE, start_new_session=True
+    )
+    try:
+        _wait_for(
+            lambda: (
+                ("cat", "S") in _group_members(proc.pid)
+                and ("sleep", "S") in _group_members(proc.pid)
+            ),
+            5.0,
+        )
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=0.3) == 0
+        _wait_for(lambda: not _live(proc.pid), 0.3 - (time.monotonic() - started))
+    finally:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+
+def _fake_runsv(bin_dir: Path, record: Path, leaf: Path, keep: int | None) -> Path:
+    """A stand-in runsv. On TERM it notes the signal and leaves the leaf as a runsv that has stopped
+    its service does: `keep`, when given, stays in cgroup.procs, and cgroup.events then reports the
+    leaf populated. Otherwise the leaf is empty and reports populated 0."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    path = bin_dir / "runsv"
+    procs, events = leaf / "cgroup.procs", leaf / "cgroup.events"
+    if keep is None:
+        left = f': > "{procs}"; printf "populated 0\\n" > "{events}"'
+    else:
+        left = f'printf "%s\\n" {keep} > "{procs}"; printf "populated 1\\n" > "{events}"'
+    on_term = f'printf TERM >> "{record}"; {left}; exit 0'
+    path.write_text(
+        f"#!/bin/sh\ntrap '{on_term}' TERM\nwhile :; do sleep 0.1; done\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def _finish_for_test(tmp_path: Path, leaf: Path) -> Path:
+    """The rendered finish script, with its leaf moved under tmp_path and a 2 s drain."""
+    text = _alice()[FINISH]
+    text = text.replace("LEAF=/sys/fs/cgroup/ginn/1000/supervisor", f"LEAF={leaf}")
+    text = text.replace("DRAIN_SECONDS=20", "DRAIN_SECONDS=2")
+    path = tmp_path / "finish.sh"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _make_leaf(tmp_path: Path, procs: str, populated: int) -> Path:
+    """A fake leaf. cgroup.procs is a plain file here, so its size is real. On cgroupfs it is 0
+    whatever it holds, which is why finish must not test it for size (ADR-013, Decision 26)."""
+    leaf = tmp_path / "leaf"
+    leaf.mkdir()
+    (leaf / "cgroup.procs").write_text(procs, encoding="utf-8")
+    (leaf / "cgroup.events").write_text(f"populated {populated}\nfrozen 0\n", encoding="utf-8")
+    return leaf
+
+
+def _finish_run(sh: str, script: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603
+        [sh, str(script)], capture_output=True, text=True, timeout=10, check=False
+    )
+
+
+def test_finish_never_tests_the_size_of_a_cgroup_file() -> None:
+    """cgroupfs reports size 0 for cgroup.procs while it holds pids, so `-s` on the leaf would end
+    the drain at once. The drain reads cgroup.events instead (ADR-013, Decision 26)."""
+    script = _alice()[FINISH]
+    assert "[ -s" not in script
+    assert '-s "$LEAF' not in script
+    assert "grep -q '^populated 1' \"$LEAF/cgroup.events\"" in script
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_finish_waits_while_a_child_cgroup_is_populated_though_procs_is_empty(
+    tmp_path: Path,
+) -> None:
+    """The leaf's own cgroup.procs is empty, and a child cgroup holds processes. cgroupfs reports
+    the leaf populated, so finish waits, and it ends once the child empties (cgroup.events)."""
+    sh = shutil.which("sh")
+    assert sh is not None
+    leaf = _make_leaf(tmp_path, procs="", populated=1)
+    script = _finish_for_test(tmp_path, leaf)
+    timer = threading.Timer(1.0, (leaf / "cgroup.events").write_text, ("populated 0\n",))
+    timer.start()
+    try:
+        started = time.monotonic()
+        result = _finish_run(sh, script)
+        elapsed = time.monotonic() - started
+    finally:
+        timer.cancel()
+    assert result.returncode == 0
+    assert elapsed >= 0.9, "finish returned while the leaf was still populated"
+    assert elapsed < 2.0, "finish did not end once the leaf emptied"
+    assert "still holds" not in result.stderr
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_finish_sends_term_to_the_runsv_only_and_waits_for_the_leaf(tmp_path: Path) -> None:
+    """A fake runsv and a fake service share the leaf. Finish sends TERM to the runsv alone, then
+    waits while the leaf stays populated. The service is still there after the bound, so finish
+    reports it and exits 0 (ADR-013, Decision 26). Real sh, and a fake leaf."""
+    sh = shutil.which("sh")
+    assert sh is not None
+    record = tmp_path / "signals"
+    sleeper = subprocess.Popen(["sleep", "30"])  # noqa: S603, S607
+    leaf = _make_leaf(tmp_path, procs="", populated=1)
+    fake = _fake_runsv(tmp_path / "bin", record, leaf, keep=sleeper.pid)
+    runsv = subprocess.Popen([str(fake)])  # noqa: S603
+    try:
+        (leaf / "cgroup.procs").write_text(f"{runsv.pid}\n{sleeper.pid}\n", encoding="utf-8")
+        result = _finish_run(sh, _finish_for_test(tmp_path, leaf))
+        assert result.returncode == 0
+        assert record.read_text(encoding="utf-8") == "TERM"
+        assert sleeper.poll() is None, "finish signalled a process that is not runsv"
+        assert "still holds processes" in result.stderr
+    finally:
+        for child in (sleeper, runsv):
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="needs /proc")
+def test_finish_returns_at_once_when_the_runsv_leaves_an_empty_leaf(tmp_path: Path) -> None:
+    sh = shutil.which("sh")
+    assert sh is not None
+    record = tmp_path / "signals"
+    leaf = _make_leaf(tmp_path, procs="", populated=1)
+    fake = _fake_runsv(tmp_path / "bin", record, leaf, keep=None)
+    runsv = subprocess.Popen([str(fake)])  # noqa: S603
+    try:
+        (leaf / "cgroup.procs").write_text(f"{runsv.pid}\n", encoding="utf-8")
+        started = time.monotonic()
+        result = _finish_run(sh, _finish_for_test(tmp_path, leaf))
+        assert result.returncode == 0
+        assert time.monotonic() - started < 2.5
+        assert "still holds" not in result.stderr
+        assert record.read_text(encoding="utf-8") == "TERM"
+    finally:
+        if runsv.poll() is None:
+            runsv.kill()
+        runsv.wait()

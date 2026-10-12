@@ -76,15 +76,28 @@ chown 1000:1000 /sys/fs/cgroup/ginn/1000 /sys/fs/cgroup/ginn/1000/cgroup.procs /
 printf '%s\n' "$$" > /sys/fs/cgroup/ginn/1000/supervisor/cgroup.procs
 
 # 4. Wait for the state directory, for example an encrypted home that is not mounted yet.
+sleep_pid=
+stop_wait() {
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || :
+        wait "$sleep_pid" 2>/dev/null || :
+    fi
+    exit 0
+}
+trap stop_wait TERM INT HUP
 waited=0
 while [ ! -d "$SV_DIR" ]; do
     if [ "$waited" -ge 60 ]; then
         log "$SV_DIR missing after 60 s; exiting so runsv restarts this service"
         exit 1
     fi
-    sleep 1
+    sleep 1 &
+    sleep_pid=$!
+    wait "$sleep_pid" || :
+    sleep_pid=
     waited=$((waited + 1))
 done
+trap - TERM INT HUP
 
 # 5. Drop to the user and run its runit supervisor. setpriv sets the numeric ids and loads the
 # user's supplementary groups from the account database (video, render, kvm and so on). This

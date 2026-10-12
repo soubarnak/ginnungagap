@@ -22,6 +22,11 @@ up accounts themselves (no getent). Each value is quoted with shlex.quote becaus
 as root.
 
 Golden files for the rendered scripts are in tests/fixtures/hostsetup/ginn-alice/.
+
+`finish` runs after run exits. runsvdir exits at once on TERM and leaves its runsv children
+running (runsvdir(8)), so finish sends TERM to those runsv processes in the supervisor leaf, and
+waits until the leaf is empty (ADR-013, Decision 26). The log script waits with a reader on its
+input, which runsv closes when it stops the service (runsv(8)).
 """
 
 from __future__ import annotations
@@ -112,7 +117,7 @@ def render(
     base = f"{SV_PARENT}/ginn-{user}"
     return {
         f"{base}/run": _run_script(values, uid),
-        f"{base}/finish": _FINISH,
+        f"{base}/finish": _finish_script(uid),
         f"{base}/log/run": _log_script(values),
     }
 
@@ -136,6 +141,10 @@ def _run_script(v: Mapping[str, str], uid: int) -> str:
             "WAIT_SECONDS": str(WAIT_SECONDS),
         },
     )
+
+
+def _finish_script(uid: int) -> str:
+    return _fill(_FINISH, {"SUPERVISOR_CGROUP": shlex.quote(_groups(uid).supervisor)})
 
 
 def _log_script(v: Mapping[str, str]) -> str:
@@ -180,20 +189,120 @@ def _check_account(label: str, name: str) -> None:
 
 _FINISH = """\
 #!/bin/sh
-# Runs after runsvdir exits. The cgroup leaf persists, and run recreates what is missing.
+# Runs after run exits, which runsv does when it stops the service (runsv(8)). runsvdir exits at
+# once on TERM and leaves its runsv children running (runsvdir(8)). This script stops them the way
+# runsvdir does on HUP: it sends TERM to each runsv process in the supervisor leaf, then waits until
+# the leaf is empty, so runsv does not exit while a service is still up (ADR-013, Decision 26).
+set -u
+
+PATH=/usr/bin:/bin
+export PATH
+
+LEAF=@SUPERVISOR_CGROUP@
+DRAIN_SECONDS=20
+
+log() {
+    printf '%s\\n' "ginn-supervisor-finish: $*" >&2
+}
+
+# Only a process named runsv gets the signal. The services themselves stop through their runsv.
+stop_runsv() {
+    while read -r pid; do
+        read -r name 2>/dev/null < "/proc/$pid/comm" || continue
+        if [ "$name" = runsv ]; then
+            kill -TERM "$pid" 2>/dev/null || :
+        fi
+    done < "$LEAF/cgroup.procs"
+}
+
+# populated succeeds while the leaf, or a cgroup below it, holds a process. The size of a cgroup
+# file is 0 on cgroupfs, so cgroup.procs is read for its pids and never tested for size.
+populated() {
+    grep -q '^populated 1' "$LEAF/cgroup.events" 2>/dev/null
+}
+
+stop_runsv
+waited=0
+while populated; do
+    if [ "$waited" -ge "$DRAIN_SECONDS" ]; then
+        log "$LEAF still holds processes after $DRAIN_SECONDS s; undo may report it busy"
+        break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
 exit 0
 """
 
+# The sleep runs in the background, so a signal to this shell ends it too. runsv signals only this
+# shell. Only run moves into the supervisor leaf, so only run's sleep could stay there (ADR-013).
 _WAIT_BLOCK = """\
+sleep_pid=
+stop_wait() {
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || :
+        wait "$sleep_pid" 2>/dev/null || :
+    fi
+    exit 0
+}
+trap stop_wait TERM INT HUP
 waited=0
 while [ ! -d "$SV_DIR" ]; do
     if [ "$waited" -ge @WAIT_SECONDS@ ]; then
         log "$SV_DIR missing after @WAIT_SECONDS@ s; exiting so runsv restarts this service"
         exit 1
     fi
-    sleep 1
+    sleep 1 &
+    sleep_pid=$!
+    wait "$sleep_pid" || :
+    sleep_pid=
     waited=$((waited + 1))
 done
+trap - TERM INT HUP
+"""
+
+# runsv ends this wait by closing the input of the log service when it stops the service
+# (runsv(8)). The reader holds that input open and exits when the input closes. Descriptor 3
+# keeps the input, because a background command gets /dev/null as its standard input when job
+# control is off.
+_LOG_WAIT_BLOCK = """\
+exec 3<&0
+cat <&3 >/dev/null &
+reader=$!
+sleep_pid=
+stop_reader() {
+    kill "$reader" 2>/dev/null || :
+    wait "$reader" 2>/dev/null || :
+}
+stop_wait() {
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || :
+        wait "$sleep_pid" 2>/dev/null || :
+    fi
+    stop_reader
+    exit 0
+}
+trap stop_wait TERM INT HUP
+waited=0
+while [ ! -d "$SV_DIR" ]; do
+    if [ "$waited" -ge @WAIT_SECONDS@ ]; then
+        stop_reader
+        log "$SV_DIR missing after @WAIT_SECONDS@ s; exiting so runsv restarts this service"
+        exit 1
+    fi
+    sleep 1 &
+    sleep_pid=$!
+    wait "$sleep_pid" || :
+    sleep_pid=
+    waited=$((waited + 1))
+    if ! kill -0 "$reader" 2>/dev/null; then
+        log "the log input closed before $SV_DIR existed, so runsv stopped this service"
+        exit 0
+    fi
+done
+trap - TERM INT HUP
+stop_reader
+exec 3<&-
 """
 
 _RUN = (
@@ -317,7 +426,7 @@ log() {
 
 # The same wait as run, so nothing is created under a state home that is not mounted yet.
 """
-    + _WAIT_BLOCK
+    + _LOG_WAIT_BLOCK
     + """
 setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \\
 mkdir -p "$LOG_DIR"

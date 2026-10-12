@@ -32,6 +32,8 @@ from ginn.hostsetup import undo as undo_mod
 from ginn.hostsetup._common import supervise_links
 from ginn.hostsetup.setup import TMP_DIR, SetupResult, UserInfo, run_setup
 from ginn.hostsetup.undo import (
+    CGROUP_BUSY_DELAYS,
+    CGROUP_BUSY_SECONDS,
     REASON_ADMIN_LINE,
     REASON_BOOT,
     REASON_BOOT_UNKNOWN,
@@ -46,9 +48,12 @@ from ginn.hostsetup.undo import (
     REASON_RECORDS_DIR,
     REASON_RECORDS_EXTRA,
     REASON_SHARED,
+    REASON_SHARED_BUSY,
     REASON_SHARED_GONE,
     REASON_SYMLINK,
     REASON_TERMINATOR,
+    SERVICE_POLL_SECONDS,
+    STATE_APPEAR_SECONDS,
     UNDO_STEPS,
     UndoResult,
     run_undo,
@@ -237,6 +242,28 @@ def _stopped(svdir: Path, seconds: float) -> None:
     """runsv has already exited, so the wait returns at once."""
 
 
+class _Time:
+    """Virtual time for the undo waits (ADR-013, Decision 26). `sleep` advances `now`.
+
+    `on_sleep` runs after each sleep, with the number of sleeps so far, so a test can make runsv
+    start or exit at a given tick. No test waits in real time.
+    """
+
+    def __init__(self, on_sleep: Callable[[int], None] | None = None) -> None:
+        self.now = 0.0
+        self.calls: list[float] = []
+        self._on_sleep = on_sleep
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.calls.append(seconds)
+        self.now += seconds
+        if self._on_sleep is not None:
+            self._on_sleep(len(self.calls))
+
+
 def _undo(
     root: Path,
     user: str = "alice",
@@ -246,11 +273,14 @@ def _undo(
     lookup: Callable[[str], UserInfo] = USERS.__getitem__,
     owner: Callable[[Path], int] | None = None,
     rmdir: Callable[[Path], None] | None = None,
+    timer: _Time | None = None,
 ) -> UndoResult:
     """One undo. `wait=None` leaves the default waiter, which follows the supervise link.
 
-    `owner` replaces the run-script owner model, and `rmdir` the cgroup rmdir (for EBUSY).
+    `owner` replaces the run-script owner model, and `rmdir` the cgroup rmdir (for EBUSY). `timer`
+    times the waits. Without it, each undo gets its own virtual clock, so no test sleeps.
     """
+    virtual = timer or _Time()
     return run_undo(
         user,
         root_dir=root,
@@ -262,6 +292,8 @@ def _undo(
         write_control=_cgroup_write,
         owner_of=owner or _script_owner(root),
         lock_timeout=5.0,
+        clock=virtual.clock,
+        sleep=virtual.sleep,
     )
 
 
@@ -1359,11 +1391,76 @@ def test_a_user_owned_directory_outside_the_delegation_is_refused(tmp_path: Path
 
 
 @pytest.mark.fr("FR-003")
-def test_setup_again_after_an_undo_that_left_the_user_owned_cgroup_directory_succeeds(
+def test_a_cgroup_directory_busy_once_is_retried_and_the_undo_completes(tmp_path: Path) -> None:
+    """One EBUSY from a cgroup rmdir costs one pause, and the undo ends with the pre-setup tree."""
+    clean = _host(tmp_path / "clean")
+    _setup(clean)
+    _service(clean, "alice")
+    _undo(clean)
+    expected = _content(_snapshot(clean))
+
+    root = _host(tmp_path / "busy")
+    _setup(root)
+    _service(root, "alice")
+    tries: list[Path] = []
+
+    def busy_once(path: Path) -> None:
+        tries.append(path)
+        if len(tries) == 1:
+            raise OSError(errno.EBUSY, os.strerror(errno.EBUSY), str(path))
+        _cgroup_rmdir(path)
+
+    timer = _Time()
+    result = _undo(root, rmdir=busy_once, timer=timer)
+    assert result.left == ()
+    assert timer.calls == [CGROUP_BUSY_DELAYS[0]]
+    assert len(tries) == 4
+    assert not (root / RECORD).exists()
+    assert _content(_snapshot(root)) == expected
+
+
+@pytest.mark.fr("FR-003")
+def test_a_per_user_cgroup_directory_busy_to_the_bound_stops_undo_and_keeps_the_record(
     tmp_path: Path,
 ) -> None:
-    """An undo whose cgroup rmdir fails with EBUSY leaves `ginn/<uid>`, owned by the user. A new
-    setup then reads the leftover as the same user's delegated directory and does not refuse it."""
+    """EBUSY that lasts past the retries stops undo with GINN-E-UNDO-CGROUP-BUSY (exit 75). The
+    record stays, so a rerun, with the process gone, completes the undo (ADR-013, Decision 26)."""
+    clean = _host(tmp_path / "clean")
+    _setup(clean)
+    _service(clean, "alice")
+    _undo(clean)
+    expected = _content(_snapshot(clean))
+
+    root = _host(tmp_path / "held")
+    _setup(root)
+    _service(root, "alice")
+
+    def busy(path: Path) -> None:
+        raise OSError(errno.EBUSY, os.strerror(errno.EBUSY), str(path))
+
+    timer = _Time()
+    with pytest.raises(GinnError) as caught:
+        _undo(root, rmdir=busy, timer=timer)
+    assert caught.value.code == "GINN-E-UNDO-CGROUP-BUSY"
+    assert caught.value.exit_code == 75
+    assert "sys/fs/cgroup/ginn/1000/supervisor" in caught.value.message
+    assert "cgroup.procs" in caught.value.remedy
+    assert timer.calls == list(CGROUP_BUSY_DELAYS)
+    assert sum(timer.calls) == pytest.approx(CGROUP_BUSY_SECONDS)
+    assert (root / RECORD).is_file()
+    assert (root / SHARED).is_file()
+    assert (root / "sys/fs/cgroup/ginn/1000/supervisor").is_dir()
+
+    rerun = _undo(root)
+    assert rerun.left == ()
+    assert not (root / RECORD).exists()
+    assert _content(_snapshot(root)) == expected
+
+
+@pytest.mark.fr("FR-003")
+def test_setup_after_a_busy_undo_is_not_refused_by_the_user_owned_leftover(tmp_path: Path) -> None:
+    """The leftover `ginn/<uid>` is the user's delegated directory (Decision 27). A busy undo keeps
+    the record, and a later setup reads that directory without refusing it."""
 
     def busy(path: Path) -> None:
         raise OSError(errno.EBUSY, os.strerror(errno.EBUSY), str(path))
@@ -1371,13 +1468,111 @@ def test_setup_again_after_an_undo_that_left_the_user_owned_cgroup_directory_suc
     root = _host(tmp_path)
     _setup(root)
     _service(root, "alice")
-    first = _undo(root, rmdir=busy)
-    busy_text = f"could not be removed: {os.strerror(errno.EBUSY)}"
-    assert ("sys/fs/cgroup/ginn/1000", busy_text) in _left(first)
-    assert (root / "sys/fs/cgroup/ginn/1000").is_dir()
-    assert not (root / RECORD).exists()
+    with pytest.raises(GinnError) as caught:
+        _undo(root, rmdir=busy)
+    assert caught.value.code == "GINN-E-UNDO-CGROUP-BUSY"
 
     again = _setup(root)
     assert again.status == "configured"
     assert (root / RECORD).is_file()
-    assert _record(root).subids is not None
+    assert (root / "var/service/ginn-alice").is_symlink()
+
+
+@pytest.mark.fr("FR-003")
+def test_a_shared_cgroup_directory_that_stays_busy_is_reported_and_the_undo_completes(
+    tmp_path: Path,
+) -> None:
+    """A shared cgroup directory that stays busy is retried, then reported with its remedy, as
+    Decision 15 (iii) allows for a directory another party uses. Undo goes on and removes the
+    record (ADR-013, Decision 26)."""
+    root = _host(tmp_path)
+    _setup(root)
+    _service(root, "alice")
+
+    def busy_shared(path: Path) -> None:
+        if path.name == "ginn" and path.parent.name == "cgroup":
+            raise OSError(errno.EBUSY, os.strerror(errno.EBUSY), str(path))
+        _cgroup_rmdir(path)
+
+    timer = _Time()
+    result = _undo(root, rmdir=busy_shared, timer=timer)
+    assert ("sys/fs/cgroup/ginn", REASON_SHARED_BUSY) in _left(result)
+    assert timer.calls == list(CGROUP_BUSY_DELAYS)
+    assert (root / "sys/fs/cgroup/ginn").is_dir()
+    assert not (root / RECORD).exists()
+
+
+@pytest.mark.fr("FR-003")
+def test_a_runsv_state_that_appears_after_undo_starts_is_waited_for(tmp_path: Path) -> None:
+    """runsvdir can start runsv after undo has begun, so the state directory appears late. The
+    waiter polls for it, and then waits for runsv to exit before the cleanup (ADR-013, Decision 26).
+    Without the poll, the wait is skipped and the cleanup runs under a live runsv."""
+    clean = _host(tmp_path / "clean")
+    _setup(clean)
+    _service(clean, "alice")
+    _undo(clean)
+    expected = _content(_snapshot(clean))
+
+    root = _host(tmp_path / "late")
+    _setup(root)
+    _service(root, "alice")
+    for target in supervise_links("alice").values():
+        shutil.rmtree(root / target.lstrip("/"))
+    readers: list[int] = []
+
+    def runsv_starts(call: int) -> None:
+        if call == 1:
+            _runsv_state(root, "alice")
+            main = root / supervise_links("alice")["etc/sv/ginn-alice/supervise"].lstrip("/")
+            readers.append(os.open(main / "ok", os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC))
+        if call == 3:
+            for fd in readers:
+                os.close(fd)
+            readers.clear()
+
+    timer = _Time(on_sleep=runsv_starts)
+    try:
+        result = _undo(root, wait=None, timer=timer)
+    finally:
+        for fd in readers:
+            os.close(fd)
+    assert result.left == ()
+    assert timer.calls == [SERVICE_POLL_SECONDS] * 3
+    assert not (root / RECORD).exists()
+    assert _content(_snapshot(root)) == expected
+
+
+@pytest.mark.fr("FR-003")
+def test_a_runsv_state_that_never_appears_costs_the_appear_window_and_undo_completes(
+    tmp_path: Path,
+) -> None:
+    """When runsv never starts, the waiter polls for STATE_APPEAR_SECONDS and then goes on."""
+    root = _host(tmp_path)
+    _setup(root)
+    _service(root, "alice")
+    for target in supervise_links("alice").values():
+        shutil.rmtree(root / target.lstrip("/"))
+
+    timer = _Time()
+    result = _undo(root, wait=None, timer=timer)
+    assert result.left == ()
+    assert not (root / RECORD).exists()
+    assert timer.now == pytest.approx(STATE_APPEAR_SECONDS, abs=SERVICE_POLL_SECONDS)
+
+
+@pytest.mark.fr("FR-003")
+def test_without_a_supervise_link_the_waiter_does_not_poll_for_a_state_directory(
+    tmp_path: Path,
+) -> None:
+    """A service that was never linked has no state to wait for, so undo does not stall."""
+    root = _host(tmp_path)
+    _setup(root)
+    _service(root, "alice")
+    os.unlink(root / "etc/sv/ginn-alice/supervise")
+    for target in supervise_links("alice").values():
+        shutil.rmtree(root / target.lstrip("/"))
+
+    timer = _Time()
+    result = _undo(root, wait=None, timer=timer)
+    assert result.left == ()
+    assert timer.calls == []
