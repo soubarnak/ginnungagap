@@ -7,9 +7,12 @@
 # user's /etc/subuid and /etc/subgid lines (Dockerfile.s07e).
 #
 #   spikes/s07e_no_subuid.sh build        base image (Dockerfile.s07, unchanged), no-subuid image (Dockerfile.s07e),
-#                                         catatonit, seccomp profiles (s07e_seccomp.py), image state
-#   spikes/s07e_no_subuid.sh run          build, then cases E0 E1 E2 E3 E4 E4c E5a E5b E5c in order
-#   spikes/s07e_no_subuid.sh case <id>    build, then one case (E0 E1 E2 E3 E4 E4c E5a E5b E5c)
+#                                         two stock-Debian realm images (Dockerfile.s07e2: plain useradd, and
+#                                         SUB_UID_COUNT=0/SUB_GID_COUNT=0), catatonit, seccomp profiles
+#                                         (s07e_seccomp.py), image state, and a stock useradd check
+#   spikes/s07e_no_subuid.sh run          build, then cases E0 E1 E1o E2 E3 E4 E4c E5a E5b E5c E1d E1d-vfs E1d-u1
+#                                         E1d-u2 E1d-u2-vfs E1d-nokey E1d-vfs-nokey in order
+#   spikes/s07e_no_subuid.sh case <id>    build, then one case (same ids as run)
 #   spikes/s07e_no_subuid.sh teardown     remove containers and storage under the spike roots only
 #
 # Every host podman call passes --root, --runroot and --tmpdir at spike-owned directories. The inner podman runs
@@ -26,7 +29,10 @@ OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s07e}"
 PM=(podman --root "$ROOT_DIR" --runroot "$RUN_DIR" --tmpdir "$RUN_DIR/libpod-tmp")
 BASE_IMG=localhost/ginn-s07e:base
 REALM_IMG=localhost/ginn-s07e:nosubuid
+U1_IMG=localhost/ginn-s07e2:useradd
+U2_IMG=localhost/ginn-s07e2:useradd-k
 ALPINE=docker.io/library/alpine:3
+ALPINE_BASE=docker.io/library/debian:stable
 TABLE="$OUT/attempts.tsv"
 
 # Outer options shared by every case (the S-07 and S-07d shape). --init-path is a host copy of catatonit.
@@ -58,6 +64,16 @@ driver = "vfs"
 
 [storage.options.vfs]
 ignore_chown_errors = "true"'
+
+# Negative controls for the follow-up: the same files without the ignore_chown_errors key.
+STORAGE_OVERLAY_NOKEY='[storage]
+driver = "overlay"
+
+[storage.options.overlay]
+mount_program = "/usr/bin/fuse-overlayfs"'
+
+STORAGE_VFS_NOKEY='[storage]
+driver = "vfs"'
 
 CONTAINERS_CONF='[engine]
 cgroup_manager = "cgroupfs"
@@ -95,6 +111,15 @@ read -r -d '' BODY_E6 <<'BODY' || true
 echo "== E6 single-uid chown inside an inner container"
 $IPM @ISTOR@ run --rm docker.io/library/alpine:3 sh -c 'id; touch /x; echo "touch rc=$?"; chown 100:100 /x; echo "chown rc=$?"; ls -ln /x; echo "ls rc=$?"'
 rc=$?; echo "E6_RC=$rc"; exit $rc
+BODY
+
+# Plain inner podman: no --root, --runroot, --tmpdir, --storage-driver or --storage-opt. Only the Realm Home
+# config files (storage.conf, containers.conf) decide the storage setup.
+read -r -d '' BODY_PLAIN <<'BODY' || true
+echo "== id and environment"; id; echo "HOME=$HOME XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-unset}"
+echo "== plain podman info (full)"; podman info; echo "info rc=$?"
+echo "== plain podman unshare: uid_map"; podman unshare cat /proc/self/uid_map; echo "unshare rc=$?"
+echo "== plain podman run"; podman run --rm docker.io/library/alpine:3 true; rc=$?; echo "INNER_RC=$rc"; exit $rc
 BODY
 
 read -r -d '' BODY_SYSCALL_PROBE <<'BODY' || true
@@ -145,6 +170,20 @@ init_out() {
   fi
 }
 
+# useradd_check: the stock Debian image with no dev user, and the realm user created the way a realm would create it
+# (useradd -m -u 1000 dev), with and without the SUB_UID_COUNT=0 / SUB_GID_COUNT=0 override. Writes useradd-check.txt.
+useradd_check() {
+  local args out=$OUT/useradd-check.txt
+  : > "$out"
+  for args in "-m -u 1000 dev" "-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev"; do
+    {
+      echo "== stock $ALPINE_BASE, useradd $args"
+      "${PM[@]}" run --rm --runtime crun "$ALPINE_BASE" sh -c "echo '-- before'; ls -l /etc/subuid /etc/subgid 2>&1; grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs; useradd $args; echo '-- after: /etc/subuid'; cat /etc/subuid 2>&1; echo '-- after: /etc/subgid'; cat /etc/subgid 2>&1; id dev"
+    } >> "$out" 2>&1
+  done
+  log "useradd check: $out"
+}
+
 build_images() {
   init_out
   if ! "${PM[@]}" image exists "$BASE_IMG"; then
@@ -153,6 +192,12 @@ build_images() {
   fi
   "${PM[@]}" build -t "$REALM_IMG" -f "$SPIKE_DIR/Dockerfile.s07e" "$OUT/ctx" \
     > "$OUT/logs/build-nosubuid.log" 2>&1 || die "no-subuid build failed, see $OUT/logs/build-nosubuid.log"
+  "${PM[@]}" build --build-arg 'REALM_USERADD=-m -u 1000 dev' -t "$U1_IMG" -f "$SPIKE_DIR/Dockerfile.s07e2" "$OUT/ctx" \
+    > "$OUT/logs/build-useradd.log" 2>&1 || die "useradd build failed, see $OUT/logs/build-useradd.log"
+  "${PM[@]}" build --build-arg 'REALM_USERADD=-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev' -t "$U2_IMG" \
+    -f "$SPIKE_DIR/Dockerfile.s07e2" "$OUT/ctx" > "$OUT/logs/build-useradd-k.log" 2>&1 \
+    || die "useradd-k build failed, see $OUT/logs/build-useradd-k.log"
+  useradd_check
   if [[ ! -s $OUT/catatonit ]]; then
     if "${PM[@]}" container exists s07e-ext; then "${PM[@]}" rm -f s07e-ext >/dev/null; fi
     "${PM[@]}" create --name s07e-ext "$BASE_IMG" >/dev/null
@@ -166,7 +211,7 @@ build_images() {
     "$OUT/seccomp-s07e-host.json" sethostname | tee -a "$OUT/logs/seccomp.log"
   : > "$OUT/image-state.txt"
   local img
-  for img in "$BASE_IMG" "$REALM_IMG"; do
+  for img in "$BASE_IMG" "$REALM_IMG" "$U1_IMG" "$U2_IMG"; do
     {
       echo "== image $img"
       "${PM[@]}" run --rm --runtime crun "$img" sh -c 'echo "-- /etc/subuid"; cat /etc/subuid; echo "-- /etc/subgid"; cat /etc/subgid; echo "-- setuid helpers"; ls -ln /usr/bin/newuidmap /usr/bin/newgidmap; for t in getcap setcap; do command -v $t || echo "$t absent"; done; dpkg -s libcap2-bin >/dev/null 2>&1; echo "libcap2-bin dpkg rc=$? (non-zero means absent)"'
@@ -202,7 +247,13 @@ cleanup() {
 
 write_inner_config() {
   local name=$1 drv=$2 storage
-  if [[ $drv == overlay ]]; then storage=$STORAGE_OVERLAY; else storage=$STORAGE_VFS; fi
+  case $drv in
+    overlay) storage=$STORAGE_OVERLAY ;;
+    vfs) storage=$STORAGE_VFS ;;
+    overlay-nokey) storage=$STORAGE_OVERLAY_NOKEY ;;
+    vfs-nokey) storage=$STORAGE_VFS_NOKEY ;;
+    *) die "unknown storage config $drv" ;;
+  esac
   printf '%s\n' "$storage" | "${PM[@]}" exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
     sh -c 'mkdir -p /home/dev/.config/containers && cat > /home/dev/.config/containers/storage.conf'
   printf '%s\n' "$CONTAINERS_CONF" | "${PM[@]}" exec -i --user 1000:1000 -e HOME=/home/dev "$name" \
@@ -216,6 +267,14 @@ inner_exec() {
   INNER_RC=0
   body=${body//@ISTOR@/"$istor"}
   "${PM[@]}" exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$INNER_PRE"$'\n'"$body" \
+    > "$OUT/logs/$tag.inner.log" 2>&1 || INNER_RC=$?
+}
+
+# plain_exec <name> <tag> <body>: plain inner commands as the realm user (HOME only, no XDG_RUNTIME_DIR). Sets INNER_RC.
+plain_exec() {
+  local name=$1 tag=$2 body=$3
+  INNER_RC=0
+  "${PM[@]}" exec --user 1000:1000 -e HOME=/home/dev "$name" sh -c "$body" \
     > "$OUT/logs/$tag.inner.log" 2>&1 || INNER_RC=$?
 }
 
@@ -302,6 +361,25 @@ case_syscall() {
   done
 }
 
+# case_plain <id> <note> <image> <profile> <driver> <outer options...>: Realm Home config only, plain inner podman.
+case_plain() {
+  local id=$1 note=$2 img=$3 prof=$4 drv=$5 name outer_s inner_s
+  shift 5
+  name="s07e-$id"
+  start_outer "$name" "$img" "$prof" "$@"
+  outer_s=$(join "${OUTER_ARGV[@]}")
+  inner_s="podman run --rm $ALPINE true (plain; HOME=/home/dev only)"
+  if (( OUTER_RC != 0 )); then
+    record "$id" "$note" "$img" "$prof" "$drv" "$outer_s" "$inner_s" "$OUTER_RC" "not run" "$OUT/logs/$name.outer.log"
+    cleanup "$name"
+    return 0
+  fi
+  write_inner_config "$name" "$drv"
+  plain_exec "$name" "$name" "$BODY_PLAIN"
+  record "$id" "$note" "$img" "$prof" "$drv" "$outer_s" "$inner_s" 0 "$INNER_RC" "$OUT/logs/$name.inner.log"
+  cleanup "$name"
+}
+
 run_case_id() {
   case $1 in
     E0) case_run E0 "control: stock base image (ships dev:100000:65536), storage.conf only" "$BASE_IMG" both overlay "$ISTOR_CONF" "${DEV_ALL[@]}" ;;
@@ -320,6 +398,20 @@ run_case_id() {
            --device /dev/fuse --device /dev/net/tun ;;
     E5c) case_run E5c "E2 (vfs) minus /dev/fuse" "$REALM_IMG" both vfs "$ISTOR_VFS" \
            --device /dev/net/tun --security-opt 'unmask=/proc/*' ;;
+    E1d) case_plain E1d "follow-up: Realm Home config only (storage.conf overlay, mount_program, ignore_chown_errors; containers.conf), plain inner podman, no-subuid image" \
+           "$REALM_IMG" both overlay "${DEV_ALL[@]}" ;;
+    E1d-vfs) case_plain E1d-vfs "follow-up: Realm Home config only, storage.conf driver vfs with [storage.options.vfs] ignore_chown_errors, plain inner podman, no-subuid image" \
+           "$REALM_IMG" both vfs "${DEV_ALL[@]}" ;;
+    E1d-u1) case_plain E1d-u1 "follow-up control: stock Debian + podman, realm user by plain useradd -m -u 1000 dev, Realm Home config only" \
+           "$U1_IMG" both overlay "${DEV_ALL[@]}" ;;
+    E1d-u2) case_plain E1d-u2 "follow-up candidate: stock Debian + podman, realm user by useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0, Realm Home config only" \
+           "$U2_IMG" both overlay "${DEV_ALL[@]}" ;;
+    E1d-u2-vfs) case_plain E1d-u2-vfs "follow-up: as E1d-u2 with storage.conf driver vfs" \
+           "$U2_IMG" both vfs "${DEV_ALL[@]}" ;;
+    E1d-nokey) case_plain E1d-nokey "negative control: E1d without ignore_chown_errors in storage.conf" \
+           "$REALM_IMG" both overlay-nokey "${DEV_ALL[@]}" ;;
+    E1d-vfs-nokey) case_plain E1d-vfs-nokey "negative control: E1d-vfs without [storage.options.vfs] ignore_chown_errors" \
+           "$REALM_IMG" both vfs-nokey "${DEV_ALL[@]}" ;;
     *) die "unknown case $1" ;;
   esac
 }
@@ -365,9 +457,9 @@ main() {
     build) init_out; build_images ;;
     run)
       build_images
-      for id in E0 E1 E1o E2 E3 E4 E4c E5a E5b E5c; do run_case_id "$id"; done
+      for id in E0 E1 E1o E2 E3 E4 E4c E5a E5b E5c E1d E1d-vfs E1d-u1 E1d-u2 E1d-u2-vfs E1d-nokey E1d-vfs-nokey; do run_case_id "$id"; done
       ;;
-    case) build_images; run_case_id "${1:?case id: E0 E1 E1o E2 E3 E4 E4c E5a E5b E5c}" ;;
+    case) build_images; run_case_id "${1:?case id: E0 E1 E1o E2 E3 E4 E4c E5a E5b E5c E1d E1d-vfs E1d-u1 E1d-u2 E1d-u2-vfs E1d-nokey E1d-vfs-nokey}" ;;
     teardown) cmd_teardown ;;
     *) die "usage: $0 build|run|case <id>|teardown" ;;
   esac
