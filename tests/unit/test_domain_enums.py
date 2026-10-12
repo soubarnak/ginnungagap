@@ -7,7 +7,7 @@ import itertools
 
 import pytest
 
-from ginn.distros import available
+from ginn.distros import TEST_SWITCH_ENV, available
 from ginn.domain.enums import DistroId, RealmState, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.realm import RealmSettings
@@ -95,8 +95,20 @@ def test_unknown_values_raise_option_invalid_exit_2(enum_cls: type, raw: str) ->
 def test_unknown_distro_message_lists_the_shipped_names_only() -> None:
     with pytest.raises(GinnError) as info:
         DistroId.parse("gentoo")
-    assert info.value.details["rule"] == "allowed values: arch, debian, fedora, kali (DR-005)"
+    assert info.value.details["rule"] == f"allowed values: {', '.join(available())} (DR-005)"
     assert info.value.details["option"] == "--distro=gentoo"
+
+
+@pytest.mark.fr("NFR-060")
+def test_the_fixture_is_not_a_distro_id_without_the_test_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(TEST_SWITCH_ENV)
+    with pytest.raises(GinnError) as info:
+        DistroId.parse("_test")
+    assert info.value.code == "GINN-E-OPTION-INVALID"
+    assert info.value.details["option"] == "--distro=_test"
+    assert "_test" not in info.value.details["rule"]
 
 
 @pytest.mark.fr("DR-005")

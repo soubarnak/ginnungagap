@@ -2,12 +2,15 @@
 """Distribution definitions as data (NFR-060). The loader is in loader.py; the TOML is in data/."""
 
 from ginn.distros.loader import (
+    TEST_SWITCH_ENV,
     DistroDef,
     HostLocale,
     Integration,
     IntegrationSet,
     Verb,
     available,
+    clear_cache,
+    distro_fixtures_enabled,
     from_mapping,
     host_locale,
     load,
@@ -16,12 +19,15 @@ from ginn.distros.loader import (
 )
 
 __all__ = [
+    "TEST_SWITCH_ENV",
     "DistroDef",
     "HostLocale",
     "Integration",
     "IntegrationSet",
     "Verb",
     "available",
+    "clear_cache",
+    "distro_fixtures_enabled",
     "from_mapping",
     "host_locale",
     "load",

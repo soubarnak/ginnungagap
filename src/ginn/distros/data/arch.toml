@@ -5,9 +5,12 @@
 # {locale} (integration steps). Write {{ and }} for literal braces. Every command is an argv list.
 #
 # Image: trust_key names [distro.arch] in src/ginn/trust/data/trust.toml (DR-040). Image facts from
-# S-10b: pacman 137 packages; en_US.UTF-8 absent; no Integration package missing.
+# S-10b: pacman 137 packages; en_US.UTF-8 absent; no sync database; no Integration package missing.
 # The locale step runs localedef, the program that locale-gen calls. S-10b tested locale-gen, not
-# localedef. Not verified on a host (M4): every verb and the step.
+# localedef. pacman-contrib is an Integration package only because checkupdates needs it (ADR-011).
+# FR-013 limits the set to CA certificates and locale data, so this is a recorded deviation.
+# Not verified on a host (M4): every verb, the step, the checkupdates exit status, and the stale
+# metadata message.
 schema = 1
 id = "arch"
 trust_key = "arch"
@@ -16,24 +19,35 @@ shell = "/bin/bash"
 package_name_regex = '[a-z0-9@_+][a-z0-9@._+-]{0,127}'
 # FR-012: pacman messages for an unknown or untrusted signing key, or a corrupt signed package.
 signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted package \(PGP signature\)|could not be looked up remotely'
+# ADR-011: a sync database older than the mirror's packages fails the download with a 404. Runtime
+# text, not verified until M4. The remedy is `ginn update <realm>`, the one full upgrade.
+stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL returned error: 404'
+# ADR-011: no verb refreshes first. The sync database moves only with a full upgrade (`upgrade`),
+# because Arch does not support partial upgrades (Arch Wiki, System maintenance).
+refresh_before = []
 
 [integration]
-packages = []
+packages = ["pacman-contrib"]
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 
 [verbs]
-# -Syu, not -Sy. Arch does not support partial upgrades, so the sync databases are never refreshed
-# without a full upgrade. The image ships no sync databases, so callers run this before install.
+# -Syu, not -Sy: Arch does not support partial upgrades. The only refresh of the sync database is a
+# full upgrade, so `refresh` and `upgrade` are the same argv. Realm creation runs it once before the
+# first install, because the image ships no sync database (ADR-011).
 refresh = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
-# --needed skips packages already installed. No --refresh: run `refresh` first, which brings the
-# sync databases current.
+# No --refresh and no --sysupgrade: install uses the sync database as the last full upgrade left it,
+# so it never upgrades the realm (FR-040 AC-1, ADR-011).
 install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
-# No --recursive: pacman refuses to remove a package that another installed package needs.
+# No --recursive and no --cascade: pacman refuses to remove a package that another installed package
+# needs. A refusal is the native form of the dependents rule (ADR-011).
 remove = ["pacman", "--remove", "--noconfirm", "{packages}"]
-# --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade.
+# --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade (FR-023).
 upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
-# --query --upgrades is -Qu: upgradable packages against the sync databases as last refreshed.
-check-updates = ["pacman", "--query", "--upgrades"]
+# checkupdates (pacman-contrib) lists upgradable packages without running a system update (Arch
+# Wiki, System maintenance). It passes no sync or upgrade flag. That it leaves the realm's sync
+# database unchanged is not verified until M4, and FR-024 depends on it (ADR-011). Its exit status
+# is not relied on here either.
+check-updates = ["checkupdates"]
 # --query --explicit --quiet is -Qeq: explicitly installed package names only (DR-007).
 list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 # --print with --print-format %n: names of the packages a sync would fetch. Changes nothing.

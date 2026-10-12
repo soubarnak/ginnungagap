@@ -31,6 +31,7 @@ Architecture decision records (ADRs) record the decisions that shape Ginnungagap
 | ADR-007 | Native helpers and memory budget | Planned (decided by spike S-05 in M1) | NFR-002, NFR-003, FR-067 |
 | ADR-008 | GPU and NVIDIA injection | Planned (decided by spike S-06 in M1) | FR-046, FR-069, R-005 |
 | ADR-009 | GUI to backend channel | Planned (M9; the roadmap assigns no spike) | FR-105, FR-106, NFR-SEC-009, NFR-010, DR-030 |
+| [ADR-011](ADR-011-package-manager-semantics.md) | Package manager semantics for refresh, update checks and removal | Accepted | FR-013, FR-023, FR-024, FR-040, FR-041, NFR-060, CR-007 |
 
 ## Adding an ADR
 

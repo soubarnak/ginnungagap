@@ -18,22 +18,30 @@ shell = "/bin/bash"
 package_name_regex = '[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}'
 # FR-012: dnf messages for a failed GPG check or a missing public key.
 signature_error_regex = '(?i)gpg check failed|public key for .* is not installed|signature verification failed'
+# ADR-011: dnf's message for a package file the mirror no longer has. Runtime text, not verified
+# until M4.
+stale_metadata_regex = 'Status code: 404'
+# ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
+# check-updates forces a refresh, so no verb needs one first.
+refresh_before = []
 
 [integration]
 packages = ["glibc-langpack-{lang}"]
 steps = []
 
 [verbs]
-# makecache fetches metadata for every enabled repository. dnf5 treats missing or expired metadata
-# as stale, so this is the refresh callers run before install, upgrade, check-updates, resolve and
-# estimate on a fresh image.
-refresh = ["dnf", "makecache"]
+# --refresh is a dnf5 global option: it forces a metadata refresh before the command. makecache
+# then downloads the metadata. It never upgrades an installed package (ADR-011).
+refresh = ["dnf", "--refresh", "makecache"]
 # install_weak_deps=False: only hard dependencies are installed (FR-040, CR-007).
 install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", "{packages}"]
+# dnf5 also removes now-unneeded dependencies (clean_requirements_on_remove, default on). It does
+# not refuse packages that need the named one: the ops layer pre-checks that (ADR-011).
 remove = ["dnf", "--assumeyes", "remove", "{packages}"]
 upgrade = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
-# check-upgrade exits 100 when updates exist and 0 when none. dnf refreshes expired metadata itself.
-check-updates = ["dnf", "check-upgrade"]
+# --refresh forces fresh metadata, so the check the Control Plane runs reflects the mirror (FR-024).
+# check-upgrade exits 100 when updates exist and 0 when none.
+check-updates = ["dnf", "--refresh", "check-upgrade"]
 # repoquery --userinstalled: names of packages installed by hand (DR-007). Format is rpm's %{name}.
 list-explicit = ["dnf", "repoquery", "--userinstalled", "--queryformat", '%{{name}}\n']
 # --assumeno: print the transaction and make no change. dnf exits 1 after the no answer.

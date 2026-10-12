@@ -16,19 +16,28 @@ shell = "/bin/bash"
 package_name_regex = '[a-z0-9][a-z0-9.+-]{1,127}'
 # FR-012: apt messages for a missing public key, an invalid signature or an unsigned repository.
 signature_error_regex = 'NO_PUBKEY|public key is not available|signatures were invalid|is not signed'
+# ADR-011: apt's messages when the lists name files the mirror no longer has. Runtime text, not
+# verified until M4.
+stale_metadata_regex = 'Unable to fetch some archives, maybe run apt-get update|404\s+Not Found'
+# ADR-011: apt-get update refreshes the package lists only and never upgrades, so these verbs run it
+# first. remove and list-explicit need no lists.
+refresh_before = ["install", "upgrade", "check-updates", "resolve", "estimate"]
 
 [integration]
 packages = ["ca-certificates", "locales"]
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
 
 [verbs]
-# apt-get update fetches the package lists. The image ships none, so callers run this before
-# install, upgrade, check-updates, resolve and estimate.
+# apt-get update fetches the package lists, and only the lists. Realm creation runs it once before
+# the first install, because the image ships none (ADR-011).
 refresh = ["apt-get", "update"]
 # --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
 install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
+# No --no-remove: apt-get aborts on any removal, including the named package. No --auto-remove:
+# apt-get leaves unneeded dependencies alone. apt-get also removes packages that need the named one;
+# the ops layer pre-checks that with --simulate (ADR-011).
 remove = ["apt-get", "--yes", "remove", "{packages}"]
-# Needs current package lists first: run `refresh` before this verb.
+# Needs current package lists first: refresh_before lists it (ADR-011).
 upgrade = ["apt-get", "--yes", "--no-install-recommends", "upgrade"]
 # apt list --upgradable: the lists as last refreshed. apt warns on stderr that its CLI is unstable.
 check-updates = ["apt", "list", "--upgradable"]

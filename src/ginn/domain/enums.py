@@ -38,8 +38,9 @@ class DistroId:
     """A distribution ID (DR-005): the name of a distribution definition in `ginn.distros`.
 
     Validated on construction against the definitions that exist. The `_test` fixture counts as
-    one, so tests can run through this path (NFR-060). An unknown name raises GINN-E-OPTION-INVALID
-    and the message lists the names users may choose.
+    one only while the test switch is on (GINN_TEST_DISTROS=1, see ginn.distros.loader), so tests
+    can run through this path and production never accepts it (NFR-060). An unknown name raises
+    GINN-E-OPTION-INVALID and the message lists the names users may choose.
     """
 
     value: str

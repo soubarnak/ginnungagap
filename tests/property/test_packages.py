@@ -10,6 +10,8 @@ hypothesis = pytest.importorskip("hypothesis")
 from hypothesis import given  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
+from ginn.distros import load  # noqa: E402
+from ginn.distros.loader import Verb  # noqa: E402
 from ginn.domain.enums import DistroId  # noqa: E402
 from ginn.domain.packages import PackageName  # noqa: E402
 from ginn.errors import GinnError  # noqa: E402
@@ -63,3 +65,18 @@ def test_invalid_names_are_rejected_with_pkg_name_invalid_exit_2(pair: tuple[str
     assert err.exit_code == 2
     assert err.details["name"] == raw
     assert isinstance(err.details["rule"], str)
+
+
+@given(VALID)
+def test_valid_names_reach_argv_as_one_element(pair: tuple[str, str]) -> None:
+    distro, raw = pair
+    assert load(distro).argv(Verb.INSTALL, [raw])[-1] == raw
+
+
+@given(st.one_of(INVALID, INVALID_ANY))
+def test_argv_refuses_every_name_the_pattern_rejects(pair: tuple[str, str]) -> None:
+    distro, raw = pair
+    with pytest.raises(GinnError) as info:
+        load(distro).argv(Verb.INSTALL, [raw])
+    assert info.value.code == "GINN-E-PKG-NAME-INVALID"
+    assert info.value.details["name"] == raw

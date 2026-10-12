@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-# Test-only fake distribution (NFR-060). It is not a real distribution: available() leaves it out
-# unless include_test=True, and it has no table in src/ginn/trust/data/trust.toml. Tests load it,
-# and load a renamed copy, to prove that a new distribution needs no code change.
+# Test-only fake distribution (NFR-060). It is not a real distribution. Its name starts with `_`, so
+# ginn hides it: available() leaves it out unless include_test=True and the test switch
+# GINN_TEST_DISTROS=1 is on, and load() refuses it without the switch (loader.py). It has no table
+# in src/ginn/trust/data/trust.toml. Tests load it, and load a renamed copy, to prove that a new
+# distribution needs no code change.
 schema = 1
 id = "_test"
 trust_key = "_test"
 shell = "/bin/sh"
 package_name_regex = '[a-z][a-z0-9.+-]{1,63}'
 signature_error_regex = 'FAKE-SIGNATURE-ERROR'
+stale_metadata_regex = 'FAKE-STALE-METADATA'
+refresh_before = ["install"]
 
 [integration]
 packages = ["fake-ca", "fake-locale-{lang}"]

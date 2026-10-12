@@ -2,10 +2,11 @@
 """Distribution definitions as data (NFR-060, DR-005, FR-012, FR-013, FR-040, FR-041).
 
 Each distribution is one TOML file in `data/`, named `<id>.toml`. Adding a distribution means a
-new file and a Trust Manifest entry, with no code change (NFR-060). `_test.toml` is a fake
-distribution for the tests. `available()` leaves it out unless asked. `ginn.domain` reads this
-package for distribution IDs (DR-005) and package-name patterns (DR-003), so this module must
-never import `ginn.domain`.
+new file and a Trust Manifest entry, with no code change (NFR-060). A name that starts with `_` is a
+test fixture, and `_test.toml` is one. Fixtures are hidden unless the test switch is on:
+GINN_TEST_DISTROS=1, which only tests/conftest.py sets. `available()` leaves them out unless asked
+for, and `load()` refuses them without the switch. `ginn.domain` reads this package for distribution
+IDs (DR-005) and package-name patterns (DR-003), so this module must never import `ginn.domain`.
 
 Placeholders use the errors.py convention. `{name}` is replaced, and `{{` and `}}` are literal
 braces. Three names are defined, each valid in one place only:
@@ -16,21 +17,34 @@ braces. Three names are defined, each valid in one place only:
   gives `en`).
 - `{locale}` in `integration.steps`. It is the language and territory of the host LANG (en_US).
 
-Every distribution defines every verb in `Verb`. `refresh` loads the current package metadata.
-Callers run `refresh` before `install`, `upgrade`, `check-updates`, `resolve` and `estimate` on a
-fresh image, because the official images ship no package lists. On Arch, `refresh` is a full
-sync-and-upgrade (-Syu), because Arch does not support refreshing the databases without upgrading.
+Every distribution defines every verb in `Verb`. `refresh` loads the package metadata a manager
+needs and never upgrades an installed package. `refresh_before` lists the verbs the caller runs
+`refresh` before (ADR-011). The list is empty where the verb already refreshes what it needs:
+- Arch never refreshes the sync database outside a full upgrade (`upgrade` is `pacman -Syu`),
+  because Arch does not support partial upgrades. `check-updates` runs `checkupdates`, which passes
+  no sync or upgrade flag (its effect on the database is verified in M4, ADR-011).
+- Debian and Kali run `apt-get update` (lists only) before install, upgrade, check-updates, resolve
+  and estimate.
+- Fedora: `check-updates` passes dnf5's global `--refresh`, and dnf5 refreshes expired metadata by
+  itself.
+A fresh image has no package lists, so realm creation runs `refresh` once before its first install
+on every distribution. The ops layer does that, not this module (ADR-011).
 
 A host LANG with no locale data to generate (unset, empty, `C`, `POSIX` or `C.UTF-8`) gets no
-entries that use `{lang}` or `{locale}`. A host LANG that is set but is not a UTF-8 locale name
-gets the same, and the realm uses C.UTF-8. The SRS has no rule that refuses such a LANG (FR-013),
-so nothing is raised; `IntegrationSet.fallback_reason` says why. Nothing here runs a command.
-Callers hand `argv()` to a subprocess as a list (NFR-SEC-005).
+entries that use `{lang}` or `{locale}`. A host LANG that is set but is not a UTF-8 locale name with
+a language and a territory (en_US.UTF-8, not en.UTF-8) gets the same, and the realm uses C.UTF-8.
+The SRS has no rule that refuses such a LANG (FR-013), so nothing is raised; `IntegrationSet.
+fallback_reason` says why. Nothing here runs a command. Callers hand `argv()` to a subprocess as a
+list (NFR-SEC-005).
+
+`stale_metadata` matches the package manager's output when the local metadata no longer matches the
+mirror (ADR-011). The ops layer maps a match to the remedy.
 
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
-distribution name raises GINN-E-OPTION-INVALID.
+distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
 """
 
+import os
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -48,12 +62,12 @@ from ginn.errors import GinnError, make
 SCHEMA: Final = 1
 DATA_PACKAGE: Final = "ginn.distros"
 DATA_DIR: Final = "data"
-TEST_DISTRO: Final = "_test"
+TEST_SWITCH_ENV: Final = "GINN_TEST_DISTROS"
 PACKAGES_ELEMENT: Final = "{packages}"
 C_UTF8: Final = "C.UTF-8"
 
 _ID_RE: Final = re.compile(r"_?[a-z][a-z0-9-]{0,31}")
-_LOCALE_RE: Final = re.compile(r"(?P<lang>[a-z]{2,3})(?:_(?P<territory>[A-Z]{2}))?\.(?i:utf-?8)")
+_LOCALE_RE: Final = re.compile(r"(?P<lang>[a-z]{2,3})_(?P<territory>[A-Z]{2})\.(?i:utf-?8)")
 _C_LOCALE_RE: Final = re.compile(r"C|POSIX|C\.(?i:utf-?8)")
 _SAMPLE: Final[dict[str, str]] = {"lang": "xx", "locale": "xx_XX"}
 _TOP_KEYS: Final = frozenset(
@@ -64,6 +78,8 @@ _TOP_KEYS: Final = frozenset(
         "shell",
         "package_name_regex",
         "signature_error_regex",
+        "stale_metadata_regex",
+        "refresh_before",
         "integration",
         "verbs",
     }
@@ -122,9 +138,10 @@ class DistroDef:
     """One validated distribution definition.
 
     `trust_key` names a table in the Trust Manifest. Only its non-emptiness is checked here (T2.14
-    checks it against the manifest). `verbs` maps each Verb to its argv template.
-    `name_pattern` is matched with fullmatch. `signature_error` is matched with search against the
-    package manager's output (FR-012).
+    checks it against the manifest). `verbs` maps each Verb to its argv template. `name_pattern` is
+    matched with fullmatch, by argv() and by the Integration Package Set. `signature_error` and
+    `stale_metadata` are matched with search against the package manager's output (FR-012,
+    ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before (ADR-011).
     """
 
     id: str
@@ -133,6 +150,8 @@ class DistroDef:
     shell: str
     name_pattern: re.Pattern[str]
     signature_error: re.Pattern[str]
+    stale_metadata: re.Pattern[str]
+    refresh_before: frozenset[Verb]
     integration: Integration
     verbs: Mapping[Verb, tuple[str, ...]]
 
@@ -140,9 +159,10 @@ class DistroDef:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
 
         Raises GINN-E-USAGE when the verb takes packages and none are given, and when packages are
-        given to a verb that takes none. Raises GINN-E-PKG-NAME-INVALID for an empty name or one
-        with a NUL byte. Package names are not checked against DR-003 here; callers pass validated
-        names (domain.packages).
+        given to a verb that takes none. Every package name must fullmatch `name_pattern` (DR-003),
+        or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
+        a leading `-`, so a name that passes can never be read as an option. domain.packages checks
+        AS-027 first; this check is the second line of defence.
         """
         if isinstance(packages, str):
             raise TypeError("packages must be a sequence of names, not one str")
@@ -155,7 +175,7 @@ class DistroDef:
         out: list[str] = []
         for element in template:
             if element == PACKAGES_ELEMENT:
-                out.extend(_name(raw) for raw in packages)
+                out.extend(self._checked(raw) for raw in packages)
             else:
                 out.append(_render(element, {}))
         return out
@@ -188,6 +208,32 @@ class DistroDef:
         lang = lang_env if lang_env and fallback_reason is None else C_UTF8
         return IntegrationSet(tuple(packages), tuple(steps), lang, fallback_reason)
 
+    def _checked(self, raw: object) -> str:
+        """Return `raw` when it is a str that fullmatches `name_pattern`, else raise (DR-003)."""
+        if not isinstance(raw, str):
+            raise TypeError(f"package names must be str, not {type(raw).__name__}")
+        if self.name_pattern.fullmatch(raw) is None:
+            err = make("GINN-E-PKG-NAME-INVALID", name=raw)
+            err.details["rule"] = f"must match {self.name_pattern.pattern} for {self.id} (DR-003)"
+            raise err
+        return raw
+
+
+_CACHE: dict[tuple[str, str], DistroDef] = {}
+
+
+def distro_fixtures_enabled() -> bool:
+    """True when the test switch is on: GINN_TEST_DISTROS is exactly "1" (NFR-060).
+
+    Only tests/conftest.py sets it. Without it, a fixture name is not a distribution.
+    """
+    return os.environ.get(TEST_SWITCH_ENV) == "1"
+
+
+def clear_cache() -> None:
+    """Forget every loaded definition. Tests that change the data directory call this."""
+    _CACHE.clear()
+
 
 def host_locale(lang_env: str | None) -> tuple[HostLocale | None, str | None]:
     """Reduce a host LANG value for the templates. Return (locale, fallback_reason).
@@ -195,48 +241,65 @@ def host_locale(lang_env: str | None) -> tuple[HostLocale | None, str | None]:
     `locale` is None when no locale data is generated: LANG is unset or empty, or it is C, POSIX or
     C.UTF-8. Accepted UTF-8 values give their language and territory, for example en_US.UTF-8 gives
     en_US and de_DE.utf8 gives de_DE. `fallback_reason` is set only when LANG is set and is not a
-    UTF-8 locale name. It names the value and says that the realm uses C.UTF-8.
+    UTF-8 locale name with a language and a territory. It names the value and says that the realm
+    uses C.UTF-8. A language alone (en.UTF-8) is not accepted: localedef needs a territory.
     """
     if not lang_env or _C_LOCALE_RE.fullmatch(lang_env):
         return None, None
     match = _LOCALE_RE.fullmatch(lang_env)
     if match is None:
         return None, (
-            f"host LANG {lang_env!r} is not a UTF-8 locale name such as en_US.UTF-8; "
-            "the realm uses C.UTF-8 and gets no locale data"
+            f"host LANG {lang_env!r} is not a UTF-8 locale name with a language and territory, "
+            "such as en_US.UTF-8; the realm uses C.UTF-8 and gets no locale data"
         )
     lang = match["lang"]
     territory = match["territory"]
-    return HostLocale(lang, f"{lang}_{territory}" if territory else lang), None
+    return HostLocale(lang, f"{lang}_{territory}"), None
 
 
 def available(*, include_test: bool = False) -> tuple[str, ...]:
-    """Return the sorted distribution IDs with a data file. `_test` only when `include_test`."""
+    """Return the sorted distribution IDs with a data file.
+
+    A fixture name (starts with `_`) is listed only when `include_test` is true and the test switch
+    is on. The default never lists one.
+    """
+    fixtures_ok = include_test and distro_fixtures_enabled()
     names = sorted(
         entry.name.removesuffix(".toml")
         for entry in _data_dir().iterdir()
         if entry.name.endswith(".toml")
     )
     return tuple(
-        name for name in names if _ID_RE.fullmatch(name) and (include_test or name != TEST_DISTRO)
+        name
+        for name in names
+        if _ID_RE.fullmatch(name) and (fixtures_ok or not name.startswith("_"))
     )
 
 
 def load(name: str) -> DistroDef:
-    """Load the shipped definition for `name` (a distribution ID, or `_test`).
+    """Load the shipped definition for `name` (a distribution ID, or a fixture with the switch on).
 
-    Raises GINN-E-OPTION-INVALID for a name with no data file, and GINN-E-DISTRO-DATA when the file
-    fails validation or its `id` differs from its file name.
+    Raises GINN-E-USAGE for a name with no data file, and for a fixture name while the switch is
+    off. Raises GINN-E-DISTRO-DATA when the file fails validation or its `id` differs from its file
+    name. A successful load is cached per data directory until `clear_cache()`.
     """
     if not isinstance(name, str) or _ID_RE.fullmatch(name) is None:
         raise _unknown(name)
-    entry = _data_dir() / f"{name}.toml"
+    if name.startswith("_") and not distro_fixtures_enabled():
+        raise _unknown(name)
+    data_dir = _data_dir()
+    key = (str(data_dir), name)
+    cached = _CACHE.get(key)
+    if cached is not None:
+        return cached
+    entry = data_dir / f"{name}.toml"
     if not entry.is_file():
         raise _unknown(name)
     source = f"{DATA_PACKAGE}/{DATA_DIR}/{name}.toml"
     definition = parse_text(entry.read_text(encoding="utf-8"), source)
     if definition.id != name:
         raise _data_error(source, "id", f"{definition.id!r} must equal the file name {name!r}")
+    _CACHE[key] = definition
     return definition
 
 
@@ -272,6 +335,8 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         raise reader.fail("shell", "must be an absolute path with no whitespace")
     name_pattern = reader.regex(raw["package_name_regex"], "package_name_regex")
     signature_error = reader.regex(raw["signature_error_regex"], "signature_error_regex")
+    stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
+    refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs = _verbs(reader, raw["verbs"])
     return DistroDef(
@@ -281,9 +346,24 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         shell=shell,
         name_pattern=name_pattern,
         signature_error=signature_error,
+        stale_metadata=stale_metadata,
+        refresh_before=refresh_before,
         integration=integration,
         verbs=MappingProxyType(verbs),
     )
+
+
+def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:
+    names = reader.strings(value, "refresh_before")
+    known = {verb.value for verb in Verb}
+    for name in names:
+        if name not in known:
+            raise reader.fail("refresh_before", f"unknown verb {name!r}")
+        if name == Verb.REFRESH.value:
+            raise reader.fail("refresh_before", "must not list refresh; it is the metadata load")
+    if len(set(names)) != len(names):
+        raise reader.fail("refresh_before", "must not repeat a verb")
+    return frozenset(Verb(name) for name in names)
 
 
 def _integration(reader: "_Reader", value: object, name_pattern: re.Pattern[str]) -> Integration:
@@ -410,20 +490,16 @@ def _render(template: str, values: Mapping[str, str]) -> str:
     return "".join(out)
 
 
-def _name(raw: object) -> str:
-    if not isinstance(raw, str):
-        raise TypeError(f"package names must be str, not {type(raw).__name__}")
-    if raw == "" or "\0" in raw:
-        raise make("GINN-E-PKG-NAME-INVALID", name=raw)
-    return raw
-
-
 def _data_dir() -> Traversable:
     return files(DATA_PACKAGE).joinpath(DATA_DIR)
 
 
 def _unknown(name: object) -> GinnError:
-    return make("GINN-E-OPTION-INVALID", option=f"--distro={name}", distro="any")
+    """Return GINN-E-USAGE for a name with no definition. The list never names a fixture."""
+    return make(
+        "GINN-E-USAGE",
+        detail=f"unknown distribution {name!r}; available: {', '.join(available())}",
+    )
 
 
 def _data_error(source: str, field: str, rule: str) -> GinnError:
@@ -437,13 +513,15 @@ __all__ = [
     "DATA_PACKAGE",
     "PACKAGES_ELEMENT",
     "SCHEMA",
-    "TEST_DISTRO",
+    "TEST_SWITCH_ENV",
     "DistroDef",
     "HostLocale",
     "Integration",
     "IntegrationSet",
     "Verb",
     "available",
+    "clear_cache",
+    "distro_fixtures_enabled",
     "from_mapping",
     "host_locale",
     "load",

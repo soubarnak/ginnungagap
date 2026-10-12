@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Distribution data and loader: NFR-060 (data only), DR-003, DR-005, FR-012, FR-013, FR-040,
-FR-041, NFR-SEC-005.
+"""Distribution data and loader: NFR-060 (data only), DR-003, DR-005, FR-012, FR-013, FR-024,
+FR-040, FR-041, NFR-SEC-005.
 
 The shipped files are checked as data: their Integration Package Set against S-10 (the distro TOML
-is the single source for it; the Trust Manifest holds no copy since R9), their verbs for
-non-interactive and signature-preserving flags, their `refresh` verb, and their name patterns
-against the DR-003 table in this file. The `_test` fixture and renamed copies prove that a new
-distribution needs no code change, both in the loader and through domain validation. Every
+is the single source for it), their verbs for non-interactive and signature-preserving flags, their
+metadata refresh rules (ADR-011, which carries FR-023's "never updated automatically" into the verb
+data), and their name patterns against the DR-003 table in this file. The `_test` fixture and
+renamed copies prove that a new distribution needs no code change, both in the loader and through
+domain validation. The fixture switch and the definition cache are tested here too. Every
 validation rule in loader.py has a test that breaks it.
 """
 
 import copy
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,10 +21,13 @@ import pytest
 
 from ginn.distros import loader
 from ginn.distros.loader import (
+    TEST_SWITCH_ENV,
     DistroDef,
     HostLocale,
     Verb,
     available,
+    clear_cache,
+    distro_fixtures_enabled,
     from_mapping,
     host_locale,
     load,
@@ -36,6 +40,7 @@ from ginn.errors import GinnError
 REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "src" / "ginn" / "distros" / "data"
 SHIPPED = ("arch", "debian", "fedora", "kali")
+SHIPPED_LIST = ", ".join(SHIPPED)
 # DR-003 name patterns, copied from the SRS. The shipped TOML files must carry these.
 DR003_PATTERNS = {
     "arch": r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
@@ -44,7 +49,9 @@ DR003_PATTERNS = {
     "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
 }
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
-PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
+PKG_MANAGERS = frozenset(
+    {"pacman", "checkupdates", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"}
+)
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
 # Tokens that turn off a native signature check (FR-012). None is needed for any verb.
 SIGNATURE_BYPASS = (
@@ -60,6 +67,28 @@ SIGNATURE_BYPASS = (
     "--nosig",
 )
 YES_FLAGS = frozenset({"--noconfirm", "--yes", "--assumeyes", "-y"})
+# Tokens that upgrade installed packages. Install, resolve and estimate argv need none (FR-040).
+UPGRADE_TOKENS = frozenset({"--sysupgrade", "--refresh", "upgrade", "dist-upgrade", "full-upgrade"})
+# Tokens that widen a removal beyond the named package (FR-041). `--no-remove` is here too: apt-get
+# aborts on any removal with it, the named one included (apt-get(8)), so it cannot express the rule.
+REMOVE_WIDENERS = frozenset(
+    {
+        "-s",
+        "-c",
+        "-d",
+        "--recursive",
+        "--cascade",
+        "--nodeps",
+        "--auto-remove",
+        "--autoremove",
+        "--purge",
+        "--force-depends",
+        "--no-remove",
+    }
+)
+DEBIAN_REFRESHED = frozenset(
+    {Verb.INSTALL, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.RESOLVE, Verb.ESTIMATE}
+)
 NAMES = ["a;b", "$(id)", "x y", "pkg{lang}", "`id`", "a&&b", "*", "gimp|cat"]
 
 
@@ -81,24 +110,40 @@ def _expect(code: str, exit_code: int) -> Callable[[GinnError], None]:
     return check
 
 
-# ---- shipped data: NFR-060, DR-005 -----------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _fresh_cache() -> Iterator[None]:
+    """Start and end each test with an empty definition cache, so monkeypatched dirs are read."""
+    clear_cache()
+    yield
+    clear_cache()
 
 
-@pytest.mark.fr("NFR-060")
+# ---- shipped data: DR-005, NFR-060 -----------------------------------------------------------
+
+
 @pytest.mark.fr("DR-005")
-def test_available_lists_the_shipped_distributions_and_leaves_out_the_fixture() -> None:
+def test_available_lists_the_four_distributions_dr005_enumerates() -> None:
     assert available() == SHIPPED
-    assert available(include_test=True) == ("_test", *SHIPPED)
 
 
 @pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_each_shipped_distribution_loads_with_every_verb(name: str) -> None:
-    definition = load(name)
-    assert definition.id == name
-    assert definition.trust_key == name
-    assert definition.shell == "/bin/bash"
-    assert set(definition.verbs) == set(Verb)
+def test_the_fixture_is_listed_only_with_include_test_and_the_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert "_test" not in available()
+    assert "_test" in available(include_test=True)  # the switch is on under tests/conftest.py
+    monkeypatch.delenv(TEST_SWITCH_ENV)
+    assert "_test" not in available(include_test=True)
+
+
+@pytest.mark.fr("NFR-060")
+def test_each_shipped_distribution_loads_with_every_verb() -> None:
+    for name in SHIPPED:
+        definition = load(name)
+        assert definition.id == name
+        assert definition.trust_key == name
+        assert definition.shell == "/bin/bash"
+        assert set(definition.verbs) == set(Verb)
 
 
 @pytest.mark.fr("NFR-060")
@@ -106,6 +151,27 @@ def test_test_fixture_loads_by_name() -> None:
     fixture = load("_test")
     assert fixture.id == "_test"
     assert fixture.argv(Verb.INSTALL, ["gimp"]) == ["fake-pm", "install", "gimp"]
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("value", [None, "", "0", "yes", "true"])
+def test_the_fixture_is_refused_unless_the_switch_is_exactly_one(
+    monkeypatch: pytest.MonkeyPatch, value: str | None
+) -> None:
+    if value is None:
+        monkeypatch.delenv(TEST_SWITCH_ENV)
+    else:
+        monkeypatch.setenv(TEST_SWITCH_ENV, value)
+    assert distro_fixtures_enabled() is False
+    with pytest.raises(GinnError) as info:
+        load("_test")
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == f"unknown distribution '_test'; available: {SHIPPED_LIST}"
+
+
+@pytest.mark.fr("NFR-060")
+def test_the_test_session_has_the_switch_on() -> None:
+    assert distro_fixtures_enabled() is True
 
 
 @pytest.mark.fr("NFR-060")
@@ -180,7 +246,8 @@ def test_a_file_whose_id_differs_from_its_name_is_refused(
 def test_unknown_or_unsafe_distribution_names_are_refused(name: str) -> None:
     with pytest.raises(GinnError) as info:
         load(name)
-    _expect("GINN-E-OPTION-INVALID", 2)(info.value)
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == f"unknown distribution {name!r}; available: {SHIPPED_LIST}"
 
 
 @pytest.mark.fr("NFR-060")
@@ -230,7 +297,8 @@ S10_STEPS = (("localedef", "-i", "en_US", "-f", "UTF-8", "en_US.UTF-8"),)
 @pytest.mark.parametrize(
     ("name", "packages", "steps"),
     [
-        ("arch", (), S10_STEPS),
+        # pacman-contrib is a recorded deviation from FR-013's set (ADR-011): checkupdates needs it.
+        ("arch", ("pacman-contrib",), S10_STEPS),
         ("debian", ("ca-certificates", "locales"), S10_STEPS),
         ("kali", ("ca-certificates", "locales"), S10_STEPS),
         ("fedora", ("glibc-langpack-en",), ()),
@@ -274,6 +342,8 @@ def test_other_locales_substitute_the_language_and_the_locale_name() -> None:
         "en_US.UTF-8@euro",
         "en_US.UTF-8\n",
         "C.ISO-8859-1",
+        "en.UTF-8",
+        "de.utf8",
     ],
 )
 def test_host_locales_that_cannot_be_used_fall_back_to_c_utf8_with_a_reason(lang: str) -> None:
@@ -300,12 +370,13 @@ def test_a_usable_host_lang_is_the_realm_lang_with_no_fallback() -> None:
 @pytest.mark.fr("FR-013")
 def test_host_locale_reduces_lang_to_language_and_territory() -> None:
     assert host_locale("en_US.UTF-8") == (HostLocale("en", "en_US"), None)
-    assert host_locale("de.UTF-8") == (HostLocale("de", "de"), None)
+    assert host_locale("de_DE.utf8") == (HostLocale("de", "de_DE"), None)
     assert host_locale("C.UTF-8") == (None, None)
     assert host_locale(None) == (None, None)
-    locale, reason = host_locale("en_US")
-    assert locale is None
-    assert reason is not None and "en_US" in reason
+    for lang in ("en_US", "en.UTF-8"):
+        locale, reason = host_locale(lang)
+        assert locale is None, lang
+        assert reason is not None and repr(lang) in reason and "territory" in reason
 
 
 # ---- shipped data: FR-040, FR-041, FR-012 verbs ----------------------------------------------
@@ -367,23 +438,164 @@ def test_apt_and_dnf_install_only_declared_dependencies(name: str, flag: str) ->
     assert flag in load(name).argv(Verb.INSTALL, ["gimp"])
 
 
-# ---- placeholder expansion: NFR-SEC-005 ------------------------------------------------------
+# ---- refresh, upgrade and removal: ADR-011 (FR-023, FR-024, FR-040, FR-041) ------------------
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_refresh_is_a_package_manager_command(name: str) -> None:
+    argv = load(name).argv(Verb.REFRESH)
+    assert argv and argv[0] in PKG_MANAGERS, (name, argv)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("debian", ["apt-get", "update"]),
+        ("kali", ["apt-get", "update"]),
+        ("fedora", ["dnf", "--refresh", "makecache"]),
+    ],
+)
+def test_refresh_fetches_the_metadata_each_manager_needs(name: str, expected: list[str]) -> None:
+    assert load(name).argv(Verb.REFRESH) == expected
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("arch", frozenset()),
+        ("fedora", frozenset()),
+        ("debian", DEBIAN_REFRESHED),
+        ("kali", DEBIAN_REFRESHED),
+        ("_test", frozenset({Verb.INSTALL})),
+    ],
+)
+def test_refresh_before_lists_only_the_verbs_a_metadata_refresh_makes_safe(
+    name: str, expected: frozenset[Verb]
+) -> None:
+    assert load(name).refresh_before == expected
+
+
+@pytest.mark.fr("FR-040")
+def test_arch_never_refreshes_the_sync_database_outside_a_full_upgrade() -> None:
+    # Arch does not support partial upgrades, so -Sy alone is never a refresh (Arch Wiki).
+    arch = load("arch")
+    full = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+    assert arch.argv(Verb.REFRESH) == full
+    assert arch.argv(Verb.UPGRADE) == full
+    assert arch.refresh_before == frozenset()
+    for verb in Verb:
+        argv = arch.argv(verb, ["gimp"] if verb in PACKAGE_VERBS else [])
+        if "--refresh" in argv:
+            assert "--sysupgrade" in argv, (verb, argv)
+
+
+@pytest.mark.fr("FR-040")
+def test_arch_install_uses_the_sync_database_as_the_last_full_upgrade_left_it() -> None:
+    assert load("arch").argv(Verb.INSTALL, ["gimp"]) == [
+        "pacman",
+        "--sync",
+        "--needed",
+        "--noconfirm",
+        "gimp",
+    ]
+
+
+@pytest.mark.fr("FR-024")
+def test_arch_check_updates_passes_no_sync_or_upgrade_flag() -> None:
+    assert load("arch").argv(Verb.CHECK_UPDATES) == ["checkupdates"]
+
+
+@pytest.mark.fr("FR-024")
+def test_fedora_check_updates_forces_fresh_metadata_and_never_upgrades() -> None:
+    argv = load("fedora").argv(Verb.CHECK_UPDATES)
+    assert argv == ["dnf", "--refresh", "check-upgrade"]
+    assert not YES_FLAGS & set(argv)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", SHIPPED)
+@pytest.mark.parametrize("verb", [Verb.INSTALL, Verb.RESOLVE, Verb.ESTIMATE])
+def test_install_resolve_and_estimate_never_upgrade_the_realm(name: str, verb: Verb) -> None:
+    argv = load(name).argv(verb, ["gimp"])
+    assert not UPGRADE_TOKENS & set(argv), (name, verb, argv)
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("arch", ["pacman", "--remove", "--noconfirm", "gimp"]),
+        ("debian", ["apt-get", "--yes", "remove", "gimp"]),
+        ("kali", ["apt-get", "--yes", "remove", "gimp"]),
+        ("fedora", ["dnf", "--assumeyes", "remove", "gimp"]),
+    ],
+)
+def test_remove_names_only_the_requested_package(name: str, expected: list[str]) -> None:
+    assert load(name).argv(Verb.REMOVE, ["gimp"]) == expected
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_remove_never_widens_the_removal_with_autoremove_or_cascade(name: str) -> None:
+    assert not REMOVE_WIDENERS & set(load(name).argv(Verb.REMOVE, ["gimp"]))
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
+@pytest.mark.parametrize(
+    "verb", [Verb.REFRESH, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.LIST_EXPLICIT]
+)
+def test_packages_given_to_a_verb_that_takes_none_are_refused(name: str, verb: Verb) -> None:
+    with pytest.raises(GinnError) as info:
+        load(name).argv(verb, ["gimp"])
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == f"verb {verb.value} takes no packages"
+
+
+# ---- placeholder expansion and package names: NFR-SEC-005, DR-003 ----------------------------
 
 
 @pytest.mark.fr("NFR-SEC-005")
 @pytest.mark.fr("FR-040")
 @pytest.mark.parametrize("name", [*SHIPPED, "_test"])
 @pytest.mark.parametrize("verb", PACKAGE_VERBS)
-def test_hostile_package_names_stay_one_argv_element_each(name: str, verb: Verb) -> None:
-    out = load(name).argv(verb, NAMES)
-    assert [element for element in out if element in NAMES] == NAMES
-    assert all(isinstance(element, str) for element in out)
+def test_hostile_and_flag_like_names_are_refused_before_any_element_is_built(
+    name: str, verb: Verb
+) -> None:
+    for raw in [*NAMES, "-x", "--foo"]:
+        with pytest.raises(GinnError) as info:
+            load(name).argv(verb, ["gimp", raw])
+        _expect("GINN-E-PKG-NAME-INVALID", 2)(info.value)
+        assert info.value.details["name"] == raw
+
+
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
+@pytest.mark.parametrize("verb", PACKAGE_VERBS)
+def test_valid_names_stay_one_argv_element_each(name: str, verb: Verb) -> None:
+    out = load(name).argv(verb, ["gimp", "lib-x.2"])
+    assert out[-2:] == ["gimp", "lib-x.2"]
 
 
 @pytest.mark.fr("NFR-SEC-005")
 def test_package_names_are_not_reparsed_as_templates() -> None:
-    out = from_mapping(_base()).argv(Verb.INSTALL, ["{lang}", "{packages}"])
+    # A name that looks like a placeholder is only a name. The permissive pattern accepts it, and
+    # argv() splices it as one element without expanding it (loader.py docstring).
+    raw = _base()
+    raw["package_name_regex"] = "[^\\x00]+"
+    out = from_mapping(raw).argv(Verb.INSTALL, ["{lang}", "{packages}"])
     assert out == ["fake-pm", "install", "{lang}", "{packages}"]
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_a_placeholder_name_is_refused_by_the_shipped_pattern() -> None:
+    with pytest.raises(GinnError) as info:
+        load("arch").argv(Verb.INSTALL, ["{packages}"])
+    _expect("GINN-E-PKG-NAME-INVALID", 2)(info.value)
 
 
 @pytest.mark.fr("NFR-060")
@@ -410,51 +622,6 @@ def test_a_verb_without_packages_needs_none() -> None:
     ]
 
 
-@pytest.mark.fr("FR-040")
-@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
-@pytest.mark.parametrize(
-    "verb", [Verb.REFRESH, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.LIST_EXPLICIT]
-)
-def test_packages_given_to_a_verb_that_takes_none_are_refused(name: str, verb: Verb) -> None:
-    with pytest.raises(GinnError) as info:
-        load(name).argv(verb, ["gimp"])
-    _expect("GINN-E-USAGE", 2)(info.value)
-    assert info.value.message == f"verb {verb.value} takes no packages"
-
-
-@pytest.mark.fr("FR-040")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_refresh_is_a_package_manager_command(name: str) -> None:
-    argv = load(name).argv(Verb.REFRESH)
-    assert argv and argv[0] in PKG_MANAGERS, (name, argv)
-
-
-@pytest.mark.fr("FR-040")
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("debian", ["apt-get", "update"]),
-        ("kali", ["apt-get", "update"]),
-        ("fedora", ["dnf", "makecache"]),
-    ],
-)
-def test_refresh_fetches_the_metadata_each_manager_needs(name: str, expected: list[str]) -> None:
-    assert load(name).argv(Verb.REFRESH) == expected
-
-
-@pytest.mark.fr("FR-040")
-def test_arch_refresh_is_a_full_upgrade_and_install_never_refreshes() -> None:
-    # Arch does not support partial upgrades, so -Sy alone is never the refresh (Arch Wiki).
-    arch = load("arch")
-    refresh = arch.argv(Verb.REFRESH)
-    assert refresh == ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
-    assert refresh == arch.argv(Verb.UPGRADE)
-    install = arch.argv(Verb.INSTALL, ["gimp"])
-    assert "--refresh" not in install
-    assert "--sysupgrade" not in install
-    assert [e for e in install if e.startswith("-") and not e.startswith("--")] == []
-
-
 @pytest.mark.fr("DR-003")
 @pytest.mark.fr("NFR-SEC-005")
 @pytest.mark.parametrize("bad", ["", "a\0b"])
@@ -470,7 +637,7 @@ def test_a_bare_string_is_not_accepted_as_a_package_list() -> None:
         load("arch").argv(Verb.INSTALL, "gimp")  # type: ignore[arg-type]
 
 
-# ---- signature errors: FR-012 ----------------------------------------------------------------
+# ---- signature and stale-metadata errors: FR-012, ADR-011 ------------------------------------
 
 SIGNATURE_SAMPLES: list[tuple[str, str]] = [
     ("arch", 'error: gimp: signature from "Packager <p@example.org>" is unknown trust'),
@@ -481,6 +648,31 @@ SIGNATURE_SAMPLES: list[tuple[str, str]] = [
     ("kali", "The following signatures were invalid: BADSIG 0123456789ABCDEF"),
     ("fedora", "GPG check FAILED"),
     ("fedora", "Public key for gimp-2.10-1.fc44.x86_64.rpm is not installed"),
+]
+# Representative runtime text, not verified until M4 (ADR-011), like the signature samples above.
+STALE_SAMPLES: list[tuple[str, str]] = [
+    (
+        "arch",
+        "error: failed retrieving file 'gimp-2.10-1-x86_64.pkg.tar.zst' from "
+        "geo.mirror.example : The requested URL returned error: 404",
+    ),
+    (
+        "debian",
+        "E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?",
+    ),
+    (
+        "debian",
+        "E: Failed to fetch http://deb.example.org/debian/pool/main/g/gimp/gimp_2.10.deb"
+        "  404  Not Found [IP: 192.0.2.1 80]",
+    ),
+    (
+        "kali",
+        "E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?",
+    ),
+    (
+        "fedora",
+        "Status code: 404 for https://mirror.example.org/fedora/gimp-2.10-1.fc44.x86_64.rpm",
+    ),
 ]
 BENIGN = ["Reading package lists... Done", "Installing gimp (2.10-1)", "Nothing to do."]
 
@@ -496,6 +688,21 @@ def test_signature_error_regex_recognises_representative_failures(name: str, lin
 @pytest.mark.parametrize("line", BENIGN)
 def test_signature_error_regex_ignores_ordinary_output(name: str, line: str) -> None:
     assert load(name).signature_error.search(line) is None
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize(("name", "line"), STALE_SAMPLES)
+def test_stale_metadata_regex_recognises_representative_mirror_failures(
+    name: str, line: str
+) -> None:
+    assert load(name).stale_metadata.search(line) is not None
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", SHIPPED)
+@pytest.mark.parametrize("line", BENIGN)
+def test_stale_metadata_regex_ignores_ordinary_output(name: str, line: str) -> None:
+    assert load(name).stale_metadata.search(line) is None
 
 
 # ---- validation: every rule in loader.py breaks on purpose -----------------------------------
@@ -533,6 +740,13 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("shell has an argument", _set("shell", value="/bin/sh -c")),
     ("name regex does not compile", _set("package_name_regex", value="[a-z")),
     ("signature regex does not compile", _set("signature_error_regex", value="(")),
+    ("stale metadata regex missing", _del("stale_metadata_regex")),
+    ("stale metadata regex does not compile", _set("stale_metadata_regex", value="(")),
+    ("refresh_before missing", _del("refresh_before")),
+    ("refresh_before is not a list", _set("refresh_before", value="install")),
+    ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),
+    ("refresh_before lists refresh", _set("refresh_before", value=["refresh"])),
+    ("refresh_before repeats a verb", _set("refresh_before", value=["install", "install"])),
     ("integration is not a table", _set("integration", value=["x"])),
     ("integration.steps missing", _del("integration", "steps")),
     ("integration has an unknown key", _set("integration", "image", value="x")),
@@ -613,6 +827,57 @@ def test_a_definition_is_a_frozen_value() -> None:
     assert isinstance(definition, DistroDef)
     with pytest.raises(AttributeError):
         definition.shell = "/bin/sh"  # type: ignore[misc]
+
+
+# ---- the definition cache: NFR-060 -----------------------------------------------------------
+
+
+@pytest.mark.fr("NFR-060")
+def test_a_loaded_definition_is_served_from_the_cache_until_clear_cache() -> None:
+    first = load("arch")
+    assert load("arch") is first
+    clear_cache()
+    assert load("arch") is not first
+
+
+@pytest.mark.fr("NFR-060")
+def test_a_cached_definition_is_served_even_when_its_file_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = _shipped_text("_test").replace('id = "_test"', 'id = "fixture"')
+    path = tmp_path / "fixture.toml"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
+    first = load("fixture")
+    path.write_text(text.replace('shell = "/bin/sh"', 'shell = "/bin/dash"'), encoding="utf-8")
+    assert load("fixture") is first
+    clear_cache()
+    assert load("fixture").shell == "/bin/dash"
+
+
+@pytest.mark.fr("NFR-060")
+def test_a_failed_load_is_not_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "fixture.toml"
+    path.write_text("schema = 1\n", encoding="utf-8")  # missing keys: refused
+    monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
+    with pytest.raises(GinnError) as info:
+        load("fixture")
+    assert info.value.code == "GINN-E-DISTRO-DATA"
+    fixed = _shipped_text("_test").replace('id = "_test"', 'id = "fixture"')
+    path.write_text(fixed, encoding="utf-8")
+    assert load("fixture").id == "fixture"
+
+
+@pytest.mark.fr("NFR-060")
+def test_a_monkeypatched_data_directory_never_returns_the_shipped_definition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    text = _shipped_text("_test").replace('id = "_test"', 'id = "arch"')
+    (tmp_path / "arch.toml").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(loader, "_data_dir", lambda: tmp_path)
+    assert load("arch").shell == "/bin/sh"
+    monkeypatch.undo()
+    assert load("arch").shell == "/bin/bash"
 
 
 def _with_verb(key: str, template: list[str]) -> DistroDef:
