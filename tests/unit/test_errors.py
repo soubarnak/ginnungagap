@@ -61,6 +61,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-RECOVERY-PENDING": 4,
     "GINN-W-HOST-CHANGED": 0,
     "GINN-W-REPLAY-MISSING": 0,
+    "GINN-E-REALM-STATE": 4,
 }
 
 

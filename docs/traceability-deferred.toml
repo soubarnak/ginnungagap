@@ -63,7 +63,8 @@ reason = "unit tests (T4.4) create two realms of one distribution, with separate
 [[deferred]]
 id = "FR-016"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "unit tests on the fake podman cover start (the container starts, grants attach, the record reads running), the idempotent start and stop, the crash restart, a failed attach that stops the realm again and leaves it stopped, the refusal of an unknown realm and of a DR-020 state, the stop timeout of 30 s, the services-on and tier refusals, a failed podman start, a stop that fails with the realm failed, a crash between the started and attached steps, a podman error that is never read as stopped, and a stop that asks podman for a stopped record (T4.5, ops/lifecycle.py); the start-to-running time of NFR-005 and the real stop are proven on a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-017"
@@ -78,7 +79,8 @@ reason = "not covered yet; the roadmap assigns its test to M4"
 [[deferred]]
 id = "FR-020"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "unit tests on the fake podman cover status and list (T4.5, ops/lifecycle.py): the record state beside podman's container state with the mismatch flag, the shares skipped and the restart flag, the stable JSON keys, the name order, a corrupt record listed with its error, the Realm Home disk walk (links not followed, entry budget), and that both commands write no journal, audit or record entry; the container layer size is a gap: container_bytes is null because the CLI never asks podman for a size, and T8.2 (disk module) or a new named task must add it; the host run that shows real disk use is T4.9; the app count waits for export/ (M5)"
 
 [[deferred]]
 id = "FR-021"
@@ -100,7 +102,7 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 id = "FR-025"
 milestone = "M4"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
+reason = "a start, a stop or a status of an unknown realm is refused with GINN-E-NO-SUCH-REALM before any write (unit-tested in test_ops_lifecycle, T4.5, ops/lifecycle.py); the rest of the requirement, including bob's list and enter, needs the CLI and a second host user (M4 host run)"
 
 [[deferred]]
 id = "FR-026"
@@ -182,7 +184,7 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-064"
 milestone = "M6"
 partial = true
-reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), the skip at start, the retry at enter and the forced unmount of a vanished source are unit-tested on a fake helper (T4.10); a missing source keeps its realm path, and a refused grant is never retried; the RealmRecord.share_skipped field is written by T4.5, from attach.share_skipped; the host run that shows the skip in ginn status needs a Void host (T4.9)"
+reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), the skip at start, the retry at enter and the forced unmount of a vanished source are unit-tested on a fake helper (T4.10); a missing source keeps its realm path, and a refused grant is never retried; the RealmRecord.share_skipped field is written at each start by T4.5 (ops/lifecycle.py, from attach.share_skipped), and status shows it (unit-tested in test_ops_lifecycle on the fake); the host run that shows the skip in ginn status needs a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-065"
@@ -194,7 +196,7 @@ reason = "identical paths are unit-tested in the T4.2 create and attach plans; a
 id = "FR-066"
 milestone = "M6"
 partial = true
-reason = "the re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode is held until the host identity changes, a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach is T4.9; the RealmRecord field that holds the list is T4.5's; the change of the grant list at the next start is M6"
+reason = "the re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode is held until the host identity changes, a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach is T4.9; the list is recomputed and saved on the record at each start by T4.5 (ops/lifecycle.py, unit-tested), and status reports the restart_required flag, which only the M6 tier and permission change sets; the change of the grant list at the next start is M6"
 
 [[deferred]]
 id = "FR-067"
@@ -216,7 +218,7 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 id = "FR-081"
 milestone = "M7"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7; the T4.10 attach tests prove a failed lazy re-attach at enter or launch raises and never stops the realm (services-on stop stays with sv)"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7; the T4.10 attach tests prove a failed lazy re-attach at enter or launch raises and never stops the realm (services-on stop stays with sv); T4.5 refuses a services-on start and stop before any write, until M7 (test_ops_lifecycle)"
 
 [[deferred]]
 id = "FR-082"

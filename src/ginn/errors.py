@@ -8,7 +8,8 @@ GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), 
 (NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
 (FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009),
 GINN-E-SETUP-BUSY (FR-001), GINN-E-UNDO-CGROUP-BUSY, GINN-E-UNDO-SERVICE-RUNNING and
-GINN-E-UNDO-SUPERVISE-STATE (FR-003). `source` cites the requirement that defines the failure.
+GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020) and GINN-E-ATTACH-FAILED
+(ADR-008). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -369,6 +370,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "the detail",
         source="ADR-008 (T4.10 notes); FR-061, FR-066 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-E-REALM-STATE",
+        exit_code=4,
+        summary="realm '{realm}' is {state}; {action} needs it {allowed}",
+        remedy="run 'ginn status {realm}', then the command that state allows; a broken realm "
+        "is resumed with 'ginn create --resume {realm}' or removed with 'ginn delete {realm}'",
+        source="DR-020 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
@@ -381,7 +390,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (
         4,
         "conflict with existing state: name taken, undo refused, unacknowledged host change, "
-        "interrupted operation not yet recovered",
+        "interrupted operation not yet recovered, a realm in a state its verb does not allow "
+        "(GINN-E-REALM-STATE)",
     ),
     (65, "data error (EX_DATAERR): image or package signature not verified"),
     (69, "network failure"),

@@ -14,7 +14,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
-| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered |
+| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE) |
 | 65 | data error (EX_DATAERR): image or package signature not verified |
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
@@ -48,6 +48,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-PKG-NAME-INVALID` | 2 | package name '{name}' is not valid | use plain package names with no wildcards or shell characters | FR-040 AC-2 |
 | `GINN-E-PKG-SIGNATURE` | 65 | package signature check failed in realm '{realm}' | fix the repository keys; ginn never skips signature checks | FR-012 AC-1 |
 | `GINN-E-REALM-BUSY` | 75 | {op} in progress | wait for the running operation to finish, then retry | FR-123 AC-1 |
+| `GINN-E-REALM-STATE` | 4 | realm '{realm}' is {state}; {action} needs it {allowed} | run 'ginn status {realm}', then the command that state allows; a broken realm is resumed with 'ginn create --resume {realm}' or removed with 'ginn delete {realm}' | DR-020 (ginn-defined; not an SRS code) |
 | `GINN-E-RECOVERY-PENDING` | 4 | realm '{realm}' has an interrupted {op} that was never recovered | if the interrupted {op} was a create, run 'ginn create --resume {realm}' or 'ginn delete {realm}'; otherwise run 'ginn doctor' and retry the {op}, and do not delete the realm | FR-122, NFR-030 (ginn-defined wording; not an SRS code) |
 | `GINN-E-RUNTIME-DIR-UNSAFE` | 77 | runtime directory {path} must be a real directory owned by uid {uid} with mode 0700; found {found} | run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-SETUP-BUSY` | 75 | another Host Setup holds {lock}; gave up after {seconds} s | another 'ginn host-setup' (or its --undo) holds /run/lock/ginn-host-setup.lock; the kernel releases that flock when its holder exits, so no stale lock exists; wait for that run to finish, then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
