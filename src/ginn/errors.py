@@ -7,7 +7,8 @@ GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
 GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
 (NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
 (FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009),
-GINN-E-SETUP-BUSY (FR-001) and GINN-E-UNDO-SERVICE-RUNNING (FR-003). `source` cites the
+GINN-E-SETUP-BUSY (FR-001), GINN-E-UNDO-SERVICE-RUNNING and GINN-E-UNDO-SUPERVISE-STATE
+(FR-003). `source` cites the
 requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -176,8 +177,19 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=75,
         summary="service ginn-{user} is still running after {seconds} s; undo stopped before its "
         "cleanup",
-        remedy="run 'sudo sv down ginn-{user}', wait until it stops, then run 'sudo ginn "
-        "host-setup --undo --user {user}' again; the Host Setup Record is kept",
+        remedy="run 'sudo sv force-stop /etc/sv/ginn-{user}', then 'sudo sv exit "
+        "/etc/sv/ginn-{user}', then run 'sudo ginn host-setup --undo --user {user}' again; the "
+        "Host Setup Record is kept",
+        source="FR-003 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-UNDO-SUPERVISE-STATE",
+        exit_code=77,
+        summary="runsv state {path} is a {state}, but runit keeps a FIFO there; undo stopped "
+        "before its cleanup",
+        remedy="run 'sudo ls -l {path}' to see what it is; if no runsv runs for ginn-{user}, "
+        "remove that entry by hand, then run 'sudo ginn host-setup --undo --user {user}' again; "
+        "the Host Setup Record is kept",
         source="FR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

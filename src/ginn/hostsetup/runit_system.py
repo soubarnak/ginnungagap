@@ -208,6 +208,10 @@ set -eu
 PATH=/usr/bin:/bin
 export PATH
 
+# Directories that this script creates are 0755 whatever umask runit passed in, so the delegated
+# cgroup directory does not depend on the environment (ADR-013, Decision 27).
+umask 022
+
 UID_NUM=@UID_NUM@
 GID_NUM=@GID_NUM@
 HOME_DIR=@HOME_DIR@
@@ -298,6 +302,9 @@ set -eu
 
 PATH=/usr/bin:/bin
 export PATH
+
+# The log directory is 0755 whatever umask runit passed in (ADR-013, Decision 27).
+umask 022
 
 UID_NUM=@UID_NUM@
 GID_NUM=@GID_NUM@

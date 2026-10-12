@@ -6,6 +6,9 @@ set -eu
 PATH=/usr/bin:/bin
 export PATH
 
+# The log directory is 0755 whatever umask runit passed in (ADR-013, Decision 27).
+umask 022
+
 UID_NUM=1000
 GID_NUM=1000
 SV_DIR=/home/alice/.local/state/ginn/sv

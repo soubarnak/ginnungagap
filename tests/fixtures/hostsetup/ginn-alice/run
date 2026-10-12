@@ -8,6 +8,10 @@ set -eu
 PATH=/usr/bin:/bin
 export PATH
 
+# Directories that this script creates are 0755 whatever umask runit passed in, so the delegated
+# cgroup directory does not depend on the environment (ADR-013, Decision 27).
+umask 022
+
 UID_NUM=1000
 GID_NUM=1000
 HOME_DIR=/home/alice

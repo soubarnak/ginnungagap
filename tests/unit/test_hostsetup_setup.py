@@ -94,7 +94,9 @@ SECOND_STEPS = [
     "symlink",
     "complete",
 ]
-OLD_REASON = "written by a ginn build before F8a/F9a; remove it by hand after checking"
+OLD_REASON = (
+    "written by a ginn build before F11 (schema {schema}); remove it by hand after checking"
+)
 
 
 class _Crash(Exception):
@@ -396,13 +398,21 @@ def test_the_service_written_lists_split_into_the_shared_record_and_the_user_rec
     record = _record(root)
     assert [entry.path for entry in record.service_paths] == [
         "run/ginn/1000",
+        "run/runit/supervise.ginn-alice",
+        "run/runit/supervise.ginn-alice-log",
         "sys/fs/cgroup/ginn/1000",
         "sys/fs/cgroup/ginn/1000/supervisor",
     ]
     assert [entry.path for entry in _shared(root).service_paths] == sorted(SHARED_SERVICE)
     assert all(entry.post is None for entry in record.service_paths)
-    for path in ("run/ginn/1000", "sys/fs/cgroup/ginn/1000/supervisor"):
+    for path in (
+        "run/ginn/1000",
+        "run/runit/supervise.ginn-alice",
+        "run/runit/supervise.ginn-alice-log",
+        "sys/fs/cgroup/ginn/1000/supervisor",
+    ):
         assert _entry(record, path).pre == rec.Image("absent")
+        assert _entry(record, path).post is None
 
 
 @pytest.mark.fr("DR-009")
@@ -412,7 +422,15 @@ def test_the_shared_entries_are_marked_and_the_per_user_entries_are_not(tmp_path
     record = _record(root)
     shared = _shared(root)
     shared_paths = {entry.path for entry in (*shared.paths, *shared.service_paths)}
-    assert shared_paths == {"etc/ginn", SHARED, SUBTREE, "sys/fs/cgroup/ginn", "run/ginn"}
+    assert shared_paths == {
+        "etc/ginn",
+        SHARED,
+        SUBUID,
+        SUBGID,
+        SUBTREE,
+        "sys/fs/cgroup/ginn",
+        "run/ginn",
+    }
     assert all(entry.shared for entry in (*shared.paths, *shared.service_paths))
     per_user = (*record.paths, *record.service_paths)
     per_user_shared = {entry.path for entry in per_user if entry.shared}
@@ -682,7 +700,7 @@ def test_a_schema_2_record_is_refused_with_the_reason_that_names_the_pre_f8a_bui
         _setup(root, clock=NOW + 60)
     assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
     assert caught.value.exit_code == 77
-    assert OLD_REASON in caught.value.message
+    assert OLD_REASON.format(schema=2) in caught.value.message
     assert _snapshot(root) == before
 
 
@@ -938,7 +956,7 @@ def test_the_cli_configures_a_host_and_reports_the_record_as_json(
     assert body["status"] == "configured"
     assert body["user"] == "alice"
     assert body["record"] == str(root / RECORD)
-    assert body["paths"] == 9
+    assert body["paths"] == 11
 
 
 @pytest.mark.fr("FR-001")
@@ -1285,9 +1303,25 @@ CLASSIFIED: tuple[tuple[str, int, str, bool], ...] = (
     ("run", 1003, "run/ginn", True),
     ("run", 1003, "run/ginn/1003", False),
     ("run", 1003, "sys/fs/cgroup/ginn/1003", False),
+    ("alice", 1000, "run/runit/supervise.ginn-alice", False),
+    ("alice", 1000, "run/runit/supervise.ginn-alice-log", False),
+    ("alice", 1000, "etc/sv/ginn-alice/supervise", False),
+    ("alice", 1000, "etc/sv/ginn-alice/log/supervise", False),
+    ("alice", 1000, "run/runit/supervise.ginn-bob", True),
+    ("alice", 1000, "run/runit/supervise.ginn-alicex", True),
+    ("alice", 1000, "run/runit/supervise.ginn-alice-logx", True),
+    ("alice", 1000, "run/runit/supervise.alice", True),
+    ("alice", 1000, "run/runit/xginn-alice", True),
+    ("alice", 1000, "run/runit/supervise.foo.ginn-alice-log", False),
+    ("sv", 1002, "run/runit/supervise.ginn-sv", False),
+    ("sv", 1002, "run/runit/supervise.sv", True),
+    ("ginn", 1001, "run/runit/supervise.ginn-ginn", False),
+    ("ginn", 1001, "run/runit/supervise.ginn-ginn-log", False),
+    ("ginn", 1001, "run/runit/supervise.ginn", True),
 )
 """(user, uid, path, shared) rows for `_is_shared`. `etc/subuid` is shared by path, and its
-entries are kept per-user by kind (`_is_user_entry`)."""
+entries are kept per-user by kind (`_is_user_entry`). A component is per-user when it equals
+`ginn-<user>`, or ends with `.ginn-<user>` or `.ginn-<user>-log` (runit's supervise state)."""
 
 
 @pytest.mark.fr("DR-009")
@@ -1295,7 +1329,15 @@ entries are kept per-user by kind (`_is_user_entry`)."""
 def test_a_path_is_per_user_only_when_a_whole_component_is_the_uid_or_the_user_named_ones(
     user: str, uid: int, rel: str, shared: bool
 ) -> None:
-    target = setup_mod._Target(user=user, uid=uid, gid=uid, rendered={}, link_rel="")
+    target = setup_mod._Target(
+        user=user,
+        uid=uid,
+        gid=uid,
+        home=f"/home/{user}",
+        rendered={},
+        link_rel="",
+        supervise_links={},
+    )
     assert setup_mod._is_shared(rel, target) is shared
 
 
@@ -1311,7 +1353,7 @@ def test_a_user_named_like_a_shared_path_component_leaves_that_path_shared(
     uid = NAMED_USERS[name].uid
     record = _record(root, name)
     shared = _shared(root)
-    assert {entry.path for entry in shared.paths} == {"etc/ginn", "etc/sv", SHARED}
+    assert {entry.path for entry in shared.paths} == {"etc/ginn", "etc/sv", SHARED, SUBUID, SUBGID}
     assert _entry(shared, "etc/sv").pre == rec.Image("absent")
     assert {entry.path for entry in shared.service_paths} == set(SHARED_SERVICE)
     assert all(entry.shared for entry in (*shared.paths, *shared.service_paths))
@@ -1390,3 +1432,153 @@ def test_a_crash_after_run_lock_is_created_leaves_it_unrecorded(tmp_path: Path) 
     shared = _shared(root)
     assert {"run", "run/lock"}.isdisjoint({entry.path for entry in shared.paths})
     assert (root / "run/lock").is_dir()
+
+
+def _setup_as(root: Path, user: str, info: UserInfo) -> SetupResult:
+    """Set `user` up with the account `info`, whatever USERS says (a changed or recycled uid)."""
+    return run_setup(
+        user,
+        root_dir=root,
+        euid=0,
+        lookup_user=lambda _name: info,
+        clock=lambda: NOW,
+        owner_of=_root_owned,
+        lock_timeout=5.0,
+    )
+
+
+@pytest.mark.fr("FR-002")
+@pytest.mark.fr("DR-009")
+def test_a_later_users_setup_leaves_the_subordinate_id_originals_in_shared_json_identical(
+    tmp_path: Path,
+) -> None:
+    """The originals of /etc/subuid and /etc/subgid are taken once, by the first setup
+    (Decision 23).
+
+    A later setup changes neither their bytes nor their mode, even though the live files change.
+    """
+    root = _host(tmp_path)
+    (root / SUBUID).write_text("carol:200000:65536\n", encoding="utf-8")
+    (root / SUBGID).write_text("carol:200000:65536", encoding="utf-8")
+    _setup(root, "alice")
+    originals = {rel: _entry(_shared(root), rel) for rel in (SUBUID, SUBGID)}
+    shared_bytes = (root / SHARED).read_bytes()
+    _setup(root, "bob")
+    assert {rel: _entry(_shared(root), rel) for rel in (SUBUID, SUBGID)} == originals
+    assert _entry(_shared(root), SUBUID).pre.data == b"carol:200000:65536\n"
+    assert _entry(_shared(root), SUBGID).pre.data == b"carol:200000:65536"
+    assert (root / SHARED).read_bytes() == shared_bytes
+
+
+@pytest.mark.fr("FR-002")
+@pytest.mark.parametrize("stage", ["pending", "complete"])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        UserInfo(uid=1500, gid=1000, home="/home/alice"),
+        UserInfo(uid=1000, gid=1500, home="/home/alice"),
+        UserInfo(uid=1000, gid=1000, home="/home/alice2"),
+    ],
+    ids=["uid", "gid", "home"],
+)
+def test_a_repair_after_the_account_uid_gid_or_home_changed_is_refused_before_any_write(
+    tmp_path: Path, stage: str, changed: UserInfo
+) -> None:
+    """ADR-013, Decision 2 (F11 amendment): the service paths name the old uid, so a repair under a
+    changed identity is refused, and the admin undoes first (Decision 24). Nothing is written."""
+    root = _host(tmp_path)
+    if stage == "pending":
+        with pytest.raises(_Crash):
+            _setup(root, fault=_crash_after("subids"))
+    else:
+        _setup(root)
+    before = _snapshot(root)
+    with pytest.raises(GinnError) as caught:
+        _setup_as(root, "alice", changed)
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert caught.value.exit_code == 77
+    assert "'sudo ginn host-setup --undo --user alice' first" in caught.value.message
+    assert _snapshot(root) == before
+
+
+@pytest.mark.fr("FR-001")
+def test_a_setup_whose_uid_another_users_record_holds_is_refused_and_names_that_record(
+    tmp_path: Path,
+) -> None:
+    """A recycled uid, or a stale record of a deleted account, would make two records name the same
+    /run/ginn/<uid> and cgroup leaves (ADR-013, Decision 24). The refusal names the other record."""
+    root = _host(tmp_path)
+    _setup(root, "alice")
+    before = _snapshot(root)
+    with pytest.raises(GinnError) as caught:
+        _setup_as(root, "carol", UserInfo(uid=1000, gid=1000, home="/home/carol"))
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert caught.value.exit_code == 77
+    assert "holds uid 1000" in caught.value.message
+    assert "'sudo ginn host-setup --undo --user alice'" in caught.value.message
+    assert _snapshot(root) == before
+
+
+def _run_script_owner(root: Path) -> Callable[[Path], int]:
+    """The owner check that matches the run script (ADR-003): the two delegated directories of
+    alice and bob belong to their uid, and every other directory to root (tests cannot chown)."""
+    owners = {
+        root / "sys/fs/cgroup/ginn/1000": 1000,
+        root / "run/ginn/1000": 1000,
+        root / "sys/fs/cgroup/ginn/1001": 1001,
+        root / "run/ginn/1001": 1001,
+    }
+    return lambda path: owners.get(path, 0)
+
+
+@pytest.mark.fr("FR-001")
+def test_a_first_setup_accepts_a_delegated_directory_the_user_owns_and_refuses_another_owner(
+    tmp_path: Path,
+) -> None:
+    """ADR-003: `ginn/<uid>` is the user's after a run script has started, so a leftover of an undo
+    that was interrupted is read as the user's own (Decision 27). Another owner is still refused."""
+    root = _host(tmp_path)
+    (root / "sys/fs/cgroup/ginn/1000").mkdir(parents=True)
+    result = _setup(root, owner_of=_run_script_owner(root))
+    assert result.status == "configured"
+    assert _entry(_record(root), "sys/fs/cgroup/ginn/1000").pre.state == "dir"
+
+    other = _host(tmp_path / "other")
+    (other / "sys/fs/cgroup/ginn/1000").mkdir(parents=True)
+    before = _snapshot(other)
+    with pytest.raises(GinnError) as caught:
+        _setup(
+            other, owner_of=lambda path: 1001 if path == other / "sys/fs/cgroup/ginn/1000" else 0
+        )
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert "is owned by uid 1001, but uid 1000" in caught.value.message
+    assert _snapshot(other) == before
+
+
+@pytest.mark.fr("FR-001")
+def test_a_damaged_sibling_record_does_not_block_the_repair_of_an_existing_user(
+    tmp_path: Path,
+) -> None:
+    """Decision 24 (F11-review): the uid-holder check runs only for a user with no record yet, so a
+    damaged record of another user does not stop this user's own repair."""
+    root = _host(tmp_path)
+    _setup(root, "bob")
+    with pytest.raises(_Crash):
+        _setup(root, "alice", fault=_crash_after("subids"))
+    (root / BOB_RECORD).write_text("{ not a record", encoding="utf-8")
+    result = _setup(root, "alice")
+    assert result.status == "configured"
+    assert _record(root, "alice").status == "complete"
+
+
+@pytest.mark.fr("FR-001")
+def test_a_new_user_setup_reads_each_sibling_record_and_refuses_on_a_damaged_one(
+    tmp_path: Path,
+) -> None:
+    root = _host(tmp_path)
+    _setup(root, "alice")
+    (root / BOB_RECORD).write_text("{ not a record", encoding="utf-8")
+    with pytest.raises(GinnError) as caught:
+        _setup_as(root, "carol", UserInfo(uid=1500, gid=1500, home="/home/carol"))
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert str(root / BOB_RECORD) in str(caught.value.details.get("path", ""))

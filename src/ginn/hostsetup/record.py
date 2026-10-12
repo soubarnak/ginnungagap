@@ -51,7 +51,8 @@ from ginn.errors import GinnError, make
 from ginn.hostsetup._atomic import atomic_write
 from ginn.hostsetup.subids import SubIdEntry
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+OLD_SCHEMAS: frozenset[int] = frozenset({1, 2, 3})
 KIND_SETUP = "setup"
 KIND_SHARED = "shared"
 RECORD_DIR = "etc/ginn"
@@ -70,8 +71,10 @@ STATE_OF_KIND: dict[str, str] = {
     "symlink": "symlink",
 }
 """The image state that a path of each kind must have on the host (`append-lines` is a file)."""
-OLD_SCHEMA_REASON = "written by a ginn build before F8a/F9a; remove it by hand after checking"
-"""The reason for a schema 1 or 2 record. Nothing has shipped, so none is migrated."""
+OLD_SCHEMA_REASON = (
+    "written by a ginn build before F11 (schema {schema}); remove it by hand after checking"
+)
+"""The reason for a schema 1, 2 or 3 record. Nothing has shipped, so none is migrated."""
 _PRE_FIELDS: dict[str, frozenset[str]] = {
     "absent": frozenset(),
     "file": frozenset({"mode", "data"}),
@@ -92,6 +95,7 @@ _SETUP_KEYS = frozenset(
         "user",
         "uid",
         "gid",
+        "home",
         "timestamp",
         "status",
         "subids",
@@ -146,6 +150,7 @@ class HostSetupRecord:
     user: str
     uid: int
     gid: int
+    home: str
     timestamp: str
     status: str
     subids: SubIds | None
@@ -160,8 +165,11 @@ class SharedRecord:
 
     `paths` lists the shared directories this setup created, and the record's own file. Each has
     the pre-image absent. The record's own file has the post-image `self`, because its digest
-    cannot be stored in it, and no other entry has a post-image. `service_paths` holds the shared
-    paths that the run script writes, with pre-images only.
+    cannot be stored in it, and no other entry has a post-image. `paths` also holds the two
+    subordinate ID files as `append-lines` entries whose pre-image is the original state of the
+    file at the first setup (absent, or a file with its bytes). Undo reads them to decide what it
+    may delete at the last undo. `service_paths` holds the shared paths that the run script writes,
+    with pre-images only.
     """
 
     timestamp: str
@@ -199,6 +207,7 @@ def check(record: HostSetupRecord) -> None:
         raise ValueError("a complete record has no subordinate ID ranges")
     if record.boot_id is not None and not _is_boot_id(record.boot_id):
         raise ValueError(f"boot_id {record.boot_id!r} is not a boot id")
+    _check_home(record.home)
     own = relpath(record.user)
     seen: set[str] = set()
     _check_entries((*record.paths, *record.service_paths), seen)
@@ -244,9 +253,9 @@ def check_shared(record: SharedRecord) -> None:
     for entry in (*record.paths, *record.service_paths):
         if not entry.shared:
             raise ValueError(f"{entry.path} is in the shared record but not marked shared")
-        if entry.path in SUBID_FILES:
-            raise ValueError(f"{entry.path} is kept per user, not in the shared record")
     for entry in record.service_paths:
+        if entry.path in SUBID_FILES:
+            raise ValueError(f"{entry.path} is not a service path")
         if entry.post is not None:
             raise ValueError(f"{entry.path} is service-written and carries no post-image")
     for entry in record.paths:
@@ -255,6 +264,12 @@ def check_shared(record: SharedRecord) -> None:
                 raise ValueError(f"{SHARED_RELPATH} must be a file whose pre-image is absent")
             if entry.post != Image("self"):
                 raise ValueError(f"{SHARED_RELPATH} must have the post-image self")
+            continue
+        if entry.path in SUBID_FILES:
+            if entry.kind != "append-lines" or entry.post is not None:
+                raise ValueError(
+                    f"{entry.path} must be an append-lines original with no post-image"
+                )
             continue
         if (entry.kind, entry.pre.state) != ("dir", "absent"):
             raise ValueError(f"{entry.path} must be a shared directory whose pre-image is absent")
@@ -271,6 +286,7 @@ def encode(record: HostSetupRecord) -> bytes:
         "user": record.user,
         "uid": record.uid,
         "gid": record.gid,
+        "home": record.home,
         "timestamp": record.timestamp,
         "status": record.status,
         "subids": None
@@ -305,6 +321,7 @@ def decode(raw: bytes) -> HostSetupRecord:
             user=_text(obj["user"], "user"),
             uid=_int(obj["uid"], "uid"),
             gid=_int(obj["gid"], "gid"),
+            home=_text(obj["home"], "home"),
             timestamp=_text(obj["timestamp"], "timestamp"),
             status=_text(obj["status"], "status"),
             subids=_subids_from(obj["subids"]),
@@ -348,8 +365,9 @@ def load(path: Path) -> HostSetupRecord | None:
     raw = _read_regular(path, "a Host Setup Record")
     if raw is None:
         return None
-    if _is_old_schema(raw):
-        raise unsafe(path, OLD_SCHEMA_REASON)
+    old = _old_schema(raw)
+    if old is not None:
+        raise unsafe(path, OLD_SCHEMA_REASON.format(schema=old))
     try:
         return decode(raw)
     except RecordError as exc:
@@ -361,8 +379,9 @@ def load_shared(path: Path) -> SharedRecord | None:
     raw = _read_regular(path, "the shared Host Setup Record")
     if raw is None:
         return None
-    if _is_old_schema(raw):
-        raise unsafe(path, OLD_SCHEMA_REASON)
+    old = _old_schema(raw)
+    if old is not None:
+        raise unsafe(path, OLD_SCHEMA_REASON.format(schema=old))
     try:
         return decode_shared(raw)
     except RecordError as exc:
@@ -390,14 +409,27 @@ def _read_regular(path: Path, what: str) -> bytes | None:
     return path.read_bytes()
 
 
-def _is_old_schema(raw: bytes) -> bool:
-    """True when `raw` is a JSON object of schema 1 or 2, the forms before F8a/F9a."""
+def _old_schema(raw: bytes) -> int | None:
+    """Return the schema number when `raw` is a JSON object of an older schema, else None."""
     try:
         obj = json.loads(raw.decode("utf-8"))
     except ValueError:
-        return False
+        return None
     schema = obj.get("schema") if isinstance(obj, dict) else None
-    return type(schema) is int and schema in (1, 2)
+    if type(schema) is int and schema in OLD_SCHEMAS:
+        return schema
+    return None
+
+
+def _check_home(home: str) -> None:
+    """Refuse a home that is not an absolute, normalised path with no control character."""
+    parts = PurePosixPath(home).parts[1:]
+    if not home.startswith("/") or PurePosixPath(home).as_posix() != home:
+        raise ValueError(f"home {home!r} is not an absolute normalised path")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"home {home!r} is not an absolute normalised path")
+    if "\0" in home or "\n" in home or "\r" in home:
+        raise ValueError(f"home {home!r} contains a control character")
 
 
 def _parse(raw: bytes, kind: str, keys: frozenset[str]) -> dict[str, Any]:

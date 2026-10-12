@@ -43,7 +43,7 @@ import stat
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from ginn.errors import make
 
@@ -107,6 +107,15 @@ def _unlink_quiet(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def realms_dir_for_home(home: PurePath) -> PurePath:
+    """Return the realm records directory of an account whose home is `home` (pure: no I/O).
+
+    This is the default XDG state layout under the home, `<home>/.local/state/ginn/realms`. A
+    custom XDG_STATE_HOME is not seen, because the account's environment is not read here.
+    """
+    return home / ".local" / "state" / _APP_NAME / "realms"
 
 
 def _xdg_base(env: Mapping[str, str], var: str, default: Path) -> Path:

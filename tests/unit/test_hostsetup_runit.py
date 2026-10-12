@@ -77,6 +77,19 @@ def test_scripts_are_shellcheck_clean(tmp_path: Path) -> None:
         assert result.returncode == 0, result.stdout.decode()
 
 
+@pytest.mark.parametrize("name", [RUN, LOG_RUN], ids=["run", "log-run"])
+def test_the_script_sets_umask_022_before_its_first_mkdir(name: str) -> None:
+    """The delegated cgroup directory is 0755 whatever umask runit passed in (ADR-013, Decision 27).
+
+    The log directory is made by the same kind of script, so its script sets the umask too.
+    """
+    lines = _alice()[name].splitlines()
+    umask_at = lines.index("umask 022")
+    mkdirs = [index for index, line in enumerate(lines) if line.startswith("mkdir ")]
+    assert mkdirs, name
+    assert umask_at < mkdirs[0], name
+
+
 def test_run_chowns_exactly_the_paths_the_cgroup_module_lists() -> None:
     chowned: list[Path] = []
     for line in _alice()[RUN].splitlines():

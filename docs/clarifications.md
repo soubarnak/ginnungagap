@@ -100,6 +100,7 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Requirement IDs: FR-003 (AC-1).
 - Issue: AC-1 says that every path in the Host Setup Record is "restored to its pre-setup content or removed". That cannot hold for these cases:
   - the subid files, after another user appended a line, because restoring the whole file would drop that line;
+  - the subid files, after setup appended a line terminator to an admin's last line that had none, because undo removes only its own line and never writes the bytes back, so the file is reported as different;
   - an admin-widened subid line, which undo leaves in place, because it is not the line that setup wrote;
   - a shared directory that another user's entries still use, because `rmdir` fails on a non-empty directory;
   - root `cgroup.subtree_control` after a reboot, when the cgroup state is gone, and while other users remain, when undo leaves the controllers in place for them.
