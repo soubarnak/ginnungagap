@@ -14,6 +14,7 @@ is not an edit of a complete entry: an append that never returned was never repo
 (FR-124, NFR-030). Any other unparseable line raises GINN-E-INTERNAL.
 
 Timestamps come from `clock`, which returns epoch seconds, unless the entry already has `ts`.
+`read` returns entries in `ts` order, which is the start time of each operation (DR-032).
 """
 
 import fcntl
@@ -175,7 +176,12 @@ class AuditLog:
         realm: RealmName | None = None,
         since: datetime | None = None,
     ) -> Iterator[AuditEntry]:
-        """Yield entries oldest first: rotated files from highest index down, then the current one.
+        """Yield entries in `ts` order, oldest start first, across the rotated and current files.
+
+        `ts` is the start time of each operation (DR-032), so an operation that started first is
+        shown first even when it finished last. Entries with equal `ts` keep file order: rotated
+        files from highest index down, then the current one. The log is bounded by rotation, so
+        the matching entries are loaded and sorted in memory.
 
         `realm` keeps only that realm's entries. `since` (timezone-aware) keeps entries at or
         after that moment. Host-integrity events have no realm and are kept only when `realm`
@@ -185,8 +191,13 @@ class AuditLog:
             raise ValueError("since must be timezone-aware")
         floor = None if since is None else since.astimezone(UTC)
         wanted = None if realm is None else realm.value
+        stamped: list[tuple[datetime, AuditEntry]] = []
         for path in self._files_oldest_first():
-            yield from self._read_file(path, wanted, floor)
+            stamped.extend(self._read_file(path, wanted, floor))
+        # sort is stable, so equal stamps keep the file order they were loaded in.
+        stamped.sort(key=lambda pair: pair[0])
+        for _moment, entry in stamped:
+            yield entry
 
     def _files_oldest_first(self) -> list[Path]:
         log = self._paths.audit_log
@@ -195,7 +206,7 @@ class AuditLog:
 
     def _read_file(
         self, path: Path, realm: str | None, floor: datetime | None
-    ) -> Iterator[AuditEntry]:
+    ) -> Iterator[tuple[datetime, AuditEntry]]:
         with path.open("rb") as handle:
             for number, raw in enumerate(handle, start=1):
                 if not raw.endswith(b"\n"):
@@ -205,9 +216,10 @@ class AuditLog:
                 entry = _decode(raw, path, number)
                 if realm is not None and entry.realm != realm:
                     continue
-                if floor is not None and _ts(entry, path, number) < floor:
+                moment = _ts(entry, path, number)
+                if floor is not None and moment < floor:
                     continue
-                yield entry
+                yield moment, entry
 
 
 def _ts(entry: AuditEntry, path: Path, number: int) -> datetime:

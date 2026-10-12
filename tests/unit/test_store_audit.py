@@ -189,6 +189,29 @@ def test_read_is_chronological_across_rotated_files_and_the_current_one(
     assert stamps == sorted(stamps)
 
 
+@pytest.mark.fr("DR-032")
+def test_read_orders_by_start_time_when_the_file_order_differs(paths: OwnedPaths) -> None:
+    """The file holds completion order. The entry that started first is read first."""
+    log = AuditLog(paths, clock=FakeClock(), max_bytes=100, keep=5)
+    log.append(_entry("finished-first", ts="2027-01-15T08:00:02.000Z"))  # started second
+    log.append(_entry("finished-second", ts="2027-01-15T08:00:01.000Z"))  # started first
+    assert _rotated_names(paths) == ["audit.log.1"], "the two entries must sit in two files"
+
+    assert _ops(log) == ["finished-second", "finished-first"]
+    assert _ops(log, realm=RealmName("arch")) == ["finished-second", "finished-first"]
+
+
+@pytest.mark.fr("DR-032")
+def test_entries_with_equal_start_times_keep_their_file_order(paths: OwnedPaths) -> None:
+    log = AuditLog(paths, clock=FakeClock(), max_bytes=100, keep=5)
+    stamp = "2027-01-15T08:00:00.000Z"
+    for op in ("first", "second", "third"):
+        log.append(_entry(op, ts=stamp))
+    assert len(_rotated_names(paths)) >= 2, "equal stamps must span files for this test"
+
+    assert _ops(log) == ["first", "second", "third"]
+
+
 @pytest.mark.fr("FR-125")
 def test_read_shows_only_the_requested_realm_in_order(paths: OwnedPaths) -> None:
     clock = FakeClock()

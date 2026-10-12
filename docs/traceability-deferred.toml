@@ -274,13 +274,13 @@ reason = "unit or property tests cover part of the requirement; the remaining ac
 id = "FR-123"
 milestone = "M8"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
+reason = "the realm lock (T2.7) and the choke point (T3.9) refuse a second operation at once, naming the running one; a real second process is unit-tested; AC-1 needs ginn rebuild and ginn install from two terminals (M8)"
 
 [[deferred]]
 id = "FR-124"
-milestone = "M2"
+milestone = "M6"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M2"
+reason = "the choke point (T3.9) writes one audit entry per operation with user, realm, op, params, before and after permissions and outcome, and the audit log (T2.9) is unit-tested; AC-1 needs a real tier change on arch, which lands with ginn tier (M6)"
 
 [[deferred]]
 id = "NFR-001"
@@ -361,9 +361,9 @@ reason = "not covered yet; the roadmap assigns its test to M3"
 
 [[deferred]]
 id = "NFR-043"
-milestone = "M2"
+milestone = "M10"
 partial = true
-reason = "unit or property tests cover part of the requirement (one audit entry per operation, T2.9); the remaining acceptance criteria, including the suite-wide count, need M2"
+reason = "the choke point (T3.9) writes exactly one audit entry per operation, for success, GinnError, KeyboardInterrupt and other exceptions, and the audit log (T2.9) is unit-tested; host-integrity events are separate FR-124 events (realm None), written at least once, and a crash between the audit append and the pending record can duplicate one, so the M10 suite-wide count must count operations and host-integrity events separately; that count is a release-gate check in M10"
 
 [[deferred]]
 id = "NFR-060"

@@ -16,7 +16,7 @@ entry counts as orphaned.
 
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -153,12 +153,19 @@ class Journal:
         return self._paths.journal / f"{realm}.json"
 
     def begin(
-        self, op: str, realm: RealmName, params: Mapping[str, Any] | None = None
+        self,
+        op: str,
+        realm: RealmName,
+        params: Mapping[str, Any] | None = None,
+        *,
+        clock: Callable[[], float] = time.time,
     ) -> JournalEntry:
         """Record that `op` has started on `realm`. Refuses to overwrite an existing entry.
 
-        An existing entry raises GINN-E-RECOVERY-PENDING (exit 4). The SRS defines no code for an
-        unrecovered interrupted operation, so the catalogue entry is ginn-defined.
+        `clock` (epoch seconds) stamps `started`, so the journal and the audit entry of one
+        operation can carry the same start time. An existing entry raises GINN-E-RECOVERY-PENDING
+        (exit 4). The SRS defines no code for an unrecovered interrupted operation, so the
+        catalogue entry is ginn-defined.
         """
         self._paths.journal.mkdir(mode=OWNED_DIR_MODE, parents=True, exist_ok=True)
         path = self._file(realm.value)
@@ -172,7 +179,7 @@ class Journal:
             op=op,
             realm=realm.value,
             pid=pid,
-            started=now_iso(time.time),
+            started=now_iso(clock),
             pid_start=process_start_ticks(pid),
             step="begin",
             params=dict(params or {}),

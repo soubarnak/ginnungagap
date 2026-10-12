@@ -15,6 +15,7 @@ from ginn.errors import GinnError
 from ginn.store.journal import Journal, JournalEntry, is_pid_alive, process_start_ticks
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import write_json_atomic
+from tests.fakes.clock import FakeClock
 
 
 @pytest.fixture
@@ -203,3 +204,13 @@ def test_pending_lists_every_realm_sorted_and_flags_corrupt_entries(paths: Owned
     with pytest.raises(GinnError) as excinfo:
         journal.pending()
     assert excinfo.value.code == "GINN-E-INTERNAL"
+
+
+@pytest.mark.fr("FR-122")
+def test_begin_stamps_started_from_the_injected_clock(paths: OwnedPaths) -> None:
+    clock = FakeClock(start=1_800_000_000.25)
+    entry = Journal(paths).begin("install", RealmName("arch"), clock=clock)
+
+    assert entry.started == "2027-01-15T08:00:00.250Z"
+    stored = json.loads((paths.journal / "arch.json").read_text(encoding="utf-8"))
+    assert stored["started"] == entry.started
