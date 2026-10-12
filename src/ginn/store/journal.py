@@ -3,8 +3,10 @@
 
 A mutating operation writes `paths.journal/<realm>.json` when it begins and updates the step
 as it goes. It removes the file when it finishes. A file still present when ginn next starts is
-an interrupted operation. `orphans()` returns those whose process is gone. Recovery itself
-(`ops/recovery.py`) is M8's job.
+an interrupted operation. `scan()` reads every file on its own and never follows a symbolic link
+or blocks on a FIFO. A damaged file comes back with a `problem` and never hides the others.
+`pending()` and `orphans()` are strict wrappers over `scan()`: they raise GINN-E-INTERNAL on the
+first damaged file. Recovery (`ops/recovery.py`, T2.8) is the only reader that acts on a scan.
 
 The journal is written under the realm lock. `begin` refuses to replace an existing entry,
 because that entry is the evidence recovery needs.
@@ -14,7 +16,10 @@ as well as the pid. A live process with a different start time is a different pr
 entry counts as orphaned.
 """
 
+import errno
+import json
 import os
+import stat
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -23,11 +28,16 @@ from typing import Any
 
 from ginn.domain import RealmName
 from ginn.errors import GinnError, make
-from ginn.store._time import now_iso
+from ginn.store._time import now_iso, parse_utc
 from ginn.store.paths import OWNED_DIR_MODE, OwnedPaths
-from ginn.store.records import fsync_dir, read_json, write_json_atomic
+from ginn.store.records import fsync_dir, write_json_atomic
 
 SCHEMA_VERSION = 1
+MAX_JOURNAL_BYTES = 64 * 1024
+"""The largest journal file that is read. An entry is a few hundred bytes, so a larger file is
+reported and never parsed (FR-122). One hostile file cannot then exhaust memory or time."""
+MAX_PARAM_DEPTH = 16
+"""The deepest nesting allowed in an entry's params. Real params are two or three levels deep."""
 _STAT_START_INDEX = 19  # field 22 is index 19 counted from field 3 (the state field)
 _DEAD_STATES = frozenset({"Z", "X"})  # zombie and dead: the process has exited
 
@@ -113,11 +123,14 @@ class JournalEntry:
             params = data["params"]
             if not isinstance(params, dict):
                 raise TypeError("params must be an object")
+            # The start time is copied into the audit entry as its ts, so it must parse here.
+            started = _str(data["started"])
+            parse_utc(started)
             return cls(
                 op=_str(data["op"]),
                 realm=realm,
                 pid=pid,
-                started=_str(data["started"]),
+                started=started,
                 pid_start=pid_start,
                 step=_str(data["step"]),
                 params=dict(params),
@@ -138,6 +151,149 @@ def _int(value: object) -> int:
     if type(value) is not int:
         raise TypeError(f"expected an integer, got {type(value).__name__}")
     return value
+
+
+_SUFFIX = ".json"
+
+
+@dataclass(frozen=True)
+class JournalFile:
+    """One journal file: its entry, or the reason it cannot be trusted (FR-122).
+
+    `realm` is the file name without `.json`. Exactly one of `entry` and `problem` is set. A
+    symbolic link, a file that is not regular, a file over MAX_JOURNAL_BYTES, a file whose entry
+    names another realm, and a file that does not parse are all reported in `problem`. None of them
+    is written or deleted, because a damaged file has no pid that could be checked.
+    """
+
+    path: Path
+    realm: str
+    entry: JournalEntry | None
+    problem: str | None
+
+    def is_live(self) -> bool:
+        """True when the entry's process still runs, with the same start time (see is_pid_alive)."""
+        return self.entry is not None and is_pid_alive(self.entry.pid, self.entry.pid_start)
+
+
+def _problem(path: Path, realm: str, reason: str) -> JournalFile:
+    return JournalFile(path, realm, None, reason)
+
+
+def _open_problem(exc: OSError) -> str:
+    if exc.errno == errno.ELOOP:
+        return "a symbolic link, which is never followed"
+    return f"cannot be opened: {exc.strerror or exc}"
+
+
+def _read_capped(fd: int) -> bytes:
+    """Read at most one byte past the limit, so an oversized file is noticed and not loaded."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_JOURNAL_BYTES:
+        chunk = os.read(fd, MAX_JOURNAL_BYTES + 1 - total)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def _nested_deeper_than(value: object, limit: int) -> bool:
+    """True when `value` nests more than `limit` levels. Iterative, so depth cannot recurse."""
+    pending: list[tuple[object, int]] = [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > limit:
+            return True
+        if isinstance(item, dict):
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            pending.extend((child, depth + 1) for child in item)
+    return False
+
+
+def _parse(path: Path, realm: str, data: bytes) -> JournalFile:
+    try:
+        parsed: object = json.loads(data.decode("utf-8"))
+    except RecursionError:
+        return _problem(path, realm, "nested too deeply to parse")
+    except MemoryError:
+        return _problem(path, realm, "too large to parse in memory")
+    except ValueError as exc:
+        return _problem(path, realm, f"not valid JSON: {exc}")
+    if not isinstance(parsed, dict):
+        return _problem(path, realm, "not a JSON object")
+    version = parsed.get("schema_version")
+    if type(version) is not int or version != SCHEMA_VERSION:
+        return _problem(path, realm, f"expected schema_version {SCHEMA_VERSION}")
+    if _nested_deeper_than(parsed.get("params"), MAX_PARAM_DEPTH):
+        return _problem(path, realm, f"params nested deeper than {MAX_PARAM_DEPTH} levels")
+    try:
+        entry = JournalEntry.from_json(parsed, str(path))
+    except GinnError as exc:
+        return _problem(path, realm, str(exc.details.get("reason", exc.message)))
+    if entry.realm != realm:
+        reason = f"the file names realm '{realm}' but its entry names '{entry.realm}'"
+        return _problem(path, realm, reason)
+    return JournalFile(path, realm, entry, None)
+
+
+def _read_journal_file(path: Path) -> JournalFile | None:
+    """Read one journal file without trusting it. None when the file does not exist.
+
+    The file is opened without following a symbolic link and without blocking on a FIFO. Only a
+    regular file of at most MAX_JOURNAL_BYTES is read. A file that cannot be parsed, or that nests
+    too deeply, is a problem and never an exception.
+    """
+    realm = path.name[: -len(_SUFFIX)] if path.name.endswith(_SUFFIX) else path.name
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return _problem(path, realm, _open_problem(exc))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return _problem(path, realm, "not a regular file, so it is not read")
+        if info.st_size > MAX_JOURNAL_BYTES:
+            return _problem(path, realm, f"larger than {MAX_JOURNAL_BYTES} bytes, so not read")
+        data = _read_capped(fd)
+    except OSError as exc:
+        return _problem(path, realm, f"unreadable: {exc.strerror or exc}")
+    finally:
+        os.close(fd)
+    if len(data) > MAX_JOURNAL_BYTES:
+        return _problem(path, realm, f"grew past {MAX_JOURNAL_BYTES} bytes while it was read")
+    return _parse(path, realm, data)
+
+
+def damaged_reason(file: JournalFile) -> str:
+    """The reason for a damaged file, with its remedy: inspect the file, then remove it (FR-122).
+
+    The remedy names the path, so an operator can act on it from the outcome or the error alone.
+    """
+    path = file.path
+    return (
+        f"journal file {path} cannot be used ({file.problem or 'damaged'}), and it blocks new "
+        f"operations on realm {file.realm} until it is removed. Inspect it with 'cat {path}'. "
+        f"When no ginn process runs for realm {file.realm} and 'ginn status {file.realm}' shows a "
+        f"state you accept, remove it with 'rm {path}'"
+    )
+
+
+def _damaged(file: JournalFile) -> GinnError:
+    """The strict error for a damaged file. It names the path and remedy, since no op is named."""
+    err = make("GINN-E-INTERNAL")
+    err.details.update(
+        {
+            "path": str(file.path),
+            "reason": file.problem or "damaged",
+            "remedy": damaged_reason(file),
+        }
+    )
+    return err
 
 
 class Journal:
@@ -163,16 +319,20 @@ class Journal:
         """Record that `op` has started on `realm`. Refuses to overwrite an existing entry.
 
         `clock` (epoch seconds) stamps `started`, so the journal and the audit entry of one
-        operation can carry the same start time. An existing entry raises GINN-E-RECOVERY-PENDING
-        (exit 4). The SRS defines no code for an unrecovered interrupted operation, so the
-        catalogue entry is ginn-defined.
+        operation can carry the same start time. Any existing file refuses the begin, whether its
+        entry is readable or not. A readable entry raises GINN-E-RECOVERY-PENDING (exit 4), which
+        names its op. A damaged file raises GINN-E-INTERNAL with its path, because it names no op.
+        The SRS defines no code for an unrecovered interrupted operation, so the catalogue entry is
+        ginn-defined.
         """
         self._paths.journal.mkdir(mode=OWNED_DIR_MODE, parents=True, exist_ok=True)
         path = self._file(realm.value)
-        if path.exists():
-            existing = JournalEntry.from_json(read_json(path, SCHEMA_VERSION), str(path))
-            err = make("GINN-E-RECOVERY-PENDING", realm=realm.value, op=existing.op)
-            err.details["pid"] = existing.pid
+        existing = _read_journal_file(path)
+        if existing is not None:
+            if existing.entry is None:
+                raise _damaged(existing)
+            err = make("GINN-E-RECOVERY-PENDING", realm=realm.value, op=existing.entry.op)
+            err.details["pid"] = existing.entry.pid
             raise err
         pid = os.getpid()
         entry = JournalEntry(
@@ -203,16 +363,37 @@ class Journal:
         fsync_dir(path.parent)
 
     def pending(self) -> list[JournalEntry]:
-        """Every entry still on disk, sorted by realm name."""
-        if not self._paths.journal.is_dir():
-            return []
+        """Every entry still on disk, sorted by realm name. A damaged file raises GINN-E-INTERNAL.
+
+        Recovery uses `scan()`, which reports a damaged file and goes on. This strict form is for
+        callers that must not go on past one.
+        """
         entries: list[JournalEntry] = []
-        for path in sorted(self._paths.journal.glob("*.json")):
-            if path.is_file():
-                data = read_json(path, SCHEMA_VERSION)
-                entries.append(JournalEntry.from_json(data, str(path)))
+        for file in self.scan():
+            if file.entry is None:
+                raise _damaged(file)
+            entries.append(file.entry)
         return entries
 
     def orphans(self) -> list[JournalEntry]:
         """Pending entries whose process is no longer running (same pid and start time)."""
         return [e for e in self.pending() if not is_pid_alive(e.pid, e.pid_start)]
+
+    def scan(self) -> list[JournalFile]:
+        """Every file in the journal directory, sorted by name, each read on its own.
+
+        A file that cannot be read does not stop the scan. It comes back with `problem` set (see
+        JournalFile). An empty or missing directory gives an empty list.
+        """
+        if not self._paths.journal.is_dir():
+            return []
+        files: list[JournalFile] = []
+        for path in sorted(self._paths.journal.glob(f"*{_SUFFIX}")):
+            file = _read_journal_file(path)
+            if file is not None:
+                files.append(file)
+        return files
+
+    def load(self, realm: RealmName) -> JournalFile | None:
+        """The journal file of `realm` as `scan()` reads it, or None when there is none."""
+        return _read_journal_file(self._file(realm.value))

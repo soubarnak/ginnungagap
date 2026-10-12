@@ -111,6 +111,24 @@ def _rotated(log: Path, index: int) -> Path:
     return log.with_name(f"{log.name}.{index}")
 
 
+_OP_ID_KEY = b'"op_id"'
+
+
+@dataclass(frozen=True)
+class AuditIndex:
+    """The Audit Log keyed by op_id, read tolerantly for recovery (FR-122, NFR-043).
+
+    `by_op_id` holds each entry whose params carry an op_id, in file order. `recovers` holds the
+    op_id values that a recovery entry names in params.recovers. `damaged` holds `path:line` for
+    each damaged line that carries an op_id. Such a line is skipped, and the caller must report
+    it. A damaged line without an op_id names no operation, so it is skipped without a note.
+    """
+
+    by_op_id: Mapping[str, tuple[AuditEntry, ...]]
+    recovers: frozenset[str]
+    damaged: tuple[str, ...]
+
+
 class AuditLog:
     """Append and read the Audit Log. There is deliberately no way to delete or edit entries."""
 
@@ -198,6 +216,45 @@ class AuditLog:
         stamped.sort(key=lambda pair: pair[0])
         for _moment, entry in stamped:
             yield entry
+
+    def index_by_op_id(self, op_id: str | None = None) -> AuditIndex:
+        """Read the files, keyed by params.op_id, skipping damaged lines (FR-122, NFR-043).
+
+        Only lines that contain the op_id key are decoded, so the lookup does not parse the whole
+        log. With `op_id`, only lines that contain that id's bytes are decoded, which is a cheap
+        re-check of one operation. A torn last line is skipped as `read` skips it. A damaged line
+        that has an op_id is skipped and listed in `damaged`, so recovery can say that its lookup
+        was incomplete. An unreadable file raises OSError, and the caller must not guess past it.
+        """
+        needle = None if op_id is None else op_id.encode("utf-8")
+        by_op: dict[str, list[AuditEntry]] = {}
+        recovers: set[str] = set()
+        damaged: list[str] = []
+        for path in self._files_oldest_first():
+            with path.open("rb") as handle:
+                for number, raw in enumerate(handle, start=1):
+                    if not raw.endswith(b"\n"):
+                        break  # torn tail from a crash mid-write
+                    if _OP_ID_KEY not in raw:
+                        continue
+                    if needle is not None and needle not in raw:
+                        continue
+                    try:
+                        entry = _decode(raw, path, number)
+                    except (GinnError, RecursionError):
+                        damaged.append(f"{path}:{number}")
+                        continue
+                    op_id = entry.params.get("op_id")
+                    if isinstance(op_id, str):
+                        by_op.setdefault(op_id, []).append(entry)
+                    named = entry.params.get("recovers")
+                    if isinstance(named, str):
+                        recovers.add(named)
+        return AuditIndex(
+            by_op_id={key: tuple(value) for key, value in by_op.items()},
+            recovers=frozenset(recovers),
+            damaged=tuple(damaged),
+        )
 
     def _files_oldest_first(self) -> list[Path]:
         log = self._paths.audit_log

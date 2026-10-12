@@ -2,8 +2,11 @@
 """The single choke point for mutating operations (DR-032, DR-033, FR-006, FR-123, FR-124).
 
 Every mutating operation runs inside `mutating()`. Nothing else takes the realm lock for an
-operation, runs the host integrity check around it, or writes its journal and audit entries. The
-steps, in order:
+operation, runs the host integrity check around it, or writes its journal and audit entries, with
+one exception: recovery (ops/recovery.py, T2.8) is the second lock holder and audit writer. It takes
+the realm lock for an interrupted operation, writes that operation's audit entry (or a `recover`
+entry that names it), and removes the journal file. It skips the host integrity check, because it
+changes only ginn state, and an unacknowledged host change must not stop it. The steps, in order:
 
 1. Realm lock (FR-123, DR-033). A second operation on the same realm is refused at once with
    GINN-E-REALM-BUSY, naming the running operation. It is never queued.
@@ -31,14 +34,14 @@ audited by the integrity state as a host-integrity event (FR-124). Steps 5 to 8 
 from the body: success, GinnError, KeyboardInterrupt or any other exception.
 
 Crash evidence for recovery (T8.5, FR-122, NFR-030). The audit entry is appended before the
-journal is finished. Recovery reads a journal entry together with the audit entry that has the
-same `op_id`. An audit outcome of "ok", or "error" with an error code, means the operation is
-finished, and recovery only removes the leftover journal file. Any other journal entry is an
+journal is finished. Recovery reads a journal entry together with the audit entries that have the
+same `op_id`. `is_finished` decides whether such an entry means the operation completed. An outcome
+of "ok", or an error with an error code, counts as finished. So do "recovered" and "broken", which
+recovery writes. Recovery then only removes the leftover journal file. Any other journal entry is an
 interrupted operation: no audit entry, outcome "interrupted", or outcome "error" without a code.
 Recovery moves the realm to `broken` or reverts it (FR-122). The journal is finished only for the
-two finished outcomes, so an interrupt or any other exception keeps its entry. When the audit
-append itself fails, the journal entry is kept too, because it is then the only record of the
-operation.
+finished outcomes, so an interrupt or any other exception keeps its entry. When the audit append
+itself fails, the journal entry is kept too, because it is then the only record of the operation.
 
 Body contract. When the body raises GinnError, it must already have rolled back its own changes.
 That is why such an operation counts as finished. Any other exception, and KeyboardInterrupt, means
@@ -70,7 +73,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from ginn.domain import RealmName
 from ginn.errors import GinnError
@@ -244,14 +247,26 @@ def _settle(
     except Exception as exc:
         problems.append(exc)
 
-    # Recovery's rule (see the module docstring): only "ok" or an error with a code is finished.
-    if audited and (outcome == "ok" or error_code is not None):
+    if audited and is_finished(outcome, error_code):
         try:
             env.journal.finish(entry)
         except Exception as exc:
             problems.append(exc)
 
     _report(problems, failure)
+
+
+_RECOVERY_OUTCOMES: Final = frozenset({"recovered", "broken"})
+
+
+def is_finished(outcome: str, error_code: str | None) -> bool:
+    """True when an audit entry with this outcome and error code means its operation completed.
+
+    "ok" and any error with a code are finished (FR-122). So are "recovered" and "broken", the two
+    outcomes that recovery writes (ops/recovery.py). "interrupted", and an error without a code, are
+    not finished. The operation's own journal finish and recovery both use this predicate.
+    """
+    return outcome == "ok" or outcome in _RECOVERY_OUTCOMES or error_code is not None
 
 
 def _outcome(failure: BaseException | None) -> tuple[str, str | None]:

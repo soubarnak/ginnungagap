@@ -129,8 +129,9 @@ def test_audit_files_are_created_with_mode_0600(paths: OwnedPaths) -> None:
 
 @pytest.mark.fr("DR-050")
 def test_the_audit_log_has_no_delete_or_rewrite_api() -> None:
+    # index_by_op_id is read-only: recovery's tolerant lookup (FR-122, NFR-043).
     public = {name for name in dir(AuditLog) if not name.startswith("_")}
-    assert public == {"append", "read"}
+    assert public == {"append", "read", "index_by_op_id"}
 
 
 @pytest.mark.fr("DR-019")
