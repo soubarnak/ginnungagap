@@ -13,7 +13,7 @@
 #   spikes/s01_systemd_rootless.sh teardown   remove spike containers, image,
 #                                             storage and cgroup directories
 #
-# Root steps run only as: sudo "$0" --root-setup|--root-move|--root-cleanup ...
+# Root steps run only as: sudo "$0" --root-setup|--root-move ...
 # Every user-level podman call uses the spike storage (--root, --runroot, --tmpdir), never
 # the default storage. Logs go to GINN_SPIKE_OUT (default
 # ~/.cache/ginn-spike/s01).
@@ -130,8 +130,8 @@ setup_root() {
   for c in "${CTL_SET[@]}"; do
     root_write "+$c" "$CG_ROOT/ginn/cgroup.subtree_control" "$log" || true
   done
-  mkdir -p "$ud" "$ud/launch"
-  printf 'OK    mkdir -p %s %s\n' "$ud" "$ud/launch" >> "$log"
+  mkdir -p "$ud" "$ud/s01-launch"
+  printf 'OK    mkdir -p %s %s\n' "$ud" "$ud/s01-launch" >> "$log"
   for c in "${CTL_SET[@]}"; do
     root_write "+$c" "$ud/cgroup.subtree_control" "$log" || true
   done
@@ -143,7 +143,7 @@ setup_root() {
   printf 'root subtree_control after: [%s]\n' "$(cat "$CG_ROOT/cgroup.subtree_control")" >> "$log"
   printf 'ginn subtree_control after: [%s]\n' "$(cat "$CG_ROOT/ginn/cgroup.subtree_control")" >> "$log"
   printf 'uid subtree_control after: [%s]\n' "$(cat "$ud/cgroup.subtree_control")" >> "$log"
-  ls -ld "$ud" "$ud/launch" "$ud/cgroup.procs" "$ud/cgroup.threads" \
+  ls -ld "$ud" "$ud/s01-launch" "$ud/cgroup.procs" "$ud/cgroup.threads" \
     "$ud/cgroup.subtree_control" >> "$log"
   chown "$uid:$gid" "$log"
 }
@@ -153,41 +153,8 @@ move_launcher() {
   need_root move_launcher
   local uid=$1 pid=$2 out=$3 log
   log="$out/root-steps.log"
-  root_write "$pid" "$CG_ROOT/ginn/$uid/launch/cgroup.procs" "$log" || die "move failed"
+  root_write "$pid" "$CG_ROOT/ginn/$uid/s01-launch/cgroup.procs" "$log" || die "move failed"
   printf 'launcher pid %s now in %s\n' "$pid" "$(sed -n 's/^0:://p' "/proc/$pid/cgroup")" >> "$log"
-}
-
-# cleanup_root <uid> <out>: undo setup_root. Containers must be gone first.
-cleanup_root() {
-  need_root cleanup_root
-  local uid=$1 out=$2 log orig pid c ud orig_ctl
-  log="$out/root-steps.log"
-  ud="$CG_ROOT/ginn/$uid"
-  orig=$(cat "$out/orig-cgroup")
-  printf '== root-cleanup %s\n' "$(date -Is)" >> "$log"
-  if [[ -f $ud/launch/cgroup.procs ]]; then
-    while read -r pid; do
-      [[ -n $pid ]] && { root_write "$pid" "$CG_ROOT$orig/cgroup.procs" "$log" || true; }
-    done < "$ud/launch/cgroup.procs"
-  fi
-  if [[ -d $ud ]]; then
-    if find "$ud" -mindepth 1 -depth -type d -exec rmdir {} + 2>>"$log"; then
-      printf 'OK    rmdir below %s\n' "$ud" >> "$log"
-    else
-      printf 'FAIL  rmdir below %s (leftover cgroups)\n' "$ud" >> "$log"
-    fi
-    if rmdir "$ud" 2>>"$log"; then printf 'OK    rmdir %s\n' "$ud" >> "$log"; fi
-  fi
-  if rmdir "$CG_ROOT/ginn" 2>>"$log"; then printf 'OK    rmdir %s\n' "$CG_ROOT/ginn" >> "$log"; fi
-  # Restore root subtree_control to the recorded original: disable only the
-  # controllers that were absent before setup_root ran.
-  orig_ctl=$(cat "$out/root-subtree-control.orig")
-  for c in "${CTL_SET[@]}"; do
-    if ! grep -qw "$c" <<<"$orig_ctl"; then
-      root_write "-$c" "$CG_ROOT/cgroup.subtree_control" "$log" || true
-    fi
-  done
-  printf 'root subtree_control restored: [%s]\n' "$(cat "$CG_ROOT/cgroup.subtree_control")" >> "$log"
 }
 
 # ---------------------------------------------------------------- user steps
@@ -374,9 +341,20 @@ cmd_run() {
   cat "$OUT/summary.tsv"
 }
 
+# remove_own_leaves: rmdir only the leaves this spike names, deepest first. Never ginn, never ginn/<uid>,
+# never a root write. A leaf that still has processes is left and logged.
+remove_own_leaves() {
+  local ud leaf
+  ud="$CG_ROOT/ginn/$(id -u)"
+  for leaf in s01a s01b s01c s01d s01-launch; do
+    [[ -d $ud/$leaf ]] || continue
+    find "$ud/$leaf" -mindepth 1 -depth -type d -exec rmdir {} + 2>>"$OUT/teardown.err" || true
+    if rmdir "$ud/$leaf" 2>>"$OUT/teardown.err"; then log "rmdir $ud/$leaf"; else log "rmdir $ud/$leaf failed (teardown.err)"; fi
+  done
+  return 0
+}
+
 cmd_teardown() {
-  local uid
-  uid=$(id -u)
   require_caller_xdg
   mkdir -p "$OUT"
   if [[ -d $GINN_SPIKE_ROOT ]]; then
@@ -391,12 +369,9 @@ cmd_teardown() {
   fi
   # The rootless pause process keeps the pinned XDG; stop it by exact pid before removing the dir.
   kill_spike_procs
+  remove_own_leaves
   rm -rf "$SPIKE_XRD"
-  if [[ -f $OUT/orig-cgroup ]]; then
-    log "root cleanup (sudo)"
-    sudo "$SELF" --root-cleanup "$uid" "$OUT"
-  fi
-  log "teardown done; logs kept in $OUT"
+  log "teardown done (no root writes); logs kept in $OUT"
 }
 
 usage() {
@@ -405,7 +380,6 @@ usage: XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01c-xrd s01_systemd_rootless.
        s01_systemd_rootless.sh --podman <podman args>            (pinned wrapper, used internally)
        s01_systemd_rootless.sh --root-setup <uid> <gid> <out>   (root only)
        s01_systemd_rootless.sh --root-move <uid> <pid> <out>    (root only)
-       s01_systemd_rootless.sh --root-cleanup <uid> <out>       (root only)
 EOF
 }
 
@@ -415,6 +389,5 @@ case ${1:-} in
   --podman) shift; podman_pinned "$@" ;;
   --root-setup) setup_root "${2:?uid}" "${3:?gid}" "${4:?out}" ;;
   --root-move) move_launcher "${2:?uid}" "${3:?pid}" "${4:?out}" ;;
-  --root-cleanup) cleanup_root "${2:?uid}" "${3:?out}" ;;
   *) usage; exit 2 ;;
 esac

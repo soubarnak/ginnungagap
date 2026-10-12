@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# S-01 crun leg (risk R-001): can systemd run as PID 1 under podman --runtime crun, with the
+# S-01 crun leg (risk R-001) and its runc control: can systemd run as PID 1 under podman, with the
 # container cgroup under the root-created delegated subtree /sys/fs/cgroup/ginn/<uid>?
-# Debian only: same Dockerfile (spikes/Dockerfile.s01) and cgroupfs manager as the runc leg.
+# Debian only: same Dockerfile (spikes/Dockerfile.s01) and cgroupfs manager for both runtimes.
 #
 #   XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01c-xrd spikes/s01c_crun.sh run
-#       Pull and build the image, record host facts, then try the roadmap services-on argv
-#       from the unmoved launcher. Exit 3 when podman refuses: the launcher is not in a leaf
-#       that its podman can write into, so no boot is measured.
+#       Pull and build the image, record host facts, then run two legs (crun, runc). Each leg
+#       starts a launcher subshell that writes its $BASHPID to $OUT/<runtime>.launcher.pid and
+#       waits at the gate until /proc/$BASHPID/cgroup shows /ginn/<uid>/s01<runtime>-launch.
+#       Root places that pid with one logged write per leg (spikes/results/S-01.md). After the
+#       gate opens, each leg boots the roadmap argv and the runc S-01 variant-a flags, measures,
+#       stops, and removes its containers.
 #   XDG_RUNTIME_DIR=/run/user/<uid>/ginn-spike-s01c-xrd spikes/s01c_crun.sh teardown
-#       Remove spike containers, image, storage, the pinned dir and the leaves this script makes.
+#       Kill the spike pause process, remove spike containers, image, storage, the pinned dir and
+#       only the leaves named in this script. Writes nothing to the cgroup root or to ginn/<uid>.
 #
-# Root: this script never runs sudo. Moving the launcher into $LAUNCH_LEAF needs one root write
-# to $LAUNCH_LEAF/cgroup.procs. The brief does not allow that write, so it is not run here.
+# Root: none in this script. The root write is run by the operator per leg, outside this file.
 #
 # Pin: every podman call goes through "$0" --podman. The wrapper refuses unless the pinned XDG dir
 # is this uid's, mode 0700, at the exact path, then runs podman with XDG_RUNTIME_DIR set to it.
@@ -25,13 +28,13 @@ SPIKE_DIR="$(dirname "$SELF")"
 MY_UID="$(id -u)"
 CG_ROOT=/sys/fs/cgroup
 CG_USER="$CG_ROOT/ginn/$MY_UID"
-LAUNCH_LEAF="$CG_USER/s01crun-launch"
 IMAGE=localhost/ginn-s01:debian-stable
 SPIKE_XRD="/run/user/$MY_UID/ginn-spike-s01c-xrd"
 STORE="${GINN_S01C_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike-s01c/podman}"
 RUNROOT="$SPIKE_XRD/runroot"
 TMPDIR_P="$SPIKE_XRD/libpod-tmp"
 OUT="${GINN_S01C_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s01c}"
+GATE_TIMEOUT=900
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -108,82 +111,143 @@ host_facts() {
     echo "crun: $(crun --version 2>&1 | head -2 | tr '\n' ' ')" || true
     echo "runc: $(runc --version 2>&1 | head -1)" || true
     echo "conmon: $(/usr/libexec/podman/conmon --version 2>&1 | head -1)" || true
+    echo "pasta: $(command -v pasta || echo none)"
     free -m
   } >"$OUT/host-facts.txt" 2>&1
 }
 
-# remove_leaves: rmdir only the leaves this script creates, deepest first. Other leaves are left alone.
-remove_leaves() {
-  local leaf
-  for leaf in "$CG_USER/s01crun" "$LAUNCH_LEAF"; do
-    [[ -d $leaf ]] || continue
-    find "$leaf" -mindepth 1 -depth -type d -exec rmdir {} + 2>>"$OUT/teardown.err" || true
-    if rmdir "$leaf" 2>>"$OUT/teardown.err"; then log "rmdir $leaf"; else log "rmdir $leaf failed (teardown.err)"; fi
+# name_for <runtime> <flavor>: container and cgroup leaf name. Each starts with s01crun or s01runc.
+name_for() {
+  case "$1-$2" in
+    crun-roadmap) echo s01crun ;;
+    crun-runca) echo s01crunm ;;
+    runc-roadmap) echo s01runc ;;
+    runc-runca) echo s01runcm ;;
+    *) die "no name for $1 $2" ;;
+  esac
+}
+
+# boot_argv <runtime> <flavor> <name>: sets BOOT_ARGV and STOP_ARGV.
+#   roadmap: the services-on argv from docs/roadmap.md, with --stop-timeout 30 at create time.
+#   runca:   the runc S-01 variant-a flags (--userns keep-id --network host), stop with -t 30.
+boot_argv() {
+  local runtime=$1 flavor=$2 name=$3
+  if [[ $flavor == roadmap ]]; then
+    BOOT_ARGV=(run -d --name "$name" --runtime "$runtime" --systemd=always --cgroupns private
+      --cgroup-parent "/ginn/$MY_UID/$name" --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30
+      "$IMAGE" /sbin/init)
+    STOP_ARGV=(stop "$name")
+  else
+    BOOT_ARGV=(run -d --name "$name" --runtime "$runtime" --systemd=always --cgroupns private
+      --userns keep-id --user 0:0 --network host --stop-signal SIGRTMIN+3
+      --cgroup-parent "/ginn/$MY_UID/$name" "$IMAGE" /sbin/init)
+    STOP_ARGV=(stop -t 30 "$name")
+  fi
+}
+
+# wait_for_move <leaf>: the gate. Reads this subshell's own cgroup; podman starts only after it matches.
+wait_for_move() {
+  local leaf=$1 me=$BASHPID i cur=""
+  for (( i = 0; i < GATE_TIMEOUT; i++ )); do
+    cur=$(sed -n 's/^0:://p' "/proc/$me/cgroup")
+    if [[ $cur == "/ginn/$MY_UID/$leaf" ]]; then
+      log "gate open: launcher $me in $cur"
+      return 0
+    fi
+    sleep 1
   done
-  return 0
+  die "gate timeout: launcher $me still in '$cur', expected /ginn/$MY_UID/$leaf"
 }
 
-# boot <name>: the roadmap services-on argv with --runtime crun. Output in $OUT/<name>.{out,err,rc}.
-boot() {
-  local name=$1 rc=0
-  "$SELF" --podman rm -f "$name" >/dev/null 2>&1 || true
-  "$SELF" --podman run -d --name "$name" --runtime crun \
-    --systemd=always --cgroupns private --cgroup-parent "/ginn/$MY_UID/$name" \
-    --user 0:0 --stop-signal SIGRTMIN+3 --stop-timeout 30 \
-    "$IMAGE" /sbin/init >"$OUT/$name.out" 2>"$OUT/$name.err" || rc=$?
-  echo "$rc" >"$OUT/$name.rc"
-  return "$rc"
-}
-
-# measure <name>: run only after boot succeeded. Not exercised in the blocked run.
-measure() {
-  local name=$1 d="$OUT/$1" t0 t1 pid wrc=0
+# measure_one <runtime> <flavor>: boot, wait, record, stop, remove. One row in summary.tsv.
+measure_one() {
+  local runtime=$1 flavor=$2 name d rc=0 wrc=0 t0 t1 t2 t3 pid cg state failed stop_s code
+  name=$(name_for "$runtime" "$flavor")
+  d="$OUT/$name"
   mkdir -p "$d"
-  timeout 60 "$SELF" --podman exec "$name" systemctl is-system-running --wait >"$d/wait.txt" 2>&1 || wrc=$?
+  boot_argv "$runtime" "$flavor" "$name"
+  printf '%q ' "${BOOT_ARGV[@]}" >"$d/boot-argv.txt"; echo >>"$d/boot-argv.txt"
+  printf '%q ' "${STOP_ARGV[@]}" >"$d/stop-argv.txt"; echo >>"$d/stop-argv.txt"
+  "$SELF" --podman rm -f "$name" >/dev/null 2>&1 || true
+  log "boot $name ($runtime, $flavor)"
+  t0=$(date +%s.%N)
+  "$SELF" --podman "${BOOT_ARGV[@]}" >"$d/run.out" 2>"$d/run.err" || rc=$?
+  echo "$rc" >"$d/run.rc"
+  if (( rc != 0 )); then
+    printf '%s\t%s\t%s\tboot-failed rc=%s: %s\n' "$runtime" "$flavor" "$name" "$rc" \
+      "$(head -c 200 "$d/run.err" | tr '\n\t' '  ')" >>"$OUT/summary.tsv"
+    log "$name: podman run exit $rc"
+    return 0
+  fi
+  timeout 60 "$SELF" --podman exec "$name" systemctl is-system-running --wait \
+    >"$d/wait.txt" 2>&1 || wrc=$?
+  t1=$(date +%s.%N)
   echo "$wrc" >"$d/wait.rc"
   "$SELF" --podman exec "$name" systemctl is-system-running >"$d/state.txt" 2>&1 || true
   "$SELF" --podman exec "$name" systemctl --failed --no-legend >"$d/failed.txt" 2>&1 || true
   "$SELF" --podman exec "$name" systemd-analyze time >"$d/systemd-analyze.txt" 2>&1 || true
   "$SELF" --podman exec "$name" cat /proc/1/cgroup >"$d/pid1-cgroup.txt" 2>&1 || true
-  "$SELF" --podman exec "$name" systemctl --version >"$d/systemd-version.txt" 2>&1 || true
   pid=$("$SELF" --podman inspect --format '{{.State.Pid}}' "$name" 2>/dev/null || echo 0)
-  echo "host init pid $pid: $(cat "/proc/$pid/cgroup" 2>/dev/null || echo gone)" >"$d/host-cgroup.txt"
-  t0=$(date +%s.%N)
-  "$SELF" --podman stop "$name" >"$d/stop.txt" 2>&1 || true
-  t1=$(date +%s.%N)
-  "$SELF" --podman inspect --format '{{.State.ExitCode}} oomkilled={{.State.OOMKilled}}' "$name" \
-    >"$d/exit.txt" 2>&1 || true
-  printf 'stop elapsed %ss\n' "$(awk -v a="$t0" -v b="$t1" 'BEGIN {printf "%.1f", b - a}')" >>"$d/exit.txt"
-  log "measure $name: state=$(head -1 "$d/state.txt") failed=$(grep -c . "$d/failed.txt" || true)"
+  cg=$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null || echo gone)
+  echo "host init pid $pid cgroup $cg" >"$d/host-cgroup.txt"
+  t2=$(date +%s.%N)
+  "$SELF" --podman "${STOP_ARGV[@]}" >"$d/stop.txt" 2>&1 || true
+  t3=$(date +%s.%N)
+  code=$("$SELF" --podman inspect --format '{{.State.ExitCode}} oomkilled={{.State.OOMKilled}}' \
+    "$name" 2>/dev/null || echo n/a)
+  state=$(head -1 "$d/state.txt" 2>/dev/null || echo n/a)
+  failed=$(grep -c . "$d/failed.txt" 2>/dev/null || true)
+  stop_s=$(awk -v a="$t2" -v b="$t3" 'BEGIN {printf "%.1f", b - a}')
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$runtime" "$flavor" "$name" "$state" "${failed:-0}" \
+    "$(awk -v a="$t0" -v b="$t1" 'BEGIN {printf "%.1f", b - a}')" "$cg" "$stop_s" "$code" \
+    >>"$OUT/summary.tsv"
+  log "$name: state=$state failed=${failed:-0} boot=$(awk -v a="$t0" -v b="$t1" 'BEGIN {printf "%.1f", b - a}')s stop=${stop_s}s exit=$code"
+  "$SELF" --podman rm -f "$name" >/dev/null 2>&1 || true
+}
+
+# leg <runtime>: the launcher subshell. Waits at the gate, then runs both flavors under it.
+leg() {
+  local runtime=$1 leaf="s01${1}-launch"
+  mkdir -p "$CG_USER/$leaf"
+  log "leg $runtime: leaf $CG_USER/$leaf owner $(stat -c %U "$CG_USER/$leaf")"
+  (
+    echo "$BASHPID" >"$OUT/$runtime.launcher.pid"
+    log "leg $runtime: launcher pid $BASHPID in $(sed -n 's/^0:://p' "/proc/$BASHPID/cgroup"); waiting for root move to /ginn/$MY_UID/$leaf"
+    wait_for_move "$leaf"
+    measure_one "$runtime" roadmap
+    measure_one "$runtime" runca
+  )
+}
+
+# remove_leaves: rmdir only the leaves named here, deepest first. Never ginn or ginn/<uid>.
+remove_leaves() {
+  local leaf
+  for leaf in s01crun s01crunm s01runc s01runcm s01crun-launch s01runc-launch; do
+    [[ -d $CG_USER/$leaf ]] || continue
+    find "$CG_USER/$leaf" -mindepth 1 -depth -type d -exec rmdir {} + 2>>"$OUT/teardown.err" || true
+    if rmdir "$CG_USER/$leaf" 2>>"$OUT/teardown.err"; then log "rmdir $CG_USER/$leaf"; else log "rmdir $CG_USER/$leaf failed (teardown.err)"; fi
+  done
+  return 0
 }
 
 cmd_run() {
-  local rc=0
   require_caller_xdg
   mkdir -p "$OUT" "$STORE" "$SPIKE_XRD" "$RUNROOT" "$TMPDIR_P"
   chmod 700 "$SPIKE_XRD"
+  printf 'runtime\tflavor\tname\tstate\tfailed_units\tboot_s\tcontainer_cgroup\tstop_s\texit\n' \
+    >"$OUT/summary.tsv"
   host_facts
   [[ -d $CG_USER && -O $CG_USER ]] || die "$CG_USER missing or not owned by uid $MY_UID"
-  # User mkdir under ginn/<uid> is allowed: no root.
-  mkdir -p "$LAUNCH_LEAF"
-  log "leaf $LAUNCH_LEAF owner $(stat -c %U "$LAUNCH_LEAF")"
   log "pull docker.io/library/debian:stable"
   "$SELF" --podman pull docker.io/library/debian:stable >"$OUT/pull.txt" 2>&1
   log "build $IMAGE from spikes/Dockerfile.s01"
   "$SELF" --podman build --network host -t "$IMAGE" -f "$SPIKE_DIR/Dockerfile.s01" "$SPIKE_DIR" \
     >"$OUT/build.txt" 2>&1
   "$SELF" --podman image inspect --format '{{.Id}} {{.RepoDigests}}' "$IMAGE" >"$OUT/image.txt" 2>&1 || true
-  log "boot s01crun from the unmoved launcher (no root)"
-  if boot s01crun; then
-    log "boot accepted, measuring"
-    measure s01crun
-  else
-    rc=$?
-    log "BLOCKED: podman run exit $rc: $(head -c 300 "$OUT/s01crun.err" | tr '\n' ' ')"
-    log "not run, outside the brief's root allowance: sudo sh -c 'echo <pid of podman launcher> > $LAUNCH_LEAF/cgroup.procs'"
-    return 3
-  fi
-  return "$rc"
+  leg crun
+  leg runc
+  log "done; summary $OUT/summary.tsv"
+  cat "$OUT/summary.tsv"
 }
 
 cmd_teardown() {
@@ -197,14 +261,16 @@ cmd_teardown() {
   fi
   rm -rf "$STORE" 2>/dev/null || log "storage removal incomplete: $STORE"
   rmdir "$(dirname "$STORE")" 2>/dev/null || true
+  # Processes first: the pause process sits in a launcher leaf, and a leaf can only be removed empty.
   kill_spike_procs
   remove_leaves
   rm -rf "$SPIKE_XRD"
   log "verify pinned dir: $(ls -d "$SPIKE_XRD" 2>&1)"
   log "verify storage: $(ls -d "$STORE" 2>&1)"
-  log "verify leaves: $(ls -d "$LAUNCH_LEAF" "$CG_USER/s01crun" 2>&1 | tr '\n' ' ')"
-  log "verify spike pids: [$(spike_pids | tr '\n' ' ')]"
-  log "teardown done; logs kept in $OUT"
+  log "verify leaves: $(ls -d "$CG_USER"/s01crun* "$CG_USER"/s01runc* 2>&1 | tr '\n' ' ')"
+  spike_pids >"$OUT/verify-pids.txt"
+  log "verify spike pids: [$(tr '\n' ' ' <"$OUT/verify-pids.txt")]"
+  log "teardown done (no root writes); logs kept in $OUT"
 }
 
 case ${1:-} in
