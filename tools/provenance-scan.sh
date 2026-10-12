@@ -87,6 +87,19 @@ add_shell_copies() {
     echo "  extensionless shell scripts copied to .sh: $copies"
 }
 
+# Count the files in a reference clone that have a scanned extension. Names only, never contents.
+# Called after add_shell_copies, so that extensionless shell scripts are included.
+count_reference_files() {
+    local dir=$1 ext n count=0
+    local -a exts
+    IFS=, read -r -a exts <<<"$SCAN_EXTENSIONS"
+    for ext in "${exts[@]}"; do
+        n=$(find "$dir" -path "$dir/.git" -prune -o -type f -name "*.$ext" -print | wc -l)
+        count=$((count + n))
+    done
+    echo "$count"
+}
+
 # Clone one reference entry ("URL" or "URL@REF") at depth 1 into the directory $2.
 fetch_reference() {
     local entry=$1 dest=$2 url ref
@@ -115,6 +128,12 @@ index=0
 for entry in "${repos[@]}"; do
     index=$((index + 1))
     fetch_reference "$entry" "$scratch/ref-$index"
+    # Fail closed: a clone with no files of the scanned extensions (wrong ref, changed layout)
+    # would give zero matches and pass the gate. Stop here, before any detector runs.
+    refs=$(count_reference_files "$scratch/ref-$index")
+    [ "$refs" -gt 0 ] \
+        || die "reference $entry has no files with extensions $SCAN_EXTENSIONS (wrong ref or layout change)"
+    echo "  reference files to compare: $refs"
 done
 
 test_dirs=()

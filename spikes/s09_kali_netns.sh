@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
+# Three-flag rule: every podman call (teardown included) passes --root, --runroot and --tmpdir,
+# all inside this spike's directories. Without --tmpdir podman shares the user's libpod tmpdir.
 # S-09 (FR-026, FR-027, NFR-SEC-002, OOS-9, R-002): can a Kali realm run raw sockets
 # (NET_RAW) inside an isolated pasta netns, and can it change host interfaces?
 #
 #   spikes/s09_kali_netns.sh run        pull and build the image, run every variant
 #   spikes/s09_kali_netns.sh teardown   remove spike containers, image and storage
 #
-# Every podman call uses the spike storage (--root/--runroot). Raw logs go to S09_OUT
+# Every podman call uses the spike storage (--root, --runroot, --tmpdir). Raw logs go to S09_OUT
 # (default ~/.cache/ginn-spike/s09), never into the repository. A denied probe (EPERM) is
 # an expected result: each probe records its exit status and the run continues.
 set -euo pipefail
@@ -14,11 +16,12 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT="${S09_ROOT:-$HOME/.local/share/ginn-spike-s09/podman}"
 RUNROOT="${S09_RUNROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike-s09}"
+TMPROOT="$RUNROOT/libpod-tmp"
 OUT="${S09_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s09}"
 SRC=docker.io/kalilinux/kali-rolling
 IMAGE=localhost/ginn-s09:kali-rolling
 CTRS=(s09a0 s09a s09b s09c s09p s09q s09s)
-P=(podman --root "$ROOT" --runroot "$RUNROOT")
+P=(podman --root "$ROOT" --runroot "$RUNROOT" --tmpdir "$TMPROOT")
 ROWS="$OUT/rows.tsv"
 RSS="$OUT/rss.tsv"
 CAPS="$OUT/caps.txt"
@@ -249,7 +252,7 @@ cleanup() {
 }
 
 cmd_run() {
-  mkdir -p "$OUT" "$(dirname "$ROOT")" "$RUNROOT"
+  mkdir -p "$OUT" "$(dirname "$ROOT")" "$RUNROOT" "$TMPROOT"
   : > "$ROWS"
   : > "$RSS"
   : > "$CAPS"
@@ -290,7 +293,7 @@ cmd_teardown() {
   rm -rf "$ROOT" "$RUNROOT" 2>/dev/null || true
   if [[ -e $ROOT || -e $RUNROOT ]]; then
     # Subuid-owned layers: retry inside the user namespace.
-    podman --root "$ROOT" --runroot "$RUNROOT" unshare rm -rf "$ROOT" >/dev/null 2>&1 || true
+    "${P[@]}" unshare rm -rf "$ROOT" >/dev/null 2>&1 || true
     rm -rf "$RUNROOT" 2>/dev/null || true
   fi
   if [[ -e $ROOT || -e $RUNROOT ]]; then

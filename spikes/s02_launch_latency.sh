@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
+# Three-flag rule: every podman call passes --root, --runroot and --tmpdir, all inside this spike's
+# directories. Without --tmpdir podman shares the user's libpod tmpdir.
 # S-02 (risk R-006): launch latency for NFR-004 (p95 <= 300 ms), the NFR-005 cold start
 # (FR-017) and Python startup in the FR-046 launcher path.
 # Builds spikes/out/s02_run, runs every measurement against one throwaway rootless container
 # in dedicated podman storage, and prints Markdown to stdout. Requires rootless podman and
-# network access for the first image pull. Never resets podman storage (do that by hand).
+# network access for the first image pull. Never resets podman storage.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -12,6 +14,7 @@ REPO=$(cd "$HERE/.." && pwd)
 OUT="$HERE/out"
 ROOT="${S02_ROOT:-$HOME/.local/share/ginn-spike-s02/podman}"
 RUNROOT="${S02_RUNROOT:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike-s02}"
+TMPROOT="$RUNROOT/libpod-tmp"
 NAME=s02
 IMAGE=docker.io/library/alpine:3
 N=${S02_N:-100}
@@ -19,12 +22,12 @@ WARM=${S02_WARM:-5}
 COLD_N=${S02_COLD_N:-20}
 COLD_WARM=2
 HOST_UID=$(id -u)
-P=(podman --root "$ROOT" --runroot "$RUNROOT")
+P=(podman --root "$ROOT" --runroot "$RUNROOT" --tmpdir "$TMPROOT")
 HELPER="$OUT/s02_run"
 STATE="$OUT/state.json"
 ROWS="$OUT/rows.tsv"
 
-# Only the spike container is removed here. Storage reset is manual, with explicit --root.
+# Only the spike container is removed here. The spike storage is left in place.
 cleanup() { "${P[@]}" rm -f "$NAME" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -102,7 +105,7 @@ IFS= read -r -d '' LAUNCH_EXEC <<'PY' || true
 import json, pathlib, subprocess, sys
 st = json.loads(pathlib.Path(sys.argv[1]).read_text())
 sys.exit(subprocess.run(["podman", "--root", sys.argv[2], "--runroot", sys.argv[3],
-                         "exec", st["name"], *sys.argv[4:]]).returncode)
+                         "--tmpdir", sys.argv[4], "exec", st["name"], *sys.argv[5:]]).returncode)
 PY
 IFS= read -r -d '' LAUNCH_HELPER <<'PY' || true
 import json, pathlib, subprocess, sys
@@ -179,7 +182,7 @@ parity_block() { # label, runner prefix argv...
 }
 
 # ---- build -------------------------------------------------------------------------------
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$TMPROOT"
 cc -std=c11 -O2 -Wall -Wextra -Werror -D_FORTIFY_SOURCE=2 -o "$HELPER" "$HERE/s02_run.c"
 
 # ---- environment -------------------------------------------------------------------------
@@ -187,9 +190,9 @@ echo "## Environment"
 echo
 echo "- kernel: $(uname -r)"
 echo "- cpu: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ //')"
-echo "- podman: $(podman --version), runc: $(/usr/bin/runc --version | head -n1)"
+echo "- podman: $("${P[@]}" --version), runc: $(/usr/bin/runc --version | head -n1)"
 echo "- python3: $(python3 -V 2>&1) at $(command -v python3)"
-echo "- storage: --root $ROOT --runroot $RUNROOT"
+echo "- storage: --root $ROOT --runroot $RUNROOT --tmpdir $TMPROOT"
 if [[ -x /usr/bin/catatonit ]]; then
   INIT=(--init --init-path /usr/bin/catatonit)
   echo "- catatonit: /usr/bin/catatonit present, container runs with --init"
@@ -253,7 +256,7 @@ row "P3: python3 -c 'import argparse, json, subprocess, pathlib'" python3 -c "im
 (cd "$REPO" && row "P4: PYTHONPATH=src python3 -m ginn --version" env PYTHONPATH=src python3 -m ginn --version)
 echo "running: state file read" >&2
 python3 -I -c "$DRIVER" readstate "S: state file read and JSON parse, in process (1000 reads)" 1000 "$STATE" >> "$ROWS"
-row "L1: python3 launcher + state + podman exec" python3 -c "$LAUNCH_EXEC" "$STATE" "$ROOT" "$RUNROOT" true
+row "L1: python3 launcher + state + podman exec" python3 -c "$LAUNCH_EXEC" "$STATE" "$ROOT" "$RUNROOT" "$TMPROOT" true
 row "L2: python3 launcher + state + s02_run" python3 -c "$LAUNCH_HELPER" "$STATE" "$HELPER" true
 table
 echo

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
+# Three-flag rule: every podman call (teardown included) passes --root, --runroot and --tmpdir,
+# all inside this spike's directories. Without --tmpdir podman shares the user's libpod tmpdir.
 #
 # S-01 (risk R-001): can systemd run as PID 1 in a rootless podman container
 # under a root-created, user-owned, controller-delegated cgroup subtree?
@@ -9,7 +11,7 @@
 #                                             storage and cgroup directories
 #
 # Root steps run only as: sudo "$0" --root-setup|--root-move|--root-cleanup ...
-# Every user-level podman call uses the spike storage (--root/--runroot), never
+# Every user-level podman call uses the spike storage (--root, --runroot, --tmpdir), never
 # the default storage. Logs go to GINN_SPIKE_OUT (default
 # ~/.cache/ginn-spike/s01).
 set -euo pipefail
@@ -21,9 +23,10 @@ CTL_SET=(cpu memory pids io cpuset)
 IMAGE=localhost/ginn-s01:debian-stable
 GINN_SPIKE_ROOT="${GINN_SPIKE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/ginn-spike/podman}"
 GINN_SPIKE_RUNROOT="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ginn-spike"
+GINN_SPIKE_TMP="$GINN_SPIKE_RUNROOT/libpod-tmp"
 OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s01}"
 export GINN_SPIKE_ROOT
-PM=(podman --root "$GINN_SPIKE_ROOT" --runroot "$GINN_SPIKE_RUNROOT")
+PM=(podman --root "$GINN_SPIKE_ROOT" --runroot "$GINN_SPIKE_RUNROOT" --tmpdir "$GINN_SPIKE_TMP")
 COMMON_FLAGS=(--systemd=always --cgroupns private --userns keep-id --user 0:0
               --network host --stop-signal SIGRTMIN+3)
 
@@ -242,7 +245,7 @@ cmd_run() {
   local uid gid orig best
   uid=$(id -u)
   gid=$(id -g)
-  mkdir -p "$OUT" "$GINN_SPIKE_ROOT" "$GINN_SPIKE_RUNROOT"
+  mkdir -p "$OUT" "$GINN_SPIKE_ROOT" "$GINN_SPIKE_RUNROOT" "$GINN_SPIKE_TMP"
   chmod 700 "$GINN_SPIKE_RUNROOT"
   orig=$(sed -n 's/^0:://p' /proc/self/cgroup)
   echo "$orig" > "$OUT/orig-cgroup"
