@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Host Setup Record: every host path Host Setup wrote, with its pre-image.
+"""The Host Setup Record: every host path Host Setup wrote, with its pre-image (DR-009, ADR-013).
 
-The record is JSON at `<root>/etc/ginn/setup-<user>.json`, mode 0644, root-owned, written with the
-atomic helper in `_atomic`. FR-001 writes it, FR-002 reads it for the rerun check, and FR-003
-(undo) restores from it (DR-009). It holds two lists:
+The record is JSON at `<root>/etc/ginn/setup-<user>.json`, mode 0600 and root-owned. It is written
+with the atomic helper in `_atomic`, under a fixed temporary name. FR-001 writes it, FR-002 reads it
+for the rerun check, and FR-003 (undo) restores from it. Schema 2 holds:
 
-- `paths`: the paths Host Setup writes. Each carries its pre-image, the state before setup, which
-  is captured before the first write. Once the record is complete, each also carries its
-  post-image. The record file lists itself with the post-image `self`, because its own digest
-  cannot be stored in it.
+- `paths`: the paths setup writes. Each carries its pre-image, the state before setup, which is
+  captured before the first write. `kind` is file, append-lines (a file that other users' setups
+  also append to, such as /etc/subuid), dir or symlink. `shared` is true for a path that every
+  user shares, and false for a path named after one user. Once the record is complete, each entry
+  also carries its post-image. The record file lists itself with the post-image `self`, because
+  its own digest cannot be stored in it.
 - `service_paths`: the paths the supervisor run script writes when the service starts (ADR-003).
   They carry pre-images only, because setup does not write them.
+- `boot_id`: the boot id read when the service-written pre-images were captured, or null when the
+  host has none. cgroup state does not survive a reboot, so undo compares it with the current boot.
 
-A file pre-image is stored as its bytes in base64, so undo can restore it exactly. A file
-post-image is a sha256 digest, because it is only compared. A symbolic link stores its target.
+A file pre-image is stored with its mode and its bytes in base64, so undo can restore it exactly.
+A file post-image has its mode and a sha256 digest, because it is only compared. A directory image
+has its mode. A symbolic link stores its target.
 """
 
 from __future__ import annotations
@@ -27,16 +32,23 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ginn.errors import make
+from ginn.errors import GinnError, make
 from ginn.hostsetup._atomic import atomic_write
 from ginn.hostsetup.subids import SubIdEntry
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RECORD_DIR = "etc/ginn"
-RECORD_MODE = 0o644
+RECORD_MODE = 0o600
 USER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 STATUSES: frozenset[str] = frozenset({"pending", "complete"})
-KINDS: frozenset[str] = frozenset({"file", "dir", "symlink"})
+KINDS: frozenset[str] = frozenset({"file", "append-lines", "dir", "symlink"})
+STATE_OF_KIND: dict[str, str] = {
+    "file": "file",
+    "append-lines": "file",
+    "dir": "dir",
+    "symlink": "symlink",
+}
+"""The image state that a path of each kind must have on the host (`append-lines` is a file)."""
 _PRE_FIELDS: dict[str, frozenset[str]] = {
     "absent": frozenset(),
     "file": frozenset({"mode", "data"}),
@@ -45,23 +57,46 @@ _PRE_FIELDS: dict[str, frozenset[str]] = {
 }
 _POST_FIELDS: dict[str, frozenset[str]] = {
     "absent": frozenset(),
-    "file": frozenset({"sha256"}),
-    "dir": frozenset(),
+    "file": frozenset({"mode", "sha256"}),
+    "dir": frozenset({"mode"}),
     "symlink": frozenset({"target"}),
     "self": frozenset(),
 }
 _TOP_KEYS = frozenset(
-    {"schema", "user", "uid", "gid", "timestamp", "status", "subids", "paths", "service_paths"}
+    {
+        "schema",
+        "user",
+        "uid",
+        "gid",
+        "timestamp",
+        "status",
+        "subids",
+        "boot_id",
+        "paths",
+        "service_paths",
+    }
 )
+_ENTRY_KEYS = frozenset({"path", "kind", "shared", "pre"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+
+RECORD_FIX = (
+    "inspect {path} with 'sudo ls -l {path}', and keep a copy with 'sudo cp -p' before you "
+    "change it, because it holds the pre-images"
+)
+"""The remedy for a record that cannot be read. It never moves the record aside."""
+SYSTEM_FIX = (
+    "inspect {path} with 'sudo ls -ld {path}' and 'sudo readlink -f {path}', then correct it by "
+    "hand"
+)
+"""The remedy for a system path, such as var/service, etc/sv or etc/ginn. It never moves it."""
 
 
 @dataclass(frozen=True)
 class Image:
     """The state of one path. `state` is absent, file, dir, symlink, or self (record file only).
 
-    A pre-image of a file has `mode` and `data`. A post-image of a file has `sha256`. A directory
-    pre-image has `mode`. A symbolic link has `target`.
+    A file image has `mode`, and a pre-image also has `data`, while a post-image has `sha256`. A
+    directory image has `mode`. A symbolic link has `target`.
     """
 
     state: str
@@ -73,12 +108,13 @@ class Image:
 
 @dataclass(frozen=True)
 class PathEntry:
-    """One host path. `kind` is file, dir or symlink. `post` is None until the record completes."""
+    """One host path. `kind` is file, append-lines, dir or symlink. `post` is None until done."""
 
     path: str
     kind: str
     pre: Image
     post: Image | None = None
+    shared: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +137,7 @@ class HostSetupRecord:
     subids: SubIds | None
     paths: tuple[PathEntry, ...]
     service_paths: tuple[PathEntry, ...] = ()
+    boot_id: str | None = None
 
 
 class RecordError(ValueError):
@@ -112,6 +149,13 @@ def relpath(user: str) -> str:
     return f"{RECORD_DIR}/setup-{user}.json"
 
 
+def unsafe(path: Path, reason: str) -> GinnError:
+    """Return GINN-E-SETUP-PATH-UNSAFE for `path`. The remedy depends on what `path` is."""
+    is_record = path.name.startswith("setup-") and path.name.endswith(".json")
+    fix = (RECORD_FIX if is_record else SYSTEM_FIX).format(path=path)
+    return make("GINN-E-SETUP-PATH-UNSAFE", path=str(path), reason=reason, fix=fix)
+
+
 def check(record: HostSetupRecord) -> None:
     """Raise ValueError when `record` breaks a rule that `encode` and `decode` both keep."""
     if not USER_NAME.fullmatch(record.user):
@@ -120,6 +164,8 @@ def check(record: HostSetupRecord) -> None:
         raise ValueError(f"status {record.status!r} is neither pending nor complete")
     if record.status == "complete" and record.subids is None:
         raise ValueError("a complete record has no subordinate ID ranges")
+    if record.boot_id is not None and not _is_boot_id(record.boot_id):
+        raise ValueError(f"boot_id {record.boot_id!r} is not a boot id")
     own = relpath(record.user)
     seen: set[str] = set()
     for entry in (*record.paths, *record.service_paths):
@@ -128,8 +174,10 @@ def check(record: HostSetupRecord) -> None:
             raise ValueError(f"{entry.path} is listed twice")
         seen.add(entry.path)
         if entry.kind not in KINDS:
-            raise ValueError(f"{entry.path}: kind {entry.kind!r} is not file, dir or symlink")
-        if entry.pre.state not in ("absent", entry.kind):
+            raise ValueError(
+                f"{entry.path}: kind {entry.kind!r} is not file, append-lines, dir or symlink"
+            )
+        if entry.pre.state not in ("absent", STATE_OF_KIND[entry.kind]):
             raise ValueError(f"{entry.path}: pre-image {entry.pre.state} does not fit {entry.kind}")
         _image_obj(entry.pre, pre=True)
     if own not in seen:
@@ -142,7 +190,7 @@ def check(record: HostSetupRecord) -> None:
         if entry.post.state == "self":
             if entry.path != own:
                 raise ValueError(f"{entry.path} claims the record's own post-image")
-        elif entry.post.state not in ("absent", entry.kind):
+        elif entry.post.state not in ("absent", STATE_OF_KIND[entry.kind]):
             raise ValueError(f"{entry.path}: post-image {entry.post.state} is not a {entry.kind}")
         _image_obj(entry.post, pre=False)
     for entry in record.service_paths:
@@ -163,6 +211,7 @@ def encode(record: HostSetupRecord) -> bytes:
         "subids": None
         if record.subids is None
         else {"uid": _sub_obj(record.subids.uid), "gid": _sub_obj(record.subids.gid)},
+        "boot_id": record.boot_id,
         "paths": [_entry_obj(entry, with_post=True) for entry in record.paths],
         "service_paths": [_entry_obj(entry, with_post=False) for entry in record.service_paths],
     }
@@ -177,7 +226,7 @@ def decode(raw: bytes) -> HostSetupRecord:
         raise RecordError(f"it is not JSON ({exc})") from exc
     if not isinstance(obj, dict) or set(obj) != _TOP_KEYS:
         raise RecordError("its top level does not have exactly the record fields")
-    if obj["schema"] != SCHEMA_VERSION:
+    if obj["schema"] != SCHEMA_VERSION or isinstance(obj["schema"], bool):
         raise RecordError(f"its schema is {obj['schema']!r}, not {SCHEMA_VERSION}")
     try:
         record = HostSetupRecord(
@@ -187,6 +236,7 @@ def decode(raw: bytes) -> HostSetupRecord:
             timestamp=_text(obj["timestamp"], "timestamp"),
             status=_text(obj["status"], "status"),
             subids=_subids_from(obj["subids"]),
+            boot_id=_boot_from(obj["boot_id"]),
             paths=tuple(_entry_from(item, with_post=True) for item in _items(obj["paths"])),
             service_paths=tuple(
                 _entry_from(item, with_post=False) for item in _items(obj["service_paths"])
@@ -209,24 +259,16 @@ def load(path: Path) -> HostSetupRecord | None:
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(st.st_mode):
-        raise make(
-            "GINN-E-SETUP-PATH-UNSAFE",
-            path=str(path),
-            reason="is not a regular file, so it cannot be a Host Setup Record",
-        )
+        raise unsafe(path, "is not a regular file, so it cannot be a Host Setup Record")
     try:
         return decode(path.read_bytes())
     except RecordError as exc:
-        raise make(
-            "GINN-E-SETUP-PATH-UNSAFE",
-            path=str(path),
-            reason=f"holds a Host Setup Record that cannot be read: {exc}",
-        ) from exc
+        raise unsafe(path, f"holds a Host Setup Record that cannot be read: {exc}") from exc
 
 
 def save(path: Path, record: HostSetupRecord) -> None:
-    """Write the record atomically with mode 0644 (DR-009). The parent directory must exist."""
-    atomic_write(path, encode(record), RECORD_MODE)
+    """Write the record atomically with mode 0600 (DR-009), under the fixed temporary name."""
+    atomic_write(path, encode(record), RECORD_MODE, fixed_tmp=True)
 
 
 def _check_rel(text: str) -> None:
@@ -237,6 +279,10 @@ def _check_rel(text: str) -> None:
         raise ValueError(f"{text!r} is not a normalised path")
     if any(part in ("", ".", "..") for part in PurePosixPath(text).parts):
         raise ValueError(f"{text!r} leaves the root or is not normalised")
+
+
+def _is_boot_id(text: str) -> bool:
+    return bool(text) and "\0" not in text and "\n" not in text and "\r" not in text
 
 
 def _image_obj(image: Image, *, pre: bool) -> dict[str, Any]:
@@ -274,8 +320,8 @@ def _image_from(obj: object, *, pre: bool) -> Image:
         digest = _text(obj["sha256"], "sha256")
         if _SHA256.fullmatch(digest) is None:
             raise RecordError("a sha256 digest is not 64 lowercase hex digits")
-        return Image("file", sha256=digest)
-    if state == "dir" and pre:
+        return Image("file", mode=_int(obj["mode"], "mode"), sha256=digest)
+    if state == "dir":
         return Image("dir", mode=_int(obj["mode"], "mode"))
     if state == "symlink":
         return Image("symlink", target=_text(obj["target"], "target"))
@@ -286,6 +332,7 @@ def _entry_obj(entry: PathEntry, *, with_post: bool) -> dict[str, Any]:
     obj: dict[str, Any] = {
         "path": entry.path,
         "kind": entry.kind,
+        "shared": entry.shared,
         "pre": _image_obj(entry.pre, pre=True),
     }
     if with_post:
@@ -296,9 +343,11 @@ def _entry_obj(entry: PathEntry, *, with_post: bool) -> dict[str, Any]:
 def _entry_from(item: object, *, with_post: bool) -> PathEntry:
     if not isinstance(item, dict):
         raise RecordError("a path entry is not an object")
-    keys = {"path", "kind", "pre"} | ({"post"} if with_post else set())
+    keys = _ENTRY_KEYS | ({"post"} if with_post else set())
     if set(item) != keys:
         raise RecordError("a path entry does not have exactly its fields")
+    if not isinstance(item["shared"], bool):
+        raise RecordError("a path entry's shared flag is not true or false")
     post = None
     if with_post and item["post"] is not None:
         post = _image_from(item["post"], pre=False)
@@ -307,6 +356,7 @@ def _entry_from(item: object, *, with_post: bool) -> PathEntry:
         kind=_text(item["kind"], "kind"),
         pre=_image_from(item["pre"], pre=True),
         post=post,
+        shared=item["shared"],
     )
 
 
@@ -330,6 +380,15 @@ def _sub_from(obj: object) -> SubIdEntry:
         start=_int(obj["start"], "subids start"),
         count=_int(obj["count"], "subids count"),
     )
+
+
+def _boot_from(value: object) -> str | None:
+    if value is None:
+        return None
+    text = _text(value, "boot_id")
+    if not _is_boot_id(text):
+        raise RecordError("boot_id is not a boot id")
+    return text
 
 
 def _items(value: object) -> list[object]:

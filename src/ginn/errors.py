@@ -6,8 +6,8 @@ ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-
 GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
 GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
 (NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
-(FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002) and GINN-E-SETUP-PATH-UNSAFE (FR-001,
-DR-009). `source` cites the requirement that defines the failure.
+(FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009) and
+GINN-E-SETUP-BUSY (FR-001). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -147,9 +147,16 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-E-SETUP-PATH-UNSAFE",
         exit_code=77,
         summary="Host Setup refuses {path}: {reason}",
-        remedy="move {path} aside by hand, keeping a copy if it is a Host Setup Record, because it "
-        "holds the pre-images; then run 'sudo ginn host-setup --user <name>' again",
+        remedy="{fix}; then run 'sudo ginn host-setup --user <name>' again",
         source="FR-001, DR-009 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SETUP-BUSY",
+        exit_code=75,
+        summary="another Host Setup holds {lock}; gave up after {seconds} s",
+        remedy="wait for the running 'ginn host-setup' to finish, then run 'sudo ginn host-setup "
+        "--user <name>' again",
+        source="FR-001 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-UNDO-REALMS-EXIST",
@@ -336,7 +343,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
-    (75, "realm or subordinate ID file busy (EX_TEMPFAIL)"),
+    (75, "realm, subordinate ID file or Host Setup busy (EX_TEMPFAIL)"),
     (
         77,
         "Host Setup must run as root, has not run for this user, or refuses an unsafe path it "

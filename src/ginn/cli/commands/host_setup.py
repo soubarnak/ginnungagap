@@ -17,9 +17,9 @@ from ginn.hostsetup.setup import SetupResult, run_setup
 def _configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--user",
-        required=True,
+        default=None,
         metavar="NAME",
-        help="account that gets rootless realms; must already exist",
+        help="account that gets rootless realms; must already exist; a root run needs it",
     )
     parser.add_argument(
         "--root-dir",
@@ -31,7 +31,7 @@ def _configure(parser: argparse.ArgumentParser) -> None:
 
 
 def _run(args: argparse.Namespace, ctx: Context) -> int:
-    result: SetupResult = run_setup(str(args.user), root_dir=Path(str(args.root_dir)))
+    result: SetupResult = run_setup(args.user, root_dir=Path(str(args.root_dir)))
     ctx.output.emit(result.as_dict(), render=result.render)
     return 0
 

@@ -19,7 +19,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
 | 73 | not enough disk space |
-| 75 | realm or subordinate ID file busy (EX_TEMPFAIL) |
+| 75 | realm, subordinate ID file or Host Setup busy (EX_TEMPFAIL) |
 | 77 | Host Setup must run as root, has not run for this user, or refuses an unsafe path it cannot repair (EX_NOPERM) |
 | 125 | reserved; see EXEC_GINN_FAILURE |
 | 130 | interrupted by the user |
@@ -49,7 +49,8 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | `GINN-E-REALM-BUSY` | 75 | {op} in progress | wait for the running operation to finish, then retry | FR-123 AC-1 |
 | `GINN-E-RECOVERY-PENDING` | 4 | realm '{realm}' has an interrupted {op} that was never recovered | if the interrupted {op} was a create, run 'ginn create --resume {realm}' or 'ginn delete {realm}'; otherwise run 'ginn doctor' and retry the {op}, and do not delete the realm | FR-122, NFR-030 (ginn-defined wording; not an SRS code) |
 | `GINN-E-RUNTIME-DIR-UNSAFE` | 77 | runtime directory {path} must be a real directory owned by uid {uid} with mode 0700; found {found} | run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
-| `GINN-E-SETUP-PATH-UNSAFE` | 77 | Host Setup refuses {path}: {reason} | move {path} aside by hand, keeping a copy if it is a Host Setup Record, because it holds the pre-images; then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001, DR-009 (ginn-defined; not an SRS code) |
+| `GINN-E-SETUP-BUSY` | 75 | another Host Setup holds {lock}; gave up after {seconds} s | wait for the running 'ginn host-setup' to finish, then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
+| `GINN-E-SETUP-PATH-UNSAFE` | 77 | Host Setup refuses {path}: {reason} | {fix}; then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001, DR-009 (ginn-defined; not an SRS code) |
 | `GINN-E-SETUP-ROOT` | 77 | Host Setup must run as root | run 'sudo ginn host-setup --user &lt;name&gt;' | FR-001 AC-2 |
 | `GINN-E-SUBID-CONFLICT` | 4 | subordinate ID range {start}:{count} for {user} is no longer free in {path} | free the overlapping line in {path} without changing the recorded range, then run 'sudo ginn host-setup --user {user}' again; Host Setup never picks another range | FR-001 AC-1, FR-002 (ginn-defined; not an SRS code) |
 | `GINN-E-SUBID-LOCK-UNSAFE` | 77 | stale subordinate ID lock {lock} cannot be reclaimed: its reclaim gate {path} is a symbolic link | as root, run 'ls -l {path}' to see where the link points, then run 'rm {path}' to remove the link itself, not its target; then run 'sudo ginn host-setup --user &lt;name&gt;' again | FR-001 (ginn-defined; not an SRS code) |
