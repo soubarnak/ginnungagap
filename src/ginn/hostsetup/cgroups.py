@@ -23,9 +23,10 @@ service that runsvdir starts is in the delegated subtree. A services-on realm is
 through the supervisor, with `--cgroup-parent /ginn/<uid>/<realm>` (ADR-003). `move_self_to` does
 the same write for a given leaf. Only tests call it today.
 
-All kernel I/O goes through `_read_text`, `_write_control` and `_make_dir`. Tests replace these to
-emulate cgroupfs, because cgroupfs semantics (accumulating `+ctrl` writes, auto-created
-interface files) cannot be reproduced on a plain temporary directory.
+All kernel I/O goes through `_read_text`, `_write_control`, `_make_dir` and `_owner_uid`. Tests
+replace these to emulate cgroupfs, because cgroupfs semantics (accumulating `+ctrl` writes,
+auto-created interface files, root-owned leaves) cannot be reproduced on a plain temporary
+directory.
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ GINN_DIR = "ginn"
 SUPERVISOR_LEAF = "supervisor"
 USER_CHOWN_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads", "cgroup.subtree_control")
 TOLERATED_ROOT_ERRNOS: frozenset[int] = frozenset({errno.EBUSY, errno.EACCES})
+ROOT_UID = 0
+ROOT_OWNED_LEAF_FILES: tuple[str, ...] = ("cgroup.procs", "cgroup.threads")
 
 
 @dataclass
@@ -171,8 +174,10 @@ def verify(cgroup_root: Path, uid: int, *, tolerated_root: bool = False) -> Veri
 
     `tolerated_root` is `DelegationPlan.root_refused` from the Host Setup Record. When it is True,
     controllers the root did not enable are reported as warnings, because delegation accepted
-    that refusal. Every other gap is a problem. Each message names the path that is wrong. This
-    is the check `ginn doctor` uses (FR-007).
+    that refusal. Every other gap is a problem. The supervisor leaf and its cgroup.procs and
+    cgroup.threads must be owned by root, so a leaf left user-owned by an older install is a
+    problem too. Each message names the path that is wrong. This is the check `ginn doctor`
+    uses (FR-007).
     """
     if not (cgroup_root / "cgroup.controllers").exists():
         return Verification(problems=[f"{cgroup_root}: cgroup v2 is not mounted"])
@@ -196,17 +201,30 @@ def verify(cgroup_root: Path, uid: int, *, tolerated_root: bool = False) -> Veri
         if not path.exists():
             result.problems.append(f"{path}: missing")
             continue
-        owner = os.stat(path).st_uid
+        owner = _owner_uid(path)
         if owner != uid:
             result.problems.append(f"{path}: owned by uid {owner}, expected {uid}")
     supervisor = user_dir / SUPERVISOR_LEAF
     if not supervisor.is_dir():
         result.problems.append(f"{supervisor}: missing")
+        return result
+    for path in (supervisor, *(supervisor / name for name in ROOT_OWNED_LEAF_FILES)):
+        if not path.exists():
+            result.problems.append(f"{path}: missing")
+            continue
+        owner = _owner_uid(path)
+        if owner != ROOT_UID:
+            result.problems.append(f"{path}: owned by uid {owner}, expected {ROOT_UID}")
     return result
 
 
 def move_self_to(leaf: Path) -> None:
-    """Move the calling process into `leaf` by writing its pid to cgroup.procs (used by M4)."""
+    """Move the calling process into `leaf` by writing its pid to cgroup.procs.
+
+    The supervisor leaf is root-owned (see the module docstring), so a call from a user process
+    fails with EACCES. The runit run script does this write as root, before setpriv (ADR-003,
+    runit_system.py step 3). Only tests call this function.
+    """
     _write_control(leaf / "cgroup.procs", str(os.getpid()))
 
 
@@ -252,3 +270,7 @@ def _make_dir(path: Path) -> bool:
     except FileExistsError:
         return False
     return True
+
+
+def _owner_uid(path: Path) -> int:
+    return os.stat(path).st_uid

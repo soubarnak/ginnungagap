@@ -20,6 +20,8 @@ import pytest
 from ginn.hostsetup import cgroups
 from ginn.hostsetup.cgroups import (
     CONTROLLERS,
+    ROOT_UID,
+    SUPERVISOR_LEAF,
     chown_paths,
     delegate_user_tree,
     enable_controllers,
@@ -42,12 +44,21 @@ ROOT_ENABLED = "cpuset cpu io memory"  # what S-01 found on the host before setu
 
 @dataclass
 class FakeCgroupfs:
-    """Kernel-like behaviour for the three cgroups.py seams, backed by files under `root`."""
+    """Kernel-like behaviour for the four cgroups.py seams, backed by files under `root`."""
 
     root: Path
     writes: list[tuple[Path, str]] = field(default_factory=list)
     mkdirs: list[Path] = field(default_factory=list)
     fail_on: dict[Path, int] = field(default_factory=dict)
+    owners: dict[Path, int] = field(default_factory=dict)
+
+    def owner_uid(self, path: Path) -> int:
+        """Owner of `path`: supervisor leaves are root-owned, other paths use the real stat."""
+        if path in self.owners:
+            return self.owners[path]
+        if SUPERVISOR_LEAF in path.relative_to(self.root).parts:
+            return ROOT_UID
+        return os.stat(path).st_uid
 
     def make_dir(self, path: Path) -> bool:
         if path.exists():
@@ -93,6 +104,7 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCgroupfs:
     kernel = FakeCgroupfs(root)
     monkeypatch.setattr(cgroups, "_make_dir", kernel.make_dir)
     monkeypatch.setattr(cgroups, "_write_control", kernel.write_control)
+    monkeypatch.setattr(cgroups, "_owner_uid", kernel.owner_uid)
     return kernel
 
 
@@ -290,6 +302,32 @@ def test_verify_reports_a_missing_leaf(
     shutil.rmtree(supervisor)
     problems = verify(fake.root, uid).problems
     assert problems == [f"{supervisor}: missing"]
+
+
+@pytest.mark.fr("FR-001")
+def test_verify_accepts_a_root_owned_supervisor_leaf(
+    fake: FakeCgroupfs, chowns: list[tuple[Path, int, int]]
+) -> None:
+    uid = TEST_UID
+    delegate_user_tree(fake.root, uid, TEST_GID)
+    supervisor = _user_tree(fake.root, uid)["supervisor"]
+    for path in (supervisor, supervisor / "cgroup.procs", supervisor / "cgroup.threads"):
+        assert fake.owner_uid(path) == ROOT_UID
+    assert verify(fake.root, uid).problems == []
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.parametrize("name", ["", "cgroup.procs", "cgroup.threads"])
+def test_verify_reports_a_user_owned_supervisor_leaf(
+    fake: FakeCgroupfs, chowns: list[tuple[Path, int, int]], name: str
+) -> None:
+    # An install from before commit 46bedba chowned the leaf to the user. Each user-owned path is
+    # one problem. The empty name selects the leaf directory itself.
+    uid = TEST_UID
+    delegate_user_tree(fake.root, uid, TEST_GID)
+    target = _user_tree(fake.root, uid)["supervisor"] / name
+    fake.owners[target] = uid
+    assert verify(fake.root, uid).problems == [f"{target}: owned by uid {uid}, expected 0"]
 
 
 def test_move_self_to_writes_this_pid_into_the_leaf(
