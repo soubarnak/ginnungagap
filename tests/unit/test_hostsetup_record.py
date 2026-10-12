@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Host Setup Record: schema 2 JSON, pre-images, refusals and the atomic write (DR-009).
+"""The Host Setup Records: schema 3 per-user and shared JSON, pre-images, refusals (DR-009).
 
 Each test works on bytes or on a temporary file. Nothing touches the real /etc.
 """
@@ -25,10 +25,11 @@ ENTRY_GID = SubIdEntry(name="alice", start=100000, count=524288)
 DIGEST = "a" * 64
 BINARY = b"\x00\xffline\n\x01"
 BOOT = "6f1d2c3b-0000-4000-8000-000000000001"
+OLD_REASON = "written by a ginn build before F8a/F9a; remove it by hand after checking"
 
 
 def _sample() -> rec.HostSetupRecord:
-    """A complete schema 2 record with each kind of image, shared and per-user entries."""
+    """A complete schema 3 per-user record: subuid and subgid, the user's paths and cgroups."""
     return rec.HostSetupRecord(
         user="alice",
         uid=1000,
@@ -46,10 +47,10 @@ def _sample() -> rec.HostSetupRecord:
                 shared=True,
             ),
             rec.PathEntry(
-                path="etc/ginn",
-                kind="dir",
-                pre=rec.Image("absent"),
-                post=rec.Image("dir", mode=0o755),
+                path="etc/subgid",
+                kind="append-lines",
+                pre=rec.Image("file", mode=0o644, data=BINARY),
+                post=rec.Image("file", mode=0o644, sha256=DIGEST),
                 shared=True,
             ),
             rec.PathEntry(
@@ -78,6 +79,34 @@ def _sample() -> rec.HostSetupRecord:
             ),
         ),
         service_paths=(
+            rec.PathEntry(path="run/ginn/1000", kind="dir", pre=rec.Image("absent")),
+            rec.PathEntry(path="sys/fs/cgroup/ginn/1000", kind="dir", pre=rec.Image("absent")),
+            rec.PathEntry(
+                path="sys/fs/cgroup/ginn/1000/supervisor",
+                kind="dir",
+                pre=rec.Image("absent"),
+            ),
+        ),
+    )
+
+
+def _shared_sample() -> rec.SharedRecord:
+    """A schema 3 shared record: shared directories, the record's own file and the service paths."""
+    return rec.SharedRecord(
+        timestamp="2027-01-15T08:00:00.000Z",
+        boot_id=BOOT,
+        paths=(
+            rec.PathEntry(path="etc/ginn", kind="dir", pre=rec.Image("absent"), shared=True),
+            rec.PathEntry(
+                path="etc/ginn/shared.json",
+                kind="file",
+                pre=rec.Image("absent"),
+                post=rec.Image("self"),
+                shared=True,
+            ),
+            rec.PathEntry(path="etc/sv", kind="dir", pre=rec.Image("absent"), shared=True),
+        ),
+        service_paths=(
             rec.PathEntry(
                 path="sys/fs/cgroup/cgroup.subtree_control",
                 kind="file",
@@ -90,7 +119,7 @@ def _sample() -> rec.HostSetupRecord:
                 pre=rec.Image("absent"),
                 shared=True,
             ),
-            rec.PathEntry(path="run/ginn/1000", kind="dir", pre=rec.Image("absent")),
+            rec.PathEntry(path="run/ginn", kind="dir", pre=rec.Image("absent"), shared=True),
         ),
     )
 
@@ -100,9 +129,19 @@ def _json(record: rec.HostSetupRecord) -> dict[str, Any]:
     return loaded
 
 
+def _shared_json(record: rec.SharedRecord) -> dict[str, Any]:
+    loaded: dict[str, Any] = json.loads(rec.encode_shared(record))
+    return loaded
+
+
 def _refused(body: dict[str, Any], match: str) -> None:
     with pytest.raises(rec.RecordError, match=match):
         rec.decode(json.dumps(body).encode("utf-8"))
+
+
+def _shared_refused(body: dict[str, Any], match: str) -> None:
+    with pytest.raises(rec.RecordError, match=match):
+        rec.decode_shared(json.dumps(body).encode("utf-8"))
 
 
 @pytest.mark.fr("DR-009")
@@ -112,9 +151,10 @@ def test_a_record_survives_an_encode_and_decode_round_trip() -> None:
 
 
 @pytest.mark.fr("DR-009")
-def test_the_json_names_the_user_ids_subids_boot_id_status_timestamp_and_schema_2() -> None:
+def test_the_json_names_kind_setup_schema_3_user_ids_subids_boot_id_status_and_timestamp() -> None:
     body = _json(_sample())
-    assert body["schema"] == 2
+    assert body["schema"] == 3
+    assert body["kind"] == "setup"
     assert body["user"] == "alice"
     assert (body["uid"], body["gid"]) == (1000, 1000)
     assert body["timestamp"] == "2027-01-15T08:00:00.000Z"
@@ -143,14 +183,14 @@ def test_a_file_post_image_has_its_mode_and_a_digest_and_not_the_bytes() -> None
 @pytest.mark.fr("DR-009")
 def test_a_directory_post_image_carries_its_mode() -> None:
     body = _json(_sample())
-    directory = next(entry for entry in body["paths"] if entry["path"] == "etc/ginn")
+    directory = next(entry for entry in body["paths"] if entry["path"] == "etc/sv/ginn-alice")
     assert directory["post"] == {"state": "dir", "mode": 0o755}
 
 
 @pytest.mark.fr("DR-009")
 def test_a_directory_post_image_without_its_mode_is_refused() -> None:
     body = _json(_sample())
-    entry = next(item for item in body["paths"] if item["path"] == "etc/ginn")
+    entry = next(item for item in body["paths"] if item["path"] == "etc/sv/ginn-alice")
     entry["post"] = {"state": "dir"}
     _refused(body, "exactly its fields")
 
@@ -165,14 +205,14 @@ def test_the_subid_files_are_kind_append_lines_and_shared() -> None:
 
 
 @pytest.mark.fr("DR-009")
-def test_each_entry_says_whether_it_is_shared_and_a_user_entry_is_not() -> None:
+def test_each_entry_says_whether_it_is_shared_and_only_the_subid_files_are_shared() -> None:
     body = _json(_sample())
     shared = {entry["path"]: entry["shared"] for entry in body["paths"] + body["service_paths"]}
-    assert shared["etc/ginn"] is True
-    assert shared["sys/fs/cgroup/ginn"] is True
-    assert shared["sys/fs/cgroup/cgroup.subtree_control"] is True
+    assert shared["etc/subuid"] is True
+    assert shared["etc/subgid"] is True
     assert shared["etc/sv/ginn-alice"] is False
     assert shared["run/ginn/1000"] is False
+    assert shared["sys/fs/cgroup/ginn/1000/supervisor"] is False
 
 
 @pytest.mark.fr("DR-009")
@@ -187,6 +227,13 @@ def test_a_shared_flag_that_is_not_a_boolean_is_refused() -> None:
     body = _json(_sample())
     body["paths"][1]["shared"] = "yes"
     _refused(body, "shared flag")
+
+
+@pytest.mark.fr("DR-009")
+def test_a_per_user_entry_marked_shared_other_than_a_subid_file_is_refused() -> None:
+    body = _json(_sample())
+    body["paths"][2]["shared"] = True
+    _refused(body, "marked shared")
 
 
 @pytest.mark.fr("DR-009")
@@ -208,9 +255,9 @@ def test_the_record_lists_itself_with_an_absent_pre_image_and_post_image_self() 
 def test_service_paths_carry_pre_images_and_no_post_image() -> None:
     body = _json(_sample())
     assert [entry["path"] for entry in body["service_paths"]] == [
-        "sys/fs/cgroup/cgroup.subtree_control",
-        "sys/fs/cgroup/ginn",
         "run/ginn/1000",
+        "sys/fs/cgroup/ginn/1000",
+        "sys/fs/cgroup/ginn/1000/supervisor",
     ]
     assert all("post" not in entry for entry in body["service_paths"])
 
@@ -276,7 +323,7 @@ def test_a_record_of_schema_1_is_refused_on_read() -> None:
 @pytest.mark.fr("DR-009")
 def test_an_unknown_schema_version_is_refused_on_read() -> None:
     body = _json(_sample())
-    body["schema"] = 3
+    body["schema"] = 4
     _refused(body, "schema")
 
 
@@ -286,6 +333,18 @@ def test_a_record_with_an_extra_top_level_field_is_refused() -> None:
     body["extra"] = 1
     with pytest.raises(ValueError, match="top level"):
         rec.decode(json.dumps(body).encode("utf-8"))
+
+
+@pytest.mark.fr("DR-009")
+def test_a_shared_record_is_refused_as_a_per_user_record_by_its_kind() -> None:
+    body = _shared_json(_shared_sample())
+    _refused(body, "kind")
+
+
+@pytest.mark.fr("DR-009")
+def test_a_per_user_record_is_refused_as_the_shared_record_by_its_kind() -> None:
+    body = _json(_sample())
+    _shared_refused(body, "kind")
 
 
 @pytest.mark.fr("DR-009")
@@ -302,6 +361,152 @@ def test_a_post_image_digest_that_is_not_sha256_hex_is_refused() -> None:
     body["paths"][0]["post"]["sha256"] = "not-a-digest"
     with pytest.raises(ValueError, match="digest"):
         rec.decode(json.dumps(body).encode("utf-8"))
+
+
+@pytest.mark.fr("DR-009")
+def test_a_shared_record_survives_an_encode_and_decode_round_trip() -> None:
+    record = _shared_sample()
+    assert rec.decode_shared(rec.encode_shared(record)) == record
+
+
+@pytest.mark.fr("DR-009")
+def test_the_shared_json_names_kind_shared_schema_3_timestamp_and_boot_id() -> None:
+    body = _shared_json(_shared_sample())
+    assert body["schema"] == 3
+    assert body["kind"] == "shared"
+    assert body["timestamp"] == "2027-01-15T08:00:00.000Z"
+    assert body["boot_id"] == BOOT
+    assert set(body) == {"schema", "kind", "timestamp", "boot_id", "paths", "service_paths"}
+    assert [entry["path"] for entry in body["paths"]] == [
+        "etc/ginn",
+        "etc/ginn/shared.json",
+        "etc/sv",
+    ]
+    assert all(entry["shared"] is True for entry in body["paths"] + body["service_paths"])
+
+
+@pytest.mark.fr("DR-009")
+def test_the_shared_record_has_no_status_and_only_its_own_file_has_a_post_image() -> None:
+    body = _shared_json(_shared_sample())
+    assert "status" not in body
+    own = [entry for entry in body["paths"] if entry["path"] == rec.SHARED_RELPATH]
+    assert own[0]["post"] == {"state": "self"}
+    others = [entry for entry in body["paths"] if entry["path"] != rec.SHARED_RELPATH]
+    assert all(entry["post"] is None for entry in others)
+    assert all("post" not in entry for entry in body["service_paths"])
+    with_post = replace(
+        _shared_sample(),
+        paths=(replace(_shared_sample().paths[0], post=rec.Image("dir", mode=0o755)),)
+        + _shared_sample().paths[1:],
+    )
+    with pytest.raises(ValueError, match="post-image"):
+        rec.encode_shared(with_post)
+    service_post = replace(
+        _shared_sample(),
+        service_paths=(replace(_shared_sample().service_paths[0], post=rec.Image("file", mode=0o644,
+                                                                              sha256=DIGEST)),)
+        + _shared_sample().service_paths[1:],
+    )
+    with pytest.raises(ValueError, match="post-image"):
+        rec.encode_shared(service_post)
+
+
+@pytest.mark.fr("DR-009")
+def test_the_shared_record_must_list_its_own_file_with_its_pre_image_absent() -> None:
+    kept = tuple(entry for entry in _shared_sample().paths if entry.path != rec.SHARED_RELPATH)
+    with pytest.raises(ValueError, match="own file"):
+        rec.encode_shared(replace(_shared_sample(), paths=kept))
+    own_with_data = replace(
+        _shared_sample(),
+        paths=tuple(
+            rec.PathEntry(path=entry.path, kind="file", pre=rec.Image("file", mode=0o600, data=b""),
+                          shared=True)
+            if entry.path == rec.SHARED_RELPATH
+            else entry
+            for entry in _shared_sample().paths
+        ),
+    )
+    with pytest.raises(ValueError, match="absent"):
+        rec.encode_shared(own_with_data)
+
+
+@pytest.mark.fr("DR-009")
+def test_a_shared_directory_must_be_a_directory_whose_pre_image_is_absent() -> None:
+    sv = rec.PathEntry(path="etc/sv", kind="dir", pre=rec.Image("dir", mode=0o755), shared=True)
+    record = replace(
+        _shared_sample(),
+        paths=(_shared_sample().paths[0], _shared_sample().paths[1], sv),
+    )
+    with pytest.raises(ValueError, match="absent"):
+        rec.encode_shared(record)
+
+
+@pytest.mark.fr("DR-009")
+def test_the_shared_record_refuses_a_subid_file_and_an_entry_not_marked_shared() -> None:
+    subuid = rec.PathEntry(path="etc/subuid", kind="append-lines", pre=rec.Image("absent"),
+                           shared=True)
+    with pytest.raises(ValueError, match="kept per user"):
+        rec.encode_shared(replace(_shared_sample(), paths=_shared_sample().paths + (subuid,)))
+    unmarked = rec.PathEntry(path="etc/sv", kind="dir", pre=rec.Image("absent"), shared=False)
+    record = replace(_shared_sample(), paths=(_shared_sample().paths[0], _shared_sample().paths[1],
+                                              unmarked))
+    with pytest.raises(ValueError, match="not marked shared"):
+        rec.encode_shared(record)
+
+
+@pytest.mark.fr("DR-009")
+def test_an_unreadable_shared_record_is_refused_and_never_taken_as_absent(tmp_path: Path) -> None:
+    path = tmp_path / "shared.json"
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(GinnError) as caught:
+        rec.load_shared(path)
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert caught.value.exit_code == 77
+    assert str(path) in caught.value.message
+
+
+@pytest.mark.fr("DR-009")
+def test_a_missing_shared_record_loads_as_none(tmp_path: Path) -> None:
+    assert rec.load_shared(tmp_path / "shared.json") is None
+
+
+@pytest.mark.fr("DR-009")
+def test_save_shared_writes_mode_0600_and_load_shared_reads_it_back(tmp_path: Path) -> None:
+    path = tmp_path / "shared.json"
+    rec.save_shared(path, _shared_sample())
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert rec.load_shared(path) == _shared_sample()
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["shared.json"]
+
+
+@pytest.mark.fr("DR-009")
+@pytest.mark.parametrize("schema", [1, 2])
+def test_a_schema_1_or_2_record_is_refused_on_load_with_the_pre_f8a_reason(
+    tmp_path: Path, schema: int
+) -> None:
+    body = _json(_sample())
+    body["schema"] = schema
+    body.pop("kind", None)
+    path = tmp_path / "setup-alice.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(GinnError) as caught:
+        rec.load(path)
+    assert caught.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert caught.value.exit_code == 77
+    assert caught.value.message == f"Host Setup refuses {path}: {OLD_REASON}"
+
+
+@pytest.mark.fr("DR-009")
+def test_a_schema_2_shared_record_is_refused_on_load_with_the_pre_f8a_reason(
+    tmp_path: Path,
+) -> None:
+    body = _shared_json(_shared_sample())
+    body["schema"] = 2
+    path = tmp_path / "shared.json"
+    path.write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(GinnError) as caught:
+        rec.load_shared(path)
+    assert OLD_REASON in caught.value.message
 
 
 @pytest.mark.fr("DR-009")
@@ -343,6 +548,7 @@ def test_save_writes_the_record_with_mode_0600_and_load_reads_it_back(tmp_path: 
 @pytest.mark.fr("DR-009")
 def test_the_relative_path_of_a_record_sits_under_etc_ginn() -> None:
     assert rec.relpath("alice") == "etc/ginn/setup-alice.json"
+    assert rec.SHARED_RELPATH == "etc/ginn/shared.json"
 
 
 @pytest.mark.fr("NFR-040")

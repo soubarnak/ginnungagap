@@ -147,15 +147,20 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-E-SETUP-PATH-UNSAFE",
         exit_code=77,
         summary="Host Setup refuses {path}: {reason}",
-        remedy="{fix}; then run 'sudo ginn host-setup --user <name>' again",
+        remedy="inspect {path} with 'sudo ls -ld {path}' and 'sudo readlink -f {path}'; for a Host "
+        "Setup Record, keep a copy with 'sudo cp -p' before any change, because it holds the "
+        "pre-images; for a system path, correct it in place by hand; then run 'sudo ginn "
+        "host-setup --user <name>' again",
         source="FR-001, DR-009 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-SETUP-BUSY",
         exit_code=75,
         summary="another Host Setup holds {lock}; gave up after {seconds} s",
-        remedy="wait for the running 'ginn host-setup' to finish, then run 'sudo ginn host-setup "
-        "--user <name>' again",
+        remedy="another 'ginn host-setup' (or its --undo) holds "
+        "/run/lock/ginn-host-setup.lock; the kernel releases that flock when its holder exits, so "
+        "no stale lock exists; wait for that run to finish, then run 'sudo ginn host-setup --user "
+        "<name>' again",
         source="FR-001 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

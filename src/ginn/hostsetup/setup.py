@@ -4,35 +4,54 @@
 `run_setup` runs these steps. Nothing under the target paths is read or written before step 2.
 
 1. The effective uid must be 0 (GINN-E-SETUP-ROOT). Then --user must be given (GINN-E-USAGE).
-2. The user is resolved by name (GINN-E-NO-SUCH-USER). The root account is refused.
-3. Idempotence, with no lock (FR-002). A complete record whose setup-written paths still match
-   their post-images (digest and mode), whose subordinate ID entries cover the recorded ranges and
-   whose planned paths are all recorded, means "already configured". Then nothing is locked,
-   created or written, not even a lock file.
-4. The global lock /run/lock/ginn-host-setup.lock is taken (GINN-E-SETUP-BUSY after 30 s). Under
-   it the record is loaded and the check is repeated, because another run may have finished.
+2. The user is resolved by name (GINN-E-NO-SUCH-USER). The root account is refused. The parents of
+   the user's record are checked (`_check_parents`): each must be a real directory owned by uid 0
+   and not writable by group or others.
+3. The shared record etc/ginn/shared.json is loaded. When it is missing but etc/ginn holds a
+   per-user record, the run refuses with GINN-E-SETUP-PATH-UNSAFE. It never recreates shared.json.
+4. Idempotence, with no lock (FR-002). A complete per-user record whose setup-written paths still
+   match their post-images (digest and mode), whose subordinate ID entries cover the recorded
+   ranges and whose planned paths are all recorded, means "already configured". Then nothing is
+   locked, created or written, shared.json included, not even a lock file. This reads only.
+5. The global lock /run/lock/ginn-host-setup.lock is taken (GINN-E-SETUP-BUSY after 30 s). Under
+   it the records are loaded and the check is repeated, because another run may have finished.
    Directories that this acquisition creates are remembered, so their pre-image is "absent".
-5. Pre-images are captured for every path setup will write and for each service-written path.
-   Nothing is written yet. A repair keeps the stored pre-images, and captures a fresh pre-image of
-   each newly planned path before writing it. Stale temporary names are removed.
-6. The record is written with status pending. This is the first write. When etc/ginn does not
-   exist, the record goes into etc/.ginn.ginn-tmp first, and that directory is renamed to etc/ginn.
-7. The planned directories are created, parents first. A directory that a repair finds with a
+6. The plan is made. Pre-images are captured for every path setup will write and for each
+   service-written path. Nothing is written yet. A repair keeps the stored pre-images, and captures
+   a fresh pre-image of each newly planned path before writing it. Stale temporary names are
+   removed.
+7. The records are written. The first setup writes etc/ginn/shared.json and the per-user record,
+   both into etc/.ginn.ginn-tmp, and then renames that directory to etc/ginn. A crash before the
+   rename leaves only the temporary directory. A later setup rewrites shared.json only when it must
+   add a shared directory (see `_plan`). The per-user record is written with status pending.
+8. The planned directories are created, parents first. A directory that a repair finds with a
    changed mode gets its mode back.
-8. Subordinate IDs for /etc/subuid, then /etc/subgid. The record is written again, still pending.
-9. The service scripts under etc/sv/ginn-<user> (run, finish, log/run).
-10. The service link, last, so runsvdir sees a complete service. On Void the link goes into the
+9. Subordinate IDs for /etc/subuid, then /etc/subgid. The per-user record is written again, still
+   pending.
+10. The service scripts under etc/sv/ginn-<user> (run, finish, log/run).
+11. The service link, last, so runsvdir sees a complete service. On Void the link goes into the
     directory that var/service resolves to, not into var/service itself.
-11. The record is written with status complete and the post-images.
+12. The per-user record is written with status complete and the post-images.
+
+The shared record and the per-user record split the planned paths. A path is shared unless a path
+component names the user or the user's uid (`_is_shared`). The shared record takes the shared
+paths other than the two subordinate ID files, which every user's record keeps. A shared directory
+that the first setup creates goes into shared.json with pre-image absent. When a later user's setup
+must create a shared directory that is missing (for example etc/sv, after an admin removed it), the
+directory is added to shared.json under the global lock, with its true pre-image (absent), only if
+shared.json lacks that path. A later user's setup never changes an existing shared entry, and never
+adds a shared entry to its own record.
 
 A crash after any step leaves a pending record, or a temporary directory with no record. The next
 run keeps the stored pre-images, reuses the stored subordinate ID range, and repeats the steps.
 
-Void keeps /var/service as a symbolic link chain (ADR-013, Decision 10). Setup follows that chain
+Void keeps /var/service as a symbolic link chain (ADR-013, Decision 10). Setup follows the chain
 inside the root, hop by hop with readlink: a relative target resolves against the directory of its
 link, and an absolute target is re-rooted under the root. The chain may be at most 40 hops long.
-Every other path refuses symbolic links. The chain must end at a real directory owned by uid 0,
-or the run refuses with GINN-E-SETUP-PATH-UNSAFE before any write.
+The chain resolution follows symbolic links at any component that it reaches while resolving the
+var/service chain. The var component itself, and every other path, refuse symbolic links. The chain
+must end at a real directory owned by uid 0, or the run refuses with GINN-E-SETUP-PATH-UNSAFE
+before any write.
 
 The service-written paths are the root cgroup subtree_control, the ginn cgroup directories, and
 /run/ginn with its <uid> directory. The supervisor run script writes them when the service starts
@@ -80,7 +99,7 @@ LOCK_POLL_SECONDS = 0.05
 SUBUID = "etc/subuid"
 SUBGID = "etc/subgid"
 TMP_DIR = "etc/.ginn.ginn-tmp"
-"""The directory the first record is written into, before it is renamed to etc/ginn."""
+"""The directory the first records are written into, before it is renamed to etc/ginn."""
 BOOT_ID = "proc/sys/kernel/random/boot_id"
 LINK_PARENT = runit_system.LINK_PARENT
 MAX_HOPS = 40
@@ -100,7 +119,12 @@ class UserInfo(NamedTuple):
 UserLookup = Callable[[str], UserInfo]
 """Resolves a user name. Raises KeyError for an unknown name, as pwd.getpwnam does."""
 FaultHook = Callable[[str], None]
-"""Called with the name of each step after it finishes. Tests raise here to simulate a crash."""
+"""Called with the name of each step after it finishes. Tests raise here to simulate a crash.
+
+The steps are "tmpdir" (first setup only, after both records are in the temporary directory and
+before its rename), "pending", "dirs", "subuid", "subgid", "subids", "sv", "symlink", "complete",
+and "shared" (a later setup that added a shared directory, after shared.json is written).
+"""
 Clock = Callable[[], float]
 OwnerOf = Callable[[Path], int]
 """Returns the owning uid of a real directory. Tests inject a root owner: they run as a user."""
@@ -108,7 +132,7 @@ OwnerOf = Callable[[Path], int]
 
 @dataclass(frozen=True)
 class SetupResult:
-    """The outcome of one `run_setup` call."""
+    """The outcome of one `run_setup` call. `paths` counts the per-user record's paths."""
 
     user: str
     uid: int
@@ -138,6 +162,14 @@ class SetupResult:
 
 
 @dataclass(frozen=True)
+class _Host:
+    """The root that every host path lies under, and the owner check that parents must pass."""
+
+    root: Path
+    owner_of: OwnerOf
+
+
+@dataclass(frozen=True)
 class _Target:
     """What one run writes for `user`: the rendered scripts and the resolved path of the link."""
 
@@ -149,7 +181,7 @@ class _Target:
 
     @property
     def leaves(self) -> dict[str, str]:
-        """Every planned file, link and append-only file, with its kind."""
+        """Every planned per-user file, link and append-only file, with its kind."""
         leaves = {
             rec.relpath(self.user): "file",
             SUBUID: "append-lines",
@@ -162,7 +194,25 @@ class _Target:
     @property
     def write_paths(self) -> tuple[str, ...]:
         """Every path this run writes, so each can be swept of its stale temporary name."""
-        return (rec.relpath(self.user), SUBUID, SUBGID, self.link_rel, *self.rendered)
+        return (
+            rec.relpath(self.user),
+            rec.SHARED_RELPATH,
+            SUBUID,
+            SUBGID,
+            self.link_rel,
+            *self.rendered,
+        )
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """What one run will write: the per-user record, the shared record, and the shared dirs."""
+
+    user: rec.HostSetupRecord
+    shared: rec.SharedRecord
+    shared_changed: bool
+    dirs: tuple[rec.PathEntry, ...]
+    """The shared directories that this run must create, whether or not shared.json lists them."""
 
 
 def run_setup(
@@ -179,9 +229,9 @@ def run_setup(
     """Run Host Setup for `user` with every host path under `root_dir`. See the module docstring.
 
     `euid` defaults to the process's effective uid, and `lookup_user` to pwd.getpwnam. `clock`
-    gives epoch seconds for the record's timestamp. `fault` is called after each step. `owner_of`
-    gives the owner of the directory that the service link goes into, and defaults to the
-    real owner. `lock_timeout` is how long to wait for the global lock.
+    gives epoch seconds for the records' timestamps. `fault` is called after each step. `owner_of`
+    gives the owner of a real directory, and defaults to the real owner. `lock_timeout` is how long
+    to wait for the global lock.
     """
     if (os.geteuid() if euid is None else euid) != 0:
         raise make("GINN-E-SETUP-ROOT")
@@ -189,43 +239,46 @@ def run_setup(
         raise make("GINN-E-USAGE", detail="--user NAME is required")
     root = _check_root(root_dir)
     info = _resolve(user, lookup_user or _pwd_lookup)
-    owner = owner_of or _owner_uid
+    host = _Host(root, owner_of or _owner_uid)
     own = rec.relpath(user)
     record_path = root / own
-    _check_parents(root, own)
+    shared_path = root / rec.SHARED_RELPATH
+    _check_parents(host, own)
     current = rec.load(record_path)
-    if current is not None and current.status == "complete":
-        if _intact(root, current, _target(root, user, info, owner)):
+    shared = rec.load_shared(shared_path)
+    if current is not None and current.status == "complete" and shared is not None:
+        if _intact(host, current, _target(host, user, info)):
             return _result(current, record_path, already=True)
-    with _global_lock(root, lock_timeout) as created:
+    if shared is None and current is not None:
+        _require_shared(host, shared)
+    with _global_lock(host, lock_timeout) as created:
         current = rec.load(record_path)
-        target = _target(root, user, info, owner)
+        shared = rec.load_shared(shared_path)
+        _require_shared(host, shared)
+        target = _target(host, user, info)
         if current is not None and current.status == "complete":
-            if _intact(root, current, target):
+            if _intact(host, current, target):
                 return _result(current, record_path, already=True)
         now = now_iso(clock)
-        if current is None:
-            pending = _capture(root, target, created, now)
-        else:
-            pending = _repair(root, current, target, created, now)
-        _guard(root, pending)
-        _sweep(root, target)
-        _write_pending(root, record_path, pending)
+        plan = _plan(host, target, current, shared, created, now)
+        _guard(host, (*plan.user.paths, *plan.shared.paths))
+        _sweep(host, target)
+        _write_records(host, record_path, shared_path, plan, fault)
         _hit(fault, "pending")
-        _make_planned_dirs(root, pending)
+        _make_planned_dirs(host, (*plan.dirs, *plan.user.paths))
         _hit(fault, "dirs")
-        pending = replace(pending, subids=_subids_step(root, target, pending, fault))
+        pending = replace(plan.user, subids=_subids_step(host, target, plan.user, fault))
         rec.save(record_path, pending)
         _hit(fault, "subids")
-        _write_scripts(root, target)
+        _write_scripts(host, target)
         _hit(fault, "sv")
-        _link_service(root, target)
+        _link_service(host, target)
         _hit(fault, "symlink")
         done = replace(
             pending,
             status="complete",
             timestamp=now,
-            paths=tuple(_post(root, entry, own) for entry in pending.paths),
+            paths=tuple(_post(host, entry, own) for entry in pending.paths),
         )
         rec.save(record_path, done)
         _hit(fault, "complete")
@@ -287,9 +340,9 @@ def _render(user: str, info: UserInfo) -> dict[str, str]:
     return runit_system.render(user, info.uid, info.gid, info.home, xdg)
 
 
-def _target(root: Path, user: str, info: UserInfo, owner_of: OwnerOf) -> _Target:
+def _target(host: _Host, user: str, info: UserInfo) -> _Target:
     """Plan the writes for `user`. Resolves the service chain, which reads and never writes."""
-    service = _resolve_service_dir(root, owner_of)
+    service = _resolve_service_dir(host)
     return _Target(
         user=user,
         uid=info.uid,
@@ -299,16 +352,17 @@ def _target(root: Path, user: str, info: UserInfo, owner_of: OwnerOf) -> _Target
     )
 
 
-def _resolve_service_dir(root: Path, owner_of: OwnerOf) -> str:
-    """Follow the var/service chain inside `root` and return the directory the link goes into.
+def _resolve_service_dir(host: _Host) -> str:
+    """Follow the var/service chain inside the root and return the directory the link goes into.
 
-    Only the chain may hold symbolic links. Each hop is read with readlink, so the kernel never
-    follows one. A relative target resolves against the directory of its link, and an absolute
-    target is re-rooted under `root`. A `..` that would leave `root` is refused, and so is a chain
-    of more than MAX_HOPS hops. The chain must end at a real directory owned by uid 0, or it must
-    be absent altogether, in which case setup creates it as a plain directory.
+    `var` itself must be a real directory. From `service` on, each symbolic link that the chain
+    reaches is read with readlink, so the kernel never follows one. A relative target resolves
+    against the directory of its link, and an absolute target is re-rooted under the root. A `..`
+    that would leave the root is refused, and so is a chain of more than MAX_HOPS hops. The chain
+    must end at a real directory owned by uid 0, or it must be absent altogether, in which case
+    setup creates it as a plain directory.
     """
-    _check_parents(root, f"{PurePosixPath(LINK_PARENT).parts[0]}/x")
+    _check_parents(host, f"{PurePosixPath(LINK_PARENT).parts[0]}/x")
     pending = list(PurePosixPath(LINK_PARENT).parts)
     done: list[str] = []
     hops = 0
@@ -317,13 +371,13 @@ def _resolve_service_dir(root: Path, owner_of: OwnerOf) -> str:
         part = pending.pop(0)
         if part == "..":
             if not done:
-                raise _unsafe(root / LINK_PARENT, "its symbolic link chain leaves the root")
+                raise _unsafe(host.root / LINK_PARENT, "its symbolic link chain leaves the root")
             done.pop()
             continue
         if missing:
             done.append(part)
             continue
-        here = root.joinpath(*done, part)
+        here = host.root.joinpath(*done, part)
         state, _, link = _probe(here)
         if state == "symlink":
             hops += 1
@@ -345,99 +399,25 @@ def _resolve_service_dir(root: Path, owner_of: OwnerOf) -> str:
             raise _unsafe(here, f"is a {state} in the var/service chain, but a directory is needed")
         done.append(part)
     if not done:
-        raise _unsafe(root / LINK_PARENT, "resolves to the root directory")
+        raise _unsafe(host.root / LINK_PARENT, "resolves to the root directory")
     rel = "/".join(done)
     if missing:
         return rel
-    owner = owner_of(root / rel)
+    owner = host.owner_of(host.root / rel)
     if owner != 0:
-        raise _unsafe(root / rel, f"is owned by uid {owner}, but uid 0 must own it")
+        raise _unsafe(host.root / rel, f"is owned by uid {owner}, but uid 0 must own it")
     return rel
 
 
-def _capture(
-    root: Path,
-    target: _Target,
-    created: set[str],
-    now: str,
-) -> rec.HostSetupRecord:
-    """Read the pre-image of every path this run will write, and of each service path. No writes."""
-    entries = _entries(root, target, set(), created)
-    service: list[rec.PathEntry] = []
-    for rel, kind in _service_written(target.uid):
-        pre = _read(root, rel, pre=True)
-        _expect(root / rel, pre, kind)
-        service.append(rec.PathEntry(path=rel, kind=kind, pre=pre, shared=_is_shared(rel, target)))
-    return rec.HostSetupRecord(
-        user=target.user,
-        uid=target.uid,
-        gid=target.gid,
-        timestamp=now,
-        status="pending",
-        subids=None,
-        paths=_sorted(entries),
-        service_paths=_sorted(service),
-        boot_id=read_boot_id(root),
-    )
+def _is_shared(rel: str, target: _Target) -> bool:
+    """True unless the path names this user or this user's uid (ADR-013, Decision 12)."""
+    own = {f"ginn-{target.user}", f"setup-{target.user}.json", str(target.uid)}
+    return not any(part in own for part in PurePosixPath(rel).parts)
 
 
-def _repair(
-    root: Path,
-    current: rec.HostSetupRecord,
-    target: _Target,
-    created: set[str],
-    now: str,
-) -> rec.HostSetupRecord:
-    """Keep every stored pre-image, and add a fresh one for each newly planned path (m3)."""
-    kept = tuple(replace(entry, post=None) for entry in current.paths)
-    fresh = _entries(root, target, {entry.path for entry in kept}, created)
-    return replace(
-        current,
-        uid=target.uid,
-        gid=target.gid,
-        status="pending",
-        timestamp=now,
-        paths=_sorted((*kept, *fresh)),
-    )
-
-
-def _entries(
-    root: Path,
-    target: _Target,
-    have: set[str],
-    created: set[str],
-) -> list[rec.PathEntry]:
-    """Return entries for the planned paths that are not in `have`, with fresh pre-images.
-
-    A directory that existed before setup is not recorded, because setup does not write it. A
-    directory or file that `created` names was made by this run's lock, so its pre-image is absent.
-    """
-    leaves = target.leaves
-    dirs: set[str] = {LOCK_DIR, *_ancestors(LOCK_DIR)}
-    for rel in leaves:
-        dirs.update(_ancestors(rel))
-    entries: list[rec.PathEntry] = []
-    for rel in sorted(dirs):
-        if rel in have:
-            continue
-        if rel in created:
-            pre = rec.Image("absent")
-        else:
-            pre = _read(root, rel, pre=True)
-            if pre.state == "dir":
-                continue
-            _expect(root / rel, pre, "dir")
-        entries.append(rec.PathEntry(path=rel, kind="dir", pre=pre, shared=_is_shared(rel, target)))
-    for rel, kind in sorted(leaves.items()):
-        if rel in have:
-            continue
-        if rel in created:
-            pre = rec.Image("absent")
-        else:
-            pre = _read(root, rel, pre=True)
-            _expect(root / rel, pre, kind)
-        entries.append(rec.PathEntry(path=rel, kind=kind, pre=pre, shared=_is_shared(rel, target)))
-    return entries
+def _is_user_entry(entry: rec.PathEntry) -> bool:
+    """True for an entry that the per-user record keeps: a user path, or a subordinate ID file."""
+    return not entry.shared or entry.path in rec.SUBID_FILES
 
 
 def _service_written(uid: int) -> tuple[tuple[str, str], ...]:
@@ -455,14 +435,110 @@ def _service_written(uid: int) -> tuple[tuple[str, str], ...]:
     )
 
 
-def _is_shared(rel: str, target: _Target) -> bool:
-    """True unless the path names this user or this user's uid (ADR-013, Decision 12)."""
-    own = {f"ginn-{target.user}", f"setup-{target.user}.json", str(target.uid)}
-    return not any(part in own for part in PurePosixPath(rel).parts)
+def _service_entries(host: _Host, target: _Target, *, shared: bool) -> list[rec.PathEntry]:
+    """Capture the pre-images of the service-written paths of one classification (ADR-013, D12)."""
+    entries: list[rec.PathEntry] = []
+    for rel, kind in _service_written(target.uid):
+        if _is_shared(rel, target) != shared:
+            continue
+        pre = _read(host, rel, pre=True)
+        _expect(host.root / rel, pre, kind)
+        entries.append(rec.PathEntry(path=rel, kind=kind, pre=pre, shared=shared))
+    return entries
 
 
-def _intact(root: Path, current: rec.HostSetupRecord, target: _Target) -> bool:
-    """True when a complete record still describes the host (FR-002). Reads only."""
+def _own_entry() -> rec.PathEntry:
+    """The shared record's own file: pre-image absent, and post-image self (ADR-013, Decision 9)."""
+    return rec.PathEntry(
+        path=rec.SHARED_RELPATH,
+        kind="file",
+        pre=rec.Image("absent"),
+        post=rec.Image("self"),
+        shared=True,
+    )
+
+
+def _require_shared(host: _Host, shared: rec.SharedRecord | None) -> None:
+    """Refuse when shared.json is missing but etc/ginn holds a per-user record (FR-001, DR-009).
+
+    The pre-images of the shared paths exist only in shared.json, so it is never recreated here.
+    With no per-user record in etc/ginn, a missing shared.json is simply written by the next setup.
+    Reads only.
+    """
+    if shared is not None:
+        return
+    directory = host.root / rec.RECORD_DIR
+    if _probe(directory)[0] != "dir":
+        return
+    names = sorted(name for name in os.listdir(directory) if rec.is_record_name(name))
+    if names:
+        raise _unsafe(
+            host.root / rec.SHARED_RELPATH,
+            f"is missing, but {rec.RECORD_DIR} holds the record {names[0]}; restore shared.json "
+            "from a copy, and do not let setup recreate it",
+        )
+
+
+def _plan(
+    host: _Host,
+    target: _Target,
+    current: rec.HostSetupRecord | None,
+    shared: rec.SharedRecord | None,
+    created: set[str],
+    now: str,
+) -> _Plan:
+    """Capture every pre-image this run needs, and build the records it will write. No writes.
+
+    A path that is absent now, or that `created` names, is planned. An existing path is not
+    recorded, because setup does not write it. A repair keeps the stored per-user pre-images.
+    The shared record is built the first time (`shared` is None), and afterwards is only grown:
+    a shared directory that this run must create is added when shared.json lacks it. A shared entry
+    that shared.json already holds is never changed, and no shared entry goes into the per-user
+    record.
+    """
+    kept = current.paths if current is not None else ()
+    fresh = _entries(host, target, {entry.path for entry in kept}, created)
+    user_fresh = [entry for entry in fresh if _is_user_entry(entry)]
+    shared_fresh = [entry for entry in fresh if not _is_user_entry(entry)]
+    if current is None:
+        user = rec.HostSetupRecord(
+            user=target.user,
+            uid=target.uid,
+            gid=target.gid,
+            timestamp=now,
+            status="pending",
+            subids=None,
+            paths=_sorted(user_fresh),
+            service_paths=_sorted(_service_entries(host, target, shared=False)),
+            boot_id=read_boot_id(host.root),
+        )
+    else:
+        user = replace(
+            current,
+            uid=target.uid,
+            gid=target.gid,
+            status="pending",
+            timestamp=now,
+            paths=_sorted((*(replace(entry, post=None) for entry in kept), *user_fresh)),
+        )
+    if shared is None:
+        first = rec.SharedRecord(
+            timestamp=now,
+            paths=_sorted((_own_entry(), *shared_fresh)),
+            service_paths=_sorted(_service_entries(host, target, shared=True)),
+            boot_id=read_boot_id(host.root),
+        )
+        return _Plan(user, first, True, _sorted(shared_fresh))
+    known = {entry.path for entry in shared.paths}
+    additions = [entry for entry in shared_fresh if entry.path not in known]
+    if not additions:
+        return _Plan(user, shared, False, _sorted(shared_fresh))
+    grown = replace(shared, paths=_sorted((*shared.paths, *additions)))
+    return _Plan(user, grown, True, _sorted(shared_fresh))
+
+
+def _intact(host: _Host, current: rec.HostSetupRecord, target: _Target) -> bool:
+    """True when a complete per-user record still describes the host (FR-002). Reads only."""
     if (current.uid, current.gid) != (target.uid, target.gid) or current.subids is None:
         return False
     recorded = {entry.path for entry in current.paths}
@@ -474,79 +550,105 @@ def _intact(root: Path, current: rec.HostSetupRecord, target: _Target) -> bool:
             continue
         if entry.post is None:
             return False
-        if _read(root, entry.path, pre=False) != entry.post:
+        if _read(host, entry.path, pre=False) != entry.post:
             return False
-    return _covers(root, SUBUID, current.subids.uid) and _covers(root, SUBGID, current.subids.gid)
+    return _covers(host, SUBUID, current.subids.uid) and _covers(
+        host, SUBGID, current.subids.gid
+    )
 
 
-def _covers(root: Path, rel: str, entry: subids.SubIdEntry) -> bool:
+def _covers(host: _Host, rel: str, entry: subids.SubIdEntry) -> bool:
     """True when the file has a line for the name that covers the recorded range (Decision 16)."""
-    _check_parents(root, rel)
-    state, _, _ = _probe(root / rel)
+    _check_parents(host, rel)
+    state, _, _ = _probe(host.root / rel)
     if state != "file":
         return False
-    text = (root / rel).read_bytes().decode("utf-8", errors="surrogateescape")
+    text = (host.root / rel).read_bytes().decode("utf-8", errors="surrogateescape")
     return any(
         line.name == entry.name and line.start <= entry.start and line.end >= entry.end
         for line in subids.parse_entries(text)
     )
 
 
-def _guard(root: Path, record: rec.HostSetupRecord) -> None:
-    """Refuse before any write when a path the record lists is now of the wrong kind."""
-    for entry in record.paths:
-        _expect(root / entry.path, _read(root, entry.path, pre=True), entry.kind)
+def _guard(host: _Host, entries: Iterable[rec.PathEntry]) -> None:
+    """Refuse before any write when a path a record lists is now of the wrong kind."""
+    for entry in entries:
+        _expect(host.root / entry.path, _read(host, entry.path, pre=True), entry.kind)
 
 
-def _sweep(root: Path, target: _Target) -> None:
+def _sweep(host: _Host, target: _Target) -> None:
     """Remove the temporary names that an earlier run left behind (ADR-013, Decision 16).
 
     Runs under the lock, before the first write. Only the fixed names are removed. Nothing else in
     /etc is touched.
     """
-    _check_parents(root, TMP_DIR)
-    state, _, _ = _probe(root / TMP_DIR)
+    _check_parents(host, TMP_DIR)
+    state, _, _ = _probe(host.root / TMP_DIR)
     if state == "dir":
-        shutil.rmtree(root / TMP_DIR)
+        shutil.rmtree(host.root / TMP_DIR)
     elif state != "absent":
-        raise _unsafe(root / TMP_DIR, f"is a {state}, but a directory is needed")
+        raise _unsafe(host.root / TMP_DIR, f"is a {state}, but a directory is needed")
     for rel in target.write_paths:
-        _check_parents(root, rel)
-        tmp = fixed_tmp_path(root / rel)
+        _check_parents(host, rel)
+        tmp = fixed_tmp_path(host.root / rel)
         try:
             remove_stale_tmp(tmp)
         except IsADirectoryError as exc:
             raise _unsafe(tmp, "is a directory where Host Setup keeps a temporary file") from exc
 
 
-def _write_pending(root: Path, record_path: Path, record: rec.HostSetupRecord) -> None:
-    """Write the pending record. The first creation of etc/ginn goes through a temporary dir."""
-    directory = record_path.parent
-    state, _, _ = _probe(directory)
-    if state != "absent":
-        rec.save(record_path, record)
+def _write_records(
+    host: _Host,
+    record_path: Path,
+    shared_path: Path,
+    plan: _Plan,
+    fault: FaultHook | None,
+) -> None:
+    """Write the records. The first creation of etc/ginn goes through a temporary directory."""
+    if _probe(record_path.parent)[0] == "absent":
+        _first_records(host, record_path, shared_path, plan, fault)
         return
-    _ensure_dir(root, "etc")
-    tmp = root / TMP_DIR
+    if plan.shared_changed:
+        rec.save_shared(shared_path, plan.shared)
+        _hit(fault, "shared")
+    rec.save(record_path, plan.user)
+
+
+def _first_records(
+    host: _Host,
+    record_path: Path,
+    shared_path: Path,
+    plan: _Plan,
+    fault: FaultHook | None,
+) -> None:
+    """Write both records into etc/.ginn.ginn-tmp, then rename it to etc/ginn (ADR-013, D16).
+
+    shared.json and the per-user record are in the directory before the rename, so etc/ginn never
+    exists without shared.json. A crash before the rename leaves the temporary directory alone.
+    """
+    _ensure_dir(host, "etc")
+    tmp = host.root / TMP_DIR
     os.mkdir(tmp, DIR_MODE)
     os.chmod(tmp, DIR_MODE)
-    rec.save(tmp / record_path.name, record)
-    os.rename(tmp, directory)
-    sync_dir(root / "etc")
+    rec.save(tmp / record_path.name, plan.user)
+    rec.save_shared(tmp / shared_path.name, plan.shared)
+    _hit(fault, "tmpdir")
+    os.rename(tmp, record_path.parent)
+    sync_dir(host.root / "etc")
 
 
-def _make_planned_dirs(root: Path, record: rec.HostSetupRecord) -> None:
-    """Create the directories the record planned, parents first, and restore their mode."""
-    for entry in record.paths:
+def _make_planned_dirs(host: _Host, entries: Iterable[rec.PathEntry]) -> None:
+    """Create the directories that the records planned, parents first, and restore their mode."""
+    for entry in entries:
         if entry.kind == "dir" and entry.pre.state == "absent":
-            _ensure_dir(root, entry.path)
-            _, mode, _ = _probe(root / entry.path)
+            _ensure_dir(host, entry.path)
+            _, mode, _ = _probe(host.root / entry.path)
             if mode != DIR_MODE:
-                os.chmod(root / entry.path, DIR_MODE)
+                os.chmod(host.root / entry.path, DIR_MODE)
 
 
 def _subids_step(
-    root: Path,
+    host: _Host,
     target: _Target,
     pending: rec.HostSetupRecord,
     fault: FaultHook | None,
@@ -554,37 +656,37 @@ def _subids_step(
     """Set the ranges up for the first time, or reuse the recorded ones (FR-001, AS-005)."""
     if pending.subids is None:
         _, uid_entry = subids.ensure_single(
-            root / SUBUID, target.user, root_dir=root, uid=target.uid
+            host.root / SUBUID, target.user, root_dir=host.root, uid=target.uid
         )
         _hit(fault, "subuid")
         _, gid_entry = subids.ensure_single(
-            root / SUBGID, target.user, root_dir=root, uid=target.gid
+            host.root / SUBGID, target.user, root_dir=host.root, uid=target.gid
         )
         _hit(fault, "subgid")
         return rec.SubIds(uid=uid_entry, gid=gid_entry)
-    subids.ensure_exact(root / SUBUID, pending.subids.uid, root_dir=root)
+    subids.ensure_exact(host.root / SUBUID, pending.subids.uid, root_dir=host.root)
     _hit(fault, "subuid")
-    subids.ensure_exact(root / SUBGID, pending.subids.gid, root_dir=root)
+    subids.ensure_exact(host.root / SUBGID, pending.subids.gid, root_dir=host.root)
     _hit(fault, "subgid")
     return pending.subids
 
 
-def _write_scripts(root: Path, target: _Target) -> None:
+def _write_scripts(host: _Host, target: _Target) -> None:
     """Write the rendered scripts with fixed temporary names. A matching script is left alone."""
     for rel in sorted(target.rendered):
-        path = root / rel
+        path = host.root / rel
         data = target.rendered[rel].encode("utf-8")
-        image = _read(root, rel, pre=True)
+        image = _read(host, rel, pre=True)
         if image.state == "file" and image.data == data and image.mode == runit_system.SCRIPT_MODE:
             continue
         _expect(path, image, "file")
         atomic_write(path, data, runit_system.SCRIPT_MODE, fixed_tmp=True)
 
 
-def _link_service(root: Path, target: _Target) -> None:
+def _link_service(host: _Host, target: _Target) -> None:
     """Point the service link at /etc/sv/ginn-<user>, in the resolved directory."""
-    _check_parents(root, target.link_rel)
-    link = root / target.link_rel
+    _check_parents(host, target.link_rel)
+    link = host.root / target.link_rel
     want = f"/{runit_system.SV_PARENT}/ginn-{target.user}"
     state, _, found = _probe(link)
     if state == "symlink" and found == want:
@@ -605,42 +707,55 @@ def _link_service(root: Path, target: _Target) -> None:
     raise _unsafe(link, f"is a {state}, but a symbolic link is needed")
 
 
-def _ensure_dir(root: Path, rel: str) -> list[str]:
-    """Create `rel` and its missing parents under `root`, each with mode 0755. Return what it made.
+def _entries(
+    host: _Host,
+    target: _Target,
+    have: set[str],
+    created: set[str],
+) -> list[rec.PathEntry]:
+    """Return entries for the planned paths that are not in `have`, with fresh pre-images.
 
-    A directory that a racing process made first is accepted. A file or link in the way is not.
+    A directory that existed before setup is not recorded, because setup does not write it. A
+    directory or file that `created` names was made by this run's lock, so its pre-image is absent.
     """
-    created: list[str] = []
-    parts = PurePosixPath(rel).parts
-    current = root
-    for index, part in enumerate(parts):
-        current = current / part
-        state, _, _ = _probe(current)
-        if state == "dir":
+    leaves = target.leaves
+    dirs: set[str] = {LOCK_DIR, *_ancestors(LOCK_DIR)}
+    for rel in leaves:
+        dirs.update(_ancestors(rel))
+    entries: list[rec.PathEntry] = []
+    for rel in sorted(dirs):
+        if rel in have:
             continue
-        if state != "absent":
-            raise _unsafe(current, f"is a {state}, but a directory is needed")
-        try:
-            os.mkdir(current, DIR_MODE)
-        except FileExistsError:
-            if _probe(current)[0] != "dir":
-                raise _unsafe(current, "appeared as a non-directory while Host Setup ran") from None
+        if rel in created:
+            pre = rec.Image("absent")
+        else:
+            pre = _read(host, rel, pre=True)
+            if pre.state == "dir":
+                continue
+            _expect(host.root / rel, pre, "dir")
+        entries.append(rec.PathEntry(path=rel, kind="dir", pre=pre, shared=_is_shared(rel, target)))
+    for rel, kind in sorted(leaves.items()):
+        if rel in have:
             continue
-        os.chmod(current, DIR_MODE)
-        created.append("/".join(parts[: index + 1]))
-    return created
+        if rel in created:
+            pre = rec.Image("absent")
+        else:
+            pre = _read(host, rel, pre=True)
+            _expect(host.root / rel, pre, kind)
+        entries.append(rec.PathEntry(path=rel, kind=kind, pre=pre, shared=_is_shared(rel, target)))
+    return entries
 
 
 @contextmanager
-def _global_lock(root: Path, timeout: float) -> Iterator[set[str]]:
+def _global_lock(host: _Host, timeout: float) -> Iterator[set[str]]:
     """Hold /run/lock/ginn-host-setup.lock (ADR-013, Decision 11). Yields the directories made.
 
     The lock directories are created when they are missing. The lock file is not recorded.
     """
-    created = set(_ensure_dir(root, LOCK_DIR))
-    fd = _open_lock(root / SETUP_LOCK)
+    created = set(_ensure_dir(host, LOCK_DIR))
+    fd = _open_lock(host.root / SETUP_LOCK)
     try:
-        _take_lock(fd, root / SETUP_LOCK, timeout)
+        _take_lock(fd, host.root / SETUP_LOCK, timeout)
         yield created
     finally:
         os.close(fd)
@@ -679,6 +794,32 @@ def _take_lock(fd: int, path: Path, timeout: float) -> None:
         time.sleep(LOCK_POLL_SECONDS)
 
 
+def _ensure_dir(host: _Host, rel: str) -> list[str]:
+    """Create `rel` and its missing parents under the root, mode 0755. Return what it made.
+
+    A directory that a racing process made first is accepted. A file or link in the way is not.
+    """
+    created: list[str] = []
+    parts = PurePosixPath(rel).parts
+    current = host.root
+    for index, part in enumerate(parts):
+        current = current / part
+        state, _, _ = _probe(current)
+        if state == "dir":
+            continue
+        if state != "absent":
+            raise _unsafe(current, f"is a {state}, but a directory is needed")
+        try:
+            os.mkdir(current, DIR_MODE)
+        except FileExistsError:
+            if _probe(current)[0] != "dir":
+                raise _unsafe(current, "appeared as a non-directory while Host Setup ran") from None
+            continue
+        os.chmod(current, DIR_MODE)
+        created.append("/".join(parts[: index + 1]))
+    return created
+
+
 def _probe(path: Path) -> tuple[str, int, str]:
     """Return (state, mode bits, link target) of `path`. A symbolic link is never followed.
 
@@ -715,10 +856,10 @@ def _image(path: Path, *, pre: bool) -> rec.Image:
     return rec.Image("file", mode=mode, sha256=hashlib.sha256(data).hexdigest())
 
 
-def _read(root: Path, rel: str, *, pre: bool) -> rec.Image:
-    """`_image` for a root-relative path, after refusing a symbolic link among its parents."""
-    _check_parents(root, rel)
-    return _image(root / rel, pre=pre)
+def _read(host: _Host, rel: str, *, pre: bool) -> rec.Image:
+    """`_image` for a root-relative path, after `_check_parents` has checked its parents."""
+    _check_parents(host, rel)
+    return _image(host.root / rel, pre=pre)
 
 
 def _expect(path: Path, image: rec.Image, kind: str) -> None:
@@ -726,22 +867,40 @@ def _expect(path: Path, image: rec.Image, kind: str) -> None:
         raise _unsafe(path, f"is a {image.state}, but Host Setup needs a {kind} there")
 
 
-def _check_parents(root: Path, rel: str) -> None:
-    """Refuse a symbolic link or file among the parents of `rel`, so no write follows one."""
-    current = root
+def _check_parents(host: _Host, rel: str) -> None:
+    """Refuse a parent of `rel` that is a link or a file, or that a non-root user may change.
+
+    Each existing parent must be a real directory, owned by uid 0 (through `host.owner_of`), and
+    not writable by group or others (the mode bits from lstat). The walk stops at the first missing
+    parent, because setup creates every parent below it as root.
+    """
+    current = host.root
     for part in PurePosixPath(rel).parts[:-1]:
         current = current / part
-        state, _, _ = _probe(current)
+        state, mode, _ = _probe(current)
         if state == "absent":
             return
         if state != "dir":
             raise _unsafe(current, f"is a {state}, but a directory is needed")
+        if mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise _unsafe(
+                current,
+                f"is writable by group or others (mode {mode:04o}), so Host Setup refuses to "
+                "write under it; check who changed it, then correct the mode by hand",
+            )
+        owner = host.owner_of(current)
+        if owner != 0:
+            raise _unsafe(
+                current,
+                f"is owned by uid {owner}, but uid 0 must own it; check who changed it, then "
+                "correct the owner by hand",
+            )
 
 
-def _post(root: Path, entry: rec.PathEntry, own: str) -> rec.PathEntry:
+def _post(host: _Host, entry: rec.PathEntry, own: str) -> rec.PathEntry:
     if entry.path == own:
         return replace(entry, post=rec.Image("self"))
-    return replace(entry, post=_read(root, entry.path, pre=False))
+    return replace(entry, post=_read(host, entry.path, pre=False))
 
 
 def _sorted(entries: Iterable[rec.PathEntry]) -> tuple[rec.PathEntry, ...]:

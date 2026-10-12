@@ -1,24 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Host Setup Record: every host path Host Setup wrote, with its pre-image (DR-009, ADR-013).
+"""The Host Setup Records: one per-user record and one shared record (DR-009, ADR-013).
 
-The record is JSON at `<root>/etc/ginn/setup-<user>.json`, mode 0600 and root-owned. It is written
-with the atomic helper in `_atomic`, under a fixed temporary name. FR-001 writes it, FR-002 reads it
-for the rerun check, and FR-003 (undo) restores from it. Schema 2 holds:
+Schema 3 has two kinds of record. Both are JSON, mode 0600 and root-owned, and both are written
+with the atomic helper in `_atomic`, under a fixed temporary name.
 
-- `paths`: the paths setup writes. Each carries its pre-image, the state before setup, which is
-  captured before the first write. `kind` is file, append-lines (a file that other users' setups
-  also append to, such as /etc/subuid), dir or symlink. `shared` is true for a path that every
-  user shares, and false for a path named after one user. Once the record is complete, each entry
-  also carries its post-image. The record file lists itself with the post-image `self`, because
-  its own digest cannot be stored in it.
-- `service_paths`: the paths the supervisor run script writes when the service starts (ADR-003).
-  They carry pre-images only, because setup does not write them.
-- `boot_id`: the boot id read when the service-written pre-images were captured, or null when the
-  host has none. cgroup state does not survive a reboot, so undo compares it with the current boot.
+The per-user record is `<root>/etc/ginn/setup-<user>.json`, with `"kind": "setup"`:
+
+- `paths`: what this user's setup wrote. These are the user's own files, directories and service
+  link, and the two subordinate ID files (kind `append-lines`, because other users' setups also
+  append to them). Each entry carries its pre-image, the state before setup, captured before the
+  first write. Once the record is complete, each entry also carries a post-image. The record
+  lists itself with the post-image `self`, because its own digest cannot be stored in it.
+- `service_paths`: this user's paths that the supervisor run script writes at service start
+  (ADR-003). They carry pre-images only.
+- `subids`, `status`, `timestamp`, `uid`, `gid` and `boot_id`.
+
+The shared record is `<root>/etc/ginn/shared.json`, with `"kind": "shared"`:
+
+- `paths`: the shared directories that setup created, and the shared record's own file, with the
+  pre-image absent. Every entry is `shared: true`.
+- `service_paths`: the shared paths that the run script writes (the root `cgroup.subtree_control`,
+  the `ginn` cgroup directory and `run/ginn`), with pre-images only.
+- `boot_id` and `timestamp`. It has no status and no post-images. Undo removes a shared directory
+  only where its pre-image is absent, and never writes shared bytes back (ADR-013, Decision 15).
+
+The first setup writes it in the same step that creates etc/ginn. A later setup adds to it only
+the shared directories that it must create and that the record lacks.
 
 A file pre-image is stored with its mode and its bytes in base64, so undo can restore it exactly.
 A file post-image has its mode and a sha256 digest, because it is only compared. A directory image
 has its mode. A symbolic link stores its target.
+
+A record of schema 1 or 2 is refused by `load` and `load_shared` with GINN-E-SETUP-PATH-UNSAFE.
+It is never read as an older form.
 """
 
 from __future__ import annotations
@@ -28,6 +42,7 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -36,9 +51,15 @@ from ginn.errors import GinnError, make
 from ginn.hostsetup._atomic import atomic_write
 from ginn.hostsetup.subids import SubIdEntry
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+KIND_SETUP = "setup"
+KIND_SHARED = "shared"
 RECORD_DIR = "etc/ginn"
 RECORD_MODE = 0o600
+SHARED_NAME = "shared.json"
+SHARED_RELPATH = f"{RECORD_DIR}/{SHARED_NAME}"
+SUBID_FILES: frozenset[str] = frozenset({"etc/subuid", "etc/subgid"})
+"""The subordinate ID files. Every user's lines are in them, so each user's record keeps them."""
 USER_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 STATUSES: frozenset[str] = frozenset({"pending", "complete"})
 KINDS: frozenset[str] = frozenset({"file", "append-lines", "dir", "symlink"})
@@ -49,6 +70,8 @@ STATE_OF_KIND: dict[str, str] = {
     "symlink": "symlink",
 }
 """The image state that a path of each kind must have on the host (`append-lines` is a file)."""
+OLD_SCHEMA_REASON = "written by a ginn build before F8a/F9a; remove it by hand after checking"
+"""The reason for a schema 1 or 2 record. Nothing has shipped, so none is migrated."""
 _PRE_FIELDS: dict[str, frozenset[str]] = {
     "absent": frozenset(),
     "file": frozenset({"mode", "data"}),
@@ -62,9 +85,10 @@ _POST_FIELDS: dict[str, frozenset[str]] = {
     "symlink": frozenset({"target"}),
     "self": frozenset(),
 }
-_TOP_KEYS = frozenset(
+_SETUP_KEYS = frozenset(
     {
         "schema",
+        "kind",
         "user",
         "uid",
         "gid",
@@ -76,19 +100,9 @@ _TOP_KEYS = frozenset(
         "service_paths",
     }
 )
+_SHARED_KEYS = frozenset({"schema", "kind", "timestamp", "boot_id", "paths", "service_paths"})
 _ENTRY_KEYS = frozenset({"path", "kind", "shared", "pre"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-
-RECORD_FIX = (
-    "inspect {path} with 'sudo ls -l {path}', and keep a copy with 'sudo cp -p' before you "
-    "change it, because it holds the pre-images"
-)
-"""The remedy for a record that cannot be read. It never moves the record aside."""
-SYSTEM_FIX = (
-    "inspect {path} with 'sudo ls -ld {path}' and 'sudo readlink -f {path}', then correct it by "
-    "hand"
-)
-"""The remedy for a system path, such as var/service, etc/sv or etc/ginn. It never moves it."""
 
 
 @dataclass(frozen=True)
@@ -127,7 +141,7 @@ class SubIds:
 
 @dataclass(frozen=True)
 class HostSetupRecord:
-    """The Host Setup Record for one user. Status is pending until every write has finished."""
+    """The per-user Host Setup Record. Status is pending until every write has finished."""
 
     user: str
     uid: int
@@ -140,24 +154,43 @@ class HostSetupRecord:
     boot_id: str | None = None
 
 
+@dataclass(frozen=True)
+class SharedRecord:
+    """The shared record, `etc/ginn/shared.json`: pre-images of every path that all users share.
+
+    `paths` lists the shared directories this setup created, and the record's own file. Each has
+    the pre-image absent. The record's own file has the post-image `self`, because its digest
+    cannot be stored in it, and no other entry has a post-image. `service_paths` holds the shared
+    paths that the run script writes, with pre-images only.
+    """
+
+    timestamp: str
+    paths: tuple[PathEntry, ...]
+    service_paths: tuple[PathEntry, ...] = ()
+    boot_id: str | None = None
+
+
 class RecordError(ValueError):
-    """The bytes are not a Host Setup Record of this schema."""
+    """The bytes are not a Host Setup Record of this schema and kind."""
 
 
 def relpath(user: str) -> str:
-    """Return the root-relative path of the record for `user`."""
+    """Return the root-relative path of the per-user record for `user`."""
     return f"{RECORD_DIR}/setup-{user}.json"
 
 
+def is_record_name(name: str) -> bool:
+    """True for a file name that a per-user record can have, such as setup-alice.json."""
+    return name.startswith("setup-") and name.endswith(".json")
+
+
 def unsafe(path: Path, reason: str) -> GinnError:
-    """Return GINN-E-SETUP-PATH-UNSAFE for `path`. The remedy depends on what `path` is."""
-    is_record = path.name.startswith("setup-") and path.name.endswith(".json")
-    fix = (RECORD_FIX if is_record else SYSTEM_FIX).format(path=path)
-    return make("GINN-E-SETUP-PATH-UNSAFE", path=str(path), reason=reason, fix=fix)
+    """Return GINN-E-SETUP-PATH-UNSAFE for `path`. The remedy is the catalogue text."""
+    return make("GINN-E-SETUP-PATH-UNSAFE", path=str(path), reason=reason)
 
 
 def check(record: HostSetupRecord) -> None:
-    """Raise ValueError when `record` breaks a rule that `encode` and `decode` both keep."""
+    """Raise ValueError when a per-user `record` breaks a rule that `encode` and `decode` keep."""
     if not USER_NAME.fullmatch(record.user):
         raise ValueError(f"invalid user name {record.user!r}")
     if record.status not in STATUSES:
@@ -168,20 +201,15 @@ def check(record: HostSetupRecord) -> None:
         raise ValueError(f"boot_id {record.boot_id!r} is not a boot id")
     own = relpath(record.user)
     seen: set[str] = set()
-    for entry in (*record.paths, *record.service_paths):
-        _check_rel(entry.path)
-        if entry.path in seen:
-            raise ValueError(f"{entry.path} is listed twice")
-        seen.add(entry.path)
-        if entry.kind not in KINDS:
-            raise ValueError(
-                f"{entry.path}: kind {entry.kind!r} is not file, append-lines, dir or symlink"
-            )
-        if entry.pre.state not in ("absent", STATE_OF_KIND[entry.kind]):
-            raise ValueError(f"{entry.path}: pre-image {entry.pre.state} does not fit {entry.kind}")
-        _image_obj(entry.pre, pre=True)
+    _check_entries((*record.paths, *record.service_paths), seen)
     if own not in seen:
         raise ValueError(f"the record does not list its own file {own}")
+    for entry in (*record.paths, *record.service_paths):
+        if entry.shared and entry.path not in SUBID_FILES:
+            raise ValueError(
+                f"{entry.path} is marked shared, but a per-user record keeps only the "
+                "subordinate ID files as shared"
+            )
     for entry in record.paths:
         if entry.post is None:
             if record.status == "complete":
@@ -198,11 +226,48 @@ def check(record: HostSetupRecord) -> None:
             raise ValueError(f"{entry.path} is service-written and carries no post-image")
 
 
+def check_shared(record: SharedRecord) -> None:
+    """Raise ValueError when the shared `record` breaks a rule that `encode_shared` keeps.
+
+    Every entry is shared. Every `paths` entry is a directory whose pre-image is absent, except the
+    record's own file, which is listed, has a pre-image that is absent and a post-image `self`.
+    `service_paths` entries have no post-image.
+    """
+    if not record.timestamp or "\0" in record.timestamp:
+        raise ValueError("the shared record has no timestamp")
+    if record.boot_id is not None and not _is_boot_id(record.boot_id):
+        raise ValueError(f"boot_id {record.boot_id!r} is not a boot id")
+    seen: set[str] = set()
+    _check_entries((*record.paths, *record.service_paths), seen)
+    if SHARED_RELPATH not in {entry.path for entry in record.paths}:
+        raise ValueError(f"the shared record does not list its own file {SHARED_RELPATH}")
+    for entry in (*record.paths, *record.service_paths):
+        if not entry.shared:
+            raise ValueError(f"{entry.path} is in the shared record but not marked shared")
+        if entry.path in SUBID_FILES:
+            raise ValueError(f"{entry.path} is kept per user, not in the shared record")
+    for entry in record.service_paths:
+        if entry.post is not None:
+            raise ValueError(f"{entry.path} is service-written and carries no post-image")
+    for entry in record.paths:
+        if entry.path == SHARED_RELPATH:
+            if (entry.kind, entry.pre.state) != ("file", "absent"):
+                raise ValueError(f"{SHARED_RELPATH} must be a file whose pre-image is absent")
+            if entry.post != Image("self"):
+                raise ValueError(f"{SHARED_RELPATH} must have the post-image self")
+            continue
+        if (entry.kind, entry.pre.state) != ("dir", "absent"):
+            raise ValueError(f"{entry.path} must be a shared directory whose pre-image is absent")
+        if entry.post is not None:
+            raise ValueError(f"{entry.path} is a shared directory and carries no post-image")
+
+
 def encode(record: HostSetupRecord) -> bytes:
-    """Return the record as JSON bytes. Raises ValueError when the record is not valid."""
+    """Return the per-user record as JSON bytes. Raises ValueError when the record is not valid."""
     check(record)
     obj: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
+        "kind": KIND_SETUP,
         "user": record.user,
         "uid": record.uid,
         "gid": record.gid,
@@ -215,19 +280,26 @@ def encode(record: HostSetupRecord) -> bytes:
         "paths": [_entry_obj(entry, with_post=True) for entry in record.paths],
         "service_paths": [_entry_obj(entry, with_post=False) for entry in record.service_paths],
     }
-    return (json.dumps(obj, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    return _dump(obj)
+
+
+def encode_shared(record: SharedRecord) -> bytes:
+    """Return the shared record as JSON bytes. Raises ValueError when the record is not valid."""
+    check_shared(record)
+    obj: dict[str, Any] = {
+        "schema": SCHEMA_VERSION,
+        "kind": KIND_SHARED,
+        "timestamp": record.timestamp,
+        "boot_id": record.boot_id,
+        "paths": [_entry_obj(entry, with_post=True) for entry in record.paths],
+        "service_paths": [_entry_obj(entry, with_post=False) for entry in record.service_paths],
+    }
+    return _dump(obj)
 
 
 def decode(raw: bytes) -> HostSetupRecord:
-    """Parse record bytes. Raises RecordError for anything that is not a valid record."""
-    try:
-        obj: object = json.loads(raw.decode("utf-8"))
-    except ValueError as exc:
-        raise RecordError(f"it is not JSON ({exc})") from exc
-    if not isinstance(obj, dict) or set(obj) != _TOP_KEYS:
-        raise RecordError("its top level does not have exactly the record fields")
-    if obj["schema"] != SCHEMA_VERSION or isinstance(obj["schema"], bool):
-        raise RecordError(f"its schema is {obj['schema']!r}, not {SCHEMA_VERSION}")
+    """Parse per-user record bytes. Raises RecordError for anything that is not a valid record."""
+    obj = _parse(raw, KIND_SETUP, _SETUP_KEYS)
     try:
         record = HostSetupRecord(
             user=_text(obj["user"], "user"),
@@ -248,27 +320,102 @@ def decode(raw: bytes) -> HostSetupRecord:
     return record
 
 
-def load(path: Path) -> HostSetupRecord | None:
-    """Return the record at `path`, or None when there is none.
+def decode_shared(raw: bytes) -> SharedRecord:
+    """Parse shared record bytes. Raises RecordError for anything that is not a valid record."""
+    obj = _parse(raw, KIND_SHARED, _SHARED_KEYS)
+    try:
+        record = SharedRecord(
+            timestamp=_text(obj["timestamp"], "timestamp"),
+            boot_id=_boot_from(obj["boot_id"]),
+            paths=tuple(_entry_from(item, with_post=True) for item in _items(obj["paths"])),
+            service_paths=tuple(
+                _entry_from(item, with_post=False) for item in _items(obj["service_paths"])
+            ),
+        )
+        check_shared(record)
+    except ValueError as exc:
+        raise RecordError(str(exc)) from exc
+    return record
 
-    A record that exists but cannot be read is refused with GINN-E-SETUP-PATH-UNSAFE. It is never
-    treated as absent: that would capture pre-images from a host that setup has already changed.
+
+def load(path: Path) -> HostSetupRecord | None:
+    """Return the per-user record at `path`, or None when there is none.
+
+    A record that exists but cannot be read, or that is of an older schema, is refused with
+    GINN-E-SETUP-PATH-UNSAFE. It is never treated as absent: that would capture pre-images from a
+    host that setup has already changed.
     """
+    raw = _read_regular(path, "a Host Setup Record")
+    if raw is None:
+        return None
+    if _is_old_schema(raw):
+        raise unsafe(path, OLD_SCHEMA_REASON)
+    try:
+        return decode(raw)
+    except RecordError as exc:
+        raise unsafe(path, f"holds a Host Setup Record that cannot be read: {exc}") from exc
+
+
+def load_shared(path: Path) -> SharedRecord | None:
+    """Return the shared record at `path`, or None when it is missing. Refusals as for `load`."""
+    raw = _read_regular(path, "the shared Host Setup Record")
+    if raw is None:
+        return None
+    if _is_old_schema(raw):
+        raise unsafe(path, OLD_SCHEMA_REASON)
+    try:
+        return decode_shared(raw)
+    except RecordError as exc:
+        raise unsafe(path, f"holds a shared Host Setup Record that cannot be read: {exc}") from exc
+
+
+def save(path: Path, record: HostSetupRecord) -> None:
+    """Write the per-user record atomically with mode 0600 (DR-009), under the fixed temp name."""
+    atomic_write(path, encode(record), RECORD_MODE, fixed_tmp=True)
+
+
+def save_shared(path: Path, record: SharedRecord) -> None:
+    """Write the shared record atomically with mode 0600 (DR-009), under the fixed temp name."""
+    atomic_write(path, encode_shared(record), RECORD_MODE, fixed_tmp=True)
+
+
+def _read_regular(path: Path, what: str) -> bytes | None:
+    """Return the bytes of the regular file at `path`, or None when it does not exist."""
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(st.st_mode):
-        raise unsafe(path, "is not a regular file, so it cannot be a Host Setup Record")
+        raise unsafe(path, f"is not a regular file, so it cannot be {what}")
+    return path.read_bytes()
+
+
+def _is_old_schema(raw: bytes) -> bool:
+    """True when `raw` is a JSON object of schema 1 or 2, the forms before F8a/F9a."""
     try:
-        return decode(path.read_bytes())
-    except RecordError as exc:
-        raise unsafe(path, f"holds a Host Setup Record that cannot be read: {exc}") from exc
+        obj = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return False
+    schema = obj.get("schema") if isinstance(obj, dict) else None
+    return type(schema) is int and schema in (1, 2)
 
 
-def save(path: Path, record: HostSetupRecord) -> None:
-    """Write the record atomically with mode 0600 (DR-009), under the fixed temporary name."""
-    atomic_write(path, encode(record), RECORD_MODE, fixed_tmp=True)
+def _parse(raw: bytes, kind: str, keys: frozenset[str]) -> dict[str, Any]:
+    """Parse the JSON object and check schema, kind and top-level keys, in that order."""
+    try:
+        obj: object = json.loads(raw.decode("utf-8"))
+    except ValueError as exc:
+        raise RecordError(f"it is not JSON ({exc})") from exc
+    if not isinstance(obj, dict):
+        raise RecordError("its top level is not a JSON object")
+    schema = obj.get("schema")
+    if type(schema) is not int or schema != SCHEMA_VERSION:
+        raise RecordError(f"its schema is {schema!r}, not {SCHEMA_VERSION}")
+    if obj.get("kind") != kind:
+        raise RecordError(f"its kind is {obj.get('kind')!r}, not {kind!r}")
+    if set(obj) != keys:
+        raise RecordError("its top level does not have exactly the record fields")
+    return obj
 
 
 def _check_rel(text: str) -> None:
@@ -281,8 +428,28 @@ def _check_rel(text: str) -> None:
         raise ValueError(f"{text!r} leaves the root or is not normalised")
 
 
+def _check_entries(entries: Iterable[PathEntry], seen: set[str]) -> None:
+    """Check each entry's path, kind and pre-image, and that no path is listed twice."""
+    for entry in entries:
+        _check_rel(entry.path)
+        if entry.path in seen:
+            raise ValueError(f"{entry.path} is listed twice")
+        seen.add(entry.path)
+        if entry.kind not in KINDS:
+            raise ValueError(
+                f"{entry.path}: kind {entry.kind!r} is not file, append-lines, dir or symlink"
+            )
+        if entry.pre.state not in ("absent", STATE_OF_KIND[entry.kind]):
+            raise ValueError(f"{entry.path}: pre-image {entry.pre.state} does not fit {entry.kind}")
+        _image_obj(entry.pre, pre=True)
+
+
 def _is_boot_id(text: str) -> bool:
     return bool(text) and "\0" not in text and "\n" not in text and "\r" not in text
+
+
+def _dump(obj: dict[str, Any]) -> bytes:
+    return (json.dumps(obj, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
 
 def _image_obj(image: Image, *, pre: bool) -> dict[str, Any]:
