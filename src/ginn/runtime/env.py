@@ -108,12 +108,17 @@ class SessionEnv:
     """The exec-time environment, the proxy names, the session binds and the skips for one realm.
 
     `pass_through` holds names only. A proxy value is never stored in this object.
+    `absent` lists the session paths that this session does not bind: a socket that is not on the
+    host, and each fixed path with no host yet (its `host` is then empty). None of them is reported
+    as a skip. Each one is a slot that a later enter or launch may fill from the session then
+    current (FR-084, ADR-008). The grant list is keyed by the fixed realm path, not by host.
     """
 
     env: dict[str, str]
     binds: list[SessionBind]
     skipped: list[Skipped] = field(default_factory=list)
     pass_through: list[str] = field(default_factory=list)
+    absent: list[SessionBind] = field(default_factory=list)
 
 
 def session_env(
@@ -136,7 +141,31 @@ def session_env(
     _authority(host_env, realm_runtime, checks, result)
     _audio(host_runtime, realm_runtime, checks, result)
     _values(host_env, result)
+    _unbound(result, realm_runtime)
     return result
+
+
+def _fixed_realms(realm_runtime: str) -> tuple[tuple[str, Mode, bool], ...]:
+    """The fixed realm paths of the session grants, each with its mode and kind (ADR-008, CL-12)."""
+    return (
+        (f"{realm_runtime}/{WAYLAND_REALM}", "rw", False),
+        (f"{realm_runtime}/{AUTHORITY_REALM}", "ro", False),
+        (X11_DIR, "ro", True),
+        (f"{realm_runtime}/{PIPEWIRE_SOCKET}", "rw", False),
+        (f"{realm_runtime}/{PULSE_SOCKET}", "rw", False),
+    )
+
+
+def _unbound(result: SessionEnv, realm_runtime: str) -> None:
+    """Record each fixed session path that this session does not bind as an empty-host slot.
+
+    A slot with no host is not a skip. An autostart, which has no session variables, still gets
+    its slots, so the first enter or launch from a session can fill them.
+    """
+    bound = {bind.realm for bind in (*result.binds, *result.absent)}
+    for realm, mode, is_dir in _fixed_realms(realm_runtime):
+        if realm not in bound:
+            result.absent.append(SessionBind("", realm, mode, is_dir))
 
 
 @dataclass(frozen=True)
@@ -160,26 +189,51 @@ def _host_runtime(host_env: Mapping[str, str], uid: int) -> str:
     return runtime_dir(uid)
 
 
-def _skip(result: SessionEnv, name: str, reason: str) -> None:
-    result.skipped.append(Skipped("session", name, reason))
+def _skip(
+    result: SessionEnv,
+    name: str,
+    reason: str,
+    bind: SessionBind | None = None,
+    realm: str = "",
+) -> None:
+    """Record a skip. A missing source passes its bind, so it can be tried again later.
+
+    A skip without a bind still names its fixed realm path, where the variable has one (ADR-008).
+    It is never retried, because its `missing` flag stays False.
+    """
+    if bind is None:
+        result.skipped.append(Skipped("session", name, reason, realm=realm))
+        return
+    result.skipped.append(
+        Skipped("session", name, reason, bind.host, bind.realm, bind.mode, bind.is_dir, True)
+    )
 
 
-def _present(result: SessionEnv, checks: _Checks, name: str, host: str, want: int) -> bool:
+def _present(
+    result: SessionEnv,
+    checks: _Checks,
+    name: str,
+    host: str,
+    want: int,
+    bind: SessionBind | None = None,
+) -> bool:
     """True when `host` is absolute and is of the file type `want`. Otherwise record a skip.
 
-    A missing source and one of another type are skipped the same way. The absolute test runs
-    first, so a relative path is never looked up in the current directory.
+    A missing source and one of another type are skipped the same way. Only the missing one keeps
+    its `bind`, because a source of the wrong type is never retried. The absolute test runs first,
+    so a relative path is never looked up in the current directory.
     """
+    realm = "" if bind is None else bind.realm
     if not os.path.isabs(host):
-        _skip(result, name, "not an absolute path")
+        _skip(result, name, "not an absolute path", realm=realm)
         return False
     noun, wrong_type = _TYPES[want]
     found = checks.file_type(host)
     if found is None:
-        _skip(result, name, f"{noun} missing")
+        _skip(result, name, f"{noun} missing", bind)
         return False
     if found != want:
-        _skip(result, name, wrong_type)
+        _skip(result, name, wrong_type, realm=realm)
         return False
     return True
 
@@ -195,13 +249,14 @@ def _record(
     is_dir: bool = False,
 ) -> bool:
     """Record a bind of `host` when it is present with the file type `want` and passes the check."""
-    if not _present(result, checks, name, host, want):
+    bind = SessionBind(host, realm, mode, is_dir)
+    if not _present(result, checks, name, host, want, bind):
         return False
     reason = checks.refusal(host, mode)
     if reason is not None:
-        _skip(result, name, reason)
+        _skip(result, name, reason, realm=realm)
         return False
-    result.binds.append(SessionBind(host, realm, mode, is_dir))
+    result.binds.append(bind)
     return True
 
 
@@ -218,22 +273,27 @@ def _wayland(
     result: SessionEnv,
 ) -> None:
     raw = host_env.get("WAYLAND_DISPLAY", "")
+    realm = f"{realm_runtime}/{WAYLAND_REALM}"
     if not raw:
         return
     if any(char in raw for char in _CONTROL):
-        _skip(result, "WAYLAND_DISPLAY", "contains NUL or a newline")
+        _skip(result, "WAYLAND_DISPLAY", "contains NUL or a newline", realm=realm)
         return
     if raw.startswith("/"):
         host = raw
     elif _SOCKET_NAME.fullmatch(raw):
         host = f"{host_runtime}/{raw}"
     else:
-        _skip(result, "WAYLAND_DISPLAY", "not a socket name")
+        _skip(result, "WAYLAND_DISPLAY", "not a socket name", realm=realm)
         return
     if _is_dbus(host):
-        _skip(result, "WAYLAND_DISPLAY", "AS-012: the D-Bus session socket, not a display")
+        _skip(
+            result,
+            "WAYLAND_DISPLAY",
+            "AS-012: the D-Bus session socket, not a display",
+            realm=realm,
+        )
         return
-    realm = f"{realm_runtime}/{WAYLAND_REALM}"
     if _record(result, checks, "WAYLAND_DISPLAY", host, realm, "rw", stat.S_IFSOCK):
         result.env["WAYLAND_DISPLAY"] = WAYLAND_REALM
 
@@ -244,10 +304,12 @@ def _x11(host_env: Mapping[str, str], checks: _Checks, result: SessionEnv) -> No
         return
     match = _LOCAL_DISPLAY.fullmatch(raw)
     if match is None:
-        _skip(result, "DISPLAY", "only a local display is granted (:N)")
+        _skip(result, "DISPLAY", "only a local display is granted (:N)", realm=X11_DIR)
         return
     socket = f"{X11_DIR}/X{match.group(1)}"
-    if not _present(result, checks, "DISPLAY", socket, stat.S_IFSOCK):
+    # A missing display socket retries the directory bind, which is what its grant attaches.
+    x11 = SessionBind(X11_DIR, X11_DIR, "ro", True)
+    if not _present(result, checks, "DISPLAY", socket, stat.S_IFSOCK, x11):
         return
     if _record(result, checks, "DISPLAY", X11_DIR, X11_DIR, "ro", stat.S_IFDIR, is_dir=True):
         result.env["DISPLAY"] = raw
@@ -270,9 +332,13 @@ def _authority(
 def _audio(host_runtime: str, realm_runtime: str, checks: _Checks, result: SessionEnv) -> None:
     for socket in (PIPEWIRE_SOCKET, PULSE_SOCKET):
         host = f"{host_runtime}/{socket}"
-        # A missing audio socket is silent. One of another type is present, so it is reported.
-        if checks.file_type(host) is not None:
-            _record(result, checks, socket, host, f"{realm_runtime}/{socket}", "rw", stat.S_IFSOCK)
+        realm = f"{realm_runtime}/{socket}"
+        # A missing audio socket is silent, so it is kept as absent and tried again later. One of
+        # another type is present, so it is reported.
+        if checks.file_type(host) is None:
+            result.absent.append(SessionBind(host, realm, "rw", False))
+        else:
+            _record(result, checks, socket, host, realm, "rw", stat.S_IFSOCK)
 
 
 def _values(host_env: Mapping[str, str], result: SessionEnv) -> None:

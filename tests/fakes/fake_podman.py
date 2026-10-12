@@ -68,6 +68,7 @@ class FakePodman:
 
     info_result: PodmanInfo = DEFAULT_INFO
     exec_results: dict[tuple[str, ...], ExecResult] = field(default_factory=dict)
+    unshare_results: list[ExecResult] = field(default_factory=list)
     fail_pull_with: str | None = None
     fail_pull_times: int | None = None
     fail_exec_with: str | None = None
@@ -275,3 +276,10 @@ class FakePodman:
         self._container(container_id)
         lines = self.log_text.get(container_id, "").splitlines(keepends=True)
         return "".join(lines[max(len(lines) - tail, 0) :])
+
+    def unshare(self, argv: Sequence[str]) -> ExecResult:
+        """Record the call. Canned results go in order. Once they run out, status 0, no output."""
+        self._record("unshare", tuple(argv))
+        if self.unshare_results:
+            return self.unshare_results.pop(0)
+        return ExecResult(0, "", "")

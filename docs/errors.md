@@ -11,7 +11,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 | Exit | Meaning |
 |---|---|
 | 0 | success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions. |
-| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED |
+| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
 | 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered |
@@ -28,6 +28,7 @@ Exit status 125 is not used by any code below. `ginn exec` returns the inner com
 
 | Code | Exit | Meaning | Remedy | Source |
 |---|---|---|---|---|
+| `GINN-E-ATTACH-FAILED` | 1 | attaching the grants into the realm failed: {detail} | retry the start, enter or launch; if it fails again, run 'ginn doctor' and report the detail | ADR-008 (T4.10 notes); FR-061, FR-066 (ginn-defined; not an SRS code) |
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |
 | `GINN-E-DISTRO-DATA` | 70 | shipped distro data {file} is invalid: {field} {rule} | the shipped distro data is invalid; reinstall ginn, or report a bug with this message | NFR-060 (ginn-defined; not an SRS code) |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |

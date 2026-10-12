@@ -170,7 +170,7 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-061"
 milestone = "M6"
 partial = true
-reason = "the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), and the table comparison closes in T6.1"
+reason = "the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), the attach executor and the helper's argv are unit-tested on a fake helper (T4.10), and the table comparison closes in T6.1"
 
 [[deferred]]
 id = "FR-062"
@@ -186,18 +186,19 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 id = "FR-064"
 milestone = "M6"
 partial = true
-reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), and the host run that shows the skip in ginn status needs a Void host"
+reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), the skip at start, the retry at enter and the forced unmount of a vanished source are unit-tested on a fake helper (T4.10); a missing source keeps its realm path, and a refused grant is never retried; the RealmRecord.share_skipped field is written by T4.5, from attach.share_skipped; the host run that shows the skip in ginn status needs a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-065"
 milestone = "M4"
 partial = true
-reason = "identical paths are unit-tested in the T4.2 create and attach plans; a drive mounted after realm start appears inside only after a lazy re-attach at enter or launch, since host mounts are private and propagation into a running realm is not assumed; that needs a Void host (T4.9)"
+reason = "identical paths are unit-tested in the T4.2 create and attach plans; a drive mounted after realm start appears inside only after a lazy re-attach at enter or launch, since host mounts are private and propagation into a running realm is not assumed; a drive mounted below a folder is a change that forces a re-attach, and the mount table is read by its real path and undoes its escapes (unit-tested in T4.10); that needs a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-066"
 milestone = "M6"
-reason = "not covered yet; the roadmap assigns its test to M6"
+partial = true
+reason = "the re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode is held until the host identity changes, a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach is T4.9; the RealmRecord field that holds the list is T4.5's; the change of the grant list at the next start is M6"
 
 [[deferred]]
 id = "FR-067"
@@ -219,7 +220,7 @@ reason = "not covered yet; the roadmap assigns its test to M7"
 id = "FR-081"
 milestone = "M7"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7"
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7; the T4.10 attach tests prove a failed lazy re-attach at enter or launch raises and never stops the realm (services-on stop stays with sv)"
 
 [[deferred]]
 id = "FR-082"

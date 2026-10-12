@@ -79,11 +79,22 @@ class SessionBind:
 
 @dataclass(frozen=True)
 class Skipped:
-    """A grant that was not made. `name` is the name the user sees, such as `~/Downloads`."""
+    """A grant that was not made. `name` is the name the user sees, such as `~/Downloads`.
+
+    A grant skipped for a missing source also names what a later enter or launch needs to try it
+    again: `host`, `realm`, `mode`, `is_dir`, and `missing=True` (FR-064, FR-066, ADR-008). A skip
+    for any other reason, such as a refused path or a source of the wrong type, leaves the realm
+    fields empty, so it is never retried.
+    """
 
     kind: str
     name: str
     reason: str
+    host: str = ""
+    realm: str = ""
+    mode: Mode = "rw"
+    is_dir: bool = False
+    missing: bool = False
 
     def message(self) -> str:
         return f"{self.kind} skipped: {self.name} ({self.reason})"
@@ -333,7 +344,7 @@ def _folder(
 ) -> _Grant | Skipped:
     """A user folder, read-write. `SharedPath.parse` checks it, so DR-004 applies in full."""
     if not exists(str(raw)):
-        return Skipped("share", name, "missing")
+        return Skipped("share", name, "missing", str(raw), realm, "rw", True, missing=True)
     try:
         shared = SharedPath.parse(str(raw), home=home, owned_paths=owned_paths, mode="rw", env=env)
     except GinnError as err:
@@ -357,7 +368,7 @@ def _mount_root(
     pass the DR-004 check and lie inside an allowed root.
     """
     if not exists(root):
-        return Skipped("share", root, "missing")
+        return Skipped("share", root, "missing", root, root, "rw", True, missing=True)
     if _real(root) != Path(root):
         return Skipped("share", root, SYMLINK_ROOT_REASON)
     target = _real(root)
@@ -383,7 +394,9 @@ def _session(
     if not os.path.isabs(bind.host) or not bind.realm.startswith("/"):
         raise ValueError(f"session bind must use absolute paths: {bind!r}")
     if not exists(bind.host):
-        return Skipped("session", bind.host, "missing")
+        return Skipped(
+            "session", bind.host, "missing", bind.host, bind.realm, bind.mode, bind.is_dir, True
+        )
     target = _real(bind.host)
     reason = path_refusal(target, env=env, home=home, owned_paths=owned_paths, mode=bind.mode)
     if reason is not None:
@@ -397,3 +410,45 @@ def _session_parents(realm: str, uid: int) -> tuple[str, ...]:
     """The directory above a session path, unless it is the runtime dir or an image directory."""
     parent = os.path.dirname(realm)
     return () if parent in (runtime_dir(uid), *_IMAGE_DIRS) else (parent,)
+
+
+def _is_mount_root(realm: str) -> bool:
+    """True for `/media`, `/mnt`, and the user's `/run/media/<user>`."""
+    user_root = realm.startswith(f"{USER_MEDIA_ROOT}/") and realm.count("/") == 3
+    return realm in MOUNT_ROOTS or user_root
+
+
+def recheck(
+    kind: str,
+    host: str,
+    realm: str,
+    mode: Mode,
+    *,
+    home: Path,
+    owned_paths: Sequence[Path],
+    env: Mapping[str, str],
+) -> str | None:
+    """The DR-004 rules for one grant, applied again before it is attached after start.
+
+    The plan checked the grant once, but its host path may now resolve somewhere else: a link can
+    be retargeted, or a folder replaced by one. So every grant that an enter or launch is about to
+    attach is checked again. The rules are those of plan time: a session path by the path rule on
+    its resolved target, a folder by `SharedPath.parse`, and a mount root by the link rule, then the
+    path rule, then the allowed-root rule. Returns the refusal reason, or None if it may go.
+    """
+    if kind == "session":
+        resolved = os.path.realpath(host)
+        return path_refusal(resolved, env=env, home=home, owned_paths=owned_paths, mode=mode)
+    if _is_mount_root(realm):
+        if os.path.realpath(host) != host:
+            return SYMLINK_ROOT_REASON
+        target = _real(host)
+        reason = path_refusal(target, env=env, home=home, owned_paths=owned_paths, mode=mode)
+        if reason is None and not under_allowed_root(target, home=home, root_itself=True):
+            reason = ROOTS_REASON
+        return reason
+    try:
+        SharedPath.parse(host, home=home, owned_paths=owned_paths, mode=mode, env=env)
+    except GinnError as err:
+        return str(err.details.get("reason", err.message))
+    return None

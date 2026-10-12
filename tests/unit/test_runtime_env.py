@@ -491,3 +491,84 @@ def test_session_binds_feed_the_attach_plan_unchanged(layout: Layout) -> None:
     ]
     bind_triples = [(os.path.realpath(bind.host), bind.realm, bind.mode) for bind in result.binds]
     assert session_triples == bind_triples
+
+
+@pytest.mark.fr("FR-064")
+@pytest.mark.fr("FR-084")
+def test_missing_wayland_socket_keeps_its_bind_for_a_later_retry(layout: Layout) -> None:
+    result = run(layout, {"WAYLAND_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": HOST_RUNTIME})
+    [skip] = result.skipped
+    assert (skip.host, skip.realm, skip.mode, skip.is_dir, skip.missing) == (
+        WAYLAND,
+        WAYLAND_REALM,
+        "rw",
+        False,
+        True,
+    )
+
+
+@pytest.mark.fr("FR-064")
+def test_a_source_of_another_type_is_never_kept_for_a_retry(layout: Layout) -> None:
+    host_env = {"WAYLAND_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": HOST_RUNTIME}
+    result = run(layout, host_env, [WAYLAND], kinds={WAYLAND: stat.S_IFREG})
+    [skip] = result.skipped
+    assert skip.missing is False
+    assert skip.realm == WAYLAND_REALM
+
+
+@pytest.mark.fr("FR-064")
+def test_missing_display_socket_keeps_the_directory_bind_for_a_retry(layout: Layout) -> None:
+    result = run(layout, {"DISPLAY": ":0", "XDG_RUNTIME_DIR": HOST_RUNTIME}, [X11_DIR])
+    [skip] = result.skipped
+    assert (skip.host, skip.realm, skip.mode, skip.is_dir, skip.missing) == (
+        X11_DIR,
+        X11_DIR,
+        "ro",
+        True,
+        True,
+    )
+
+
+AUDIO_REALMS = (f"{REALM_RUNTIME}/pipewire-0", f"{REALM_RUNTIME}/pulse/native")
+
+
+@pytest.mark.fr("FR-084")
+def test_absent_audio_sockets_are_kept_for_a_retry_and_not_reported(layout: Layout) -> None:
+    result = run(layout, {"XDG_RUNTIME_DIR": HOST_RUNTIME})
+    assert result.skipped == []
+    audio = [(bind.host, bind.realm) for bind in result.absent if bind.realm in AUDIO_REALMS]
+    assert audio == [
+        (PIPEWIRE, f"{REALM_RUNTIME}/pipewire-0"),
+        (PULSE, f"{REALM_RUNTIME}/pulse/native"),
+    ]
+
+
+@pytest.mark.fr("FR-084")
+def test_a_present_audio_socket_is_not_listed_as_absent(layout: Layout) -> None:
+    result = run(layout, {"XDG_RUNTIME_DIR": HOST_RUNTIME}, [PIPEWIRE])
+    assert [bind.host for bind in result.absent if bind.realm in AUDIO_REALMS] == [PULSE]
+
+
+@pytest.mark.fr("FR-084")
+def test_an_empty_session_leaves_every_fixed_path_as_a_slot_with_no_host(layout: Layout) -> None:
+    """An autostart has no session variables. Each fixed path is still a slot to fill later."""
+    result = run(layout, {})
+    assert result.skipped == []
+    assert result.binds == []
+    realms = {bind.realm for bind in result.absent}
+    assert realms == {
+        WAYLAND_REALM,
+        AUTHORITY_REALM,
+        X11_DIR,
+        f"{REALM_RUNTIME}/pipewire-0",
+        f"{REALM_RUNTIME}/pulse/native",
+    }
+    hosts = {bind.realm: bind.host for bind in result.absent if bind.realm not in AUDIO_REALMS}
+    assert set(hosts.values()) == {""}
+
+
+@pytest.mark.fr("FR-064")
+def test_a_skip_without_a_bind_still_names_its_fixed_realm_path(layout: Layout) -> None:
+    result = run(layout, {"WAYLAND_DISPLAY": "bad name", "XDG_RUNTIME_DIR": HOST_RUNTIME})
+    [skip] = result.skipped
+    assert (skip.reason, skip.realm, skip.missing) == ("not a socket name", WAYLAND_REALM, False)

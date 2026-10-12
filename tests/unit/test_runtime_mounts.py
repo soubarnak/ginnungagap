@@ -19,6 +19,7 @@ from ginn.errors import GinnError
 from ginn.podman.adapter import CreateSpec, Mount
 from ginn.runtime import mounts
 from ginn.runtime.mounts import (
+    SYMLINK_ROOT_REASON,
     Attach,
     AttachPlan,
     CreateBinds,
@@ -27,6 +28,7 @@ from ginn.runtime.mounts import (
     Skipped,
     attach_plan,
     create_binds,
+    recheck,
     runtime_dir,
 )
 
@@ -583,3 +585,66 @@ def test_relative_host_home_is_refused(layout: Layout) -> None:
             env={},
             exists=fake_fs([]),
         )
+
+
+@pytest.mark.fr("FR-064")
+def test_missing_downloads_keeps_what_a_later_enter_needs_to_retry_it(layout: Layout) -> None:
+    """A skip for a missing folder names its host path, realm path and mode, and is retryable."""
+    downloads = layout.home / "Downloads"
+    downloads.rmdir()
+    present = [p for p in present_all(layout) if not p.endswith("/Downloads")]
+    plan = attach(layout, present=present)
+    [skip] = [s for s in plan.skipped if s.name == "~/Downloads"]
+    assert (skip.host, skip.realm, skip.mode, skip.is_dir, skip.missing) == (
+        str(downloads),
+        f"{layout.home}/Downloads",
+        "rw",
+        True,
+        True,
+    )
+
+
+@pytest.mark.fr("FR-064")
+def test_missing_mount_root_keeps_its_root_for_a_retry(layout: Layout) -> None:
+    present = [p for p in present_all(layout) if p != f"/run/media/{USER}"]
+    plan = attach(layout, present=present)
+    [skip] = [s for s in plan.skipped if s.name == f"/run/media/{USER}"]
+    assert (skip.host, skip.realm, skip.is_dir, skip.missing) == (
+        f"/run/media/{USER}",
+        f"/run/media/{USER}",
+        True,
+        True,
+    )
+
+
+@pytest.mark.fr("DR-004")
+def test_refused_grant_is_not_marked_missing_so_it_is_never_retried(layout: Layout) -> None:
+    plan = attach(layout, present=present_all(layout))
+    assert all(not skip.missing for skip in plan.skipped)
+
+
+@pytest.mark.fr("DR-004")
+def test_recheck_admits_a_folder_under_home_and_refuses_one_outside(layout: Layout) -> None:
+    folder = str(layout.home / "Downloads")
+    realm = f"{layout.home}/Downloads"
+    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    assert recheck("share", folder, realm, "rw", **kwargs) is None
+    assert recheck("share", "/etc", realm, "rw", **kwargs) is not None
+
+
+@pytest.mark.fr("DR-004")
+def test_recheck_refuses_a_session_path_under_ssh(layout: Layout) -> None:
+    host = str(layout.home / ".ssh" / "agent.sock")
+    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    assert recheck("session", host, "/run/user/1000/agent", "rw", **kwargs) is not None
+
+
+@pytest.mark.fr("DR-004")
+def test_recheck_refuses_a_mount_root_that_is_now_a_link(layout: Layout, tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "media-link"
+    link.symlink_to(target, target_is_directory=True)
+    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    reason = recheck("share", str(link), "/media", "rw", **kwargs)
+    assert reason == SYMLINK_ROOT_REASON

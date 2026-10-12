@@ -281,3 +281,11 @@ class Podman(Protocol):
     def logs(self, container_id: str, tail: int) -> str:
         """Return the last `tail` lines of the container's stdout."""
         ...
+
+    def unshare(self, argv: Sequence[str]) -> ExecResult:
+        """Run `argv` under `podman unshare`, in the store's user namespace (ADR-008).
+
+        The command's own status comes back in the result and is not raised. The first word must
+        be an absolute path. Podman's own failure (exit 125) raises GinnError.
+        """
+        ...

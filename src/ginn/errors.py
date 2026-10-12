@@ -361,13 +361,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "message",
         source="DR-040 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-E-ATTACH-FAILED",
+        exit_code=1,
+        summary="attaching the grants into the realm failed: {detail}",
+        remedy="retry the start, enter or launch; if it fails again, run 'ginn doctor' and report "
+        "the detail",
+        source="ADR-008 (T4.10 notes); FR-061, FR-066 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
 
 EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (0, "success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions."),
-    (1, "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED"),
+    (1, "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED"),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
     (
