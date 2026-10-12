@@ -11,7 +11,7 @@ Both are built for `x86_64` (glibc) and `x86_64-musl` (NFR-062).
 
 ## Install from the release repository
 
-The packages are published as assets of each GitHub release, with signed repository metadata (NFR-SEC-004).
+The packages are published as assets of each GitHub release, with signed repository metadata.
 
 1. Add the repository:
 

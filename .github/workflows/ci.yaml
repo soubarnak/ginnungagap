@@ -77,9 +77,11 @@ jobs:
           xbps-install -Syu -y xbps </dev/null
           xbps-install -yu </dev/null
           xbps-install -y git shadow </dev/null
-          useradd -m builder
-          # xbps-src refuses root and builds in a user namespace, so run it as builder.
-          # The container is privileged for the same reason as the Void project's own CI.
+          # xbps-src refuses root and builds in a chroot, so run it as builder in group
+          # xbuilder, as the Void project's own CI does. The container is privileged for
+          # the same reason.
+          getent group xbuilder >/dev/null || groupadd xbuilder
+          useradd -m -G xbuilder builder
           cp -a /src /home/builder/ginnungagap
           git clone --depth 1 https://github.com/void-linux/void-packages.git /home/builder/void-packages
           printf 'XBPS_CHROOT_CMD=uchroot\n' >> /home/builder/void-packages/etc/conf

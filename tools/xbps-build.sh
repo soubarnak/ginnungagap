@@ -59,10 +59,10 @@ fi
 
 cd "$void"
 # -Q runs the package check stage, which includes the unit tests in the release tarball.
+# The native build takes no -a; -a names a cross target, here x86_64-musl.
 ./xbps-src binary-bootstrap
-./xbps-src -a x86_64 -Q pkg ginn
+./xbps-src -Q pkg ginn
 if [ "${GINN_MUSL:-0}" = 1 ]; then
-    ./xbps-src -a x86_64-musl binary-bootstrap
     ./xbps-src -a x86_64-musl -Q pkg ginn
 fi
 
