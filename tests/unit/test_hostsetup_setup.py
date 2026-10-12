@@ -45,6 +45,15 @@ USERS: dict[str, UserInfo] = {
     "alice": UserInfo(uid=1000, gid=1000, home="/home/alice"),
     "bob": UserInfo(uid=1001, gid=1001, home="/home/bob"),
 }
+NAMED_USERS: dict[str, UserInfo] = {
+    "ginn": UserInfo(uid=1001, gid=1001, home="/home/ginn"),
+    "sv": UserInfo(uid=1002, gid=1002, home="/home/sv"),
+    "run": UserInfo(uid=1003, gid=1003, home="/home/run"),
+}
+"""Accounts whose names equal a path component of the host layout (ADR-013, Decision 12).
+
+`ginn` has the uid the task names, which bob also has. No test sets up both in one root.
+"""
 NOW = 1_800_000_000.0
 BOOT = "6f1d2c3b-0000-4000-8000-000000000001"
 RECORD = "etc/ginn/setup-alice.json"
@@ -169,7 +178,7 @@ def _setup(
         user,
         root_dir=root,
         euid=0,
-        lookup_user=USERS.__getitem__,
+        lookup_user=_account,
         clock=lambda: clock,
         fault=fault,
         owner_of=owner_of,
@@ -177,14 +186,21 @@ def _setup(
     )
 
 
+def _account(name: str) -> UserInfo:
+    """The account for `name` from USERS or NAMED_USERS. KeyError when unknown, as getpwnam does."""
+    if name in NAMED_USERS:
+        return NAMED_USERS[name]
+    return USERS[name]
+
+
 def _passwd(name: str) -> Any:
     """Stands in for pwd.getpwnam with the fields that Host Setup reads. KeyError when unknown."""
-    info = USERS[name]
+    info = _account(name)
     return SimpleNamespace(pw_uid=info.uid, pw_gid=info.gid, pw_dir=info.home)
 
 
 def _rendered(user: str = "alice") -> dict[str, str]:
-    info = USERS[user]
+    info = _account(user)
     home = info.home
     xdg = {
         "XDG_STATE_HOME": f"{home}/.local/state",
@@ -1244,3 +1260,133 @@ def test_an_existing_etc_ginn_with_no_records_gets_a_shared_json_and_does_not_re
     shared = _shared(root)
     assert "etc/ginn" not in {entry.path for entry in shared.paths}
     assert _record(root).status == "complete"
+
+
+CLASSIFIED: tuple[tuple[str, int, str, bool], ...] = (
+    ("ginn", 1001, "etc/ginn", True),
+    ("ginn", 1001, "etc/ginn/shared.json", True),
+    ("ginn", 1001, "etc/ginn/setup-ginn.json", False),
+    ("ginn", 1001, "sys/fs/cgroup/ginn", True),
+    ("ginn", 1001, "sys/fs/cgroup/ginn/1001", False),
+    ("ginn", 1001, "sys/fs/cgroup/ginn/1001/supervisor", False),
+    ("ginn", 1001, "run/ginn", True),
+    ("ginn", 1001, "run/ginn/1001", False),
+    ("ginn", 1001, "run/ginn/10010", True),
+    ("ginn", 1001, "etc/sv", True),
+    ("ginn", 1001, "etc/sv/ginn-ginn", False),
+    ("ginn", 1001, "etc/sv/ginn-ginn/log/run", False),
+    ("ginn", 1001, "var/service/ginn-ginn", False),
+    ("ginn", 1001, "etc/subuid", True),
+    ("sv", 1002, "etc/sv", True),
+    ("sv", 1002, "etc/sv/ginn-sv/run", False),
+    ("sv", 1002, "etc/ginn", True),
+    ("run", 1003, "run", True),
+    ("run", 1003, "run/lock", True),
+    ("run", 1003, "run/ginn", True),
+    ("run", 1003, "run/ginn/1003", False),
+    ("run", 1003, "sys/fs/cgroup/ginn/1003", False),
+)
+"""(user, uid, path, shared) rows for `_is_shared`. `etc/subuid` is shared by path, and its
+entries are kept per-user by kind (`_is_user_entry`)."""
+
+
+@pytest.mark.fr("DR-009")
+@pytest.mark.parametrize(("user", "uid", "rel", "shared"), CLASSIFIED)
+def test_a_path_is_per_user_only_when_a_whole_component_is_the_uid_or_the_user_named_ones(
+    user: str, uid: int, rel: str, shared: bool
+) -> None:
+    target = setup_mod._Target(user=user, uid=uid, gid=uid, rendered={}, link_rel="")
+    assert setup_mod._is_shared(rel, target) is shared
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.fr("DR-009")
+@pytest.mark.parametrize("name", list(NAMED_USERS))
+def test_a_user_named_like_a_shared_path_component_leaves_that_path_shared(
+    tmp_path: Path, name: str
+) -> None:
+    root = _host(tmp_path)
+    shutil.rmtree(root / "etc/sv")
+    _setup(root, name)
+    uid = NAMED_USERS[name].uid
+    record = _record(root, name)
+    shared = _shared(root)
+    assert {entry.path for entry in shared.paths} == {"etc/ginn", "etc/sv", SHARED}
+    assert _entry(shared, "etc/sv").pre == rec.Image("absent")
+    assert {entry.path for entry in shared.service_paths} == set(SHARED_SERVICE)
+    assert all(entry.shared for entry in (*shared.paths, *shared.service_paths))
+    per_user = {entry.path for entry in (*record.paths, *record.service_paths)}
+    assert per_user.isdisjoint({"etc/ginn", "etc/sv", SHARED, "run", *SHARED_SERVICE})
+    assert {entry.path for entry in record.paths if entry.shared} == {SUBUID, SUBGID}
+    assert _entry(record, f"etc/ginn/setup-{name}.json").shared is False
+    assert _entry(record, f"etc/sv/ginn-{name}/run").kind == "file"
+    assert _entry(record, f"etc/sv/ginn-{name}").shared is False
+    assert {
+        f"run/ginn/{uid}",
+        f"sys/fs/cgroup/ginn/{uid}",
+        f"sys/fs/cgroup/ginn/{uid}/supervisor",
+    } <= per_user
+    before = _snapshot(root)
+    assert _setup(root, name, clock=NOW + 60).status == "already configured"
+    assert _snapshot(root) == before
+
+
+@pytest.mark.fr("FR-002")
+@pytest.mark.fr("DR-009")
+def test_a_rerun_does_not_check_the_mode_of_a_shared_directory(tmp_path: Path) -> None:
+    """ADR-013, Decision 18: shared entries carry pre-images only, so a rerun leaves their modes."""
+    root = _host(tmp_path)
+    shutil.rmtree(root / "etc/sv")
+    _setup(root)
+    assert _entry(_shared(root), "etc/sv").post is None
+    os.chmod(root / "etc/sv", 0o700)
+    before = _snapshot(root)
+    assert _setup(root, clock=NOW + 60).status == "already configured"
+    assert _snapshot(root) == before
+    assert stat.S_IMODE(os.stat(root / "etc/sv").st_mode) == 0o700
+
+
+@pytest.mark.fr("DR-009")
+def test_shared_json_carries_a_post_image_only_for_itself(tmp_path: Path) -> None:
+    """ADR-013, Decision 18 and Decision 9: the self entry is the only one with a post-image."""
+    root = _host(tmp_path)
+    shutil.rmtree(root / "etc/sv")
+    _setup(root)
+    shared = _shared(root)
+    assert [entry.path for entry in shared.paths if entry.post is not None] == [SHARED]
+    assert all(entry.post is None for entry in shared.service_paths)
+
+
+@pytest.mark.fr("NFR-040")
+def test_two_path_refusals_with_different_reasons_carry_the_same_general_remedy(
+    tmp_path: Path,
+) -> None:
+    """ADR-013, Decision 19: the catalogue remedy is one text, and the case is in the reason."""
+    root = _host(tmp_path)
+    os.chmod(root / "etc", 0o775)  # noqa: S103 - the test makes a parent group-writable on purpose
+    with pytest.raises(GinnError) as mode:
+        _setup(root)
+    os.chmod(root / "etc", 0o755)  # noqa: S103 - restores the mode the test changed above
+    with pytest.raises(GinnError) as owner:
+        _setup(root, owner_of=lambda path: 1000 if path.name == "etc" else 0)
+    assert mode.value.code == owner.value.code == "GINN-E-SETUP-PATH-UNSAFE"
+    assert "writable by group or others" in mode.value.message
+    assert "is owned by uid 1000" in owner.value.message
+    assert mode.value.remedy == owner.value.remedy
+    assert mode.value.remedy.startswith("inspect ")
+
+
+@pytest.mark.fr("FR-001")
+@pytest.mark.fr("NFR-030")
+def test_a_crash_after_run_lock_is_created_leaves_it_unrecorded(tmp_path: Path) -> None:
+    """ADR-013, Residuals (d). The fault after the first records stands in for a SIGKILL."""
+    root = _host(tmp_path)
+    shutil.rmtree(root / "run")
+    with pytest.raises(_Crash):
+        _setup(root, fault=_crash_after("tmpdir"))
+    assert (root / "run/lock").is_dir()
+    assert not (root / "etc/ginn").exists()
+    _setup(root, clock=NOW + 60)
+    shared = _shared(root)
+    assert {"run", "run/lock"}.isdisjoint({entry.path for entry in shared.paths})
+    assert (root / "run/lock").is_dir()

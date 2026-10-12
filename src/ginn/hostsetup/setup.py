@@ -33,14 +33,18 @@
     directory that var/service resolves to, not into var/service itself.
 12. The per-user record is written with status complete and the post-images.
 
-The shared record and the per-user record split the planned paths. A path is shared unless a path
-component names the user or the user's uid (`_is_shared`). The shared record takes the shared
-paths other than the two subordinate ID files, which every user's record keeps. A shared directory
-that the first setup creates goes into shared.json with pre-image absent. When a later user's setup
-must create a shared directory that is missing (for example etc/sv, after an admin removed it), the
-directory is added to shared.json under the global lock, with its true pre-image (absent), only if
-shared.json lacks that path. A later user's setup never changes an existing shared entry, and never
-adds a shared entry to its own record.
+The shared record and the per-user record split the planned paths. A path is per-user when one of
+its components is the user's decimal uid, `ginn-<user>` or `setup-<user>.json`. Every other path is
+shared (`_is_shared`, ADR-013 Decision 12). Components are compared whole, so a user named `ginn`
+leaves etc/ginn shared. The shared record takes the shared paths other than the two subordinate ID
+files, which every user's record keeps. A shared directory that the first setup creates goes into
+shared.json with pre-image absent. An existing etc/ginn with no records and no shared.json is a
+first setup: shared.json is written into it, and the directory is not recorded (Decision 20). When
+a later user's setup must create a shared directory that is missing (for example etc/sv, after an
+admin removed it), the directory is added to shared.json under the global lock, with its true
+pre-image (absent), only if shared.json lacks that path. A later user's setup never changes an
+existing shared entry, and never adds a shared entry to its own record. Shared entries carry
+pre-images only, so a rerun does not check the mode of a shared directory (Decision 18).
 
 A crash after any step leaves a pending record, or a temporary directory with no record. The next
 run keeps the stored pre-images, reuses the stored subordinate ID range, and repeats the steps.
@@ -410,7 +414,12 @@ def _resolve_service_dir(host: _Host) -> str:
 
 
 def _is_shared(rel: str, target: _Target) -> bool:
-    """True unless the path names this user or this user's uid (ADR-013, Decision 12)."""
+    """True unless a whole component of `rel` is the uid, `ginn-<user>` or `setup-<user>.json`.
+
+    ADR-013, Decision 12. Components are compared whole, not as substrings: uid 1001 does not match
+    `run/ginn/10010`, and a user named `sv` does not make `etc/sv` per-user. The two subordinate ID
+    files are shared by path, and `_is_user_entry` keeps them in the per-user record.
+    """
     own = {f"ginn-{target.user}", f"setup-{target.user}.json", str(target.uid)}
     return not any(part in own for part in PurePosixPath(rel).parts)
 
