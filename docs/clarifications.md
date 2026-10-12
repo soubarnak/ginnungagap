@@ -16,6 +16,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-8 | Development-tier setcap step and libcap package | FR-013, CR-007, FR-021, FR-062, NFR-SEC-002 | withdrawn (2026-10-12, D2) |
 | CL-9 | Create-time refresh and the Integration Package Set | FR-013, FR-023, CR-007 | open, for SRS v1.1 |
 | CL-10 | Create-time mitigations for services-on realms | CR-007, FR-013, NFR-003, FR-080 | open, for SRS v1.1 (needed only if S-05s fails) |
+| CL-11 | Host Setup undo when a path is shared, or its state is gone | FR-003 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -93,3 +94,16 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - How ginn works now: the product form uses create-time mounts and environment: a read-only bind of a ginn-owned journald drop-in at `/etc/systemd/journald.conf.d/ginn.conf` (this replaces the tmpfs form of D5), `/dev/null` bind mounts over the unit paths, and `SYSTEMD_LOG_LEVEL=warning` in the environment (ADR-007). ginn writes no file into the realm's /etc. The image's /etc changes only where podman creates a mountpoint stub for a bind whose target the image lacks. That write is podman's, not ginn's. S-05s checks the mounted drop-in before T7.3 (ADR-007).
 - Evidence: S-05r measured the a+b+d PASS with the mitigations as image layers (`spikes/s05/Dockerfile.mit`). Those layers write the journald file and the mask symlinks into /etc. S-05s has not run, so the create-time forms are unmeasured.
 - Status: open, for SRS v1.1. The entry is needed only if S-05s shows that the create-time forms fail. The fallback writes files into the realm's /etc, and CR-007 then needs this wording to allow it.
+
+## CL-11: Host Setup undo when a path is shared, or its state is gone
+
+- Requirement IDs: FR-003 (AC-1).
+- Issue: AC-1 says that every path in the Host Setup Record is "restored to its pre-setup content or removed". That cannot hold for these cases:
+  - the subid files, after another user appended a line, because restoring the whole file would drop that line;
+  - an admin-widened subid line, which undo leaves in place, because it is not the line that setup wrote;
+  - a shared directory that another user's entries still use, because `rmdir` fails on a non-empty directory;
+  - root `cgroup.subtree_control` after a reboot, when the cgroup state is gone, and while other users remain, when undo leaves the controllers in place for them.
+- Proposed wording: "every path in the Host Setup Record is restored, removed, or has setup's own change reversed; a shared path still used by another record is left and reported."
+- How ginn works now: ADR-013 Decision 15 reverses setup's change instead of writing bytes back. Subid lines are removed by exact match (i). Root controllers are disabled only for the last record, and only in the same boot (ii). Shared directories are removed only when their pre-image is absent and they are empty (iii). Undo prints each path it leaves, and why. The register does not claim that AC-1 holds as written.
+- Evidence: ADR-013 Decisions 6, 15 and 17. The shared record followed the eighth review (MJ1), which showed that per-user records lost shared pre-images when users were undone out of order. The cases above follow from the same rules. No undo has run on a host yet.
+- Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds on the assumption that the proposed wording is accepted, and T3.5 is built to it.
