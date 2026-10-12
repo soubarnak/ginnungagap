@@ -1,0 +1,13 @@
+sweep_id	cfg	run	status	image	settle	boot_s	state	failed_units	conmon_rss_kib	realm_rss_kib	pause_rss_kib	total_rss_kib	realm_pss_kib	pause_pss_kib	total_pss_kib	nproc_container	swap_kib	pss_missing	pause_pid
+s05r-20261012T145658	off	1	ok	docker.io/library/debian:stable	na	-	-	-	1932	2812	700	3512	1049	402	1451	2	0	0	9758
+s05r-20261012T145658	off	2	ok	docker.io/library/debian:stable	na	-	-	-	1888	4072	700	4772	2331	402	2733	2	0	0	9758
+s05r-20261012T145658	off	3	ok	docker.io/library/debian:stable	na	-	-	-	1888	3948	700	4648	2187	402	2589	2	0	0	9758
+s05r-20261012T145658	off	4	ok	docker.io/library/debian:stable	na	-	-	-	1940	3932	700	4632	2177	402	2579	2	0	0	9758
+s05r-20261012T145658	off	5	ok	docker.io/library/debian:stable	na	-	-	-	2004	4096	700	4796	2266	402	2668	2	0	0	9758
+s05r-20261012T145658	off	6	ok	docker.io/library/debian:stable	na	-	-	-	2000	4108	700	4808	2244	402	2646	2	0	0	9758
+s05r-20261012T145658	off	7	ok	docker.io/library/debian:stable	na	-	-	-	1988	3984	652	4636	2174	362	2536	2	32	0	9758
+s05r-20261012T145658	off	8	ok	docker.io/library/debian:stable	na	-	-	-	1988	4080	652	4732	2270	362	2632	2	32	0	9758
+s05r-20261012T145658	off	9	excluded-pressure	docker.io/library/debian:stable	na	-	-	-	1748	1904	12	1916	455	8	463	2	36	0	9758
+s05r-20261012T145658	off	10	excluded-pressure	docker.io/library/debian:stable	na	-	-	-	1880	3728	12	3740	2256	8	2264	2	36	0	9758
+s05r-20261012T145658	off	9	ok	docker.io/library/debian:stable	na	-	-	-	1888	3932	748	4680	2158	428	2586	2	0	0	28864
+s05r-20261012T145658	off	10	ok	docker.io/library/debian:stable	na	-	-	-	1888	3840	748	4588	2066	428	2494	2	0	0	28864

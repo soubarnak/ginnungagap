@@ -3,7 +3,7 @@
 # Build args choose the layers: JOURNAL=1 installs the journald drop-in; MASKS=base
 # masks masks-base.txt; MASKS=logind also masks systemd-logind. Mitigation (d),
 # SYSTEMD_LOG_LEVEL, is a run-time environment setting and is not baked in.
-ARG BASE=localhost/ginn-s05:base
+ARG BASE=localhost/ginn-s05r:base
 FROM ${BASE}
 ARG JOURNAL=0
 ARG MASKS=none
