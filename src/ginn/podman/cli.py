@@ -45,7 +45,7 @@ from ginn.podman.adapter import (
     with_network_retry,
 )
 from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
-from ginn.store.paths import OwnedPaths, _check_runtime_dir
+from ginn.store.paths import OwnedPaths, check_runtime_dir
 
 _NETWORK_PATTERNS: Final = (
     re.compile(r"dial tcp", re.IGNORECASE),
@@ -175,7 +175,8 @@ class PodmanCli:
 
     Build it with `from_paths`, the documented constructor. It takes Owned Paths and derives every
     location from them. `history` keeps the full argv of every call, in order, for tests and
-    diagnostics.
+    diagnostics. `tightened` keeps one line for each owned directory that a call tightened from a
+    wider mode (DR-021), in the order they happened. The CLI prints them; this class prints nothing.
     """
 
     @classmethod
@@ -255,6 +256,7 @@ class PodmanCli:
         self.verbose = verbose
         self.owned_paths = owned_paths
         self.history: list[list[str]] = []
+        self.tightened: list[str] = []
 
     def _global_flags(self) -> list[str]:
         """Global flags come before the subcommand. --cdi-spec-dir is global (S-06)."""
@@ -326,12 +328,13 @@ class PodmanCli:
         there yet. The runtime check runs first and is the same check `OwnedPaths.from_env`
         makes. `ensure()` would create a missing runtime root and chmod a wrong-mode one, and
         ADR-004 forbids both, so a missing or unsafe root is refused here. Both steps are
-        idempotent: what is already right is not rewritten.
+        idempotent: what is already right is not rewritten. A directory wider than 0700 is
+        tightened, and the change is appended to `tightened` (DR-021). It is not printed here.
         """
         if self.owned_paths is not None:
-            _check_runtime_dir(self.owned_paths.runtime, os.getuid())
+            check_runtime_dir(self.owned_paths.runtime, os.getuid())
             try:
-                self.owned_paths.ensure()
+                self.owned_paths.ensure(on_tighten=self.tightened.append)
                 self.owned_paths.ensure_config()
             except OSError as exc:
                 raise _internal(f"cannot prepare Owned Paths for podman: {exc}") from exc

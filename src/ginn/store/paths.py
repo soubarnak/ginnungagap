@@ -124,13 +124,14 @@ def _runtime_dir(env: Mapping[str, str], uid: int, system_run: Path) -> Path:
         runtime = Path(override)
     else:
         runtime = system_run / _APP_NAME / str(uid)
-    _check_runtime_dir(runtime, uid)
+    check_runtime_dir(runtime, uid)
     return runtime
 
 
-def _check_runtime_dir(runtime: Path, uid: int) -> None:
+def check_runtime_dir(runtime: Path, uid: int) -> None:
     """Refuse a runtime directory that is missing or is not a 0700 directory owned by `uid`.
 
+    Public because the podman adapter runs the same check before each call (DR-010, ADR-004).
     lstat, not stat: a symbolic link in place of the directory is refused, as `_ensure_dir` does.
     """
     try:

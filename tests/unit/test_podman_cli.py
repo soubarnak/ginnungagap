@@ -520,6 +520,28 @@ def test_a_fresh_tree_needs_no_setup_before_a_from_paths_call(shim: Path, tmp_pa
     assert len(logged(shim)) == 1
 
 
+@pytest.mark.fr("DR-021")
+def test_a_wider_owned_directory_is_tightened_and_recorded_without_printing(
+    shim: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An owned directory left at 0755 is tightened by the next call. The adapter records the change
+    # for the CLI to print, and writes nothing itself.
+    paths = host_paths(tmp_path)
+    paths.data.mkdir(parents=True)
+    os.chmod(paths.data, 0o755)  # noqa: S103 - fixture mode bits, not a host file
+    cli = PodmanCli.from_paths(paths)
+    cli.info()
+    assert _mode(paths.data) == 0o700
+    assert len(cli.tightened) == 1
+    assert str(paths.data) in cli.tightened[0]
+    assert "from 755 to 700" in cli.tightened[0]
+    out, err = capsys.readouterr()
+    assert out == "" and err == ""
+    # The next call has nothing left to tighten, and the earlier notice is kept.
+    cli.info()
+    assert len(cli.tightened) == 1
+
+
 @pytest.mark.fr("DR-010")
 @pytest.mark.fr("NFR-040")
 @pytest.mark.parametrize("damage", ["missing", "wrong-mode"])

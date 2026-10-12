@@ -7,9 +7,10 @@ file are never rewritten. A user who already holds at least `size` IDs in total 
 which makes a second run a no-op (FR-002). The read-modify-replace runs under `<name>.lock` next to
 the file (etc/subuid.lock, etc/subgid.lock), so two Host Setup runs cannot both append (FR-001).
 The lock file holds its holder's PID. A lock whose PID is gone and whose file is old enough is
-left behind by a crash, so it is reclaimed instead of blocking every later run. Reclaiming runs
-under `<name>.lock.reclaim`, a sidecar file held with flock, so two waiters cannot both unlink the
-same stale lock (see `_reclaim_stale`).
+left behind by a crash, so it is reclaimed instead of blocking every later run. A lock that is
+still empty when it is old enough was left by a crash between its create and its PID write, and
+is reclaimed the same way. Reclaiming runs under `<name>.lock.reclaim`, a sidecar file held with
+flock, so two waiters cannot both unlink the same stale lock (see `_reclaim_stale`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from ginn.errors import make
 from ginn.hostsetup._atomic import atomic_write, file_mode
 
 MIN_SIZE = 524_288
@@ -38,7 +40,8 @@ LOCK_TIMEOUT_SECONDS = 5.0
 """How long `ensure_range` waits for another holder of the lock before it gives up."""
 LOCK_POLL_SECONDS = 0.05
 LOCK_STALE_SECONDS = 3.0
-"""A lock is reclaimed only when its PID is gone and the lock file is at least this old."""
+"""A lock is reclaimed only when the lock file is at least this old, and either its PID is gone
+or it is empty (its creator died before it wrote the PID)."""
 
 _DECIMAL = re.compile(r"[0-9]+")
 """Digits of a subuid or subgid start or count field. Any length is accepted."""
@@ -64,9 +67,9 @@ class SubIdLocked(Exception):
     The lock is not removed while its holder is alive, and the message names the holder's PID
     when the lock records one. Host Setup should be run again later.
 
-    It is also raised when the reclaim gate `<name>.lock.reclaim` is a symbolic link. The stale
-    lock then cannot be reclaimed, and the message names the gate. Running again does not help
-    until the link is removed. No catalogue code is defined for this case.
+    A reclaim gate `<name>.lock.reclaim` that is a symbolic link is a different case: the stale
+    lock cannot be reclaimed until a person removes the link. That raises GINN-E-SUBID-LOCK-UNSAFE
+    instead (see `_reclaim_stale`).
     """
 
 
@@ -202,12 +205,17 @@ def _is_setuid(path: Path) -> bool:
 
 @dataclass(frozen=True)
 class _LockIdentity:
-    """One lock file as read through a single open descriptor. `pid` is None when unknown."""
+    """One lock file as read through a single open descriptor. `pid` is None when unknown.
+
+    `empty` is True when the file holds no bytes at all. Such a lock has no PID yet, and its
+    creator may have died before it wrote one.
+    """
 
     dev: int
     ino: int
     mtime_ns: int
     pid: int | None
+    empty: bool
 
 
 @contextmanager
@@ -216,11 +224,12 @@ def _lock(path: Path, timeout: float) -> Iterator[None]:
 
     The lock is a file created with O_CREAT|O_EXCL, so only one creator can succeed, and it
     holds the creator's PID. A second caller retries every LOCK_POLL_SECONDS until `timeout`,
-    then raises SubIdLocked and leaves the other holder's file in place. An empty or unreadable
-    lock counts as held, because it may be a creator that has not written its PID yet. A stale
-    lock (see `_is_stale`) is reclaimed at most once per call, through `_reclaim_stale`. When that
-    call creates the new lock itself, this caller holds it at once. The file this call created is
-    removed on exit, including when the body raises.
+    then raises SubIdLocked and leaves the other holder's file in place. A lock with no PID counts
+    as held. An empty lock is held too, until it is old enough to be stale (see `_is_stale`),
+    because its creator may not have written its PID yet. A stale lock is reclaimed at most once
+    per call, through `_reclaim_stale`. When that call creates the new lock itself, this caller
+    holds it at once. The file this call created is removed on exit, including when the body
+    raises.
     """
     lock = path.with_name(f"{path.name}.lock")
     deadline = time.monotonic() + timeout
@@ -249,8 +258,8 @@ def _create_lock(lock: Path) -> bool:
     """Create `lock` exclusively, write this process's PID into it. False if it already exists.
 
     If the PID write, its fsync or the close fails, the lock this call created is removed before
-    the error propagates. A lock with no PID is never stale (see `_is_stale`), so leaving it would
-    block every later run until the timeout.
+    the error propagates. A lock with no PID would block every later run until it is old enough to
+    be stale (see `_is_stale`), so it is removed here.
     """
     try:
         fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -286,10 +295,11 @@ def _read_lock(lock: Path) -> _LockIdentity | None:
         return None
     try:
         st = os.fstat(fd)
-        text = os.read(fd, _READ_LIMIT).decode("ascii", errors="replace")
+        data = os.read(fd, _READ_LIMIT)
     finally:
         os.close(fd)
-    return _LockIdentity(st.st_dev, st.st_ino, st.st_mtime_ns, _parse_pid(text))
+    text = data.decode("ascii", errors="replace")
+    return _LockIdentity(st.st_dev, st.st_ino, st.st_mtime_ns, _parse_pid(text), empty=not data)
 
 
 def _parse_pid(text: str) -> int | None:
@@ -302,14 +312,20 @@ def _parse_pid(text: str) -> int | None:
 
 
 def _is_stale(seen: _LockIdentity) -> bool:
-    """True when `seen` records a PID that no longer exists and the file is old enough.
+    """True when `seen` is a crashed creator's lock and the file is at least LOCK_STALE_SECONDS old.
 
-    A lock with no PID yet (its creator has not written it) is never stale.
+    Two cases qualify. In the first, the recorded PID no longer exists. In the second, the lock is
+    empty: its creator died before it wrote a PID, so there is no PID to check and the empty file
+    is the evidence. The age test applies to both. A live creator writes its PID a moment after it
+    creates the file, so a young lock may still be in use. A lock whose first line is not a PID and
+    which is not empty is never stale.
     """
-    if seen.pid is None:
+    if seen.pid is None and not seen.empty:
         return False
     if time.time_ns() - seen.mtime_ns < LOCK_STALE_SECONDS * 1_000_000_000:
         return False
+    if seen.pid is None:
+        return True
     try:
         os.kill(seen.pid, 0)
     except ProcessLookupError:
@@ -333,16 +349,16 @@ def _reclaim_stale(lock: Path, seen: _LockIdentity) -> bool:
     refused. The gate is not removed after use: an empty file is harmless, and removing it would
     reopen the race. See `_reclaim_locked` for what runs under the gate.
 
-    A symbolic link in place of the gate fails the open with ELOOP. That is raised as SubIdLocked,
-    because the stale lock cannot be reclaimed. Any other error from the open propagates as it is.
+    A symbolic link in place of the gate fails the open with ELOOP. That is raised as
+    GINN-E-SUBID-LOCK-UNSAFE, because the stale lock cannot be reclaimed until a person removes the
+    link. Any other error from the open propagates as it is.
     """
     gate_path = lock.with_name(f"{lock.name}.reclaim")
     try:
         gate = os.open(gate_path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            reason = f"{gate_path} is a symbolic link"
-            raise SubIdLocked(f"{lock} cannot be reclaimed: {reason}") from exc
+            raise make("GINN-E-SUBID-LOCK-UNSAFE", lock=str(lock), path=str(gate_path)) from exc
         raise
     try:
         fcntl.flock(gate, fcntl.LOCK_EX)
@@ -354,12 +370,13 @@ def _reclaim_stale(lock: Path, seen: _LockIdentity) -> bool:
 def _reclaim_locked(lock: Path, seen: _LockIdentity) -> bool:
     """Runs under the reclaim gate. Unlink `lock` if it is still `seen`, then create a new one.
 
-    The re-read compares every field of the identity: device, inode, mtime_ns and PID. If any of
-    them differs, another caller reclaimed or replaced the lock after `seen` was taken, so it is
-    left alone and this call returns False. Otherwise the stale lock is unlinked and this call
-    creates the new lock while it still holds the gate. Other reclaimers cannot touch that lock,
-    because they must take the gate first. A caller that is not reclaiming can still win the
-    O_EXCL race for the path. Then this call returns False and leaves that lock alone.
+    The re-read compares every field of the identity: device, inode, mtime_ns, PID and the empty
+    flag. If any of them differs, another caller reclaimed or replaced the lock after `seen` was
+    taken, so it is left alone and this call returns False. Otherwise the stale lock is unlinked
+    and this call creates the new lock while it still holds the gate. Other reclaimers cannot
+    touch that lock, because they must take the gate first. A caller that is not reclaiming can
+    still win the O_EXCL race for the path. Then this call returns False and leaves that lock
+    alone.
 
     One gap remains, and it is accepted: PID reuse. After the holder dies, an unrelated process
     may take its PID, and the stale lock then looks held. The caller waits and times out, which is

@@ -4,8 +4,8 @@
 Every GINN-E-* and GINN-W-* code that appears in GINN-SRS-001 has an entry. Some codes are
 ginn-defined and the SRS does not name them: the CLI-level GINN-E-USAGE, GINN-E-INTERRUPTED and
 GINN-E-INTERNAL, GINN-E-RECOVERY-PENDING (FR-122), GINN-E-HOST-NOT-SET-UP and
-GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-DISTRO-DATA (NFR-060) and GINN-E-TRUST-DATA
-(DR-040). `source` cites the requirement that defines the failure.
+GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), GINN-E-DISTRO-DATA
+(NFR-060) and GINN-E-TRUST-DATA (DR-040). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -106,6 +106,16 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="run 'ginn doctor' to see the cause; if Host Setup has not run, run 'sudo ginn "
         "host-setup --user <name>'; otherwise check 'sudo sv status ginn-<user>'",
         source="DR-010; ADR-004 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SUBID-LOCK-UNSAFE",
+        exit_code=77,
+        summary="stale subordinate ID lock {lock} cannot be reclaimed: "
+        "its reclaim gate {path} is a symbolic link",
+        remedy="as root, run 'ls -l {path}' to see where the link points, then run 'rm {path}' to "
+        "remove the link itself, not its target; then run 'sudo ginn host-setup --user <name>' "
+        "again",
+        source="FR-001 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-UNDO-REALMS-EXIST",
@@ -293,7 +303,11 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
     (75, "realm busy (EX_TEMPFAIL)"),
-    (77, "Host Setup must run as root, or has not run for this user (EX_NOPERM)"),
+    (
+        77,
+        "Host Setup must run as root, has not run for this user, or refuses an unsafe path it "
+        "cannot repair (EX_NOPERM)",
+    ),
     (EXEC_GINN_FAILURE, "reserved; see EXEC_GINN_FAILURE"),
     (130, "interrupted by the user"),
 )

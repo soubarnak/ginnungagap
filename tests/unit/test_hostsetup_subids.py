@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from ginn.errors import GinnError
 from ginn.hostsetup import subids
 from ginn.hostsetup.subids import (
     DEFAULT_CEILING,
@@ -316,6 +317,56 @@ def test_a_lock_of_a_dead_process_is_kept_while_it_is_still_fresh(tmp_path: Path
 
 
 @pytest.mark.fr("FR-001")
+def test_an_empty_lock_left_by_a_crash_is_reclaimed_once_it_is_old_enough(tmp_path: Path) -> None:
+    # The creator died between the O_EXCL create and its PID write, so no PID will ever appear.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_bytes(b"")
+    _age(lock, 60)
+    change = ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.0)
+    assert change.changed is True
+    assert _names(path.parent) == ["subuid", "subuid.lock.reclaim"]
+
+
+@pytest.mark.fr("FR-001")
+def test_an_empty_lock_younger_than_the_stale_age_is_kept(tmp_path: Path) -> None:
+    # The creator may still be running and about to write its PID, so a young empty lock is held.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_bytes(b"")
+    _age(lock, subids.LOCK_STALE_SECONDS - 1)
+    with pytest.raises(SubIdLocked):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.read_bytes() == b""
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
+def test_an_empty_lock_that_gains_a_pid_before_the_reclaim_is_not_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The creator writes its PID after the lock was judged stale. The identity then differs, so
+    # the reclaim leaves the lock alone. The mtime is put back, so only the content differs.
+    path = _subuid(tmp_path, SAMPLE)
+    lock = _lock_path(path)
+    lock.write_bytes(b"")
+    _age(lock, 60)
+    judged_mtime = os.stat(lock).st_mtime_ns
+    real_reclaim = subids._reclaim_stale
+
+    def creator_writes_its_pid(target: Path, seen: subids._LockIdentity) -> bool:
+        lock.write_text(f"{os.getpid()}\n")
+        os.utime(lock, ns=(judged_mtime, judged_mtime))
+        return real_reclaim(target, seen)
+
+    monkeypatch.setattr(subids, "_reclaim_stale", creator_writes_its_pid)
+    with pytest.raises(SubIdLocked):
+        ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
+    assert lock.read_text() == f"{os.getpid()}\n"
+    assert path.read_bytes() == SAMPLE
+
+
+@pytest.mark.fr("FR-001")
 def test_a_lock_held_by_a_live_pid_times_out_and_names_that_pid(tmp_path: Path) -> None:
     path = _subuid(tmp_path, SAMPLE)
     lock = _lock_path(path)
@@ -469,9 +520,11 @@ def test_a_symbolic_link_in_place_of_the_reclaim_gate_is_refused(tmp_path: Path)
     elsewhere = tmp_path / "elsewhere"
     gate = lock.with_name(f"{lock.name}.reclaim")
     gate.symlink_to(elsewhere)
-    with pytest.raises(SubIdLocked, match="symbolic link") as refused:
+    with pytest.raises(GinnError) as refused:
         ensure_range(path, "alice", MIN_SIZE, lock_timeout=0.1)
-    assert str(gate) in str(refused.value)
+    assert refused.value.code == "GINN-E-SUBID-LOCK-UNSAFE"
+    assert refused.value.exit_code == 77
+    assert refused.value.details == {"lock": str(lock), "path": str(gate)}
     cause = refused.value.__cause__
     assert isinstance(cause, OSError)
     assert cause.errno == errno.ELOOP
@@ -485,7 +538,8 @@ def test_a_symbolic_link_in_place_of_the_reclaim_gate_is_refused(tmp_path: Path)
 def test_a_failed_pid_write_or_fsync_removes_the_lock_it_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
-    # A lock with no PID is never stale, so one left behind would block every later Host Setup.
+    # The lock this call created is removed. Otherwise an empty lock would block every later Host
+    # Setup until it was old enough to be reclaimed.
     path = _subuid(tmp_path, SAMPLE)
     real_write = os.write
     pid_line = f"{os.getpid()}\n".encode("ascii")

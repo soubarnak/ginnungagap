@@ -44,6 +44,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-SETUP-ROOT": 77,
     "GINN-E-HOST-NOT-SET-UP": 77,
     "GINN-E-RUNTIME-DIR-UNSAFE": 77,
+    "GINN-E-SUBID-LOCK-UNSAFE": 77,
     "GINN-E-INTERRUPTED": 130,
     "GINN-E-INTERNAL": 70,
     "GINN-E-DISTRO-DATA": 70,
@@ -208,6 +209,20 @@ def test_runtime_dir_unsafe_names_the_path_owner_and_mode() -> None:
         "runtime directory /run/ginn/1000 must be a real directory owned by uid 1000 with mode "
         "0700; found mode 755"
     )
+
+
+@pytest.mark.fr("FR-001")
+def test_subid_lock_unsafe_names_the_lock_gate_and_the_root_fix() -> None:
+    err = make("GINN-E-SUBID-LOCK-UNSAFE", lock="/etc/subuid.lock", path="/etc/subuid.lock.reclaim")
+    assert err.code == "GINN-E-SUBID-LOCK-UNSAFE"
+    assert err.exit_code == 77
+    assert err.message == (
+        "stale subordinate ID lock /etc/subuid.lock cannot be reclaimed: "
+        "its reclaim gate /etc/subuid.lock.reclaim is a symbolic link"
+    )
+    assert "as root, run 'ls -l /etc/subuid.lock.reclaim'" in err.remedy
+    assert "'rm /etc/subuid.lock.reclaim' to remove the link itself" in err.remedy
+    assert "\n" not in err.remedy
 
 
 @pytest.mark.fr("DR-040")
