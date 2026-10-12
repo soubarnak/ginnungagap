@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.cli import PodmanCli
@@ -29,9 +30,7 @@ from ginn.runtime.attach import (
     NOT_VISIBLE,
     Admit,
     AttachResult,
-    GrantRecord,
     Op,
-    SourceIdentity,
     admission,
     attach_at_start,
     helper_path,

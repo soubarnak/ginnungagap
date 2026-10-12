@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Atomic JSON writes, realm records and the RealmStore (DR-001, DR-020, DR-035)."""
 
+import dataclasses
 import json
 import os
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from ginn.domain import (
     RealmState,
     Tier,
 )
+from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, read_json, write_json_atomic
@@ -448,3 +450,99 @@ def test_remove_corrupt_on_a_missing_realm_is_no_such_realm(tmp_path: Path) -> N
     with pytest.raises(GinnError) as excinfo:
         store.remove_corrupt(RealmName("ghost"))
     assert excinfo.value.code == "GINN-E-NO-SUCH-REALM"
+
+
+@pytest.mark.fr("FR-066")
+def test_realm_record_keeps_its_grant_list_through_json(tmp_path: Path) -> None:
+    grants = [
+        GrantRecord(
+            "share",
+            "/home/alice/Downloads",
+            "/home/alice/Downloads",
+            "rw",
+            True,
+            SourceIdentity(7, 11, ("/home/alice/Downloads/mnt",)),
+            None,
+        ),
+        GrantRecord("session", "", "/run/user/1000/wayland-0", "rw", False),
+    ]
+    record = dataclasses.replace(_record(), grants=grants)
+    restored = RealmRecord.from_json(json.loads(json.dumps(record.to_json())))
+    assert restored == record
+    assert restored.grants[0].identity == SourceIdentity(7, 11, ("/home/alice/Downloads/mnt",))
+
+
+@pytest.mark.fr("FR-066")
+def test_a_record_written_before_grants_existed_reads_with_an_empty_list(tmp_path: Path) -> None:
+    older = _record().to_json()
+    del older["grants"]
+    assert older["schema_version"] == 1
+    assert RealmRecord.from_json(older).grants == []
+
+
+@pytest.mark.fr("FR-066")
+def test_a_grant_that_does_not_parse_is_reported_as_internal(tmp_path: Path) -> None:
+    data = _record().to_json()
+    data["grants"] = [{"kind": 5}]
+    with pytest.raises(GinnError) as excinfo:
+        RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
+    assert excinfo.value.code == "GINN-E-INTERNAL"
+
+
+@pytest.mark.fr("FR-066")
+@pytest.mark.parametrize("item", [5, "x", None, ["a"]])
+def test_a_grant_item_that_is_not_an_object_is_reported_as_internal(
+    tmp_path: Path, item: object
+) -> None:
+    data = _record().to_json()
+    data["grants"] = [item]
+    with pytest.raises(GinnError) as excinfo:
+        RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
+    assert excinfo.value.code == "GINN-E-INTERNAL"
+
+
+def _grant_json(**changes: object) -> dict[str, object]:
+    """A valid share grant as the record stores it, with `changes` applied."""
+    grant: dict[str, object] = {
+        "kind": "share",
+        "host": "/home/alice/Downloads",
+        "realm": "/home/alice/Downloads",
+        "mode": "rw",
+        "is_dir": True,
+        "identity": None,
+        "not_visible": None,
+    }
+    grant.update(changes)
+    return grant
+
+
+@pytest.mark.fr("FR-066")
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"realm": "relative/Downloads"},
+        {"realm": ""},
+        {"host": "relative/Downloads"},
+        {"kind": "share", "host": ""},
+    ],
+)
+def test_a_grant_with_a_relative_path_is_reported_as_internal(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    data = _record().to_json()
+    data["grants"] = [_grant_json(**changes)]
+    with pytest.raises(GinnError) as excinfo:
+        RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
+    assert excinfo.value.code == "GINN-E-INTERNAL"
+
+
+@pytest.mark.fr("FR-066")
+def test_a_session_slot_with_an_empty_host_is_a_valid_grant(tmp_path: Path) -> None:
+    """A session path that no session binds yet has an empty host (runtime/env.py)."""
+    data = _record().to_json()
+    data["grants"] = [
+        _grant_json(kind="session", host="", realm="/run/user/1000/wayland-0", mode="rw")
+    ]
+    restored = RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
+    assert restored.grants[0].host == ""
+    assert restored.grants[0].realm == "/run/user/1000/wayland-0"

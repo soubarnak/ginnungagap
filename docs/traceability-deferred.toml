@@ -39,31 +39,27 @@ reason = "every doctor check with its PASS and FAIL cases, the text and JSON rep
 id = "FR-010"
 milestone = "M4"
 partial = true
-reason = "the Basic, services-off create argv is golden-tested and never privileged (T4.1); the create itself, the realm user, the rollback and the AC-1 installed-package list need ops/create.py and a Void host (T4.4, T4.9)"
-
+reason = "ops/create.py (T4.4) is unit-tested on FakePodman: the phase order, the final stopped Basic record with services off (AC-1), the --with install (AC-2), AC-3 with the existing record byte-identical, the disk and digest refusals, the retries, a failure of each podman call and of each step, rollback after an interrupt at each journal step and inside the create call, the pull, the home mkdir and the record write, and the realm user step with its argv. Unverified until the T4.9 host gate: the installed-package list of a real image (AC-1, AC-2); the realm user step (useradd -K -m -d host home -u uid name, after start); and the keep-id passwd injection check (the create argv carries --passwd=false, and the user step would fail on a uid clash without it). A real create is T4.9"
 [[deferred]]
 id = "FR-011"
 milestone = "M4"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
-
+reason = "the pinned-digest pull, the digest check after the pull, and the image removal on a mismatch are unit-tested on FakePodman (T4.4). A failed create leaves no image that it pulled. Not yet proven on a host: a tampered image in a real registry, and the layers in real storage (T4.9)"
 [[deferred]]
 id = "FR-012"
 milestone = "M4"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
-
+reason = "unit tests (T4.4) check that no create step passes a flag that disables a native signature check, and that a signature error maps to GINN-E-PKG-SIGNATURE. Not yet proven on a host: a repository that serves a bad signature (AC-1), and the package-manager config after create (AC-2), which are T4.9 and M5"
 [[deferred]]
 id = "FR-013"
 milestone = "M4"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
-
+reason = "unit tests (T4.4) check the Integration Package Set and its locale steps for each distribution, the LANG handling and the fallback note. Not yet proven on a host: the package diff of a new realm against its image (AC-1), which is T4.9"
 [[deferred]]
 id = "FR-015"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
-
+partial = true
+reason = "unit tests (T4.4) create two realms of one distribution, with separate homes and containers. A second create of the same distribution while one runs is refused at once with GINN-E-REALM-BUSY, by the per-distribution image lock (ops/create.py, store/locks.py image_lock). Not yet proven on a host: independent roots and homes in real storage (AC-1), which is T4.9"
 [[deferred]]
 id = "FR-016"
 milestone = "M4"
@@ -267,19 +263,17 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 id = "FR-120"
 milestone = "M8"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
-
+reason = "unit tests (T4.4) check the create retries: 4 attempts in all, delays of 5, 15 and 45 s, a recovery after two failed attempts, and the rollback when the last retry fails. Package-manager network failures are not retried, because the distribution data has no classifier for them. Not yet covered: network failure during install, update or rebuild, and the broken state from a package database (T8.1, T8.4)"
 [[deferred]]
 id = "FR-121"
 milestone = "M8"
-reason = "not covered yet; the roadmap assigns its test to M8"
-
+partial = true
+reason = "the create precheck (T4.4) refuses before any download when free space is below the base image estimate times 1.10. The estimate covers the base image only. The disk module, the --with estimate and the Kali size confirmation are T8.2 and T8.7"
 [[deferred]]
 id = "FR-122"
 milestone = "M8"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
-
+reason = "the create rollback, the creating record kept after a crash mid-pull, the broken record when a rollback step fails, and the journal entry kept after an unexpected exception are unit-tested (T4.4). Not yet covered: --resume and recovery (T2.8), and the SIGKILL proof at every journal step (T8.6)"
 [[deferred]]
 id = "FR-123"
 milestone = "M8"

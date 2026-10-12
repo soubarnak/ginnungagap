@@ -88,6 +88,7 @@ class CreateSpec:
     hostname: str | None = None
     user: str | None = None
     userns: str | None = None
+    passwd: bool = True
     init: bool = False
     init_path: str | None = None
     systemd: str | None = None
@@ -119,6 +120,9 @@ class CreateSpec:
         _opt(argv, "--hostname", self.hostname)
         _opt(argv, "--user", self.user)
         _opt(argv, "--userns", self.userns)
+        if not self.passwd:
+            # False keeps podman from writing a passwd entry for the keep-id user (T4.4 review).
+            argv.append("--passwd=false")
         argv += ["--network", self.network]
         if self.http_proxy is not None:
             # False keeps the host's proxy variables out of the realm (T4.1, ADR-004 amendment).

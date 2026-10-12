@@ -72,12 +72,15 @@ class FakePodman:
     fail_pull_with: str | None = None
     fail_pull_times: int | None = None
     fail_exec_with: str | None = None
+    fail_ops: dict[str, str] = field(default_factory=dict)
+    pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
     tops: dict[str, list[tuple[int, int, str]]] = field(default_factory=dict)
     log_text: dict[str, str] = field(default_factory=dict)
     images: dict[str, ImageInfo] = field(default_factory=dict)
     containers: dict[str, _Container] = field(default_factory=dict)
     calls: list[FakeCall] = field(default_factory=list)
+    exec_users: list[str | None] = field(default_factory=list)
     _pull_failures: int = 0
     _next: int = 1
 
@@ -99,6 +102,12 @@ class FakePodman:
         if found is None:
             raise make("GINN-E-INTERNAL")
         return found
+
+    def _take_op_failure(self, op: str) -> None:
+        """Raise the code queued in `fail_ops` for `op`, once. The code takes no placeholders."""
+        code = self.fail_ops.pop(op, None)
+        if code is not None:
+            raise make(code)
 
     def _take_pull_failure(self) -> bool:
         if self.fail_pull_with is None:
@@ -128,7 +137,7 @@ class FakePodman:
                 raise _error(self.fail_pull_with, ref_with_digest)
             image = ImageInfo(
                 id=hashlib.sha256(ref_with_digest.encode("utf-8")).hexdigest(),
-                digest=ref_with_digest.partition("@")[2],
+                digest=self.pull_digest_override or ref_with_digest.partition("@")[2],
                 repo_digests=(ref_with_digest,),
                 size=_FAKE_IMAGE_SIZE,
                 created=_FAKE_IMAGE_CREATED,
@@ -152,6 +161,7 @@ class FakePodman:
 
     def create(self, spec: CreateSpec) -> str:
         self._record("create", spec.name)
+        self._take_op_failure("create")
         spec.to_argv()  # validates the spec, including the privileged refusal (NFR-SEC-001)
         if any(c.name == spec.name for c in self.containers.values()):
             raise make("GINN-E-INTERNAL")
@@ -167,6 +177,7 @@ class FakePodman:
 
     def start(self, container_id: str) -> None:
         self._record("start", container_id)
+        self._take_op_failure("start")
         container = self._container(container_id)
         if container.state is ContainerState.RUNNING:
             raise make("GINN-E-INTERNAL")
@@ -176,6 +187,7 @@ class FakePodman:
 
     def stop(self, container_id: str, timeout_s: int) -> None:
         self._record("stop", container_id, timeout_s)
+        self._take_op_failure("stop")
         container = self._container(container_id)
         if container.state is ContainerState.RUNNING:
             container.state = ContainerState.EXITED
@@ -183,6 +195,7 @@ class FakePodman:
 
     def rm(self, container_id: str, force: bool) -> None:
         self._record("rm", container_id, force)
+        self._take_op_failure("rm")
         container = self._container(container_id)
         if container.state is ContainerState.RUNNING and not force:
             raise make("GINN-E-INTERNAL")
@@ -203,6 +216,7 @@ class FakePodman:
 
     def inspect(self, container_id: str) -> ContainerInfo:
         self._record("inspect", container_id)
+        self._take_op_failure("inspect")
         return self._info_for(self._container(container_id))
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
@@ -240,6 +254,7 @@ class FakePodman:
         interactive: bool = False,
         capture: bool = True,
     ) -> ExecResult:
+        self.exec_users.append(user)
         result = self._exec("exec", container_id, argv)
         if not capture:
             return ExecResult(result.exit_code, "", "")

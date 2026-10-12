@@ -247,3 +247,14 @@ def test_command_follows_the_image_and_is_absent_when_unset() -> None:
     argv = basic_spec(entrypoint_argv=["sleep"], command=["infinity"]).to_argv()
     assert argv[-4:] == ["--entrypoint", '["sleep"]', DIGEST, "infinity"]
     assert basic_spec().to_argv()[-1] == DIGEST
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("NFR-SEC-001")
+def test_passwd_renders_only_when_false_so_podman_keeps_its_default_otherwise() -> None:
+    """Realms pass `--passwd=false`, so keep-id writes no passwd entry (T4.4 review, ADR-006)."""
+    assert "--passwd=false" not in basic_spec().to_argv()
+    assert "--passwd=false" not in basic_spec(passwd=True).to_argv()
+    argv = basic_spec(passwd=False).to_argv()
+    assert argv[argv.index("--passwd=false") - 1] == "keep-id"
+    assert argv.count("--passwd=false") == 1

@@ -101,6 +101,24 @@ def realm_lock(paths: OwnedPaths, name: RealmName, op: str) -> Iterator[None]:
         yield
 
 
+IMAGE_LOCK_PREFIX = "_image-"
+"""Lock names for one distribution's image start with `_`, which no realm name can (DR-002)."""
+
+
+@contextmanager
+def image_lock(paths: OwnedPaths, distro: str, op: str) -> Iterator[None]:
+    """Hold the lock for one distribution's image, around every create that pulls it.
+
+    The rmi guard in ops/create.py (remove the image a create pulled, unless a container uses it)
+    is only correct while no other create of the same distribution runs. This lock makes that so.
+    A second holder is refused at once with GINN-E-REALM-BUSY, as a realm lock is (FR-123), so two
+    creates of one distribution at the same moment cannot both pull and then undo each other. Take
+    the image lock before the realm lock, always in that order.
+    """
+    with _exclusive(paths, f"{IMAGE_LOCK_PREFIX}{distro}", op):
+        yield
+
+
 @contextmanager
 def global_lock(paths: OwnedPaths, op: str) -> Iterator[None]:
     """Hold the host-wide lock for operations such as integrity ack or host setup."""

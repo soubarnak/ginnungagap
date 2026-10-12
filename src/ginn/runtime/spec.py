@@ -14,6 +14,9 @@ What the argv carries, and the decision behind each item (docs/capabilities.md, 
 Basic table, unless a row says otherwise):
 - `--name ginn-<realm>-g<generation>`. A services toggle makes a new generation (ADR-003, FR-083).
 - `--user <uid>:<gid>` with `--userns keep-id`. The ids are the host user's (roadmap, design).
+- `--passwd=false`. Podman would otherwise write a passwd entry for the keep-id user into the realm,
+  and the realm user step (`useradd -u <uid>`, ops/create.py) would then find that uid taken. The
+  user is created by `useradd` alone (ADR-006 amendment of 2026-10-13, T4.4 review).
 - `--network host`. Non-Kali realms share the host network namespace (AS-006). Kali is refused
   here, because it needs pasta and NET_RAW (FR-026, FR-027, T10.1).
 - `--http-proxy=false`. Podman does not copy the host's proxy variables into the realm. The proxy
@@ -179,6 +182,7 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         network="host",
         user=f"{spec.uid}:{spec.gid}",
         userns="keep-id",
+        passwd=False,
         http_proxy=False,
         init=True,
         entrypoint_argv=list(KEEP_ALIVE_ENTRYPOINT),

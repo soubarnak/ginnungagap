@@ -5,6 +5,7 @@
 - Amended: 2026-10-12 (D2). The first decision used setcap helpers and a subordinate ID range inside the realm. The amended decision runs the inner podman in single-ID mode. It needs no setcap, no libcap package and no subordinate range for the realm user. No code implements the first decision (M6 is not started), so nothing migrates.
 - Amended: 2026-10-12 (D3). FR-062 AC-3 passes with the decided set (S-07f case A; scope in Assumptions). The no-new-privileges reason and the containers.conf rationale are recorded in the Decision.
 - Amended: 2026-10-12 (D5; the count is corrected in D6). Three statements are corrected to match S-07: the SELinux scope, what podman chose with containers.conf absent, and the XDG_RUNTIME_DIR pin disclosure. No decision changes.
+- Amended: 2026-10-13 (T4.4 review). The realm user is created with `useradd -m -d <host home>`, and the create argv carries `--passwd=false`, so keep-id writes no passwd entry for the realm user. See the section "Amendment (2026-10-13): realm user and keep-id passwd". Unverified until the T4.9 host gate.
 - Amended: 2026-10-12 (D8). The FR-085 re-run is named by its roadmap task (T7.7, conditional on CL-2), and T10.6 carries the deferral if FR-085 stays deferred. The earlier "after M7" wording named no task. No decision changes.
 
 ## Context
@@ -64,6 +65,15 @@ Podman and its helpers enter the realm as requested packages (CR-007). ginn does
 The seccomp profile is generated on each host from `/usr/share/containers/seccomp.json`. It removes `sethostname` from every rule that names it. It adds one rule at the front that allows `sethostname`. It leaves `setdomainname` as it is. The file is written under an Owned Path and keyed by the SHA-256 of the source. If the source is missing, or the expected entries are not found, ginn fails closed. It never uses `seccomp=unconfined`.
 
 The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must produce exactly that set.
+
+## Amendment (2026-10-13): realm user and keep-id passwd
+
+This amendment keeps the Decision and adds two things to the realm user step, which is part of realm creation (T4.4).
+
+- The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -d <host home> -u <uid> <name>`. The `-d` names the Realm Home that is bound at the host home path (FR-048), so the passwd home and the bound home are the same path.
+- The create argv carries `--passwd=false` (`CreateSpec.passwd`, set by `runtime/spec.py`). Podman's keep-id mode otherwise writes an entry for the host uid into the realm's /etc/passwd. The user step then runs `useradd -u <uid>` on a uid that is already taken, and it fails on a real host. The S-07 spikes did not show this, because their images already held the `dev` user before the container started, so keep-id had no entry to add. ginn runs `useradd` after start, so the two conflict.
+
+Not verified. The clash is inferred from the podman and useradd behaviour above, and it is not shown on a host. The T4.9 gate runs the user step with and without `--passwd=false` (roadmap T4.9, dated 2026-10-13).
 
 ## Alternatives considered
 

@@ -71,6 +71,7 @@ GOLDEN_ARCH = [
     "1000:1000",
     "--userns",
     "keep-id",
+    "--passwd=false",
     "--network",
     "host",
     "--http-proxy=false",
@@ -191,6 +192,7 @@ def assert_basic_argv(argv: list[str]) -> None:
     assert "--security-opt" not in argv
     assert "--env" not in argv
     assert "--http-proxy=false" in argv
+    assert "--passwd=false" in argv
     assert "--init" in argv
     assert "--init-path" not in argv
     assert not any(arg.startswith("--systemd") for arg in argv)

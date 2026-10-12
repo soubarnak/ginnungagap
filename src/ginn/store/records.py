@@ -27,6 +27,7 @@ from ginn.domain import (
     Tier,
     transition,
 )
+from ginn.domain.grants import GrantRecord
 from ginn.errors import GinnError, make
 from ginn.store._time import parse_utc, utc_from_epoch, utc_iso
 from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
@@ -93,6 +94,19 @@ def _str_list(value: object) -> list[str]:
     return [_str(item) for item in value]
 
 
+def _grants(value: object) -> list[GrantRecord]:
+    """The grant list of a record: each item is a JSON object read as a `GrantRecord` (FR-066).
+
+    Anything else raises TypeError, which `RealmRecord.from_json` reports as GINN-E-INTERNAL.
+    """
+    if not isinstance(value, list):
+        raise TypeError(f"expected a list, got {type(value).__name__}")
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"expected a grant object, got {type(item).__name__}")
+    return [GrantRecord.from_dict(item) for item in value]
+
+
 @dataclass
 class RealmRecord:
     """The stored state of one realm (DR-001). The settings and previous_state are validated at
@@ -111,6 +125,9 @@ class RealmRecord:
     updated_at: datetime
     restart_required: bool = False
     share_skipped: list[str] = field(default_factory=list)
+    # The grant list fixed at the last start (FR-066, ADR-008). Added without a schema bump: a
+    # record written before it existed has no key, and reads as an empty list.
+    grants: list[GrantRecord] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Refuse a `previous_state` that DR-020 does not allow for this state.
@@ -151,6 +168,7 @@ class RealmRecord:
             "updated_at": utc_iso(self.updated_at),
             "restart_required": self.restart_required,
             "share_skipped": list(self.share_skipped),
+            "grants": [grant.to_dict() for grant in self.grants],
         }
 
     @classmethod
@@ -182,6 +200,7 @@ class RealmRecord:
                 updated_at=parse_utc(_str(data["updated_at"])),
                 restart_required=_bool(data["restart_required"]),
                 share_skipped=_str_list(data["share_skipped"]),
+                grants=_grants(data.get("grants", [])),
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

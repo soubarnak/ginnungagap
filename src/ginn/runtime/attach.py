@@ -42,9 +42,9 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Final, Literal, Self, TypeGuard
+from typing import Final, Literal
 
-from ginn.domain.paths import Mode
+from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError, make
 from ginn.podman.adapter import Podman
 from ginn.runtime.env import SessionEnv
@@ -61,74 +61,6 @@ NOT_VISIBLE: Final = "host source not visible in the store namespace"
 """The skip reason for an attach whose device and inode differ from the host identity (FR-064)."""
 Op = Literal["attach", "force", "unmount"]
 """One helper group: a first attach, a forced attach, or an unmount of the realm path alone."""
-
-
-@dataclass(frozen=True)
-class SourceIdentity:
-    """The host identity of a grant's source. `below` lists the mount points under a folder."""
-
-    dev: int
-    ino: int
-    below: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, object]:
-        return {"dev": self.dev, "ino": self.ino, "below": list(self.below)}
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> Self:
-        dev, ino, below = data.get("dev"), data.get("ino"), data.get("below")
-        if not (_is_int(dev) and _is_int(ino) and isinstance(below, list)):
-            raise ValueError(f"not a source identity: {dict(data)!r}")
-        if not all(isinstance(point, str) for point in below):
-            raise ValueError(f"not a source identity: {dict(data)!r}")
-        return cls(dev, ino, tuple(below))
-
-
-@dataclass(frozen=True)
-class GrantRecord:
-    """One grant of the list fixed at the last start (FR-066). `identity` is None while skipped.
-
-    `host` and `realm` are absolute. `is_dir` says what the placeholder must be: a folder for a
-    directory source, and an empty file for a socket or a file. A session grant may have an empty
-    `host` until a session binds its realm path. `not_visible` is the host identity whose device and
-    inode did not match the attach, so the grant is not retried until the host identity changes
-    (NFR-004). The caller stores the list with `to_dict`, and reads it back with `from_dict` (the
-    RealmRecord field is T4.5's).
-    """
-
-    kind: str
-    host: str
-    realm: str
-    mode: Mode
-    is_dir: bool
-    identity: SourceIdentity | None = None
-    not_visible: SourceIdentity | None = None
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "kind": self.kind,
-            "host": self.host,
-            "realm": self.realm,
-            "mode": self.mode,
-            "is_dir": self.is_dir,
-            "identity": None if self.identity is None else self.identity.to_dict(),
-            "not_visible": None if self.not_visible is None else self.not_visible.to_dict(),
-        }
-
-    @classmethod
-    def from_dict(cls, data: Mapping[str, object]) -> Self:
-        kind, host, realm = data.get("kind"), data.get("host"), data.get("realm")
-        is_dir, raw = data.get("is_dir"), data.get("identity")
-        hidden = data.get("not_visible")
-        if not (isinstance(kind, str) and isinstance(host, str) and isinstance(realm, str)):
-            raise ValueError(f"not a grant record: {dict(data)!r}")
-        if not isinstance(is_dir, bool) or not (raw is None or isinstance(raw, Mapping)):
-            raise ValueError(f"not a grant record: {dict(data)!r}")
-        if not (hidden is None or isinstance(hidden, Mapping)):
-            raise ValueError(f"not a grant record: {dict(data)!r}")
-        identity = None if raw is None else SourceIdentity.from_dict(raw)
-        not_visible = None if hidden is None else SourceIdentity.from_dict(hidden)
-        return cls(kind, host, realm, _mode(data.get("mode")), is_dir, identity, not_visible)
 
 
 Admit = Callable[[GrantRecord], str | None]
@@ -149,18 +81,6 @@ class _Row:
 
     status: str
     seen: SourceIdentity | None = None
-
-
-def _is_int(value: object) -> TypeGuard[int]:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _mode(value: object) -> Mode:
-    if value == "ro":
-        return "ro"
-    if value == "rw":
-        return "rw"
-    raise ValueError(f"mode must be 'ro' or 'rw', not {value!r}")
 
 
 def _failed(detail: str) -> GinnError:
