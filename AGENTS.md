@@ -8,10 +8,11 @@ Ginnungagap (`ginn`) is a Void Linux tool. It creates per-distribution Realms on
 
 ## Clean-room rules
 
-- Never open, read, or copy from Distrobox, from the upstream Anatase Spaces project, or from this repo's pre-reset git history (any commit before the T0.1 reset). Do not run `git show` or `git log -p` on those commits.
+- Never open, read, or copy from the source code of Distrobox or of the Anatase Spaces project, or from this repo's pre-reset git history (any commit before the T0.1 reset). Do not run `git show` or `git log -p` on those commits.
+- The Anatase Docs FAQ cited as SRS REF-1 may be read; it is documentation, not code.
 - Design only from `GINN-SRS-001-v1.0.md` and public specifications (XDG Base Directory, freedesktop Desktop Entry, OCI runtime, Podman CLI).
 - Write every file from scratch. Do not paste text from other sources, even short snippets.
-- The provenance scan (CI, NFR-063) fails on any match against the reference sources. The repo hygiene test fails on the forbidden identifiers.
+- The provenance scan (CI, NFR-063) will fail (added in T0.4) on any match against the reference sources. The repo hygiene test fails on the forbidden identifiers.
 
 ## Spec discipline
 
@@ -24,7 +25,7 @@ Ginnungagap (`ginn`) is a Void Linux tool. It creates per-distribution Realms on
 
 - Never invoke `xbps-*` commands (FR-004). T0.7 adds a PATH shim that fails any `xbps-*` call in the test suite.
 - After Host Setup, write only to Owned Paths (DR-010, CR-006).
-- Realms are always rootless. Never pass `--privileged` to Podman. Never run a Realm as host root (CR-003, OOS-10).
+- Realms are always rootless. Never pass `--privileged` to Podman. Never run a Realm as host root (CR-003, OOS-3, OOS-10).
 - Pass package names, paths and other input to subprocesses as argv lists. Never build a shell string or use `shell=True` (NFR-SEC-005).
 - Every mutating operation goes through the single choke point `ops/_mutating.py` (DR-032, FR-123, FR-124).
 
@@ -52,7 +53,7 @@ ops/         create, rebuild, update, delete, retry, disk, recovery (FR-010/019/
 gui/         Control Plane, GTK4 and libadwaita (FR-100..107)
 ```
 
-Also: `native/` (small C helpers, each at most 200 lines), `tests/` (unit, property, integration, gui, fakes, shims, fixtures), `tools/` (release, packaging and check scripts), `docs/` (roadmap, ADRs, error catalogue, traceability, capabilities, reference notes).
+Also: `native/` (small C helpers, each at most 200 lines), `packaging/` (Void xbps-src template), `spikes/` (M1 spike scripts and results), `tests/` (unit, property, integration, gui, fakes, shims, fixtures), `tools/` (release, packaging and check scripts), `docs/` (roadmap, ADRs, error catalogue, traceability, capabilities, reference notes).
 
 ## How to run checks
 
@@ -68,11 +69,12 @@ GINN_INTEGRATION=1 pytest tests/integration -q   # Void host with rootless Podma
 
 Host-only tests run only when `GINN_INTEGRATION=1` is set, on a Void host with rootless Podman.
 
-## Task format
+## Task dispatch format
 
-Tasks are listed in `docs/roadmap.md`. Each task gives:
+Tasks are listed in `docs/roadmap.md`. Each task is dispatched with:
 
 - `id`: milestone-numbered, for example `T2.5`
+- `name`: short task title
 - `files`: one to four paths
 - `SRS IDs`: the requirements it implements
 - `proving test`: the test file and its `fr` marker

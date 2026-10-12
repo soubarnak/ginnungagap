@@ -42,6 +42,7 @@ mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 markers = [
     "fr(id): SRS requirement id",
     "host_glibc",

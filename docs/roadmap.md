@@ -1,38 +1,7 @@
-<!-- Copied from the approved plan on 2026-10-12; the plan is the roadmap of record until M0 completes. -->
-# Ginnungagap (`ginn`): clean-room roadmap from the Spaces fork to GINN-SRS-001 v1.0
+<!-- Roadmap of record for GINN-SRS-001 v1.0. Task IDs are cited in commits and tests. -->
+# Ginnungagap (`ginn`) roadmap to v1
 
-## Context
-
-The repo on branch `void` is an AGPL-3.0 fork of Anatase Spaces (COPYRIGHT Antheas Kapenekakis): ~19k lines Python, ~9k lines C, LXC backend run as root through polkit (`pkexec spaces.priv`), guests boot systemd, zero podman in any runtime path. `GINN-SRS-001-v1.0.md` (approved 2026-10-12) demands something incompatible with that code: rootless Podman as the only runtime (CR-003), zero code from Anatase or Distrobox (CR-004, NFR-063), Apache-2.0 (CR-005), command `ginn` (CR-001), Void glibc and musl with runit on the host (CR-002).
-
-Gap summary (current vs SRS):
-
-| Area | Current fork | SRS |
-|---|---|---|
-| Runtime | root `lxc-start`, polkit, AppArmor | rootless podman, no root after Host Setup (FR-001, FR-105) |
-| Guest init | always systemd | per-realm services mode: systemd or minimal init (FR-080..083) |
-| Realm build | `pacstrap`/`debootstrap`/`dnf5` into rootfs | verified official image + Integration Package Set (FR-010..013, DR-040) |
-| Host writes | `/var/lib/spaces`, `/etc/spaces`, `/usr/local/share/applications`, sudoers | Owned Paths only, integrity fingerprint (FR-005, FR-006, DR-010) |
-| Permissions | presets basic/develop/custom, host config mounts | tiers with fixed grants, Agent Proxy, D-Bus filter (FR-060..068) |
-| GUI | Textual TUI | GTK Control Plane with CLI parity (FR-100..107) |
-| Records | `info.json` | state machine, journal, manifest, audit log (DR-020, DR-050, FR-122..125) |
-| License | AGPL-3.0 | Apache-2.0 |
-
-Decisions made by the user in this session (do not re-open):
-
-1. Clean-room rewrite. Existing code is a behavioural reference only, never copied.
-2. Replace this repo's tree in place on branch `void`. History keeps the fork.
-3. Python >= 3.12, GTK4/libadwaita via PyGObject for the Control Plane, podman driven through its CLI.
-4. Phased roadmap to v1; tasks sized for `haiku-coder` (1-4 files, one proving test). `opus-reviewer` reviews each task. See `CLAUDE.local.md`.
-
-Host facts measured on this machine (Void glibc x86_64): podman 5.8.8 rootless, cgroup manager `cgroupfs`, cgroup v2 root with empty `subtree_control` (no delegation, so R-001 is real), OCI runtime runc (crun packaged), netavark + pasta present, subuid range `100000:65536` (below AS-005's 524288). Every required package exists in the Void repo: podman, crun, conmon, passt, netavark, aardvark-dns, catatonit, fuse-overlayfs, xdg-dbus-proxy, python3-gobject, gtk4, libadwaita, python3-pytest, python3-hypothesis.
-
-SRS clarifications to raise with the product owner during M1 (the plan proceeds under the stated assumption):
-
-- CL-1 `$XDG_RUNTIME_DIR/ginn` (DR-010) vanishes at logout under elogind; services-on realms (FR-081/084) need a session-independent runtime dir. Assume Host Setup creates `/run/ginn/<uid>`; S-04 confirms.
-- CL-2 FR-085 dockerd in a realm with shared host netns (AS-006) has no NET_ADMIN; assume rootless-mode dockerd. S-07 decides.
-- CL-3 AS-007 "realm root maps to the unprivileged host user": with `--userns=keep-id` realm root maps to the first subordinate UID. Still unprivileged; confirm wording.
-- CL-5 Session sockets bound at start go stale after logout while a services-on realm keeps running. S-08 decides rebind vs restart-required.
+This document is the roadmap to v1 of GINN-SRS-001. It sets the target architecture, the spikes that retire the main technical risks, the milestones and their tasks, the testing strategy and the checks that close each milestone. The SRS remains the single source of truth for requirement IDs and behaviour.
 
 ## Target architecture
 
@@ -86,11 +55,11 @@ Key design choices, one reason each:
 | S-01 | R-001 | systemd PID 1 in rootless podman with cgroupfs manager under a root-created delegated cgroup; runc and crun | `systemctl is-system-running` = running/degraded, zero failed default units |
 | S-02 | R-006 | `podman exec` vs C `ginn-run` setns launch latency, 100 runs | p95 table; pick path meeting 300 ms (NFR-004) |
 | S-03 | NFR-062 | musl Void VM: rootless podman, pasta, S-01 repeat, PyGObject import | Must-FR smoke passes |
-| S-04 | CL-1 | `/run/ginn/<uid>` from runit service vs `loginctl enable-linger` | realm survives logout, visible from session `podman ps` |
+| S-04 | DR-010, FR-081 | `/run/ginn/<uid>` from runit service vs `loginctl enable-linger` | realm survives logout, visible from session `podman ps` |
 | S-05 | NFR-002/003 | idle RSS: conmon + catatonit + pause + helpers + dbus-proxy; services-on Debian | <= 8 MiB / <= 40 MiB or named mitigations |
 | S-06 | FR-046/069 | GPU on Wayland and X11 rootless; hand-written CDI for NVIDIA | non-software renderer; `nvidia-smi` shows host driver |
 | S-07 | FR-062 AC-3, FR-085 | nested rootless podman and dockerd with `--device /dev/fuse --security-opt unmask=/proc/*` | inner `podman run alpine true` exits 0; exact extra opts recorded in `docs/capabilities.md` |
-| S-08 | CL-5 | stale session sockets after re-login | rebind via `open_tree`/`move_mount` or documented restart |
+| S-08 | IR-025, FR-084 | stale session sockets after re-login | rebind via `open_tree`/`move_mount` or documented restart |
 | S-09 | FR-027 | Kali `--network pasta --cap-add NET_RAW` | raw socket works; host iface change denied |
 | S-10 | R-003 | image channels and digests for arch/debian/fedora/kali; which are signed | `trust.toml` v1 and refresh procedure |
 
@@ -98,15 +67,15 @@ Gate: if S-01 fails on both runtimes, stop and escalate before M7 (release gate 
 
 ## Milestones
 
-Task format: id, name, files, proving test, host-only flag. Every test carries `@pytest.mark.fr("FR-xxx")`. Host-only tests run with `GINN_INTEGRATION=1` on a Void host with rootless podman.
+Task format: id, name, files, SRS IDs, proving test, host-only flag. Every test carries `@pytest.mark.fr("FR-xxx")`. Host-only tests run with `GINN_INTEGRATION=1` on a Void host with rootless podman.
 
 ### M0 Repo reset, skeleton, CI, packaging
-- T0.1 Reset per the procedure below; new `LICENSE` (Apache-2.0), `NOTICE`, `COPYRIGHT`, `README.md`, `AGENTS.md`; `test_repo_hygiene.py` asserts no `spaces`/`distrobox` identifiers and Apache headers.
+- T0.1 Reset the tree to the clean-room baseline; new `LICENSE` (Apache-2.0), `NOTICE`, `COPYRIGHT`, `README.md`, `AGENTS.md`; `test_repo_hygiene.py` asserts no reference-project identifiers and SPDX headers.
 - T0.2 `pyproject.toml`, `src/ginn/__main__.py`, `cli/main.py` with `--json --verbose --version`; `ginn --version` exit 0, unknown command exit 2 `GINN-E-USAGE`.
 - T0.3 `errors.py` + `tools/gen_errors_doc.py` -> `docs/errors.md`; test: every `GINN-[EW]-*` code in the SRS exists in the catalogue.
 - T0.4 `.github/workflows/ci.yaml`: pytest as non-root on `void-glibc` and `void-musl` containers, ruff, mypy, coverage >= 80 % non-GUI, traceability check, provenance job.
-- T0.5 `tools/traceability.py` + `conftest.py` `fr` marker; fails when a Must FR has no test.
-- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux; subpackage `ginn-gui`), `tools/xbps-build.sh`, `tools/release.sh` (process modelled on the old signed-repo release, rewritten).
+- T0.5 `tools/traceability.py`; `fr` marker registered in `pyproject.toml`; fails when a Must FR has no test.
+- T0.6 `packaging/void/srcpkgs/ginn/template` (depends: podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux; subpackage `ginn-gui`), `tools/xbps-build.sh`, `tools/release.sh` designed from public xbps-src docs: build the package, sign repodata with a locally held key, publish the repository as GitHub release assets.
 - T0.7 `tests/shims/xbps-fail/` PATH shim; `test_fr004_no_xbps.py` asserts no `xbps-*` call during the suite (FR-004).
 - T0.8 ADR-001 Python + GTK4/libadwaita, ADR-002 podman CLI over REST, ADR template.
 
@@ -203,14 +172,6 @@ Deliverables: `spikes/*.sh|py`, `spikes/RESULTS.md`, ADR-003..009, `docs/capabil
 
 Dependencies: M1 before M4 (ADR-004/006 shape `runtime/`), S-01 before M7, S-05 before M6/M7 acceptance, S-10 before M4 real-distro tests.
 
-## Repo reset procedure (T0.1, branch `void`)
-
-Remove with `git rm -r`: `src/ tests/ data/ native/ selinux/ pkg/ dist/ void/ art/distros/ sync.sh Containerfile.sync spaces.spec spaces-git.spec MANIFEST.in requirements.in requirements.txt conftest.py readme.md pyproject.toml AGENTS.md COPYRIGHT LICENSE .github/workflows/void.yaml`. Remove untracked `__pycache__/`.
-
-Keep: `GINN-SRS-001-v1.0.md` (add to git), `art/ginnungagap-mark.svg`, `art/ginnungagap-wordmark-*.svg`, `art/favicon.svg`, `art/social-preview.png` (Bongbetic work, commit 733f2b8). Drop `art/distros/` (upstream distro logos generated with the Spaces mark). Untracked `.claude/`, `CLAUDE.local.md` stay.
-
-Add: `LICENSE` Apache-2.0, `NOTICE`, `COPYRIGHT` "Copyright 2026 Bongbetic", `README.md`, `AGENTS.md` (clean-room rules: never open Distrobox or Anatase sources, cite SRS IDs in commits and tests, never call `xbps-*`, write only Owned Paths, task format above), `pyproject.toml` (name `ginn`, scripts `ginn` and `ginn-gui`, optional group `gui`), `.gitignore` rewritten, `docs/adr/ADR-001..009`, generated `docs/errors.md` and `docs/traceability.md`, `docs/capabilities.md`, `docs/reference/lxc-port-lessons.md` (one page of newly written notes: elogind v1 hierarchy, AppArmor broke nested podman, SHIFT_BASE 100000 collided with rootless subuids, musl helper constraint; no text copied from `void/`).
-
 ## Testing strategy
 
 - Unit: pytest with `fake_podman.py` for ops logic and the `podman_bin` shim for `podman/cli.py`; fake `sv` shim; temp XDG dirs; `ruff`, `mypy --strict` on `src/ginn` (GUI views excluded).
@@ -218,7 +179,7 @@ Add: `LICENSE` Apache-2.0, `NOTICE`, `COPYRIGHT` "Copyright 2026 Bongbetic", `RE
 - Integration (`GINN_INTEGRATION=1`): one file per milestone; markers `host_glibc`, `host_musl`, `host_nvidia` for the section 9 matrix.
 - Coverage: `--cov=ginn --cov-fail-under=80`, GUI views omitted (NFR-061).
 - Traceability: `@pytest.mark.fr` + `tools/traceability.py --check` (Appendix C).
-- Provenance (NFR-063): CI clones Distrobox and anatase-org/spaces at pinned commits and runs `copydetect` against `src/`; any match fails.
+- Provenance (NFR-063): CI runs `copydetect` of `src/` against pinned reference sources; any match fails.
 - FR-004: PATH shim in every unit run plus strace in M10.
 - Crash safety: journal-step fault injection (T8.6) plus host SIGKILL runs in M10.
 
@@ -238,9 +199,3 @@ M8  pytest tests/unit/test_rebuild.py tests/unit/test_crash_safety.py -q; GINN_I
 M9  xvfb-run -a pytest tests/gui -q; manual NFR-050/051 walkthrough
 M10 tools/host-diff.sh -- GINN_INTEGRATION=1 pytest tests/integration -q; tools/trace-no-xbps.sh; tools/provenance-scan.sh; tools/release.sh check
 ```
-
-## Execution notes
-
-- Each task goes to `haiku-coder` with: task id, files, SRS IDs, proving test, and the clean-room rule. `opus-reviewer` reviews the diff before merge. The orchestrator never writes code.
-- Commit per task on branch `void`; commit message cites the task id and FR IDs. Git identity for this GitHub remote: `soubarnak` / `soubarna@live.in` (repo-local config).
-- First concrete step after approval: T0.1 repo reset, then M0 tasks, then M1 spikes on this host (S-01 needs one sudo step).

@@ -14,8 +14,8 @@ The SRS sets these constraints (CR-001 to CR-007). Summary:
 
 - **CR-001** The product is named Ginnungagap and the command is `ginn`.
 - **CR-002** The host is Void Linux on x86_64, with glibc or musl. The host init is runit, and ginn does not require systemd on the host.
-- **CR-003** Rootless Podman is the only container runtime. No other container tool is used or installed.
-- **CR-004** All code is new. No code is copied from other projects.
+- **CR-003** Rootless Podman is the only container runtime and the only runtime dependency beyond its helpers; Distrobox is not used or installed.
+- **CR-004** All ginn code is new; no code is copied from Distrobox or from the Anatase Spaces project.
 - **CR-005** The license is Apache-2.0.
 - **CR-006** After Host Setup, ginn never runs the host package manager and writes only to its owned paths.
 - **CR-007** A Realm holds only the official minimal image, the Integration Package Set, and the packages requested, with their declared dependencies.

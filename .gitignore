@@ -11,7 +11,9 @@ dist/
 spikes/out/
 native/ginn-*
 !native/*.c
+!native/*.h
 *.pem
 *.key
 CLAUDE.local.md
-.claude/settings.local.json
+.claude/
+.venv/

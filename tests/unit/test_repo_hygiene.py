@@ -1,77 +1,143 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Repository hygiene: no identifiers from other projects, Apache-2.0 text, SPDX headers.
+"""Repository hygiene: clean-room terms, the Apache-2.0 text and SPDX headers.
 
 Covers CR-004 (all code is new) and CR-005 (Apache-2.0 license).
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[2]
-SPDX = "# SPDX-License-Identifier: Apache-2.0"
 
-# Lowercase identifiers that must not appear in repo text. Each is split across
-# adjacent literals so this file does not contain it. The bytecode cache still
-# holds the joined string, so __pycache__ is pruned during the walk.
-FORBIDDEN = ("distro" "box", "ana" "tase", "spaces" ".priv", "machine" "ctl", "ns" "pawn")
+# Each term is split with "+" so this file does not contain it. Adjacent literals
+# would be joined by the formatter, so "+" keeps the split stable.
+REF_CONTAINER = "distro" + "box"
+REF_UPSTREAM = "ana" + "tase"
+FORBIDDEN_TERMS = (REF_CONTAINER, REF_UPSTREAM, "machine" + "ctl", "ns" + "pawn")
+# Code-shaped names from the reference projects, matched case-insensitively.
+FORBIDDEN_RE = re.compile(
+    r"\bspaces[._-]|\bSPACES_|\bimport spaces\b|\bfrom spaces\b", re.IGNORECASE
+)
 
-# Directory names pruned during the walk (VCS metadata and caches).
-PRUNE_NAMES = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-# Repo-relative directories outside the scan. art/ is binary artwork, docs/reference
-# holds clean-room notes, and .claude/ is untracked local tooling that is never shipped.
-PRUNE_REL_DIRS = {"art", "docs/reference", ".claude"}
-# Repo-relative files outside the scan. The roadmap copies the approved plan, which
-# names the reference projects.
-SKIP_REL_FILES = {"GINN-SRS-001-v1.0.md", "docs/roadmap.md"}
+# Reviewed occurrences. Each entry gives the file, the Markdown section that may hold
+# them, and the exact count per term. Any other count fails the test.
+ALLOWED: dict[str, tuple[str, dict[str, int]]] = {
+    "AGENTS.md": ("## Clean-room rules", {REF_CONTAINER: 1, REF_UPSTREAM: 2}),
+    "README.md": ("## Design constraints", {REF_CONTAINER: 2, REF_UPSTREAM: 1}),
+}
+
+# The SRS quotes the reference projects by name, so it is not scanned.
+SKIP_REL_FILES = frozenset({"GINN-SRS-001-v1.0.md"})
+SPDX_SUFFIXES = frozenset({".py", ".sh", ".c", ".h"})
+SPDX_HASH_HEADER = frozenset({"# SPDX-License-Identifier: Apache-2.0"})
+SPDX_C_HEADER = frozenset(
+    {
+        "// SPDX-License-Identifier: Apache-2.0",
+        "/* SPDX-License-Identifier: Apache-2.0 */",
+    }
+)
+LICENSE_SHA256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+
+GIT_LIST_FILES = ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
 
 
-def _repo_text_files():
-    """Yield (path, repo-relative posix path) for every file in scope."""
-    for dirpath, dirnames, filenames in os.walk(REPO):
-        rel_dir = Path(dirpath).relative_to(REPO)
-        dirnames[:] = [
-            d
-            for d in dirnames
-            if d not in PRUNE_NAMES and (rel_dir / d).as_posix() not in PRUNE_REL_DIRS
-        ]
-        for name in filenames:
-            rel = (rel_dir / name).as_posix()
-            if rel not in SKIP_REL_FILES:
-                yield REPO / rel, rel
+def _git_paths() -> list[str]:
+    """Return tracked and untracked, non-ignored paths, relative to the repo root."""
+    # Fixed argv list, no shell. git is resolved from PATH by design.
+    result = subprocess.run(  # noqa: S603
+        GIT_LIST_FILES, cwd=REPO, check=True, capture_output=True
+    )
+    return [os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw]
+
+
+def _scan_files() -> list[tuple[str, Path]]:
+    """Return (repo-relative posix path, absolute path) for each file in scope."""
+    found: list[tuple[str, Path]] = []
+    for rel in _git_paths():
+        if rel in SKIP_REL_FILES:
+            continue
+        path = REPO / rel
+        if os.path.islink(path) and not path.exists():
+            continue  # broken symlink
+        if not path.is_file():
+            continue  # deleted from the worktree but still in the index
+        found.append((rel, path))
+    return found
+
+
+def _read_text(path: Path) -> str | None:
+    """Return the UTF-8 text of a file, or None for binary or non-UTF-8 data."""
+    data = path.read_bytes()
+    if b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _section(text: str, heading: str) -> str:
+    """Return the text under a level-2 heading, up to the next level-2 heading."""
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:] if end == -1 else text[start:end]
 
 
 @pytest.mark.fr("CR-004")
 def test_no_forbidden_identifiers_in_repo_text() -> None:
     hits: list[str] = []
-    for path, rel in _repo_text_files():
-        try:
-            text = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            continue  # binary file
-        hits.extend(f"{rel}: {term}" for term in FORBIDDEN if term in text)
+    for rel, path in _scan_files():
+        hits.extend(f"{rel}: path has {term}" for term in FORBIDDEN_TERMS if term in rel.lower())
+        if FORBIDDEN_RE.search(rel):
+            hits.append(f"{rel}: path matches a code-shaped name")
+        text = _read_text(path)
+        if text is None:
+            continue  # binary artwork or non-UTF-8 data
+        lowered = text.lower()
+        section, allowed = ALLOWED.get(rel, ("", {}))
+        for term in FORBIDDEN_TERMS:
+            expected = allowed.get(term, 0)
+            count = lowered.count(term)
+            if count != expected:
+                hits.append(f"{rel}: {term} found {count} times, expected {expected}")
+            if section:
+                in_section = _section(text, section).lower().count(term)
+                if in_section != expected:
+                    hits.append(f"{rel}: {term} found {in_section} times in {section}")
+        hits.extend(f"{rel}: code-shaped name {m.group(0)!r}" for m in FORBIDDEN_RE.finditer(text))
     assert not hits, "forbidden identifiers found:\n" + "\n".join(hits)
 
 
-@pytest.mark.fr("CR-004")
-def test_license_file_starts_with_apache_header() -> None:
-    lines = (REPO / "LICENSE").read_text(encoding="utf-8").lstrip().splitlines()
-    assert lines[0] == "Apache License"
-    assert lines[1].strip() == "Version 2.0, January 2004"
+@pytest.mark.fr("CR-005")
+def test_license_file_is_canonical_apache_2_0() -> None:
+    digest = hashlib.sha256((REPO / "LICENSE").read_bytes()).hexdigest()
+    assert digest == LICENSE_SHA256, f"LICENSE sha256 is {digest}"
 
 
-@pytest.mark.fr("CR-004")
-def test_python_sources_start_with_spdx_header() -> None:
-    missing: list[str] = []
-    for top in ("src", "tests"):
-        base = REPO / top
-        if not base.is_dir():
-            continue
-        for path in sorted(base.rglob("*.py")):
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if not lines or lines[0].strip() != SPDX:
-                missing.append(path.relative_to(REPO).as_posix())
+def _has_spdx_header(path: Path) -> bool:
+    text = _read_text(path)
+    if text is None:
+        return False
+    lines = text.splitlines()
+    if lines and lines[0].startswith("#!"):
+        lines = lines[1:]
+    head = lines[0].strip() if lines else ""
+    expected = SPDX_C_HEADER if path.suffix in {".c", ".h"} else SPDX_HASH_HEADER
+    return head in expected
+
+
+@pytest.mark.fr("CR-005")
+def test_source_files_carry_spdx_header() -> None:
+    missing = [
+        rel
+        for rel, path in _scan_files()
+        if path.suffix in SPDX_SUFFIXES and not _has_spdx_header(path)
+    ]
     assert not missing, "missing SPDX header: " + ", ".join(missing)

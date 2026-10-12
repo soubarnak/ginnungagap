@@ -20,8 +20,4 @@ The earlier attempt used a user-namespace shift base of 100000. Rootless Podman 
 
 ## Realm helpers need an old glibc
 
-C helpers copied into a realm must be built against an old glibc baseline. Otherwise they must run on the host only. The planned `native/` helpers all run on the host.
-
-## Distribution logos
-
-Distribution logos are trademarks. The earlier attempt's copies were not kept, and ginn ships no distribution logos.
+C helpers copied into a realm must be built against an old glibc baseline. Otherwise they must run on the host only. The planned `native/` helpers all run on the host. On a musl host, helpers built against the host libc cannot run inside glibc realms; helpers therefore stay host-side or are built against a glibc baseline.
