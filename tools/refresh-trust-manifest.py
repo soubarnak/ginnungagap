@@ -259,7 +259,8 @@ def main(argv: Sequence[str] | None = None, *, run: Runner | None = None) -> int
             print(
                 "not refreshed: compressed_size_bytes, estimated_installed_bytes, "
                 "measured_installed_bytes, signature, verified_on and the index digest in the "
-                "table comments. Run S-10 section 6, steps 3 to 5, before committing."
+                "table comments. Still by hand, per S-10 section 6: steps 2 to 4, the other "
+                "fields of step 5, step 7, and the commit in step 8."
             )
     except RefreshError as exc:
         sys.stderr.write(f"refresh-trust-manifest: {exc}\n")

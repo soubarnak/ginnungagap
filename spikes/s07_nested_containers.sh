@@ -8,9 +8,9 @@
 #   spikes/s07_nested_containers.sh run       run the attempt matrix and final checks
 #   spikes/s07_nested_containers.sh teardown  remove spike containers, image and storage
 #
-# Every podman call uses the spike storage (--root/--runroot), never the default
-# storage. No root, no sudo, no host package installs. Raw logs go to GINN_SPIKE_OUT
-# (default ~/.cache/ginn-spike/s07), outside the repository.
+# Every podman call uses the spike storage (--root/--runroot) and the spike XDG pin (XRD
+# below), never the default storage. No root, no sudo, no host package installs. Raw logs
+# go to GINN_SPIKE_OUT (default ~/.cache/ginn-spike/s07), outside the repository.
 set -euo pipefail
 
 SELF="$(readlink -f "$0")"
@@ -21,12 +21,28 @@ OUT="${GINN_SPIKE_OUT:-${XDG_CACHE_HOME:-$HOME/.cache}/ginn-spike/s07}"
 IMAGE=localhost/ginn-s07:part-a
 ALPINE=docker.io/library/alpine:3
 DEBIAN=docker.io/library/debian:stable
-PM=(podman --root "$ROOT_DIR" --runroot "$RUN_DIR" --tmpdir "$RUN_DIR/libpod-tmp")
+PM=(spike_podman)
 TABLE="$OUT/attempts.tsv"
 
 log() { printf '%s %s\n' "$(date +%T)" "$*" | tee -a "$OUT/run.log"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 mem_ok() { awk '/MemAvailable/ { exit !($2 >= 262144) }' /proc/meminfo || die "MemAvailable below 256 MiB"; }
+
+# XDG pin. PM names spike_podman, so every host podman call (the "${PM[@]}" uses below) runs
+# with XDG_RUNTIME_DIR set to the spike-owned directory XRD. The spike refuses to run podman
+# unless XRD is a real directory, owned by this user, with mode 0700.
+XRD=/run/user/1000/ginn-spike-s07-xrd
+spike_xrd_check() {
+  [[ $(id -u) == 1000 ]] || die "refusing to run: the S-07 XDG pin is for uid 1000"
+  [[ -e $XRD ]] || mkdir -m 0700 "$XRD" || die "cannot create $XRD (is /run/user/1000 present?)"
+  [[ -d $XRD && ! -L $XRD && -O $XRD && $(stat -c %a "$XRD") == 700 ]] \
+    || die "refusing to run: $XRD is not a 0700 directory owned by this user"
+}
+spike_podman() {
+  spike_xrd_check
+  XDG_RUNTIME_DIR="$XRD" podman --root "$ROOT_DIR" --runroot "$RUN_DIR" \
+    --tmpdir "$RUN_DIR/libpod-tmp" "$@"
+}
 
 # outer_run <name> [podman run options...]: the outer stand-in with the shared options.
 # --init uses a host copy of catatonit (the host has none; see extract_catatonit).
@@ -255,7 +271,7 @@ cmd_teardown() {
 }
 
 case "${1:-}" in
-  run) cmd_run ;;
-  teardown) cmd_teardown ;;
+  run) spike_xrd_check; cmd_run ;;
+  teardown) spike_xrd_check; cmd_teardown ;;
   *) die "usage: $0 run|teardown" ;;
 esac
