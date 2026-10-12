@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-05 mitigation layers over the S-01 base image (built from spikes/Dockerfile.s01).
+# Build args choose the layers: JOURNAL=1 installs the journald drop-in; MASKS=base
+# masks masks-base.txt; MASKS=logind also masks systemd-logind. Mitigation (d),
+# SYSTEMD_LOG_LEVEL, is a run-time environment setting and is not baked in.
+ARG BASE=localhost/ginn-s05:base
+FROM ${BASE}
+ARG JOURNAL=0
+ARG MASKS=none
+COPY journald-volatile.conf masks-base.txt masks-logind.txt /tmp/s05/
+RUN set -eu; \
+    if [ "$JOURNAL" = 1 ]; then \
+      install -D -m 0644 /tmp/s05/journald-volatile.conf \
+        /etc/systemd/journald.conf.d/50-ginn-s05-volatile.conf; \
+    fi; \
+    case "$MASKS" in \
+      base) lists="/tmp/s05/masks-base.txt" ;; \
+      logind) lists="/tmp/s05/masks-base.txt /tmp/s05/masks-logind.txt" ;; \
+      *) lists="" ;; \
+    esac; \
+    for f in $lists; do \
+      grep -hv '^#' "$f" | while read -r unit; do \
+        ln -sf /dev/null "/etc/systemd/system/$unit"; \
+      done; \
+    done; \
+    rm -rf /tmp/s05

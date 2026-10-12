@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-05 mitigation (b), logind variant: added on top of masks-base.txt.
+# FR-080 apps may need logind, so S-05 measures with and without this line.
+systemd-logind.service

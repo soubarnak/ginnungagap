@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-05 mitigation (c) comparison: the S-01 package set built WITH apt recommends.
+# Measures what --no-install-recommends (used by spikes/Dockerfile.s01) saves. Not a Realm image.
+FROM docker.io/library/debian:stable
+RUN apt-get update \
+ && apt-get install -y systemd systemd-sysv dbus procps \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
