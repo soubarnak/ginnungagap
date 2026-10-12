@@ -1,22 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host paths a realm may be given (DR-004, AS-011, NFR-SEC-006).
 
-`SharedPath.parse` is the only way to get a `SharedPath`. It resolves symlinks and `..` on the
-raw string with `os.path.realpath`, then checks the resolved target. The stored `path` is that
-resolved target, so the bind mount uses exactly what was validated. Lexical `normpath` is not run
-first: `link/../x` means something different once `link` is followed.
+`path_refusal` is the one rule check. `SharedPath.parse` calls it, and so do the mount plan in
+runtime/mounts.py and the session environment in runtime/env.py, so a path is refused the same way
+wherever it comes from. The caller passes `env`, so the AS-011 XDG overrides come from the host
+that the caller describes. Only `SharedPath.parse` falls back to `os.environ`, and only when no env
+is given.
 
-Rule order: the input must be absolute with no NUL byte and no `:` or `,`. Podman's `-v` and
-`--mount` syntax splits on those characters, so such a path would bind a different mount. The
-resolved target gets the same character check, because a symlink can hide them. Then the resolved
-target must not be a forbidden path, must not contain one, and must not sit inside one (see
-`_conflicts`). It must lie strictly under an allowed root. Forbidden rules are checked before the
-root rule, so `/etc` reports its own rule.
+`SharedPath.parse` is the only way to get a `SharedPath`. It resolves symlinks and `..` on the raw
+string with `os.path.realpath`, then checks the resolved target. The stored `path` is that resolved
+target, so the bind mount uses exactly what was validated. Lexical `normpath` is not run first:
+`link/../x` means something different once `link` is followed.
 
-`FORBIDDEN_RULES` is the data that docs/capabilities.md and the GUI render. The rules are checked
-against resolved paths, so a symlink to a forbidden target is refused like the target itself.
-The two AS-011 desktop and autostart rules also follow `XDG_DATA_HOME` and `XDG_CONFIG_HOME` when
-those are set to absolute paths (`_xdg_rules`). The hard-coded defaults always apply as well.
+Rule order: the input must be absolute and hold no NUL, no `:`, no `,` and no newline. Podman's
+`-v` and `--mount` syntax splits on those characters, so such a path would bind a different mount.
+The resolved target gets the same character check, because a symlink can hide them. Then the
+resolved target must not be a forbidden path, must not contain one, and must not sit inside one
+(see `_conflicts`). `SharedPath.parse` also requires it to lie strictly under an allowed root.
+Forbidden rules are checked before the root rule, so `/etc` reports its own rule.
+
+`FORBIDDEN_RULES` is the data that docs/capabilities.md and the GUI render. The two AS-011 desktop
+and autostart rules also follow `XDG_DATA_HOME` and `XDG_CONFIG_HOME` when those are set to absolute
+paths (`_xdg_rules`). The hard-coded defaults always apply as well.
+
+A fixed system grant (AS-009) is the one exception the caller can ask for. Its real source may lie
+under a system subtree, for example `/etc/localtime` resolves to `/usr/share/zoneinfo`. The rule
+that holds that source is exempt for that source only (see `path_refusal`).
+
 Validation happens at share time. Symlinks created inside a share later are not checked here.
 `SharedPath.revalidate()` runs the checks again for the mount builder at create and start.
 """
@@ -36,7 +46,15 @@ PATH_CODE: Final = "GINN-E-PATH-FORBIDDEN"
 OWNED: Final = "<owned>"
 """`ForbiddenRule.path` value that stands for every Owned Path the caller supplies."""
 
+ROOTS_REASON: Final = "DR-004: outside $HOME, /run/media, /media and /mnt"
+"""The refusal for a share whose resolved target lies outside every allowed root."""
+
 _TOKEN: Final = object()
+_XDG_NAMES: Final = ("XDG_DATA_HOME", "XDG_CONFIG_HOME")
+_UNBINDABLE: Final = (":", ",", "\0", "\n", "\r")
+_UNBINDABLE_REASON: Final = (
+    "contains ':' or ',', a NUL or a newline; podman's -v and --mount syntax cannot carry it"
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +145,11 @@ def _xdg_rules(env: Mapping[str, str]) -> tuple[ForbiddenRule, ...]:
     return tuple(rules)
 
 
+def _xdg_pairs(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """The XDG overrides from `env`. A SharedPath keeps them, so revalidate uses the same rules."""
+    return tuple((name, env[name]) for name in _XDG_NAMES if name in env)
+
+
 def _forbidden(
     home: Path, owned: Sequence[Path], extra: Sequence[ForbiddenRule]
 ) -> list[tuple[ForbiddenRule, Path]]:
@@ -140,7 +163,20 @@ def _forbidden(
 
 
 def _roots(home: Path) -> tuple[Path, ...]:
-    return tuple(home if root == "~" else _real(root) for root in ALLOWED_ROOTS)
+    home_real = _real(home)
+    return tuple(home_real if root == "~" else _real(root) for root in ALLOWED_ROOTS)
+
+
+def under_allowed_root(target: Path, *, home: Path, root_itself: bool = False) -> bool:
+    """True when `target`, already resolved, lies strictly under one of ALLOWED_ROOTS.
+
+    With `root_itself`, a target equal to a root also counts. The mount roots `/media` and `/mnt`
+    are attached as themselves (FR-061), so they pass with it. A user share never does.
+    """
+    roots = _roots(home)
+    if root_itself and target in roots:
+        return True
+    return any(_strictly_under(target, root) for root in roots)
 
 
 def _conflicts(target: Path, forbidden: Path, rule: ForbiddenRule, mode: Mode) -> bool:
@@ -159,16 +195,64 @@ def _conflicts(target: Path, forbidden: Path, rule: ForbiddenRule, mode: Mode) -
     return hit and not exempt
 
 
+def _exempt_by_grant(rule: ForbiddenRule, forbidden: Path, target: Path, grant: Path) -> bool:
+    """True when `rule` is the fixed grant's own system subtree, and `target` is that grant.
+
+    Only an absolute subtree rule can be exempt, so `~/.ssh` and `OWNED` never are. Only the rule
+    whose forbidden path is an ancestor of the grant's real source qualifies. The target must be
+    that source or lie under it.
+    """
+    if not (rule.subtree and rule.path.startswith("/")):
+        return False
+    at_grant = target == grant or grant in target.parents
+    return at_grant and forbidden in grant.parents
+
+
 def _refuse(raw: str, reason: str) -> GinnError:
     return reject(PATH_CODE, {"reason": reason}, path=raw)
 
 
-def _podman_separator(text: str) -> bool:
-    """True when `text` holds a character that podman's -v and --mount syntax splits on."""
-    return ":" in text or "," in text
+def path_refusal(
+    target: str | Path,
+    *,
+    env: Mapping[str, str],
+    home: Path,
+    owned_paths: Sequence[Path],
+    mode: Mode,
+    fixed: str | Path | None = None,
+) -> str | None:
+    """Return the rule that forbids binding `target`, or None when no rule applies.
 
+    The reason is `RULE_ID: description`, or a plain sentence for a path that is not absolute or
+    holds a character podman cannot carry. `target` may be raw text. It is checked as given, then
+    resolved and checked again, so a symlink to a forbidden or unusable path is refused like the
+    path itself.
 
-_SEPARATOR_REASON: Final = "contains ':' or ','; podman's -v and --mount syntax cannot carry it"
+    A rule applies when the target is the forbidden path, when the forbidden path lies under the
+    target (the bind would expose it), or, for a subtree rule, when the target lies under the
+    forbidden path. A read-only bind is exempt from the AS-011 startup-file rules.
+
+    `fixed` names an AS-009 grant, such as /usr/share/fonts or /etc/localtime. Its real path is the
+    source that is bound. The one absolute subtree rule that holds that source is exempt, and only
+    for a target at the source or under it. Every other rule still applies, so a fixed grant that
+    resolves into ~/.ssh is refused.
+    """
+    raw = str(target)
+    if not os.path.isabs(raw):
+        return "not an absolute path"
+    if any(char in raw for char in _UNBINDABLE):
+        return _UNBINDABLE_REASON
+    resolved = _real(raw)
+    if any(char in str(resolved) for char in _UNBINDABLE):
+        return f"resolves to a path that {_UNBINDABLE_REASON}"
+    grant = None if fixed is None else _real(fixed)
+    owned_real = [_real(path) for path in owned_paths]
+    for rule, forbidden in _forbidden(_real(home), owned_real, _xdg_rules(env)):
+        if grant is not None and _exempt_by_grant(rule, forbidden, resolved, grant):
+            continue
+        if _conflicts(resolved, forbidden, rule, mode):
+            return f"{rule.rule_id}: {rule.description}"
+    return None
 
 
 @dataclass(frozen=True)
@@ -176,9 +260,9 @@ class SharedPath:
     """A host path validated for sharing with a realm. Build it with `parse`.
 
     `path` is the resolved target. `target_exists` is False when the target is missing, which is
-    allowed but reported. `_raw`, `_home` and `_owned` are the parse inputs, kept so that
-    `revalidate` can run the same checks again. The `_token` field refuses direct construction
-    without validation.
+    allowed but reported. `_raw`, `_home`, `_owned` and `_xdg` are the parse inputs, kept so that
+    `revalidate` can run the same checks again. `_xdg` holds only the AS-011 overrides. The
+    `_token` field refuses direct construction without validation.
     """
 
     path: Path
@@ -187,6 +271,7 @@ class SharedPath:
     _raw: str
     _home: Path
     _owned: tuple[Path, ...]
+    _xdg: tuple[tuple[str, str], ...]
     _token: object
 
     def __post_init__(self) -> None:
@@ -207,7 +292,11 @@ class SharedPath:
         mount still gets through. Returns None when the share is unchanged.
         """
         fresh = SharedPath.parse(
-            self._raw, home=self._home, owned_paths=self._owned, mode=self.mode
+            self._raw,
+            home=self._home,
+            owned_paths=self._owned,
+            mode=self.mode,
+            env=dict(self._xdg),
         )
         if fresh.path != self.path:
             raise _refuse(
@@ -223,30 +312,24 @@ class SharedPath:
         home: Path,
         owned_paths: Sequence[Path],
         mode: Mode,
+        env: Mapping[str, str] | None = None,
     ) -> Self:
+        """Validate `raw` as a share. `env` carries the AS-011 overrides; None reads os.environ."""
         if mode not in ("ro", "rw"):
             raise ValueError(f"mode must be 'ro' or 'rw', not {mode!r}")
         if not isinstance(raw, str):
             raise TypeError(f"shared path must be a str, not {type(raw).__name__}")
         if not home.is_absolute():
             raise ValueError(f"home must be absolute, not {home}")
-        if "\0" in raw:
-            raise _refuse(raw, "contains a NUL byte")
+        environ: Mapping[str, str] = os.environ if env is None else env
         if not raw.startswith("/"):
             raise _refuse(raw, "not absolute; give the full path, since ~ is not expanded")
-        if _podman_separator(raw):
-            raise _refuse(raw, _SEPARATOR_REASON)
-
-        home_real = _real(home)
-        owned_real = [_real(path) for path in owned_paths]
+        reason = path_refusal(raw, env=environ, home=home, owned_paths=owned_paths, mode=mode)
+        if reason is not None:
+            raise _refuse(raw, reason)
         target = _real(raw)
-        if _podman_separator(str(target)):
-            raise _refuse(raw, f"resolves to a path that {_SEPARATOR_REASON}")
-        for rule, forbidden in _forbidden(home_real, owned_real, _xdg_rules(os.environ)):
-            if _conflicts(target, forbidden, rule, mode):
-                raise _refuse(raw, f"{rule.rule_id}: {rule.description}")
-        if not any(_strictly_under(target, root) for root in _roots(home_real)):
-            raise _refuse(raw, "outside $HOME, /run/media, /media and /mnt")
+        if not under_allowed_root(target, home=home):
+            raise _refuse(raw, ROOTS_REASON)
         return cls(
             path=target,
             mode=mode,
@@ -254,6 +337,7 @@ class SharedPath:
             _raw=raw,
             _home=home,
             _owned=tuple(owned_paths),
+            _xdg=_xdg_pairs(environ),
             _token=_TOKEN,
         )
 

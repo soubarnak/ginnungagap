@@ -150,7 +150,8 @@ reason = "not covered yet; the roadmap assigns its test to M5"
 [[deferred]]
 id = "FR-048"
 milestone = "M4"
-reason = "not covered yet; the roadmap assigns its test to M4"
+partial = true
+reason = "the Realm Home mount at the host home path is unit-tested (T4.2); echo $HOME and ls ~ inside the realm need a Void host (T4.6, T4.9)"
 
 [[deferred]]
 id = "FR-049"
@@ -165,7 +166,8 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 [[deferred]]
 id = "FR-061"
 milestone = "M6"
-reason = "not covered yet; the roadmap assigns its test to M6"
+partial = true
+reason = "the Basic binds, devices and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9), and the table comparison closes in T6.1"
 
 [[deferred]]
 id = "FR-062"
@@ -179,13 +181,15 @@ reason = "not covered yet; the roadmap assigns its test to M6"
 
 [[deferred]]
 id = "FR-064"
-milestone = "M4"
-reason = "missing tier folders are skipped by the Basic binds of T4.2 (M4); the M6 heading range lists the whole FR-060..069 block"
+milestone = "M6"
+partial = true
+reason = "a missing tier folder is skipped, reported and never created, unit-tested for ~/Downloads in T4.2; AC-1 is ~/Projects in a Development realm (T6.2), and the host run that shows the skip in ginn status needs a Void host"
 
 [[deferred]]
 id = "FR-065"
 milestone = "M4"
-reason = "identical paths are set by the Basic binds of T4.2 (M4); the M6 heading range lists the whole FR-060..069 block"
+partial = true
+reason = "identical paths are unit-tested in the T4.2 create and attach plans; a drive mounted after realm start appears inside only after a lazy re-attach at enter or launch, since host mounts are private and propagation into a running realm is not assumed; that needs a Void host (T4.9)"
 
 [[deferred]]
 id = "FR-066"

@@ -11,7 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from ginn.domain.paths import FORBIDDEN_RULES, OWNED, ForbiddenRule, Mode, SharedPath
+from ginn.domain.paths import (
+    FORBIDDEN_RULES,
+    OWNED,
+    ROOTS_REASON,
+    ForbiddenRule,
+    Mode,
+    SharedPath,
+    path_refusal,
+    under_allowed_root,
+)
 from ginn.errors import GinnError
 
 pytestmark = [
@@ -149,6 +158,7 @@ REFUSED = [
     ("Music", "rw"),
     ("", "ro"),
     ("/home/alice/x\x00", "rw"),
+    ("/home/alice/Music\nx", "rw"),
 ]
 
 
@@ -195,6 +205,7 @@ def test_direct_construction_without_parse_is_refused() -> None:
             _raw="/home/alice/Music",
             _home=HOME,
             _owned=(),
+            _xdg=(),
             _token=object(),
         )
 
@@ -235,7 +246,7 @@ def test_symlink_into_ssh_is_refused(real_home: Path) -> None:
     assert info.value.details["reason"].startswith("DR-004.ssh")
 
 
-@pytest.mark.parametrize("name", ["odd:name", "odd,name"])
+@pytest.mark.parametrize("name", ["odd:name", "odd,name", "odd\nname"])
 def test_symlink_to_a_target_with_a_separator_is_refused(real_home: Path, name: str) -> None:
     """The link text has no separator, but the mount would use the target, which does."""
     (real_home / name).mkdir()
@@ -357,3 +368,137 @@ def test_revalidate_refuses_a_link_swapped_to_a_forbidden_target(real_home: Path
         shared.revalidate()
 
     assert info.value.details["reason"].startswith("DR-004.ssh")
+
+
+PRIVATE_TARGETS = [
+    # (target, expected rule or None, mode, fixed grant or None)
+    ("/", "DR-004.root", "rw", None),
+    ("/etc", "DR-004.etc", "rw", None),
+    ("/etc/localtime", None, "ro", "/etc/localtime"),
+    ("/etc/passwd", "DR-004.etc", "ro", "/etc/localtime"),
+    ("/usr/share/fonts", None, "ro", "/usr/share/fonts"),
+    ("/usr/share/fonts", "DR-004.usr", "ro", None),
+    ("/usr/bin/x", "DR-004.usr", "ro", "/usr/share/fonts"),
+    ("/home/alice", "DR-004.home", "rw", None),
+    ("/home", "DR-004.home", "rw", None),
+    ("/home/alice/.ssh/key", "DR-004.ssh", "rw", None),
+    ("/home/alice/.ssh/key", "DR-004.ssh", "ro", None),
+    # The subtree hole: a fixed grant exempts its own system subtree, not the rest of DR-004.
+    ("/home/alice/.ssh/fonts", "DR-004.ssh", "ro", "/usr/share/fonts"),
+    ("/home/alice/.bashrc", "AS-011.bashrc", "rw", None),
+    ("/home/alice/.bashrc", None, "ro", None),
+    ("/home/alice/.local/share/ginn/realms/x", "DR-004.owned", "rw", None),
+    ("/home/alice/Downloads", None, "rw", None),
+]
+
+
+@pytest.mark.parametrize(("target", "rule", "mode", "fixed"), PRIVATE_TARGETS)
+def test_path_refusal_names_the_rule_or_grants_a_fixed_exemption(
+    target: str, rule: str | None, mode: Mode, fixed: str | None
+) -> None:
+    found = path_refusal(
+        Path(target),
+        env={},
+        home=HOME,
+        owned_paths=OWNED_PATHS,
+        mode=mode,
+        fixed=fixed,
+    )
+    if rule is None:
+        assert found is None
+    else:
+        assert found is not None
+        assert found.startswith(rule)
+
+
+@pytest.mark.parametrize(
+    ("moved", "target", "mode"),
+    [
+        ("/data/xdg", "/data/xdg/applications/x.desktop", "rw"),
+        ("/data/xdg", "/data/xdg/applications", "ro"),
+        ("/data/xdg", "/data/xdg/applications/x.desktop", "ro"),
+    ],
+)
+def test_moved_xdg_data_home_refuses_its_applications_dir(
+    moved: str, target: str, mode: Mode
+) -> None:
+    """AS-011: the rule follows $XDG_DATA_HOME, for a share and for a session bind alike."""
+    env = {"XDG_DATA_HOME": moved}
+    found = path_refusal(Path(target), env=env, home=HOME, owned_paths=OWNED_PATHS, mode=mode)
+    assert found is not None
+    assert found.startswith("AS-011.applications")
+    assert path_refusal(Path(target), env={}, home=HOME, owned_paths=OWNED_PATHS, mode=mode) is None
+
+
+def test_relative_xdg_override_is_ignored() -> None:
+    env = {"XDG_DATA_HOME": "data", "XDG_CONFIG_HOME": "config"}
+    found = path_refusal(
+        Path("/data/applications"), env=env, home=HOME, owned_paths=OWNED_PATHS, mode="rw"
+    )
+    assert found is None
+
+
+def test_shared_path_parse_takes_the_xdg_override_from_its_env_parameter() -> None:
+    env = {"XDG_DATA_HOME": "/home/alice/xdg"}
+    with pytest.raises(GinnError) as info:
+        SharedPath.parse(
+            "/home/alice/xdg/applications/x.desktop",
+            home=HOME,
+            owned_paths=OWNED_PATHS,
+            mode="rw",
+            env=env,
+        )
+    assert info.value.details["reason"].startswith("AS-011.applications")
+    shared = SharedPath.parse(
+        "/home/alice/xdg/applications/x.desktop",
+        home=HOME,
+        owned_paths=OWNED_PATHS,
+        mode="rw",
+        env={},
+    )
+    assert shared.path == Path("/home/alice/xdg/applications/x.desktop")
+
+
+def test_mount_root_that_contains_home_is_refused() -> None:
+    """A /mnt that holds $HOME exposes the home directory, so DR-004.home refuses it."""
+    home = Path("/mnt/data/home/alice")
+    found = path_refusal(Path("/mnt"), env={}, home=home, owned_paths=[], mode="rw")
+    assert found is not None
+    assert found.startswith("DR-004.home")
+
+
+def test_media_root_that_contains_an_owned_path_is_refused() -> None:
+    owned = [Path("/media/usb/ginn")]
+    found = path_refusal(Path("/media"), env={}, home=HOME, owned_paths=owned, mode="rw")
+    assert found is not None
+    assert found.startswith("DR-004.owned")
+
+
+def test_symlinked_mount_root_is_refused_as_its_target(tmp_path: Path) -> None:
+    """A mount root that is a symlink to /etc is refused like /etc itself."""
+    link = tmp_path / "mnt"
+    os.symlink("/etc", link)
+    found = path_refusal(link, env={}, home=HOME, owned_paths=OWNED_PATHS, mode="rw")
+    assert found is not None
+    assert found.startswith("DR-004.etc")
+
+
+def test_symlink_to_a_newline_target_is_refused_with_the_separator_reason(real_home: Path) -> None:
+    (real_home / "odd\nname").mkdir()
+    (real_home / "link").symlink_to(real_home / "odd\nname")
+    found = path_refusal(real_home / "link", env={}, home=real_home, owned_paths=[], mode="ro")
+    assert found is not None
+    assert found.startswith("resolves to a path that contains ':' or ','")
+
+
+def test_under_allowed_root_counts_a_root_itself_only_when_asked() -> None:
+    assert under_allowed_root(Path("/media"), home=HOME, root_itself=True) is True
+    assert under_allowed_root(Path("/media"), home=HOME) is False
+    assert under_allowed_root(Path("/media/usb"), home=HOME) is True
+    assert under_allowed_root(Path("/data/Music"), home=HOME, root_itself=True) is False
+
+
+def test_share_outside_the_allowed_roots_reports_the_dr004_root_reason() -> None:
+    with pytest.raises(GinnError) as info:
+        SharedPath.parse("/data/Music", home=HOME, owned_paths=OWNED_PATHS, mode="rw")
+    assert info.value.details["reason"] == ROOTS_REASON
