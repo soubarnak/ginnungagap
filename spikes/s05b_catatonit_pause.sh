@@ -3,6 +3,11 @@
 #
 # S-05b (NFR-002, NFR-003): can rootless podman use catatonit as its pause process?
 #
+# Finding: the rootless pause execs `catatonit -P` only from the fixed paths
+# /usr/libexec/podman/catatonit and /usr/bin/catatonit (podman pkg/rootless/rootless_linux.c,
+# do_pause). helper_binaries_dir and init_path do not reach it. With neither path present,
+# the pause is podman's own binary (comm "podman pause").
+#
 #   spikes/s05b_catatonit_pause.sh prepare    extract Debian's catatonit into the scratch bin dir
 #   spikes/s05b_catatonit_pause.sh probe      stop the spike pause, start a fresh one, report its comm and exe
 #   spikes/s05b_catatonit_pause.sh knobs      stop the spike pause, retry with [engine] init_path set, report comm
