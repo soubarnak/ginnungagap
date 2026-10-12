@@ -18,8 +18,10 @@ checksum=@CHECKSUM@
 archs="x86_64 x86_64-musl"
 
 post_install() {
-    vdoc README.md
-    vdoc NOTICE
+	vlicense LICENSE
+	vlicense NOTICE
+	vdoc README.md
+	vdoc NOTICE
 }
 
 # ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists.

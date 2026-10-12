@@ -46,6 +46,14 @@ def _template_fields() -> dict[str, str]:
     return fields
 
 
+def _post_install_body() -> list[str]:
+    """Return the stripped lines inside the template's post_install() function."""
+    lines = TEMPLATE.read_text(encoding="utf-8").splitlines()
+    start = lines.index("post_install() {")
+    end = lines.index("}", start)
+    return [line.strip() for line in lines[start + 1 : end]]
+
+
 def _project_version() -> str:
     with (REPO / "pyproject.toml").open("rb") as handle:
         return str(tomllib.load(handle)["project"]["version"])
@@ -75,6 +83,13 @@ def test_template_depends_on_podman_and_its_helpers() -> None:
 @pytest.mark.fr("CR-005")
 def test_template_license_is_apache_2_0() -> None:
     assert _template_fields()["license"] == "Apache-2.0"
+
+
+@pytest.mark.fr("CR-005")
+@pytest.mark.parametrize("name", ["LICENSE", "NOTICE"])
+def test_template_installs_license_and_notice_with_vlicense(name: str) -> None:
+    # Apache-2.0 4(a) requires a copy of the License and 4(d) the NOTICE text to ship with ginn.
+    assert f"vlicense {name}" in _post_install_body()
 
 
 @pytest.mark.fr("AS-003")
