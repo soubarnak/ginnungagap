@@ -48,7 +48,7 @@ SHIPPED_LIST = ", ".join(SHIPPED)
 DR003_PATTERNS = {
     "arch": r"[a-z0-9@_+][a-z0-9@._+-]{0,127}",
     "debian": r"[a-z0-9][a-z0-9.+-]{1,127}",
-    "fedora": r"[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
+    "fedora": r"(?!.*\.rpm\Z)[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}",
     "kali": r"[a-z0-9][a-z0-9.+-]{1,127}",
 }
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
@@ -1252,3 +1252,45 @@ def _with_verb(key: str, template: list[str]) -> DistroDef:
     raw = copy.deepcopy(_base())
     raw["verbs"][key] = template
     return from_mapping(raw, source="fixture.toml")
+
+
+# ---- T5.1 review fixes: network markers, trailing '-', fedora .rpm ---------------------------
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_every_shipped_distro_defines_a_network_error_pattern(name: str) -> None:
+    assert load(name).network_error.pattern
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+def test_a_missing_network_error_regex_is_refused_as_distro_data() -> None:
+    raw = _base()
+    del raw["network_error_regex"]
+    with pytest.raises(GinnError) as caught:
+        from_mapping(raw, "test")
+    assert caught.value.code == "GINN-E-DISTRO-DATA"
+
+
+@pytest.mark.fr("DR-003")
+@pytest.mark.fr("AS-027")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_a_trailing_dash_is_refused_by_the_argv_builder_for_every_distro(name: str) -> None:
+    with pytest.raises(GinnError) as caught:
+        load(name).argv(Verb.INSTALL, ["gcc-"])
+    assert caught.value.code == "GINN-E-PKG-NAME-INVALID"
+    assert load(name).argv(Verb.INSTALL, ["g++"])[-1] == "g++"
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("DR-003")
+def test_a_fedora_name_ending_in_rpm_is_refused_and_a_suffix_form_is_read_as_typed() -> None:
+    fedora = load("fedora")
+    assert fedora.name_pattern.fullmatch("gimp.rpm") is None
+    assert fedora.name_pattern.fullmatch("rpm") is not None
+    # dnf reads `gimp-2.10.38` and `foo.x86_64` as name, version or arch forms; the manifest keeps
+    # the name as typed (FR-040 reason), so both pass the pattern.
+    assert fedora.name_pattern.fullmatch("gimp-2.10.38") is not None
+    assert fedora.name_pattern.fullmatch("foo.x86_64") is not None

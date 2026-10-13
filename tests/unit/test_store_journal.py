@@ -12,7 +12,14 @@ import pytest
 
 from ginn.domain import RealmName
 from ginn.errors import GinnError
-from ginn.store.journal import Journal, JournalEntry, is_pid_alive, process_start_ticks
+from ginn.store.journal import (
+    MAX_JOURNAL_BYTES,
+    PARAMS_OVERFLOW,
+    Journal,
+    JournalEntry,
+    is_pid_alive,
+    process_start_ticks,
+)
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import write_json_atomic
 from tests.fakes.clock import FakeClock
@@ -69,6 +76,108 @@ def test_step_updates_the_journal_entry_in_place(paths: OwnedPaths) -> None:
     assert advanced.step == "image-pulled"
     assert journal.pending() == [advanced]
     assert not (paths.journal / "arch.tmp").exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_step_with_params_merges_them_into_the_entry_and_keeps_the_op_id(
+    paths: OwnedPaths,
+) -> None:
+    journal = Journal(paths)
+    entry = journal.begin("install", RealmName("arch"), {"packages": ["yay-bin"], "aur": True})
+    advanced = journal.step(entry, "built", {"added": ["git"], "keep": ["glibc"]})
+
+    assert advanced.step == "built"
+    assert advanced.params["added"] == ["git"]
+    assert advanced.params["keep"] == ["glibc"]
+    assert advanced.params == {**entry.params, "added": ["git"], "keep": ["glibc"]}
+    assert journal.pending() == [advanced]
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_oversized_step_drops_its_params_and_the_file_stays_readable_end_to_end(
+    paths: OwnedPaths,
+) -> None:
+    journal = Journal(paths)
+    names = [f"package-name-{index:04d}" for index in range(1500)]
+    entry = journal.begin(
+        "install", RealmName("arch"), {"op_id": "op-1", "packages": ["yay-bin"], "aur": True}
+    )
+    # 1500 added and 1500 keep names: the step alone is over the 64 KiB cap.
+    params = {"added": names, "keep": [f"keep-{name}" for name in names]}
+    raw = json.dumps({**entry.to_json(), "step": "built", "params": {**entry.params, **params}})
+    assert len(raw.encode("utf-8")) > MAX_JOURNAL_BYTES
+
+    advanced = journal.step(entry, "built", params, drop=("added",))
+
+    file = paths.journal / "arch.json"
+    assert file.stat().st_size <= MAX_JOURNAL_BYTES
+    assert advanced.step == "built"
+    assert advanced.params == {
+        "op_id": "op-1",
+        "packages": ["yay-bin"],
+        "aur": True,
+        PARAMS_OVERFLOW: True,
+    }
+    # The reader still accepts the file, so a scan and a pending list see the entry.
+    [scanned] = journal.scan()
+    assert scanned.problem is None
+    assert scanned.entry == advanced
+    assert journal.pending() == [advanced]
+    # The settle finishes the entry, and the next operation can begin on the realm.
+    journal.finish(advanced)
+    again = journal.begin("delete", RealmName("arch"))
+    assert again.op == "delete"
+    assert journal.pending() == [again]
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_step_whose_essentials_do_not_fit_keeps_only_the_essentials(
+    paths: OwnedPaths,
+) -> None:
+    journal = Journal(paths)
+    entry = journal.begin(
+        "install", RealmName("arch"), {"op_id": "op-2", "packages": ["yay-bin"], "aur": True}
+    )
+    huge = [f"x-{index:06d}-{'y' * 40}" for index in range(2000)]
+    advanced = journal.step(entry, "built", {"packages": huge, "removable": huge})
+    assert advanced.params == {
+        "op_id": "op-2",
+        "packages": ["yay-bin"],
+        "aur": True,
+        PARAMS_OVERFLOW: True,
+    }
+    assert journal.load(RealmName("arch")) is not None
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_whole_set_step_clears_the_overflow_marker_and_a_plain_step_keeps_it(
+    paths: OwnedPaths,
+) -> None:
+    journal = Journal(paths)
+    entry = journal.begin(
+        "install", RealmName("arch"), {"op_id": "op-3", "packages": ["yay-bin"], "aur": True}
+    )
+    huge = [f"package-{index:05d}-{'x' * 30}" for index in range(2000)]
+    overflowed = journal.step(entry, "toolchain", {"added": huge})
+    assert overflowed.params[PARAMS_OVERFLOW] is True
+    # A step with no set of its own keeps the marker: the set it dropped is still lost.
+    plain = journal.step(overflowed, "upgrading")
+    assert plain.params[PARAMS_OVERFLOW] is True
+    # A step whose set is whole clears the marker, so the set it writes is honoured.
+    cleared = journal.step(
+        plain, "built", {"removable": ["fakeroot"]}, drop=("added", PARAMS_OVERFLOW)
+    )
+    assert cleared.params == {
+        "op_id": "op-3",
+        "packages": ["yay-bin"],
+        "aur": True,
+        "removable": ["fakeroot"],
+    }
+    assert journal.pending() == [cleared]
 
 
 @pytest.mark.fr("NFR-030")

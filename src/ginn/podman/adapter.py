@@ -272,12 +272,19 @@ class Podman(Protocol):
         interactive: bool = False,
         capture: bool = True,
         pass_env: Sequence[str] = (),
+        timeout_s: float | None = None,
+        max_output: int | None = None,
+        stdout_tail: bool = False,
     ) -> ExecResult:
         """Run argv in a running container. With capture=False the output is not captured.
 
         The output goes straight to the caller's stdio, and the result has empty stdout and
         stderr. The exit status is the inner command's status. `pass_env` names variables that
         podman copies from its own environment, as `--env NAME`, so no value reaches the argv.
+        `timeout_s` and `max_output` bound a captured run (FR-044): when the run takes longer, or
+        its stdout passes `max_output` bytes, the podman client is killed and GINN-E-INTERNAL is
+        raised with the reason in its details. Both default to no limit. A bounded run decodes its
+        stdout with surrogateescape, so encoding it back gives the exact bytes of the output.
         """
         ...
 

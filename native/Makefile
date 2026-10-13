@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Builds the ginn-rebind helper (ADR-008). `make check` compiles it with gcc and clang with
-# warnings as errors, and checks the 200-line limit (AGENTS.md). `make` builds into build/ only;
-# `make install` copies the helper to $(DESTDIR)$(LIBEXECDIR), and no target installs by default.
+# Builds the native helpers: ginn-rebind (ADR-008) and ginn-watch (FR-044, NFR-009). `make check`
+# compiles each with gcc and clang with warnings as errors, and checks the 200-line limit
+# (AGENTS.md). `make` builds into build/ only; `make install` copies the helpers to
+# $(DESTDIR)$(LIBEXECDIR), and no target installs by default.
 
 GCC ?= gcc
 CLANG ?= clang
@@ -11,30 +12,36 @@ WARN := -std=c11 -Wall -Wextra -Werror -O2
 PREFIX ?= /usr
 LIBEXECDIR ?= $(PREFIX)/libexec/ginn
 BUILD := build
-SRC := ginn-rebind.c
+HELPERS := ginn-rebind ginn-watch
 LINE_LIMIT := 200
 
-all: $(BUILD)/ginn-rebind
+all: $(addprefix $(BUILD)/,$(HELPERS))
 
-$(BUILD)/ginn-rebind: $(SRC)
+$(BUILD)/%: %.c
 	@mkdir -p $(BUILD)
-	$(CC) $(WARN) -o $@ $(SRC)
+	$(CC) $(WARN) -o $@ $<
 
 check: lines
 	@mkdir -p $(BUILD)/check
-	$(GCC) $(WARN) -o $(BUILD)/check/ginn-rebind.gcc $(SRC)
-	$(CLANG) $(WARN) -o $(BUILD)/check/ginn-rebind.clang $(SRC)
-	@echo "ginn-rebind: gcc and clang clean with $(WARN)"
+	@for h in $(HELPERS); do \
+		$(GCC) $(WARN) -o $(BUILD)/check/$$h.gcc $$h.c && \
+		$(CLANG) $(WARN) -o $(BUILD)/check/$$h.clang $$h.c || exit 1; \
+	done
+	@echo "$(HELPERS): gcc and clang clean with $(WARN)"
 
 lines:
-	@n=$$(wc -l < $(SRC)); \
-	if [ "$$n" -gt $(LINE_LIMIT) ]; then \
-		echo "$(SRC): $$n lines, limit $(LINE_LIMIT) (AGENTS.md)"; exit 1; \
-	fi; \
-	echo "$(SRC): $$n lines (limit $(LINE_LIMIT))"
+	@for h in $(HELPERS); do \
+		n=$$(wc -l < $$h.c); \
+		if [ "$$n" -gt $(LINE_LIMIT) ]; then \
+			echo "$$h.c: $$n lines, limit $(LINE_LIMIT) (AGENTS.md)"; exit 1; \
+		fi; \
+		echo "$$h.c: $$n lines (limit $(LINE_LIMIT))"; \
+	done
 
 install: all
-	install -D -m 0755 $(BUILD)/ginn-rebind $(DESTDIR)$(LIBEXECDIR)/ginn-rebind
+	@for h in $(HELPERS); do \
+		install -D -m 0755 $(BUILD)/$$h $(DESTDIR)$(LIBEXECDIR)/$$h || exit 1; \
+	done
 
 clean:
 	rm -rf $(BUILD)

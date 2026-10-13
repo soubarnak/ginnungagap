@@ -11,6 +11,10 @@ shell = "/bin/sh"
 package_name_regex = '[a-z][a-z0-9.+-]{1,63}'
 signature_error_regex = 'FAKE-SIGNATURE-ERROR'
 stale_metadata_regex = 'FAKE-STALE-METADATA'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = 'FAKE-NETWORK-ERROR'
 refresh_before = ["install"]
 
 [integration]

@@ -295,6 +295,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-040; FR-120",
     ),
     ErrorSpec(
+        code="GINN-E-PKG-DEPENDENTS",
+        exit_code=4,
+        summary="removing {packages} in realm '{realm}' would also remove {dependents}",
+        remedy="remove the dependent packages first with 'ginn remove {realm} PACKAGE', or keep "
+        "the package installed; ginn does not force a removal",
+        source="FR-041; ADR-011 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-DOCTOR-FAILED",
         exit_code=1,
         summary="{failed} of {total} doctor checks failed",
@@ -426,6 +434,77 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "realm until it is settled",
         source="FR-122 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-W-BUILD-RESIDUAL",
+        exit_code=0,
+        summary="packages used only to build an AUR package are left in realm '{realm}': "
+        "{packages}",
+        remedy="check why they were kept ({reason}), then remove them with 'ginn remove {realm} "
+        "PACKAGE' if they are not needed",
+        source="FR-043 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-MANIFEST-UNRECORDED",
+        exit_code=0,
+        summary="packages changed in a root session of realm '{realm}' are not recorded: {detail}",
+        remedy="run 'ginn install {realm} PACKAGE' for each package the session installed, "
+        "to record it in the Install Manifest",
+        source="FR-042 AC-1, DR-007 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-BIN-NAME-INVALID",
+        exit_code=2,
+        summary="binary name '{binary}' is not valid",
+        remedy="use a plain file name of letters, digits, dot, plus, underscore or hyphen, with no "
+        "slash; the names 'ginn', 'ginn-*' and 'podman' are reserved",
+        source="FR-047 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-BIN-NOT-EXPORTED",
+        exit_code=3,
+        summary="binary '{binary}' is not exported from realm '{realm}'",
+        remedy="check the realm and binary names; export it with 'ginn export --bin <realm> "
+        "<binary>'",
+        source="FR-047 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-BIN-EXISTS",
+        exit_code=4,
+        summary="'{path}' exists and is not a launcher of realm '{realm}'",
+        remedy="unexport the other launcher first, or choose another name; ginn never overwrites "
+        "a file it did not write",
+        source="FR-047; DR-010 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-EXPORT-LIST",
+        exit_code=1,
+        summary="cannot list the desktop entries of realm '{realm}': {reason}",
+        remedy="check that the realm runs with 'ginn status {realm}'; nothing was exported or "
+        "removed",
+        source="FR-044; FR-045 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-EXPORT-SKIPPED",
+        exit_code=0,
+        summary="desktop entry '{app}' of realm '{realm}' is not exported: {reason}",
+        remedy="fix the entry in the realm or remove its package; the next sync follows the realm",
+        source="FR-044 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-EXPORT-SYNC",
+        exit_code=0,
+        summary="the host menu of realm '{realm}' is not fully synced: {reason}",
+        remedy="the realm and its packages are kept as they are; run 'ginn _sync {realm}' to retry "
+        "the menu",
+        source="FR-044 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-ICON-SKIPPED",
+        exit_code=0,
+        summary="icon of desktop entry '{app}' in realm '{realm}' is not copied: {reason}",
+        remedy="the host menu shows the entry without this icon",
+        source="FR-044 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
@@ -443,7 +522,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         4,
         "conflict with existing state: name taken, undo refused, unacknowledged host change, "
         "interrupted operation not yet recovered, a realm in a state its verb does not allow "
-        "(GINN-E-REALM-STATE)",
+        "(GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS)",
     ),
     (65, "data error (EX_DATAERR): image or package signature not verified"),
     (69, "network failure"),

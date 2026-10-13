@@ -51,7 +51,13 @@ def test_as027_shapes_are_rejected_for_every_distro(distro: DistroId, raw: str) 
 
 @pytest.mark.parametrize(
     ("raw", "rule_prefix"),
-    [("gimp*", "AS-027"), ("gimp>=2", "AS-027"), ("./gimp", "AS-027"), ("-gimp", "AS-027")],
+    [
+        ("gimp*", "AS-027"),
+        ("gimp>=2", "AS-027"),
+        ("./gimp", "AS-027"),
+        ("-gimp", "AS-027"),
+        ("gcc-", "AS-027"),
+    ],
 )
 def test_as027_rule_names_the_rejected_shape(raw: str, rule_prefix: str) -> None:
     with pytest.raises(GinnError) as info:
@@ -62,7 +68,9 @@ def test_as027_rule_names_the_rejected_shape(raw: str, rule_prefix: str) -> None
 
 
 @pytest.mark.parametrize("distro", DISTROS, ids=lambda distro: distro.value)
-@pytest.mark.parametrize("raw", ["firefox", "python3-pip", "gcc-c++", "libstdc++", "gimp-1.2"])
+@pytest.mark.parametrize(
+    "raw", ["firefox", "python3-pip", "gcc-c++", "libstdc++", "gimp-1.2", "g++"]
+)
 def test_common_names_are_accepted_for_every_distro(distro: DistroId, raw: str) -> None:
     assert PackageName.parse(raw, distro).value == raw
 

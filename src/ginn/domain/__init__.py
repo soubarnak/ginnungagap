@@ -6,7 +6,7 @@ Each primitive is validated when it is built. The rest of the code accepts only 
 
 from ginn.domain.enums import DistroId, RealmState, Tier
 from ginn.domain.names import RealmName
-from ginn.domain.packages import PackageName
+from ginn.domain.packages import InstallMethod, InstallSource, ManifestEntry, PackageName
 from ginn.domain.paths import ALLOWED_ROOTS, FORBIDDEN_RULES, ForbiddenRule, Mode, SharedPath
 from ginn.domain.realm import RealmSettings
 from ginn.domain.states import (
@@ -28,6 +28,9 @@ __all__ = [
     "DistroId",
     "ForbiddenRule",
     "IllegalTransition",
+    "InstallMethod",
+    "InstallSource",
+    "ManifestEntry",
     "Mode",
     "PackageName",
     "RealmName",

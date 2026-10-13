@@ -18,10 +18,14 @@ shell = "/bin/bash"
 # DR-003 (Arch and AUR), matched with fullmatch.
 package_name_regex = '[a-z0-9@_+][a-z0-9@._+-]{0,127}'
 # FR-012: pacman messages for an unknown or untrusted signing key, or a corrupt signed package.
-signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted package \(PGP signature\)|could not be looked up remotely'
+signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted package \(PGP signature\)|could not be looked up remotely|One or more PGP signatures could not be verified'
 # ADR-011: a sync database older than the mirror's packages fails the download with a 404. Runtime
 # text, not verified until M4. The remedy is `ginn update <realm>`, the one full upgrade.
 stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL returned error: 404'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = 'Could not resolve host|Failed to connect to|Connection timed out|Connection refused|Operation timed out|Operation too slow|Temporary failure in name resolution'
 # ADR-011: a stderr line of the check-updates query that matches one of these makes the check fail
 # closed (error), whatever the exit status. Matched with search, one line at a time. Without a sync
 # database, pacman is expected to print `warning: database file for <repo> does not exist`. That

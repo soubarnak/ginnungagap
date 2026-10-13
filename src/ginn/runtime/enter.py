@@ -34,7 +34,10 @@ The steps, in order:
    (`ROOT_HOME`). The session environment is passed, and the proxy names go as `--env NAME`
    (ADR-004 amendment). A status of 125 is podman's own failure or the command's own 125, so enter
    reads the listing once more. If the container no longer runs, GINN-E-REALM-STATE is raised.
-   Otherwise the status comes back unchanged. The exec is never retried.
+   Otherwise the status comes back unchanged. The exec is never retried. Under `--root`, the
+   `root_session` hook (EnterHooks) wraps the exec: it receives the record, the container and the
+   exec as a callable, and it returns the status of that exec. The hook records the packages that
+   a root session installs (FR-042 AC-1). Without the hook, or without `--root`, nothing wraps it.
 
 A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm keeps running, since
 enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
@@ -99,6 +102,10 @@ def _stdio_is_tty() -> bool:
     return os.isatty(0) and os.isatty(1)
 
 
+RootSession = Callable[[RealmRecord, str, Callable[[], int]], int]
+"""Wraps the exec of a `--root` session: (record, container id, run) -> the exec's status."""
+
+
 @dataclass(frozen=True)
 class EnterHooks:
     """The seams of enter. The defaults are the real ones.
@@ -108,7 +115,10 @@ class EnterHooks:
     the wait for a lock holder, and `sleep` separates two checks of that wait. `observe` receives
     `listing`, `precheck` and `exec`, each with the seconds it took (NFR-004, T4.9). `notify`
     receives each FR-006 warning of a re-attach or a start that this enter made, before the command
-    runs, so the caller can show it first (the command's own output comes after).
+    runs, so the caller can show it first (the command's own output comes after). `root_session`
+    wraps the exec of a `--root` session: it is called with the record, the container id and a
+    callable that runs the exec, and it returns that exec's status. It is never called without
+    `--root`, so the non-root path costs nothing (NFR-004).
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
@@ -117,6 +127,7 @@ class EnterHooks:
     sleep: Callable[[float], None] = time.sleep
     observe: Callable[[str, float], None] | None = None
     notify: Callable[[GinnWarning], None] | None = None
+    root_session: RootSession | None = None
 
 
 @dataclass(frozen=True)
@@ -326,18 +337,26 @@ def enter_realm(
         command = list(argv)
         action = "exec"
     home = exec_home(session.host_home, root=root)
-    exec_started = hooks.clock()
-    status = podman.exec_interactive(
-        cid,
-        command,
-        user=exec_user(session.uid, gid, root=root),
-        env={**look.session.env, "HOME": home},
-        workdir=home,
-        tty=hooks.isatty(),
-        interactive=True,
-        pass_env=tuple(look.session.pass_through),
-    )
-    _observe(hooks, "exec", hooks.clock() - exec_started)
+
+    def run() -> int:
+        exec_started = hooks.clock()
+        status = podman.exec_interactive(
+            cid,
+            command,
+            user=exec_user(session.uid, gid, root=root),
+            env={**look.session.env, "HOME": home},
+            workdir=home,
+            tty=hooks.isatty(),
+            interactive=True,
+            pass_env=tuple(look.session.pass_through),
+        )
+        _observe(hooks, "exec", hooks.clock() - exec_started)
+        return status
+
+    if root and hooks.root_session is not None:
+        status = hooks.root_session(record, cid, run)
+    else:
+        status = run()
     if status == PODMAN_ERROR_EXIT and not _running(_listed(podman, name, cid)):
         raise make(
             "GINN-E-REALM-STATE",

@@ -69,7 +69,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,11 +145,22 @@ class Mutation:
         self._journal = journal
         self._entry: JournalEntry | None = None
 
-    def step(self, name: str) -> None:
-        """Record in the journal that the body reached step `name` (FR-122)."""
+    def step(
+        self,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        drop: Sequence[str] = (),
+    ) -> None:
+        """Record in the journal that the body reached step `name` (FR-122).
+
+        `params` are journal-only: they are merged into the journal entry and never written to the
+        audit entry, and `drop` removes journal params. An AUR build records its package sets this
+        way (FR-043).
+        """
         if self._entry is None:
             raise RuntimeError("step() is only valid inside the journaled body")
-        self._entry = self._journal.step(self._entry, name)
+        self._entry = self._journal.step(self._entry, name, params, drop=drop)
 
     def set_permissions(self, before: Mapping[str, Any], after: Mapping[str, Any]) -> None:
         """Record the permission diff of this operation for the audit entry (FR-124 AC-1)."""

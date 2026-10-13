@@ -14,7 +14,7 @@ import argparse
 import sys
 import traceback
 from collections.abc import Sequence
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from ginn import __version__
 from ginn.cli import commands as registry
@@ -88,10 +88,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for spec in registry.COMMANDS:
         _check_example(spec)
+        # A hidden command gets no `help` keyword: argparse then leaves it out of the listing.
+        listed: dict[str, Any] = {} if spec.hidden else {"help": spec.help}
         sub = subparsers.add_parser(
             spec.name,
-            help=spec.help,
             description=spec.help,
+            **listed,
             epilog=f"Example: {spec.example}",
             formatter_class=_HELP_FORMAT,
             allow_abbrev=False,

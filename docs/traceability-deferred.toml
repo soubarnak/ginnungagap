@@ -47,9 +47,9 @@ partial = true
 reason = "the pinned-digest pull, the digest check after the pull, and the image removal on a mismatch are unit-tested on FakePodman (T4.4). A failed create leaves no image that it pulled. Not yet proven on a host: a tampered image in a real registry, and the layers in real storage (T4.9)"
 [[deferred]]
 id = "FR-012"
-milestone = "M4"
+milestone = "M5"
 partial = true
-reason = "unit tests (T4.4) check that no create step passes a flag that disables a native signature check, and that a signature error maps to GINN-E-PKG-SIGNATURE. Not yet proven on a host: a repository that serves a bad signature (AC-1), and the package-manager config after create (AC-2), which are T4.9 and M5"
+reason = "unit tests check that no create or install step passes a flag that disables a native signature check, for every distribution, verb and check-updates step, with gpgcheck, trusted=yes, no-check-sig and SigLevel scanned in any case (T4.4, T5.1, tests/unit/test_packages_manager.py and test_distros_loader.py). A signature error maps to GINN-E-PKG-SIGNATURE with exit 65, and it wins over network text, which is not retried (T5.1, T5.3, tests/unit/test_packages_manager.py, test_ops_packages.py). Not yet proven on a host: a repository that serves a bad signature (AC-1), which is gate 3 of M5 and is not approved; the package-manager config after rebuild and update (AC-2) waits for M8. T5.8: makepkg's checksum and PGP checks stay on for an AUR build, and no argv passes --skipchecksums, --skippgpcheck, --skipinteg or --asroot (tests/unit/test_packages_aur.py)"
 [[deferred]]
 id = "FR-013"
 milestone = "M4"
@@ -116,40 +116,40 @@ reason = "the golden argv proves --network host for non-Kali realms (T4.1); the 
 id = "FR-040"
 milestone = "M5"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M5"
-
+reason = "install is unit-tested on FakePodman (T5.1, T5.3, tests/unit/test_ops_packages.py and test_cli_packages.py): the argv of each verb, the refresh rule of ADR-011, the names checked before any podman call (AC-2), with a trailing '-' refused on every distribution (apt reads it as a removal) and a Fedora name ending in .rpm refused (dnf reads it as a file). Version and arch suffix forms (`gimp-2.10.38`, `foo.x86_64`) pass the pattern, because dnf reads them as such, and the manifest records the name as typed. The start of a stopped realm, the failure codes, the realistic network retries (FR-120), and the Install Manifest entry are unit-tested too; a failed install records the requested names the realm now lists. Residual, not covered (T8.3): recovery replays an interrupted install or remove only from its journal steps `installed` and `removed`, so an interrupt before them, and a failed install or remove whose explicit list cannot be read, leave the Install Manifest as it was while the native change may already have happened. Not yet proven on a host: the package set grows by exactly the package and its dependency closure (AC-1), which is gate 3 of M5 and is not approved"
 [[deferred]]
 id = "FR-041"
 milestone = "M5"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M5"
-
+reason = "remove is unit-tested on FakePodman (T5.3, tests/unit/test_ops_packages.py and test_cli_packages.py): the dry run first where the distribution defines it (ADR-011), the GINN-E-PKG-DEPENDENTS refusal before any removal, the refusal of an unread or over-capped dry run (an apt heading with no Remv line included), the Install Manifest entry dropped, and a failed removal drops the names the realm no longer lists. Dependent names are escaped in the refusal. Residual, not covered (T8.3): recovery replays an interrupted install or remove only from its journal steps `installed` and `removed`, so an interrupt before them, and a failed install or remove whose explicit list cannot be read, leave the Install Manifest as it was while the native change may already have happened. Not yet proven: the removal of an exported entry (AC-1, which needs FR-045 on a host) and the dry-run output formats on a host (ADR-011, M4)"
 [[deferred]]
 id = "FR-042"
 milestone = "M5"
 partial = true
-reason = "ginn enter --root and ginn exec --root run as container root inside the realm (user 0:0; HOME and the workdir at /root, never the bound Realm Home, since keep-id maps container root to a subordinate uid, so a root write could not be deleted by the user; the SRS does not say which HOME `--root` gets, and this is a decision of 2026-10-13). The no-privilege argv is unit-tested in test_podman_cli, and the rest on FakePodman (T4.6, test_runtime_enter); AC-1 installs htop with pacman and records it in the Install Manifest, which needs the package set (M5) and a Void host (T4.9). The CLI enter and exec take --root (T4.11, tests/unit/test_cli_enter.py: user 0:0, HOME and workdir /root), and the host smoke ran exec --root echo ok on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13)"
+reason = "ginn enter --root and ginn exec --root run as container root inside the realm (user 0:0; HOME and the workdir at /root, never the bound Realm Home, since keep-id maps container root to a subordinate uid, so a root write could not be deleted by the user; the SRS does not say which HOME `--root` gets, and this is a decision of 2026-10-13). The no-privilege argv is unit-tested in test_podman_cli, and the rest on FakePodman (T4.6, test_runtime_enter); AC-1 installs htop with pacman and records it in the Install Manifest, which needs the package set (M5) and a Void host (T4.9). The CLI enter and exec take --root (T4.11, tests/unit/test_cli_enter.py: user 0:0, HOME and workdir /root), and the host smoke ran exec --root echo ok on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13). T5.2 (tests/unit/test_ops_native.py, test_cli_root_session.py): the explicit-package diff of a --root session records each new package as native (AC-1), with the two reads as root under the locale, and a non-root command makes no read (NFR-004). Not yet proven on a host: pacman -S htop run inside a real realm (AC-1, gate 3 of M5)"
 
 [[deferred]]
 id = "FR-043"
 milestone = "M5"
-reason = "not covered yet; the roadmap assigns its test to M5"
-
+partial = true
+reason = "the AUR build is unit-tested on FakePodman and a dependency-graph fake (T5.8 review and final verify, tests/unit/test_packages_aur.py, test_ops_packages.py, test_cli_packages.py, test_ops_recovery.py, test_store_journal.py, test_podman_bounded.py): the steps in order (git, dependencies, toolchain, upgrading, built, removed) with their journaled package sets (added, removable), the build as the realm user and never root (makepkg refuses root), the clone limited to https from the AUR host (protocol.allow), the .SRCINFO read inside the realm (IR-023), the requested name checked against the pkgnames, -debug and unneeded sibling files never handed to pacman, requested packages built in dependency order with sibling pkgnames installed as dependencies first, the build-only set as added minus the closure of the requested, runtime and sibling names (the closure follows Provides; a runtime dependency that git also pulled is kept), a refused removal as a residual retried once without the names pacman says it needs, the restore after a failure before built (AC-2), the network and PGP mappings, the output and time limits (the build keeps only the tail of its output), and the flag scan (--skipchecksums, --skippgpcheck, --skipinteg and --asroot are never passed). No AUR helper is installed. Recovery replays the AUR manifest from upgrading, built and removed, removes the journaled removable set at built and the added set before built, validates every journaled name, and treats an overflowed journal (params_overflow) as unknown sets: nothing is removed and the reason says so; a whole-set step clears the marker. At upgrading a failed query keeps the entry, and a stopped realm records the requested names unchecked with a warning, because the upgrade may have run (no verification of those names until the realm is queried). OPEN DECISION for the user (no behaviour change here): the build keyring is empty, so a source that validpgpkeys signs fails the PGP check with GINN-E-PKG-SIGNATURE; importing keys into the build needs a key-trust ADR. Not yet proven on a host: a real build and install in a realm (AC-1), which is gate 3 of M5 and is not approved; the makepkg package file name and the pacman refusal and query layouts are unverified on a host. Residual: a crash before built leaves the build-only set until recovery removes it, and recovery cannot remove it when the realm is not running (a warning names it, T8.3); a dependency that exists only in the AUR is refused and restored; a virtual dependency is followed only through Provides as pacman lists them; a killed client may leave a build running in the realm (podman exec has no kill of its own)."
 [[deferred]]
 id = "FR-044"
 milestone = "M5"
-reason = "not covered yet; the roadmap assigns its test to M5"
+partial = true
+reason = "the Desktop Entry allowlist, the icon checks, the bounded listings and the sync diff and apply are unit-tested on fakes (T5.4, T5.5, T5.6); the trigger, ginn-watch, is unit-tested on a temporary directory (T5.9): a .desktop create or delete runs the command after a debounced batch, and other names do not. Not proven on a host: the entry appears in a real menu, its launch from there, and the 5 s export (gate 3). Starting and stopping the watcher is M7. Known limit: realm my with app arch-firefox and realm my-arch with app firefox both name ginn-my-arch-firefox.desktop, which FR-044 AC-1 pins; the second realm is refused with a warning, never overwritten. A package transaction runs the menu sync under the same lock (T5.3, ops/packages.py): a successful install or remove syncs once, under the lock, with the absolute ginn path; a sync that lists nothing or cannot save its state is the GINN-W-EXPORT-SYNC warning, an entry whose host write fails is skipped with GINN-W-EXPORT-SKIPPED, and the change stands either way, while a journal write error still fails it; a realm that does not run is skipped silently (tests/unit/test_ops_packages.py, test_cli_packages.py, test_export_sync.py). The listing uses GNU find -printf: gate 3 must check every image (all four distributions) for GNU findutils"
 
 [[deferred]]
 id = "FR-045"
 milestone = "M5"
-reason = "not covered yet; the roadmap assigns its test to M5"
+partial = true
+reason = "the removal of an entry and its icon copy on the next sync is unit-tested on fakes (T5.6), and a removed desktop file runs the sync trigger (ginn-watch, T5.9, unit-tested on a temporary directory); the removal inside a real realm and the 5 s unexport on a host (gate 3) are not, so this entry waits on the M5 host gate"
 
 [[deferred]]
 id = "FR-046"
 milestone = "M6"
 partial = true
-reason = "the session env and the display, audio and authority attach plan are unit-tested (T4.2, T4.3); the menu launch (T5.4) and the audio connection and Wayland renderer on a host (T6.6) are not, so this entry waits on T6.6"
+reason = "the session env and the display, audio and authority attach plan are unit-tested (T4.2, T4.3), and the exported Exec line is unit-tested to reach ginn exec with the original argv (T5.4); the menu launch on a host and the audio connection and Wayland renderer (T6.6) are not, so this entry waits on T6.6"
 
 [[deferred]]
 id = "FR-048"
@@ -269,7 +269,7 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 id = "FR-120"
 milestone = "M8"
 partial = true
-reason = "unit tests (T4.4) check the create retries: 4 attempts in all, delays of 5, 15 and 45 s, a recovery after two failed attempts, and the rollback when the last retry fails. Package-manager network failures are not retried, because the distribution data has no classifier for them. Not yet covered: network failure during install, update or rebuild, and the broken state from a package database (T8.1, T8.4)"
+reason = "unit tests (T4.4) check the create retries: 4 attempts in all, delays of 5, 15 and 45 s, a recovery after two failed attempts, and the rollback when the last retry fails. Package-manager network failures are not retried, because the distribution data has no classifier for them. Not yet covered: network failure during install, update or rebuild, and the broken state from a package database (T8.1, T8.4). T5.1 review: a realistic non-zero status of a package step (Debian's `Temporary failure resolving`, Arch's `Could not resolve host`, dnf's `Curl error`) is classified by the distribution's `network_error_regex` and retried with the FR-120 delays, and then raised as GINN-E-NETWORK; a signature match and stale metadata are not retried (tests/unit/test_packages_manager.py, tests/unit/test_ops_packages.py, tests/unit/test_distros_loader.py)"
 [[deferred]]
 id = "FR-121"
 milestone = "M8"
@@ -338,7 +338,9 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 [[deferred]]
 id = "NFR-009"
 milestone = "M5"
-reason = "not covered yet; the roadmap assigns its test to M5"
+partial = true
+reason = "the sync costs a fixed number of podman calls, counted on 200 entries with a fixed per-call cost (T5.6); the trigger batches a burst into one run and bounds the wait for a steady stream to its max latency (ginn-watch, T5.9); the 5 s bound on installed applications, 20 runs, is host-only and waits for gate 3. That gate must check every image for GNU findutils (find -printf), since the listing needs it"
+
 
 [[deferred]]
 id = "NFR-010"

@@ -16,12 +16,17 @@ id = "fedora"
 trust_key = "fedora"
 shell = "/bin/bash"
 # DR-003 (Fedora), matched with fullmatch.
-package_name_regex = '[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}'
+# DR-003, and a name ending in .rpm is refused: dnf reads it as a local file path (FR-040).
+package_name_regex = '(?!.*\.rpm\Z)[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}'
 # FR-012: dnf messages for a failed GPG check or a missing public key.
 signature_error_regex = '(?i)gpg check failed|public key for .* is not installed|signature verification failed'
 # ADR-011: dnf's message for a package file the mirror no longer has. Runtime text, not verified
 # until M4.
 stale_metadata_regex = 'Status code: 404'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = "Curl error \\(|Couldn't resolve host|Timeout was reached|Failed to connect to"
 # ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
 # check-updates and upgrade force a refresh, so no verb needs one first.
 refresh_before = []

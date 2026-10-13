@@ -21,10 +21,10 @@ import json
 import os
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from ginn.domain import RealmName
 from ginn.errors import GinnError, make
@@ -34,8 +34,16 @@ from ginn.store.records import fsync_dir, write_json_atomic
 
 SCHEMA_VERSION = 1
 MAX_JOURNAL_BYTES = 64 * 1024
-"""The largest journal file that is read. An entry is a few hundred bytes, so a larger file is
-reported and never parsed (FR-122). One hostile file cannot then exhaust memory or time."""
+"""The largest journal file that is read, and the largest that is written (FR-122). A larger file is
+reported and never parsed, so one hostile file cannot exhaust memory or time. The writers keep every
+file under this size: `begin` refuses params that do not fit, and `step` drops step
+params that would overflow and marks the entry with PARAMS_OVERFLOW. The operation's changes are
+already made, so the step is recorded and not refused."""
+PARAMS_OVERFLOW: Final = "params_overflow"
+"""The params marker of an entry whose step params were dropped for size (see `step`)."""
+ESSENTIAL_PARAMS: Final = ("op_id", "packages", "aur")
+"""The params that `begin` writes and that a step never drops. Recovery reads them when the rest
+of the params overflowed (ops/recovery.py)."""
 MAX_PARAM_DEPTH = 16
 """The deepest nesting allowed in an entry's params. Real params are two or three levels deep."""
 _STAT_START_INDEX = 19  # field 22 is index 19 counted from field 3 (the state field)
@@ -86,6 +94,11 @@ def is_pid_alive(pid: int, start_ticks: int | None = None) -> bool:
     if state in _DEAD_STATES:
         return False
     return start_ticks is None or ticks == start_ticks
+
+
+def _serialized_size(entry: "JournalEntry") -> int:
+    """The bytes `write_json_atomic` would write for `entry`, the size the reader checks."""
+    return len((json.dumps(entry.to_json(), indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -344,12 +357,46 @@ class Journal:
             step="begin",
             params=dict(params or {}),
         )
+        size = _serialized_size(entry)
+        if size > MAX_JOURNAL_BYTES:
+            detail = (
+                f"the operation's parameters need {size} bytes, over the {MAX_JOURNAL_BYTES} limit"
+            )
+            raise make("GINN-E-USAGE", detail=detail)
         write_json_atomic(path, entry.to_json())
         return entry
 
-    def step(self, entry: JournalEntry, name: str) -> JournalEntry:
-        """Record that the operation reached step `name`. Returns the updated entry."""
-        updated = replace(entry, step=name)
+    def step(
+        self,
+        entry: JournalEntry,
+        name: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        drop: Sequence[str] = (),
+    ) -> JournalEntry:
+        """Record that the operation reached step `name`. Returns the updated entry.
+
+        `params`, when given, are merged into the entry's params and written with the step, and
+        `drop` names params to remove. An AUR build records its package sets this way (FR-043). A
+        caller whose params are a whole set clears the overflow marker with `drop`, by naming
+        PARAMS_OVERFLOW; no step clears it implicitly, because the params it dropped are still lost.
+        A file that would pass MAX_JOURNAL_BYTES is not written in full. The step params are dropped
+        and the entry carries PARAMS_OVERFLOW. If even the entry's own params would not fit, only
+        ESSENTIAL_PARAMS are kept. Either way the step is recorded, because the operation's changes
+        have already been made. The writers never produce a file the reader refuses.
+        """
+        merged = {key: value for key, value in entry.params.items() if key not in drop}
+        if params is not None:
+            merged.update(params)
+        updated = replace(entry, step=name, params=merged)
+        if _serialized_size(updated) > MAX_JOURNAL_BYTES:
+            kept = {key: value for key, value in entry.params.items() if key not in drop}
+            updated = replace(entry, step=name, params={**kept, PARAMS_OVERFLOW: True})
+        if _serialized_size(updated) > MAX_JOURNAL_BYTES:
+            essentials: dict[str, Any] = {
+                key: entry.params[key] for key in ESSENTIAL_PARAMS if key in entry.params
+            }
+            updated = replace(entry, step=name, params={**essentials, PARAMS_OVERFLOW: True})
         write_json_atomic(self._file(entry.realm), updated.to_json())
         return updated
 

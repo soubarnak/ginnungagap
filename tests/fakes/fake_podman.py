@@ -79,6 +79,14 @@ class _Container:
     """The `--passwd-entry` podman writes for the keep-id user. `getent passwd` reads it (T4.9b)."""
 
 
+def _cat(files: Mapping[str, bytes], path: str) -> ExecResult:
+    """What `cat -- <path>` prints in a container: the file's bytes, decoded as the adapter does."""
+    content = files.get(path)
+    if content is None:
+        return ExecResult(1, "", f"cat: {path}: No such file or directory\n")
+    return ExecResult(0, content.decode("utf-8", "surrogateescape"), "")
+
+
 def _error(code: str, ref: str) -> GinnError:
     if code == "GINN-E-IMAGE-UNVERIFIED":
         return make(code, distro=ref.partition("@")[0])
@@ -103,6 +111,10 @@ class FakePodman:
 
     info_result: PodmanInfo = DEFAULT_INFO
     exec_results: dict[tuple[str, ...], ExecResult] = field(default_factory=dict)
+    exec_sequences: dict[tuple[str, ...], list[ExecResult]] = field(default_factory=dict)
+    """Ordered answers for one argv: each call takes the first, so the same argv can answer
+    differently before and after an operation (the explicit-package diff, T5.2). Once a queue is
+    empty, `exec_results` answers the argv again."""
     unshare_results: list[ExecResult] = field(default_factory=list)
     fail_pull_with: str | None = None
     fail_pull_times: int | None = None
@@ -319,11 +331,16 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         if self.fail_exec_with is not None:
             raise _error(self.fail_exec_with, container.image)
+        queued = self.exec_sequences.get(tuple(argv))
+        if queued:
+            return queued.pop(0)
         canned = self.exec_results.get(tuple(argv))
         if canned is not None:
             return canned  # a test can inject any answer, a mismatched entry included
         if len(argv) == 3 and tuple(argv[:2]) == ("getent", "passwd"):
             return _getent_passwd(container, argv[2])
+        if len(argv) == 3 and tuple(argv[:2]) == ("cat", "--"):
+            return _cat(self.files, argv[2])
         return ExecResult(0, "", "")
 
     def exec(
@@ -338,12 +355,25 @@ class FakePodman:
         interactive: bool = False,
         capture: bool = True,
         pass_env: Sequence[str] = (),
+        timeout_s: float | None = None,
+        max_output: int | None = None,
+        stdout_tail: bool = False,
     ) -> ExecResult:
+        """The limits are accepted for the protocol. A test injects a hang or an overflow itself.
+        `stdout_tail` is accepted too: the fake answers with its whole canned output."""
         self.exec_users.append(user)
         self._note_exec("exec", container_id, argv, user, env, workdir, pass_env, tty, interactive)
         result = self._exec("exec", container_id, argv)
         if not capture:
             return ExecResult(result.exit_code, "", "")
+        if (
+            max_output is not None
+            and len(result.stdout.encode("utf-8", "surrogateescape")) > max_output
+        ):
+            # What the adapter does: the run is cut at the cap, and the error names the cap.
+            over = make("GINN-E-INTERNAL")
+            over.details["reason"] = f"printed more than {max_output} bytes"
+            raise over
         return result
 
     def exec_interactive(

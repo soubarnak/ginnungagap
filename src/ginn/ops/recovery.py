@@ -54,9 +54,19 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
   running only after the attach. So is a journal step of `running`. Both are matched to podman. Any
   other step means the start did not finish: a container that podman runs is stopped, and the
   record becomes `stopped`.
-- stop, install, remove, tier, perms, services, export and any other op with no state of its own:
-  the record takes the state that podman reports, `running` or `stopped`, when the record is
-  `stopped`, `running` or `failed`.
+- stop, install, remove, tier, perms, services and any other op with no state of its own: the
+  record takes the state that podman reports, `running` or `stopped`, when the record is `stopped`,
+  `running` or `failed`.
+- install and remove also replay the Install Manifest write that the package step did not reach.
+  The journal step `installed` (install) or `removed` (remove) is written after the package manager
+  succeeds and before the manifest is saved, so an entry at that step gets the manifest written from
+  its `packages` param, in the same record write (FR-040, FR-041, DR-007). An AUR install (param
+  `aur`) writes its step `removed` after its build-only set is gone, and its entries are `aur`
+  (FR-043). An entry at any earlier step leaves the manifest as it was. The native change may
+  already have happened there, and no journal step says how far it got (residual, T8.3).
+- sync, export and unexport change only host files, never a realm record (FR-044, FR-047). They are
+  recovered with no state write, whatever the record reads, so a deleting or broken realm is not
+  blocked by a launcher. The next run of the same operation reconciles the host files.
 - rebuild: DR-034 keeps the old root until the atomic swap, so a `rebuilding` record returns to its
   previous state (DR-020). Other records are matched to podman, as above.
 - update: `updating` becomes `broken` (DR-020, FR-120). A record already `broken` is settled as
@@ -92,13 +102,28 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
-from ginn.domain import RealmName, RealmState, can_transition
+from ginn.distros import Verb
+from ginn.distros import load as load_distro
+from ginn.domain import (
+    DistroId,
+    InstallMethod,
+    InstallSource,
+    ManifestEntry,
+    PackageName,
+    RealmName,
+    RealmState,
+    can_transition,
+)
 from ginn.errors import GinnError
 from ginn.ops._mutating import OpEnv, is_finished
+from ginn.packages.aur import query_argv
+from ginn.packages.manager import MAX_OUTPUT_CHARS, parse_names, shown
+from ginn.packages.manifest import installed, removed
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
+from ginn.store._time import utc_from_epoch
 from ginn.store.audit import AuditEntry, AuditIndex
-from ginn.store.journal import JournalEntry, JournalFile, damaged_reason
+from ginn.store.journal import PARAMS_OVERFLOW, JournalEntry, JournalFile, damaged_reason
 from ginn.store.locks import realm_lock
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -110,6 +135,33 @@ OP_UPDATE: Final = "update"
 OP_DELETE: Final = "delete"
 OP_RECOVER: Final = "recover"
 """The op of the entry that recovery writes for an operation that already had an audit entry."""
+OP_SYNC: Final = "sync"
+OP_EXPORT: Final = "export"
+OP_INSTALL: Final = "install"
+OP_REMOVE: Final = "remove"
+STEP_INSTALLED: Final = "installed"
+"""The journal step that an install writes after its package step (ops/packages.py)."""
+STEP_REMOVED: Final = "removed"
+STEP_GIT: Final = "git"
+"""The AUR build's journal step after its git install (ops/packages.py, packages/aur.py)."""
+STEP_DEPENDENCIES: Final = "dependencies"
+"""The AUR build's journal step after its runtime dependencies are installed."""
+STEP_TOOLCHAIN: Final = "toolchain"
+"""The AUR build's journal step after its toolchain is installed."""
+STEP_BUILT: Final = "built"
+STEP_UPGRADING: Final = "upgrading"
+"""The AUR build's journal step before each package install (packages/aur.py)."""
+_QUERY_TIMEOUT_S: Final = 300.0
+_REMOVE_TIMEOUT_S: Final = 300.0
+"""The AUR build's journal step after its packages are installed, before the build-only removal."""
+_AUR_STEPS: Final = frozenset(
+    {STEP_GIT, STEP_DEPENDENCIES, STEP_TOOLCHAIN, STEP_UPGRADING, STEP_BUILT, STEP_REMOVED}
+)
+_ROOT_ENV: Final = {"LC_ALL": "C.UTF-8"}
+"""The journal step that a remove writes after its package step (ops/packages.py)."""
+OP_UNEXPORT: Final = "unexport"
+_HOST_ONLY_OPS: Final = frozenset({OP_SYNC, OP_EXPORT, OP_UNEXPORT})
+"""Operations that write host files only, never a realm record (see the module docstring)."""
 
 START_COMPLETE_STEP: Final = "running"
 """The journal step of a start after its record is saved running (ops/lifecycle.py). Earlier steps
@@ -157,12 +209,19 @@ class _Decision:
     """The verdict on one interrupted operation. `target` None means the record is not written.
 
     `stop_container` is the id of a container to stop before the record is written, or None.
+    `manifest`, when set, is the Install Manifest to write with the record (FR-040, FR-041).
+    `remove_names` and `remove_argv` are packages to remove best effort (FR-043), and `remove_in`
+    is the running container they are removed from. Without a container they are reported left.
     """
 
     outcome: str
     target: RealmState | None
     reason: str
     stop_container: str | None = None
+    manifest: list[ManifestEntry] | None = None
+    remove_names: tuple[str, ...] = ()
+    remove_argv: tuple[str, ...] = ()
+    remove_in: str | None = None
 
 
 def find_pending(env: OpEnv) -> list[JournalFile]:
@@ -314,13 +373,230 @@ def _settle_locked(
     # NFR-030 order: a podman stop, the record, the audit entry, then the journal file.
     if decision.stop_container is not None:
         podman.stop(decision.stop_container, STOP_NOW_S)
+    decision = _remove_left_over(podman, decision)
     if decision.target is not None:
         store.set_state(name, decision.target)
+    if decision.manifest is not None:
+        _write_manifest(env, store, name, decision.manifest)
     _write_settlement(
         env, entry, op_id, own=bool(own), outcome=decision.outcome, reason=decision.reason
     )
     env.journal.finish(entry)
     return _outcome(current, decision.outcome, decision.reason, warnings=notes)
+
+
+def _write_manifest(
+    env: OpEnv,
+    store: RealmStore,
+    name: RealmName,
+    manifest: list[ManifestEntry],
+) -> None:
+    """Save the Install Manifest that an interrupted package step did not reach (DR-007).
+
+    The record write is atomic (DR-035), and the replay is idempotent: a second run computes the
+    same manifest from the same journal and the same record.
+    """
+    record = store.load(name)
+    store.save(replace(record, manifest=manifest, updated_at=utc_from_epoch(env.clock())))
+
+
+def _names_of(value: object, distro: DistroId) -> list[str] | None:
+    """A list of package names that each pass DR-003 for the realm's distribution (item 9), or None.
+
+    A name that fails is refused before it reaches an argv or the manifest: the journal file is
+    written by ginn, but a damaged or edited file is not trusted (NFR-SEC-005).
+    """
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        return None
+    try:
+        for item in value:
+            PackageName(item, distro)
+    except GinnError:
+        return None
+    return list(value)
+
+
+def _journal_names(entry: JournalEntry, distro: DistroId) -> list[str] | None:
+    """The package names the journal entry carries, or None when they are not valid names."""
+    return _names_of(entry.params.get("packages"), distro)
+
+
+def _decide_package(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _Decision:
+    """An interrupted install or remove. The state is decided as for any op with no state of its
+    own. The manifest is replayed only when the journal step shows the package step finished."""
+    if entry.op == OP_INSTALL and entry.params.get("aur") is True:
+        return _decide_aur(podman, record, entry)
+    replays = entry.op == OP_REMOVE and entry.step == STEP_REMOVED
+    replays = replays or (entry.op == OP_INSTALL and entry.step == STEP_INSTALLED)
+    decision = _decide_by_podman(podman, record, entry.op)
+    if not replays or decision.outcome == OUTCOME_BLOCKED:
+        return decision
+    names = _journal_names(entry, record.settings.distro)
+    if names is None:
+        reason = "the journal entry names no valid package list, so the manifest is left as it is"
+        return _Decision(OUTCOME_BLOCKED, None, f"{reason}; the entry is kept")
+    if entry.op == OP_INSTALL:
+        manifest = installed(
+            record.manifest, names, source=InstallSource.REPO, method=InstallMethod.GINN
+        )
+    else:
+        manifest = removed(record.manifest, names)
+    reason = f"{decision.reason}; the Install Manifest now matches the interrupted {entry.op}"
+    return replace(decision, manifest=manifest, reason=reason)
+
+
+def _decide_aur(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _Decision:
+    """An interrupted AUR install (FR-043). The state is decided as for any op with no state of its
+    own. The journal step says what is settled:
+
+    - `upgrading`: some requested packages may be installed. The realm is queried, and each one that
+      is installed is recorded in the manifest as `aur` from `ginn`. A query that exits non-zero
+      keeps the entry (BLOCKED), so the next run asks again. When the realm is not running, the
+      requested names are recorded without a check, since the upgrade may have run, and the warning
+      says so. Nothing is removed, because the build-only set is not known yet.
+    - `built`: the requested packages are installed, so the manifest is written. The journal's
+      `removable` set is removed best effort (a removal pacman refuses is reported left installed).
+    - `removed`: the manifest is written, and nothing is removed.
+    - `git`, `dependencies` or `toolchain`: the operation is restored, so every package in `added`
+      is removed best effort, and the manifest is left alone (AC-2).
+    - any other step: nothing is known to be changed, so nothing is removed.
+
+    A journal whose package sets overflowed (PARAMS_OVERFLOW, journal.py) does not know its
+    packages. Then nothing is removed and the reason says so. The requested names still come from
+    `packages`.
+    """
+    decision = _decide_by_podman(podman, record, entry.op)
+    if decision.outcome == OUTCOME_BLOCKED or entry.step not in _AUR_STEPS:
+        return decision
+    distro = record.settings.distro
+    names = _journal_names(entry, distro)
+    if names is None:
+        reason = "the journal entry names no valid package list, so the build is left as it is"
+        return _Decision(OUTCOME_BLOCKED, None, f"{reason}; the entry is kept")
+    overflowed = entry.params.get(PARAMS_OVERFLOW) is True
+    running = _podman_state(podman, record) is ContainerState.RUNNING
+    container = record.container_id if running else None
+    notes: list[str] = []
+    manifest: list[ManifestEntry] | None = None
+    removable: list[str] | None = None
+    unverified = False
+    if entry.step in (STEP_BUILT, STEP_REMOVED):
+        manifest = installed(
+            record.manifest, names, source=InstallSource.AUR, method=InstallMethod.GINN
+        )
+    if entry.step == STEP_UPGRADING:
+        if container is not None:
+            result = podman.exec(
+                container,
+                query_argv(),
+                user="0:0",
+                env=_ROOT_ENV,
+                timeout_s=_QUERY_TIMEOUT_S,
+                max_output=MAX_OUTPUT_CHARS,
+            )
+            if result.exit_code != 0:
+                # An unread listing settles nothing. The entry stays, and the next run asks again.
+                reason = (
+                    f"the installed packages could not be read (the query exited with status "
+                    f"{result.exit_code}), so the entry is kept"
+                )
+                return _Decision(OUTCOME_BLOCKED, None, reason)
+            found = sorted(parse_names(result.stdout, realm=record.name.value, step="query"))
+            done = [name for name in names if name in found]
+            if done:
+                manifest = installed(
+                    record.manifest, done, source=InstallSource.AUR, method=InstallMethod.GINN
+                )
+        else:
+            # The realm is stopped, which a reboot usually causes. The upgrade may have run, so the
+            # requested names are recorded unchecked. A rebuild reinstalls any that are missing.
+            manifest = installed(
+                record.manifest, names, source=InstallSource.AUR, method=InstallMethod.GINN
+            )
+            unverified = True
+            notes.append(
+                f"recorded without a check, since the realm is not running: {shown(names)}"
+            )
+        if not overflowed and (added := _names_of(entry.params.get("added"), distro)) is None:
+            return _Decision(OUTCOME_BLOCKED, None, "the journal's added set is not valid; kept")
+        if not overflowed and added:
+            left = sorted(set(added) - set(names))
+            notes.append(f"the build-only packages are not removed: {shown(left)}")
+    elif entry.step == STEP_BUILT:
+        if overflowed:
+            notes.append(
+                "the build-only packages are not known (the journal overflowed), so none is removed"
+            )
+        else:
+            removable = _names_of(entry.params.get("removable"), distro)
+            if removable is None:
+                return _Decision(
+                    OUTCOME_BLOCKED, None, "the journal's removable set is not valid; kept"
+                )
+    elif entry.step in (STEP_GIT, STEP_DEPENDENCIES, STEP_TOOLCHAIN):
+        if overflowed:
+            notes.append("the packages added so far are not known (the journal overflowed)")
+        else:
+            removable = _names_of(entry.params.get("added"), distro)
+            if removable is None:
+                return _Decision(
+                    OUTCOME_BLOCKED, None, "the journal's added set is not valid; kept"
+                )
+    reason = decision.reason
+    if manifest is not None and not unverified:
+        reason = f"{reason}; the Install Manifest now matches the interrupted install"
+    remove_names: tuple[str, ...] = ()
+    remove_argv: tuple[str, ...] = ()
+    if removable:
+        remove_names = tuple(sorted(set(removable)))
+        remove_argv = tuple(load_distro(distro.value).argv(Verb.REMOVE, list(remove_names)))
+    if notes:
+        reason = f"{reason}; {'; '.join(notes)}"
+    return replace(
+        decision,
+        manifest=manifest,
+        reason=reason,
+        remove_names=remove_names,
+        remove_argv=remove_argv,
+        remove_in=container if remove_names else None,
+    )
+
+
+def _remove_left_over(podman: Podman, decision: _Decision) -> _Decision:
+    """Remove the packages of an interrupted AUR build, best effort (FR-043, FR-122).
+
+    The removal is bounded in time and output, as every root step is. A removal that stops at a
+    limit, or that pacman refuses, is named in the reason, so the user sees it in the
+    GINN-W-RECOVERED warning. The record is settled either way: a left-over package is a residual,
+    not a reason to keep the journal forever.
+    """
+    if not decision.remove_names:
+        return decision
+    names = shown(list(decision.remove_names))
+    if decision.remove_in is None:
+        note = f"left installed, since the realm is not running: {names}"
+    else:
+        try:
+            result = podman.exec(
+                decision.remove_in,
+                list(decision.remove_argv),
+                user="0:0",
+                env=_ROOT_ENV,
+                timeout_s=_REMOVE_TIMEOUT_S,
+                max_output=MAX_OUTPUT_CHARS,
+                stdout_tail=True,
+            )
+        except GinnError as exc:
+            reason = exc.details.get("reason")
+            if exc.code == "GINN-E-INTERNAL" and isinstance(reason, str):
+                note = f"left installed, since the removal stopped at its limit: {names}"
+            else:
+                note = f"left installed, since the removal failed ({exc.code}): {names}"
+        else:
+            if result.exit_code == 0:
+                return decision
+            note = f"left installed, since pacman refused the removal: {names}"
+    return replace(decision, reason=f"{decision.reason}; build-only packages {note}")
 
 
 def _write_settlement(
@@ -379,6 +655,9 @@ def _decide(
     entry: JournalEntry,
 ) -> _Decision:
     """The verdict for one interrupted operation. GinnError: no verdict can be reached."""
+    if entry.op in _HOST_ONLY_OPS:
+        reason = f"interrupted {entry.op}: only host files were written, so no realm state moves"
+        return _Decision(OUTCOME_RECOVERED, None, reason)
     if not store.exists(name):
         reason = "no realm record exists, so no realm state needs a revert"
         return _Decision(OUTCOME_RECOVERED, None, reason)
@@ -393,6 +672,8 @@ def _decide(
         return _decide_update(podman, record)
     if entry.op == OP_START:
         return _decide_start(podman, record, entry)
+    if entry.op in (OP_INSTALL, OP_REMOVE):
+        return _decide_package(podman, record, entry)
     return _decide_by_podman(podman, record, entry.op)
 
 

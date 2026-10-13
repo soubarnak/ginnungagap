@@ -92,6 +92,7 @@ _TOP_KEYS: Final = frozenset(
         "package_name_regex",
         "signature_error_regex",
         "stale_metadata_regex",
+        "network_error_regex",
         "refresh_before",
         "integration",
         "verbs",
@@ -186,6 +187,7 @@ class DistroDef:
     name_pattern: re.Pattern[str]
     signature_error: re.Pattern[str]
     stale_metadata: re.Pattern[str]
+    network_error: re.Pattern[str]
     refresh_before: frozenset[Verb]
     integration: Integration
     verbs: Mapping[Verb, tuple[str, ...]]
@@ -292,9 +294,12 @@ class DistroDef:
         """Return `raw` when it is a str that fullmatches `name_pattern`, else raise (DR-003)."""
         if not isinstance(raw, str):
             raise TypeError(f"package names must be str, not {type(raw).__name__}")
-        if self.name_pattern.fullmatch(raw) is None:
+        if raw.endswith("-") or self.name_pattern.fullmatch(raw) is None:
             err = make("GINN-E-PKG-NAME-INVALID", name=raw)
-            err.details["rule"] = f"must match {self.name_pattern.pattern} for {self.id} (DR-003)"
+            rule = (
+                f"must match {self.name_pattern.pattern} for {self.id} (DR-003), and must not end"
+            )
+            err.details["rule"] = f"{rule} in '-' (AS-027)"
             raise err
         return raw
 
@@ -462,6 +467,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     name_pattern = reader.regex(raw["package_name_regex"], "package_name_regex")
     signature_error = reader.regex(raw["signature_error_regex"], "signature_error_regex")
     stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
+    network_error = reader.regex(raw["network_error_regex"], "network_error_regex")
     fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
@@ -474,6 +480,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         name_pattern=name_pattern,
         signature_error=signature_error,
         stale_metadata=stale_metadata,
+        network_error=network_error,
         refresh_before=refresh_before,
         integration=integration,
         verbs=MappingProxyType(verbs),

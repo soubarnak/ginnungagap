@@ -8,7 +8,9 @@ a flag). A name such as `gimp-1.2` is valid only because the regex allows its ch
 never read as a version constraint.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final, Self
 
 from ginn.distros import load
@@ -33,6 +35,12 @@ def _check(raw: str, distro: DistroId) -> None:
             )
     if raw.startswith("-"):
         raise reject(PACKAGE_CODE, {"rule": "AS-027: leading '-' reads as an option"}, name=raw)
+    if raw.endswith("-"):
+        raise reject(
+            PACKAGE_CODE,
+            {"rule": "AS-027: trailing '-' reads as a removal in apt-get"},
+            name=raw,
+        )
     pattern = load(distro.value).name_pattern
     if pattern.fullmatch(raw) is None:
         raise reject(
@@ -60,3 +68,47 @@ class PackageName:
 
     def __str__(self) -> str:
         return self.value
+
+
+class InstallSource(StrEnum):
+    """Where an Install Manifest entry came from (DR-007)."""
+
+    REPO = "repo"
+    AUR = "aur"
+    METAPACKAGE = "metapackage"
+
+
+class InstallMethod(StrEnum):
+    """How an Install Manifest entry was installed (DR-007). `ginn` is `ginn install`. `native` is
+    the realm's own package manager, recorded by the explicit-package diff of a `--root` session
+    (FR-042 AC-1)."""
+
+    GINN = "ginn"
+    NATIVE = "native"
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    """One Install Manifest entry (DR-007): a package name, its source and its install method.
+
+    The manifest holds one entry per package name, and it belongs to one realm (DR-001). A stored
+    entry is read back with `from_dict`, which raises TypeError or ValueError on a bad field.
+    """
+
+    name: str
+    source: InstallSource
+    method: InstallMethod
+
+    def to_dict(self) -> dict[str, str]:
+        return {"name": self.name, "source": self.source.value, "method": self.method.value}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> Self:
+        name = data["name"]
+        if not isinstance(name, str) or not name:
+            raise TypeError("manifest entry name must be a non-empty string")
+        source = data["source"]
+        method = data["method"]
+        if not isinstance(source, str) or not isinstance(method, str):
+            raise TypeError("manifest entry source and method must be strings")
+        return cls(name=name, source=InstallSource(source), method=InstallMethod(method))

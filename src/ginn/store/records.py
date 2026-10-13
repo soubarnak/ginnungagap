@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 from ginn.domain import (
     REMOVED,
     DistroId,
+    ManifestEntry,
     RealmName,
     RealmSettings,
     RealmState,
@@ -94,6 +95,16 @@ def _str_list(value: object) -> list[str]:
     return [_str(item) for item in value]
 
 
+def _manifest(value: object) -> list[ManifestEntry]:
+    """The Install Manifest of a record: each item is a JSON object read as a `ManifestEntry`."""
+    if not isinstance(value, list):
+        raise TypeError(f"expected a list, got {type(value).__name__}")
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise TypeError(f"expected a manifest object, got {type(item).__name__}")
+    return [ManifestEntry.from_dict(item) for item in value]
+
+
 def _grants(value: object) -> list[GrantRecord]:
     """The grant list of a record: each item is a JSON object read as a `GrantRecord` (FR-066).
 
@@ -128,6 +139,9 @@ class RealmRecord:
     # The grant list fixed at the last start (FR-066, ADR-008). Added without a schema bump: a
     # record written before it existed has no key, and reads as an empty list.
     grants: list[GrantRecord] = field(default_factory=list)
+    # The Install Manifest (DR-007). Added without a schema bump, like `grants`: a record written
+    # before it existed has no key and reads as an empty manifest. Deleting the record removes it.
+    manifest: list[ManifestEntry] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         """Refuse a `previous_state` that DR-020 does not allow for this state.
@@ -169,6 +183,7 @@ class RealmRecord:
             "restart_required": self.restart_required,
             "share_skipped": list(self.share_skipped),
             "grants": [grant.to_dict() for grant in self.grants],
+            "manifest": [entry.to_dict() for entry in self.manifest],
         }
 
     @classmethod
@@ -201,6 +216,7 @@ class RealmRecord:
                 restart_required=_bool(data["restart_required"]),
                 share_skipped=_str_list(data["share_skipped"]),
                 grants=_grants(data.get("grants", [])),
+                manifest=_manifest(data.get("manifest", [])),
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

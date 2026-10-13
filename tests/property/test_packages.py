@@ -35,14 +35,28 @@ DISTROS = list(PATTERNS)
 AS027_CHARS = "*?[]=<>/ \t\n\x00"
 NOISE = "()!,;:|&$`\\'\"{}~@^%#" + AS027_CHARS + "abcXYZ019._+-"
 
+
+def _valid(distro: str, raw: str) -> bool:
+    """The DR-003 pattern, plus the two refusals of the rules: a trailing '-' (apt reads it as a
+    removal, AS-027) and, on Fedora, a name ending in .rpm (dnf reads it as a file)."""
+    if re.fullmatch(PATTERNS[distro], raw) is None or raw.endswith("-"):
+        return False
+    return not (distro == "fedora" and raw.endswith(".rpm"))
+
+
 VALID = st.one_of(
-    *(st.tuples(st.just(d), st.from_regex(p, fullmatch=True)) for d, p in PATTERNS.items())
+    *(
+        st.tuples(st.just(d), st.from_regex(p, fullmatch=True)).filter(
+            lambda pair: _valid(pair[0], pair[1])
+        )
+        for d, p in PATTERNS.items()
+    )
 )
 INVALID = st.tuples(st.sampled_from(DISTROS), st.text(alphabet=NOISE, max_size=12)).filter(
-    lambda pair: re.fullmatch(PATTERNS[pair[0]], pair[1]) is None
+    lambda pair: not _valid(pair[0], pair[1])
 )
 INVALID_ANY = st.tuples(st.sampled_from(DISTROS), st.text()).filter(
-    lambda pair: re.fullmatch(PATTERNS[pair[0]], pair[1]) is None
+    lambda pair: not _valid(pair[0], pair[1])
 )
 
 

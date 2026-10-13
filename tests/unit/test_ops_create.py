@@ -25,7 +25,14 @@ import pytest
 
 from ginn.distros import Verb
 from ginn.distros import load as load_distro
-from ginn.domain import RealmName, RealmState, Tier
+from ginn.domain import (
+    InstallMethod,
+    InstallSource,
+    ManifestEntry,
+    RealmName,
+    RealmState,
+    Tier,
+)
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import (
@@ -1330,3 +1337,27 @@ def test_a_second_create_of_the_same_distribution_is_refused_while_one_holds_the
         assert not (env.paths.homes / "debian-dev").exists()
     result = create_realm(env, fake, request(home, name="debian-dev"), hooks=hooks)
     assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("DR-007")
+def test_with_packages_are_recorded_in_the_install_manifest_as_ginn_installs(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(
+        env,
+        fake,
+        request(home, with_packages=("htop", "vim")),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    (name,) = RealmStore(env.paths).list_names()
+    record = RealmStore(env.paths).load(name)
+    assert record.manifest == [
+        ManifestEntry(name="htop", source=InstallSource.REPO, method=InstallMethod.GINN),
+        ManifestEntry(name="vim", source=InstallSource.REPO, method=InstallMethod.GINN),
+    ]

@@ -44,7 +44,7 @@ def test_the_real_adapter_echoes_its_commands_to_verbose_output(
     adapter = REAL_PODMAN(world.paths, out)
     assert isinstance(adapter, PodmanCli)
     assert adapter.verbose == out.verbose_line
-    assert adapter.binary == "podman"
+    assert adapter.binary == _context.podman_program(world.paths)  # absolute, outside bin
     assert adapter.oci_runtime == "crun"
 
 

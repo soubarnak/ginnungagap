@@ -19,7 +19,8 @@ from ginn.cli.output import Output
 from ginn.domain import RealmName
 from ginn.errors import EXEC_GINN_FAILURE, GinnError, make
 from ginn.errors import Warning as GinnWarning
-from ginn.runtime.enter import enter_realm
+from ginn.ops.native import root_session_recorder
+from ginn.runtime.enter import RootSession, enter_realm
 
 
 def enter_or_exec(
@@ -45,7 +46,11 @@ def enter_or_exec(
         realms = _context.realms(output)
         _context.settle_interrupted(realms, output)
         output.flush_warnings()  # before the inner command writes, so the warnings come first
-        hooks = dataclasses.replace(_context.enter_hooks(), notify=_notifier(output))
+        hooks = dataclasses.replace(
+            _context.enter_hooks(),
+            notify=_notifier(output),
+            root_session=_root_session(realms, output) if root else None,
+        )
         status = enter_realm(
             realms.env,
             realms.podman,
@@ -67,6 +72,11 @@ def enter_or_exec(
         raise internal from exc
     _context.finish(realms, output)
     return status
+
+
+def _root_session(realms: _context.Realms, output: Output) -> RootSession:
+    """Record the packages a `--root` session installs (FR-042 AC-1). See ops/native.py."""
+    return root_session_recorder(realms.env, realms.podman, notify=_notifier(output))
 
 
 def _notifier(output: Output) -> Callable[[GinnWarning], None]:

@@ -66,6 +66,8 @@ from typing import Any, Final
 
 from ginn.distros import Verb
 from ginn.domain import (
+    InstallMethod,
+    InstallSource,
     RealmState,
     Tier,
     transition,
@@ -82,8 +84,10 @@ from ginn.ops._create_plan import (
 )
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops._rollback import Rollback
-from ginn.podman.adapter import Podman, with_network_retry
-from ginn.podman.models import ContainerState, ExecResult
+from ginn.packages.manager import ROOT_USER, run_step
+from ginn.packages.manifest import installed
+from ginn.podman.adapter import Podman
+from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
     AttachResult,
     admission,
@@ -98,15 +102,12 @@ from ginn.store.locks import image_lock
 from ginn.store.paths import OWNED_DIR_MODE
 from ginn.store.records import RealmRecord, RealmStore
 
-ROOT_USER: Final = "0:0"
-"""Package steps and the realm user check run as container root (ADR-008, FR-042)."""
 RETRY_DELAYS: Final[tuple[float, ...]] = (5.0, 15.0, 45.0)
 """Seconds before retries 1 to 3 of a network failure (FR-120, AS-023)."""
 STOP_TIMEOUT_S: Final = 30
 """Seconds `podman stop` waits before it kills the realm (FR-016, AS-023)."""
 ROLLBACK_STOP_TIMEOUT_S: Final = 0
 """A half-made realm has no state to save, so a rollback stop does not wait."""
-_DETAIL_LIMIT: Final = 300
 
 
 @dataclass(frozen=True)
@@ -128,15 +129,6 @@ def _remove_tree(path: Path) -> None:
         path.unlink()
     elif path.is_dir():
         shutil.rmtree(path)
-
-
-def _decisive(result: ExecResult) -> str:
-    """The first non-blank line of a step's stderr, else of its stdout, cut to a short length."""
-    for text in (result.stderr, result.stdout):
-        for line in text.splitlines():
-            if line.strip():
-                return line.strip()[:_DETAIL_LIMIT]
-    return "no output"
 
 
 class _Create:
@@ -356,19 +348,19 @@ class _Create:
             self._step("integrated")
             return
         self._locale_note = integration.fallback_reason
-        self._exec(definition.argv(Verb.REFRESH), step="refresh", package=True)
+        self._exec(definition.argv(Verb.REFRESH), step="refresh")
         if integration.packages:
             argv = definition.argv(Verb.INSTALL, integration.packages)
-            self._exec(argv, step="integration", package=True)
+            self._exec(argv, step="integration")
         for step in integration.steps:
-            self._exec(list(step), step="locale", package=True)
+            self._exec(list(step), step="locale")
         self._step("integrated")
 
     def _install_with(self) -> None:
         packages = self._plan.packages
         if packages:
             argv = self._plan.definition.argv(Verb.INSTALL, packages)
-            self._exec(argv, step="with", package=True)
+            self._exec(argv, step="with")
         self._step("packages")
 
     def _finish(self) -> RealmRecord:
@@ -384,6 +376,12 @@ class _Create:
             grants=list(attached.records),
             share_skipped=list(self._skips),
             restart_required=False,
+            manifest=installed(
+                record.manifest,
+                list(self._plan.packages),
+                source=InstallSource.REPO,
+                method=InstallMethod.GINN,
+            ),
         )
         return self._current()
 
@@ -441,30 +439,21 @@ class _Create:
         self._store.save(record)
         self._record = record
 
-    def _exec(self, argv: list[str], *, step: str, package: bool) -> None:
-        """Run `argv` as container root, retrying network failures. A non-zero status fails."""
-        cid = self._container_id()
-        result = with_network_retry(
-            lambda: self._podman.exec(cid, argv, user=ROOT_USER), self._retry_hook
-        )
-        if result.exit_code == 0:
-            return
-        raise self._exec_failure(step, result, package=package)
+    def _exec(self, argv: list[str], *, step: str) -> None:
+        """Run a package step as container root, with its failure mapped (FR-012, FR-040).
 
-    def _exec_failure(self, step: str, result: ExecResult, *, package: bool) -> GinnError:
-        """Map a failed step to its code (FR-012, FR-040). The decisive line goes in details."""
-        if not package:
-            err = make("GINN-E-INTERNAL")
-        else:
-            text = f"{result.stderr}\n{result.stdout}"
-            if self._plan.definition.signature_error.search(text) is not None:
-                err = make("GINN-E-PKG-SIGNATURE", realm=self._request.name.value)
-            else:
-                err = make("GINN-E-PKG-MANAGER", realm=self._request.name.value)
-            if self._plan.definition.stale_metadata.search(text) is not None:
-                err.details["stale_metadata"] = True
-        err.details.update({"step": step, "exit": result.exit_code, "detail": _decisive(result)})
-        return err
+        The call and its mapping are `packages/manager.py` `run_step`, shared with install and
+        remove, so a create step and an install step fail the same way.
+        """
+        run_step(
+            self._podman,
+            self._container_id(),
+            self._plan.definition,
+            argv,
+            realm=self._request.name.value,
+            step=step,
+            retry_hook=self._retry_hook,
+        )
 
 
 def create_realm(

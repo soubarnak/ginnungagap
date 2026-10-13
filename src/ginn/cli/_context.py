@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -35,6 +36,7 @@ from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks
 from ginn.ops.delete import DeleteHooks
 from ginn.ops.lifecycle import HostUser, LifecycleHooks
+from ginn.ops.packages import PackageHooks
 from ginn.ops.recovery import (
     OUTCOME_BLOCKED,
     OUTCOME_BROKEN,
@@ -84,6 +86,54 @@ def owned_paths() -> OwnedPaths:
     return OwnedPaths.from_env()
 
 
+def _outside_bin(path: str, paths: OwnedPaths | None) -> bool:
+    """False for a path that resolves into the ginn bin directory, the launchers' own folder."""
+    if paths is None:
+        return True
+    return not os.path.realpath(path).startswith(os.path.realpath(paths.bin) + os.sep)
+
+
+def _on_path(name: str, paths: OwnedPaths | None) -> str | None:
+    """The executable `name` that PATH holds in an absolute directory, with links resolved.
+
+    A copy inside the ginn bin directory is skipped, so a launcher never runs another launcher.
+    Relative PATH entries are skipped: they depend on the working directory. None when there is no
+    such executable.
+    """
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = os.path.join(entry, name)
+        if not os.path.isabs(entry) or not os.path.isfile(candidate):
+            continue
+        if not os.access(candidate, os.X_OK) or not _outside_bin(candidate, paths):
+            continue
+        return os.path.realpath(candidate)
+    return None
+
+
+def ginn_program(paths: OwnedPaths | None = None) -> str:
+    """The absolute path of the ginn command that an exported launcher runs (FR-046, FR-047).
+
+    The `ginn` that PATH holds outside the bin directory (see `_on_path`). With none, `sys.argv[0]`
+    when it is absolute and outside the bin directory. The bare name `ginn` is the last resort.
+    """
+    found = _on_path("ginn", paths)
+    if found is not None:
+        return found
+    if os.path.isabs(sys.argv[0]) and _outside_bin(sys.argv[0], paths):
+        return os.path.realpath(sys.argv[0])
+    return "ginn"
+
+
+def podman_program(paths: OwnedPaths | None = None) -> str:
+    """The absolute path of the podman that every runtime call runs (ADR-002, FR-011).
+
+    PodmanCli starts `podman` with the PATH it is given, so a bare name would let a file earlier on
+    PATH (a launcher in the bin directory, say) stand in for podman. The first `podman` outside the
+    bin directory is used. With none, the bare name, which then fails at the call as it always did.
+    """
+    return _on_path("podman", paths) or "podman"
+
+
 def account_name() -> str:
     """The account name of the running user, or the uid when it has no passwd entry."""
     uid = os.getuid()
@@ -100,7 +150,7 @@ def host_user() -> HostUser:
 
 def podman(paths: OwnedPaths, output: Output) -> PodmanCli:
     """The podman adapter. Every runtime command goes to stderr in verbose mode (NFR-042)."""
-    return PodmanCli.from_paths(paths, verbose=output.verbose_line)
+    return PodmanCli.from_paths(paths, binary=podman_program(paths), verbose=output.verbose_line)
 
 
 def op_env(paths: OwnedPaths) -> OpEnv:
@@ -126,6 +176,12 @@ def enter_hooks() -> EnterHooks:
 
 def delete_hooks() -> DeleteHooks:
     return DeleteHooks()
+
+
+def package_hooks(paths: OwnedPaths) -> PackageHooks:
+    """The hooks of an install or a remove. The menu entries it writes run the absolute ginn
+    command, as `ginn _sync` does (FR-044)."""
+    return PackageHooks(lifecycle=lifecycle_hooks(), program=ginn_program(paths))
 
 
 @dataclass(frozen=True)

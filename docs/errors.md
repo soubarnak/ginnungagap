@@ -15,7 +15,7 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, GINN-E-REALM-USER |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
-| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE) |
+| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS) |
 | 65 | data error (EX_DATAERR): image or package signature not verified |
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
@@ -30,9 +30,13 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | Code | Exit | Meaning | Remedy | Source |
 |---|---|---|---|---|
 | `GINN-E-ATTACH-FAILED` | 1 | attaching the grants into the realm failed: {detail} | retry the start, enter or launch; if it fails again, run 'ginn doctor' and report the detail | ADR-008 (T4.10 notes); FR-061, FR-066 (ginn-defined; not an SRS code) |
+| `GINN-E-BIN-EXISTS` | 4 | '{path}' exists and is not a launcher of realm '{realm}' | unexport the other launcher first, or choose another name; ginn never overwrites a file it did not write | FR-047; DR-010 (ginn-defined; not an SRS code) |
+| `GINN-E-BIN-NAME-INVALID` | 2 | binary name '{binary}' is not valid | use a plain file name of letters, digits, dot, plus, underscore or hyphen, with no slash; the names 'ginn', 'ginn-*' and 'podman' are reserved | FR-047 (ginn-defined; not an SRS code) |
+| `GINN-E-BIN-NOT-EXPORTED` | 3 | binary '{binary}' is not exported from realm '{realm}' | check the realm and binary names; export it with 'ginn export --bin &lt;realm&gt; &lt;binary&gt;' | FR-047 (ginn-defined; not an SRS code) |
 | `GINN-E-DISK-SPACE` | 73 | not enough disk space: need {needed}, have {available} | free space on the partition that holds ginn data, then retry | FR-121 AC-1 |
 | `GINN-E-DISTRO-DATA` | 70 | shipped distro data {file} is invalid: {field} {rule} | the shipped distro data is invalid; reinstall ginn, or report a bug with this message | NFR-060 (ginn-defined; not an SRS code) |
 | `GINN-E-DOCTOR-FAILED` | 1 | {failed} of {total} doctor checks failed | run the command printed under each failing check, then run 'ginn doctor' again | FR-007 AC-1 |
+| `GINN-E-EXPORT-LIST` | 1 | cannot list the desktop entries of realm '{realm}': {reason} | check that the realm runs with 'ginn status {realm}'; nothing was exported or removed | FR-044; FR-045 (ginn-defined; not an SRS code) |
 | `GINN-E-HOME-UNSAFE` | 77 | realm home '{path}' cannot be removed: {reason} | inspect '{path}' and fix it by hand, then run 'ginn delete {realm} --purge-home' again; 'ginn delete {realm}' removes the realm and keeps the home | DR-010, DR-021 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-NOT-SET-UP` | 77 | runtime directory {path} does not exist | run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged; changed paths: {paths} | review the listed paths, then run 'ginn integrity --ack' and retry the command | FR-006 AC-1 |
@@ -47,6 +51,7 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-NOT-SUPPORTED-YET` | 2 | realm '{realm}' cannot be used yet: {feature} arrives in {milestone} | use a realm this build can run; docs/roadmap.md lists the milestones | FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-OPTION-INVALID` | 2 | option {option} is not valid for distro {distro} | remove the option, or choose a distro that supports it | FR-014 AC-3 |
 | `GINN-E-PATH-FORBIDDEN` | 2 | path '{path}' may not be shared with a realm | choose another path; see DR-004 | FR-063 AC-2; FR-103 AC-1 |
+| `GINN-E-PKG-DEPENDENTS` | 4 | removing {packages} in realm '{realm}' would also remove {dependents} | remove the dependent packages first with 'ginn remove {realm} PACKAGE', or keep the package installed; ginn does not force a removal | FR-041; ADR-011 (ginn-defined; not an SRS code) |
 | `GINN-E-PKG-MANAGER` | 1 | native package manager failed in realm '{realm}' | run again with --verbose to see the package manager output, fix its cause, then retry | FR-040; FR-120 |
 | `GINN-E-PKG-NAME-INVALID` | 2 | package name '{name}' is not valid | use plain package names with no wildcards or shell characters | FR-040 AC-2 |
 | `GINN-E-PKG-SIGNATURE` | 65 | package signature check failed in realm '{realm}' | fix the repository keys; ginn never skips signature checks | FR-012 AC-1 |
@@ -67,7 +72,12 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-UNDO-SERVICE-RUNNING` | 75 | service ginn-{user} is still running after {seconds} s; undo stopped before its cleanup | run 'sudo sv force-stop /etc/sv/ginn-{user}', then 'sudo sv exit /etc/sv/ginn-{user}', then run 'sudo ginn host-setup --undo --user {user}' again; the Host Setup Record is kept | FR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-UNDO-SUPERVISE-STATE` | 77 | runsv state {path} is a {state}, but runit keeps a FIFO there; undo stopped before its cleanup | run 'sudo ls -l {path}' to see what it is; if no runsv runs for ginn-{user}, remove that entry by hand, then run 'sudo ginn host-setup --undo --user {user}' again; the Host Setup Record is kept | FR-003 (ginn-defined; not an SRS code) |
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |
+| `GINN-W-BUILD-RESIDUAL` | 0 | packages used only to build an AUR package are left in realm '{realm}': {packages} | check why they were kept ({reason}), then remove them with 'ginn remove {realm} PACKAGE' if they are not needed | FR-043 (ginn-defined; not an SRS code) |
+| `GINN-W-EXPORT-SKIPPED` | 0 | desktop entry '{app}' of realm '{realm}' is not exported: {reason} | fix the entry in the realm or remove its package; the next sync follows the realm | FR-044 (ginn-defined; not an SRS code) |
+| `GINN-W-EXPORT-SYNC` | 0 | the host menu of realm '{realm}' is not fully synced: {reason} | the realm and its packages are kept as they are; run 'ginn _sync {realm}' to retry the menu | FR-044 (ginn-defined; not an SRS code) |
 | `GINN-W-HOST-CHANGED` | 0 | host files changed since baseline: {paths} | review the listed paths; the likely cause is xbps or a system file edit made while ginn was running (R-004); then run 'ginn integrity --ack' | FR-006 AC-1; FR-104 AC-1 |
+| `GINN-W-ICON-SKIPPED` | 0 | icon of desktop entry '{app}' in realm '{realm}' is not copied: {reason} | the host menu shows the entry without this icon | FR-044 (ginn-defined; not an SRS code) |
+| `GINN-W-MANIFEST-UNRECORDED` | 0 | packages changed in a root session of realm '{realm}' are not recorded: {detail} | run 'ginn install {realm} PACKAGE' for each package the session installed, to record it in the Install Manifest | FR-042 AC-1, DR-007 (ginn-defined; not an SRS code) |
 | `GINN-W-RECOVERED` | 0 | recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason} | run 'ginn status {realm}'; a broken realm can be resumed with 'ginn create --resume {realm}' (arrives in M8) or removed with 'ginn delete {realm}' | FR-122 (ginn-defined; not an SRS code) |
 | `GINN-W-RECOVERY-UNSETTLED` | 0 | recovery could not settle an interrupted operation: {detail} | run 'ginn doctor' and inspect the journal file named above; do not delete the realm until it is settled | FR-122 (ginn-defined; not an SRS code) |
 | `GINN-W-REPLAY-MISSING` | 0 | package {package} is no longer available upstream | reinstall it later with 'ginn install' if it returns | FR-022 AC-1 |

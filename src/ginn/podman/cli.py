@@ -29,11 +29,13 @@ Exit 125 from `exec` is podman's own failure and is never returned as the comman
 import json
 import os
 import re
+import selectors
 import shlex
 import signal
 import stat
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
@@ -69,6 +71,11 @@ _DIGEST_PATTERNS: Final = (
 )
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _NETWORK_EXIT: Final = 125
+STDERR_TAIL_BYTES: Final = 65536
+"""The most stderr a bounded exec keeps, from its end: the error line of a failed command."""
+STDOUT_TAIL_BYTES: Final = 65536
+"""The most stdout a bounded exec keeps when the caller asks for its tail (`stdout_tail`). A step
+whose stdout is not parsed (a build, an install) keeps only this: its output cannot fill memory."""
 DEFAULT_OCI_RUNTIME: Final = "crun"
 """OCI runtime passed as `--runtime` on every call (IR-020, ADR-004). crun is the runtime the
 spikes validate, and keep-groups works only with it."""
@@ -171,6 +178,17 @@ def _parent_ignores_interrupts() -> Iterator[None]:
     finally:
         signal.signal(signal.SIGINT, signal.SIG_DFL if old_int is None else old_int)
         signal.signal(signal.SIGQUIT, signal.SIG_DFL if old_quit is None else old_quit)
+
+
+def _without_dir(path_value: str, directory: Path) -> str:
+    """The PATH with every entry that is `directory` removed (ginn's bin directory, FR-047).
+
+    A launcher in ginn's bin directory must not shadow a program that ginn runs, so podman is
+    always run from the PATH of the session without that directory.
+    """
+    target = os.path.normpath(str(directory))
+    kept = [entry for entry in path_value.split(os.pathsep) if os.path.normpath(entry) != target]
+    return os.pathsep.join(kept)
 
 
 def _env_flags(env: Mapping[str, str] | None) -> list[str]:
@@ -349,6 +367,8 @@ class PodmanCli:
         proxy, and a changed proxy applies at the next exec or launch.
         """
         env = {key: value for key, value in os.environ.items() if _passes(key)}
+        if self.owned_paths is not None and "PATH" in env:
+            env["PATH"] = _without_dir(env["PATH"], self.owned_paths.bin)
         env["XDG_RUNTIME_DIR"] = str(self.runtime_root)
         env["CONTAINERS_CONF"] = str(self.containers_conf)
         env["CONTAINERS_STORAGE_CONF"] = str(self.storage_conf)
@@ -540,6 +560,9 @@ class PodmanCli:
         interactive: bool = False,
         capture: bool = True,
         pass_env: Sequence[str] = (),
+        timeout_s: float | None = None,
+        max_output: int | None = None,
+        stdout_tail: bool = False,
     ) -> ExecResult:
         """Run one command in the container and return its status and output.
 
@@ -563,10 +586,99 @@ class PodmanCli:
             )
             return ExecResult(status, "", "")
         args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
-        result = self._run(args)
+        if timeout_s is None and max_output is None and not stdout_tail:
+            result = self._run(args)
+        else:
+            result = self._run_bounded(args, timeout_s, max_output, stdout_tail)
         if result.returncode == PODMAN_ERROR_EXIT:
             raise self._failure("exec", result)
         return ExecResult(result.returncode, result.stdout, result.stderr)
+
+    def _run_bounded(
+        self,
+        args: Sequence[str],
+        timeout_s: float | None,
+        max_output: int | None,
+        stdout_tail: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run like `_run`, but stop after `timeout_s` seconds, or when stdout passes `max_output`.
+
+        The deadline is checked on every pass of the loop, so a process that prints without pause
+        still times out. The two output streams are read through a selector, so a descriptor above
+        1024 works too. Each stream keeps only its last `STDERR_TAIL_BYTES` or `STDOUT_TAIL_BYTES`
+        when `stdout_tail` is set: the error line of a failed command survives, and a flood of
+        progress output does not fill memory. The byte count against `max_output` is kept in full
+        either way, so the cap still applies to what the process printed. A run that hits a limit is
+        killed and waited for, then GINN-E-INTERNAL is raised with the reason in `details`. The kill
+        reaches only the podman client. A process that podman started in the container keeps running
+        there, because `podman exec` has no kill of its own, so a limit bounds ginn's wait, not the
+        realm's work. Output is decoded with surrogateescape, so encoding it gives the exact bytes.
+        Fixed argv list, no shell (NFR-SEC-005).
+        """
+        argv = self._prepare(args)
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        try:
+            proc = subprocess.Popen(  # noqa: S603
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self._env()
+            )
+        except OSError as exc:
+            raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
+        if proc.stdout is None or proc.stderr is None:  # both are PIPE above
+            raise _internal("cannot read the output of podman")
+        out_limit = STDOUT_TAIL_BYTES if stdout_tail else None
+        buffer = bytearray()
+        tail = bytearray()
+        printed = 0
+        reason: str | None = None
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+            while reason is None and selector.get_map():
+                if deadline is not None and time.monotonic() >= deadline:
+                    reason = f"timed out after {timeout_s} s"
+                    break
+                wait = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+                events = selector.select(wait)
+                if not events:
+                    reason = f"timed out after {timeout_s} s"
+                    break
+                for key, _ in events:
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.data == "stdout":
+                        printed += len(chunk)
+                        buffer.extend(chunk)
+                        if out_limit is not None:
+                            del buffer[: max(len(buffer) - out_limit, 0)]
+                        if max_output is not None and printed > max_output:
+                            reason = f"printed more than {max_output} bytes"
+                            break
+                    else:
+                        tail.extend(chunk)
+                        del tail[: max(len(tail) - STDERR_TAIL_BYTES, 0)]
+            if reason is None:
+                left = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+                try:
+                    returncode = proc.wait(timeout=left)
+                except subprocess.TimeoutExpired:
+                    reason = f"timed out after {timeout_s} s"
+        finally:
+            selector.close()
+            if proc.poll() is None:
+                proc.kill()
+            proc.stdout.close()
+            proc.stderr.close()
+            proc.wait()
+        if reason is not None:
+            err = _internal(f"exec {reason}")
+            err.details["reason"] = reason
+            raise err
+        text = bytes(buffer).decode("utf-8", errors="surrogateescape")
+        errors = bytes(tail).decode("utf-8", errors="surrogateescape")
+        return subprocess.CompletedProcess(argv, returncode, text, errors)
 
     def exec_interactive(
         self,

@@ -40,6 +40,8 @@ class CommandSpec(NamedTuple):
     example: str
     configure: ConfigureHook
     run: RunHook
+    hidden: bool = False
+    """A hidden command runs and parses, but is left out of the top-level help (`_sync`)."""
 
 
 COMMAND_MODULES: tuple[str, ...] = (
@@ -55,6 +57,11 @@ COMMAND_MODULES: tuple[str, ...] = (
     "enter",
     "exec",
     "delete",
+    "export",
+    "unexport",
+    "sync",
+    "install",
+    "remove",
 )
 
 

@@ -24,10 +24,20 @@ from typing import Any
 
 import pytest
 
-from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
+from ginn.domain import (
+    DistroId,
+    InstallMethod,
+    InstallSource,
+    ManifestEntry,
+    RealmName,
+    RealmSettings,
+    RealmState,
+    Tier,
+)
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv, is_finished
 from ginn.ops.recovery import (
+    _REMOVE_TIMEOUT_S,
     OUTCOME_BLOCKED,
     OUTCOME_BROKEN,
     OUTCOME_BUSY,
@@ -39,10 +49,12 @@ from ginn.ops.recovery import (
     find_pending,
     recover,
 )
-from ginn.podman.models import ContainerInfo, ContainerState
+from ginn.packages.aur import query_argv
+from ginn.packages.manager import MAX_OUTPUT_CHARS
+from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.store import journal as journal_module
 from ginn.store.audit import AuditEntry, AuditLog
-from ginn.store.journal import Journal, JournalEntry, process_start_ticks
+from ginn.store.journal import PARAMS_OVERFLOW, Journal, JournalEntry, process_start_ticks
 from ginn.store.locks import realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
@@ -89,7 +101,8 @@ def _info(cid: str, state: ContainerState) -> ContainerInfo:
 
 
 class _Podman:
-    """Answers inspect and ps for one container, and records stops. `container` None: absent."""
+    """Answers inspect and ps for one container, and records stops and execs. `container` None:
+    absent. `exec_exit` is the status of every exec (the AUR build-only removal, FR-043)."""
 
     def __init__(
         self,
@@ -97,11 +110,25 @@ class _Podman:
         *,
         inspect_fails: bool = False,
         ps_fails: bool = False,
+        exec_exit: int = 0,
     ) -> None:
         self.container = container
         self.inspect_fails = inspect_fails
         self.ps_fails = ps_fails
+        self.exec_exit = exec_exit
         self.stops: list[str] = []
+        self.execs: list[tuple[str, tuple[str, ...], str | None]] = []
+
+    def exec(
+        self,
+        container_id: str,
+        argv: Any,
+        *,
+        user: str | None = None,
+        **_: Any,
+    ) -> ExecResult:
+        self.execs.append((container_id, tuple(argv), user))
+        return ExecResult(self.exec_exit, "", "")
 
     def inspect(self, container_id: str) -> ContainerInfo:
         if self.inspect_fails or self.container is None:
@@ -1141,3 +1168,541 @@ def test_an_unfinished_entry_written_in_that_window_gets_one_recover_entry_only(
     [recovery] = _recovers(paths, OP_ID)
     assert recovery.outcome == "broken"
     assert _state(paths) is RealmState.BROKEN
+
+
+# ---- T5.3 review fix: an interrupted install or remove replays the Install Manifest --------
+
+PACKAGES = ["htop", "gimp"]
+
+
+def _with_manifest(record: RealmRecord, *names: str) -> RealmRecord:
+    record.manifest = [
+        ManifestEntry(name=name, source=InstallSource.REPO, method=InstallMethod.GINN)
+        for name in names
+    ]
+    return record
+
+
+def _manifest_names(paths: OwnedPaths) -> list[str]:
+    return [entry.name for entry in RealmStore(paths).load(RealmName("arch")).manifest]
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_install_interrupted_after_its_package_step_replays_the_manifest_write(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(
+        paths, _dead(op="install", step="installed", params={"packages": PACKAGES})
+    )
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "Install Manifest now matches the interrupted install" in outcome.reason
+    assert _manifest_names(paths) == ["gimp", "htop"]
+    assert _state(paths) is RealmState.RUNNING
+    assert not journal.exists()
+    [entry] = _audit(paths)
+    assert (entry.op, entry.outcome) == ("install", "recovered")
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_install_already_past_the_manifest_write_changes_no_manifest(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _with_manifest(_record(state=RealmState.RUNNING), "htop"))
+    _write_journal(paths, _dead(op="install", step="recorded", params={"packages": ["htop"]}))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "Install Manifest" not in outcome.reason
+    assert _manifest_names(paths) == ["htop"]
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_install_interrupted_before_its_package_step_leaves_the_manifest_as_it_was(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(paths, _dead(op="install", step="refreshed", params={"packages": PACKAGES}))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == []
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_a_remove_interrupted_after_its_package_step_drops_the_removed_entries(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _with_manifest(_record(state=RealmState.RUNNING), "htop", "gimp"))
+    _write_journal(paths, _dead(op="remove", step="removed", params={"packages": ["htop"]}))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "Install Manifest now matches the interrupted remove" in outcome.reason
+    assert _manifest_names(paths) == ["gimp"]
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_entry_with_no_package_list_is_blocked_and_its_journal_kept(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(
+        paths, _dead(op="install", step="installed", params={"packages": "htop"})
+    )
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "no valid package list" in outcome.reason
+    assert journal.exists()
+    assert _manifest_names(paths) == []
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_aur_install_interrupted_after_its_build_only_removal_replays_aur_entries(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(
+        paths, _dead(op="install", step="removed", params={"packages": ["yay-bin"], "aur": True})
+    )
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    [entry] = RealmStore(paths).load(RealmName("arch")).manifest
+    assert (entry.name, entry.source.value, entry.method.value) == ("yay-bin", "aur", "ginn")
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_install_interrupted_before_its_removal_leaves_the_manifest_as_it_was(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    params = {"packages": ["yay-bin"], "aur": True, "added": ["git"]}
+    _write_journal(paths, _dead(op="install", step="toolchain", params=params))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == []
+
+
+AUR_ADDED = [
+    "fakeroot",
+    "gcc",
+    "git",
+    "go",
+    "glibc",
+    "isl",
+    "libyaml",
+    "make",
+    "perl",
+    "pcre2",
+    "yay-bin",
+    "zlib",
+]
+AUR_KEEP = ["glibc", "libyaml", "perl", "yay-bin", "zlib"]
+AUR_BUILD_ONLY = ["fakeroot", "gcc", "git", "go", "isl", "make", "pcre2"]
+
+
+def _aur_entry(step: str, *, params: dict[str, Any] | None = None) -> JournalEntry:
+    base = {"packages": ["yay-bin"], "aur": True}
+    return _dead(op="install", step=step, params={**base, **(params or {})})
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_interrupted_at_built_replays_aur_entries_and_removes_the_build_only_set(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(
+        paths,
+        _aur_entry("built", params={"removable": AUR_BUILD_ONLY}),
+    )
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    [entry] = RealmStore(paths).load(RealmName("arch")).manifest
+    assert (entry.name, entry.source.value, entry.method.value) == ("yay-bin", "aur", "ginn")
+    [(container, argv, user)] = podman.execs
+    assert container == CID and user == "0:0"
+    assert argv == ("pacman", "--remove", "--noconfirm", *AUR_BUILD_ONLY)
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_interrupted_before_built_removes_every_added_package_and_keeps_the_manifest(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(paths, _aur_entry("toolchain", params={"added": AUR_ADDED[:-2]}))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == []
+    [(_, argv, _)] = podman.execs
+    assert argv == ("pacman", "--remove", "--noconfirm", *sorted(AUR_ADDED[:-2]))
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_build_only_set_with_the_container_stopped_is_reported_left_installed(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(paths, _aur_entry("built", params={"removable": AUR_BUILD_ONLY}))
+    podman = _Podman(ContainerState.EXITED)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert podman.execs == []
+    assert "left installed, since the realm is not running" in outcome.reason
+    assert "fakeroot" in outcome.reason
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_build_only_removal_pacman_refuses_is_reported_and_the_entry_is_settled(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("built", params={"removable": AUR_BUILD_ONLY}))
+    podman = _Podman(ContainerState.RUNNING, exec_exit=1)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "left installed, since pacman refused the removal" in outcome.reason
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_at_removed_replays_the_manifest_and_removes_nothing_more(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(paths, _aur_entry("removed", params={"removable": AUR_BUILD_ONLY}))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == ["yay-bin"]
+    assert podman.execs == []
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_without_its_package_set_is_blocked_and_kept(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("git"))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "added set is not valid" in outcome.reason
+    assert podman.execs == []
+    assert journal.exists()
+    assert _manifest_names(paths) == []
+
+
+class _Listing(_Podman):
+    """_Podman whose package query answers `listing`, the realm's installed names (FR-043)."""
+
+    def __init__(self, container: ContainerState | None, listing: str, exit_code: int = 0) -> None:
+        super().__init__(container)
+        self.listing = listing
+        self.query_exit = exit_code
+
+    def exec(
+        self,
+        container_id: str,
+        argv: Any,
+        *,
+        user: str | None = None,
+        **kwargs: Any,
+    ) -> ExecResult:
+        if tuple(argv) == tuple(query_argv()):
+            self.execs.append((container_id, tuple(argv), user))
+            return ExecResult(self.query_exit, self.listing, "")
+        return super().exec(container_id, argv, user=user, **kwargs)
+
+
+class _LimitedRemoval(_Podman):
+    """_Podman whose build-only removal stops at its output limit (FR-043, FR-122). It keeps the
+    bounds each exec was given, in `bounds`."""
+
+    def __init__(self, container: ContainerState | None) -> None:
+        super().__init__(container)
+        self.bounds: list[tuple[object, object, object]] = []
+
+    def exec(
+        self,
+        container_id: str,
+        argv: Any,
+        *,
+        user: str | None = None,
+        **kwargs: Any,
+    ) -> ExecResult:
+        if tuple(argv)[:2] == ("pacman", "--remove"):
+            self.bounds.append(
+                (kwargs.get("timeout_s"), kwargs.get("max_output"), kwargs.get("stdout_tail"))
+            )
+            err = make("GINN-E-INTERNAL")
+            err.details["reason"] = "printed more than 1048576 bytes"
+            raise err
+        return super().exec(container_id, argv, user=user, **kwargs)
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_that_overflowed_at_built_removes_nothing_and_records_the_requested_names(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("built", params={PARAMS_OVERFLOW: True}))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == ["yay-bin"]
+    assert podman.execs == []
+    assert "the build-only packages are not known (the journal overflowed)" in outcome.reason
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_that_overflowed_before_built_names_the_packages_it_does_not_know(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("toolchain", params={PARAMS_OVERFLOW: True}))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == []
+    assert podman.execs == []
+    assert "the packages added so far are not known (the journal overflowed)" in outcome.reason
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_interrupted_while_upgrading_records_the_requested_names_found_installed(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("upgrading", params={"added": AUR_ADDED}))
+    podman = _Listing(ContainerState.RUNNING, "glibc\nperl\nyay-bin\n")
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == ["yay-bin"]
+    [(_, argv, user)] = podman.execs
+    assert argv == tuple(query_argv()) and user == "0:0"
+    assert "the build-only packages are not removed" in outcome.reason
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_upgrading_with_the_realm_stopped_records_the_names_unchecked(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("upgrading", params={"added": AUR_ADDED}))
+    podman = _Podman(ContainerState.EXITED)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert podman.execs == []
+    # The upgrade may have run, so the requested names are recorded without a check (FR-040).
+    assert _manifest_names(paths) == ["yay-bin"]
+    [entry] = RealmStore(paths).load(RealmName("arch")).manifest
+    assert (entry.source.value, entry.method.value) == ("aur", "ginn")
+    assert "recorded without a check, since the realm is not running: yay-bin" in outcome.reason
+    assert "not removed" in outcome.reason
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_whose_upgrading_query_exits_non_zero_keeps_the_entry(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("upgrading", params={"added": AUR_ADDED}))
+    podman = _Listing(ContainerState.RUNNING, "", exit_code=1)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "(the query exited with status 1), so the entry is kept" in outcome.reason
+    assert [argv for _, argv, _ in podman.execs] == [tuple(query_argv())]
+    assert _manifest_names(paths) == []
+    assert journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_built_set_written_after_an_overflow_clears_the_marker_and_recovery_honours_it(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    paths.journal.mkdir(parents=True, exist_ok=True)
+    journal = Journal(paths)
+    huge = [f"package-{index:05d}-{'x' * 30}" for index in range(2000)]
+    interrupted = _aur_entry("dependencies")
+    overflowed = journal.step(interrupted, "toolchain", {"added": huge}, drop=("added",))
+    assert overflowed.params.get(PARAMS_OVERFLOW) is True
+    built = journal.step(
+        overflowed,
+        "built",
+        {"removable": AUR_BUILD_ONLY},
+        drop=("added", PARAMS_OVERFLOW),
+    )
+    assert PARAMS_OVERFLOW not in built.params
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == ["yay-bin"]
+    [(_, argv, _)] = podman.execs
+    assert argv == ("pacman", "--remove", "--noconfirm", *AUR_BUILD_ONLY)
+    assert not (paths.journal / "arch.json").exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_with_an_invalid_requested_name_is_blocked_and_kept(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(
+        paths,
+        _aur_entry("built", params={"removable": AUR_BUILD_ONLY, "packages": ["yay bin"]}),
+    )
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "no valid package list" in outcome.reason
+    assert podman.execs == []
+    assert journal.exists()
+    assert _manifest_names(paths) == []
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_build_with_an_invalid_added_set_while_upgrading_is_blocked_and_kept(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("upgrading", params={"added": ["bad name"]}))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "added set is not valid" in outcome.reason
+    # The realm is only queried (read-only); nothing is removed.
+    assert [argv for _, argv, _ in podman.execs] == [tuple(query_argv())]
+    assert journal.exists()
+
+
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_a_build_only_removal_that_stops_at_its_limit_is_reported_left_installed(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("built", params={"removable": AUR_BUILD_ONLY}))
+    podman = _LimitedRemoval(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "left installed, since the removal stopped at its limit" in outcome.reason
+    assert podman.bounds == [(_REMOVE_TIMEOUT_S, MAX_OUTPUT_CHARS, True)]
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize("step", ["listed", "applied"])
+def test_an_install_interrupted_during_the_menu_sync_is_settled_and_keeps_its_manifest(
+    paths: OwnedPaths, env: OpEnv, step: str
+) -> None:
+    _save(paths, _with_manifest(_record(state=RealmState.RUNNING), "htop"))
+    journal = _write_journal(
+        paths, _dead(op="install", step=step, params={"packages": ["htop"], "aur": False})
+    )
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == ["htop"]
+    assert podman.execs == []
+    assert not journal.exists()
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("FR-043")
+@pytest.mark.fr("FR-122")
+def test_an_aur_install_interrupted_during_the_menu_sync_removes_nothing(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    journal = _write_journal(paths, _aur_entry("listed"))
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _manifest_names(paths) == []
+    assert podman.execs == []
+    assert not journal.exists()
