@@ -62,6 +62,8 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-RECOVERY-PENDING": 4,
     "GINN-W-HOST-CHANGED": 0,
     "GINN-W-REPLAY-MISSING": 0,
+    "GINN-W-RECOVERED": 0,
+    "GINN-W-RECOVERY-UNSETTLED": 0,
     "GINN-E-REALM-STATE": 4,
     "GINN-E-HOME-UNSAFE": 77,
     "GINN-E-NOT-SUPPORTED-YET": 2,
@@ -287,3 +289,10 @@ def test_generated_errors_doc_is_current() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.fr("FR-122")
+def test_the_recovered_remedy_names_both_recovery_commands_and_their_milestone() -> None:
+    remedy = CATALOGUE["GINN-W-RECOVERED"].remedy
+    assert "'ginn create --resume {realm}' (arrives in M8)" in remedy
+    assert "'ginn delete {realm}'" in remedy

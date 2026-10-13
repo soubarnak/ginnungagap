@@ -8,11 +8,21 @@ the default runner of `ginn.runtime.attach` is the fake's `unshare`, so their lo
 the same. The attach tests pass their own runner, and the host gate runs the real helper.
 """
 
+from collections.abc import Iterator
+from pathlib import Path
+
 import pytest
 
 import ginn.runtime.attach as attach_mod
+from tests.unit.realm_cli_support import World, build_world
 
 
 @pytest.fixture(autouse=True)
 def _helper_answers_through_the_fake(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(attach_mod, "run_on_host", lambda podman, argv: podman.unshare(list(argv)))
+
+
+@pytest.fixture
+def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
+    """A pinned host for the CLI realm tests (tests/unit/realm_cli_support.py)."""
+    yield build_world(tmp_path, monkeypatch)

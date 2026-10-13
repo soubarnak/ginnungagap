@@ -27,6 +27,10 @@ HEADER = (
     "\n"
     "Exit status 125 is not used by any code below. `ginn exec` returns the inner command's exit "
     "status, so ginn-side failures of `exec` and `enter` exit 125 instead (IR-011, FR-049).\n"
+    "Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of `exec` or "
+    "`enter`. A 125 that podman or the command returns on its own is passed through unchanged, so "
+    "the exit status alone does not tell the two apart. The exceptions are the argparse refusals "
+    "(exit 2) and Ctrl-C (130).\n"
     "\n"
 )
 

@@ -557,6 +557,47 @@ def test_a_running_realm_with_no_host_change_costs_one_listing_and_writes_nothin
     assert all(seconds >= 0 for _, seconds in observed)
 
 
+@pytest.mark.fr("FR-006")
+@pytest.mark.fr("FR-017")
+def test_a_host_change_during_a_re_attach_is_notified_before_the_command_runs(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    home: Path,
+    host: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    start_realm(env, fake, RealmName("lab"), session=user, hooks=lifecycle_hooks)
+    (home / "Downloads").mkdir()
+    real_unshare = fake.unshare
+    real_exec = fake.exec_interactive
+    events: list[str] = []
+    notices: list[Any] = []
+
+    def unshare_and_change(argv: Any) -> Any:
+        (host / "etc" / "hosts").write_text("10.0.0.1 changed\n", encoding="utf-8")
+        return real_unshare(argv)
+
+    def exec_and_record(*args: Any, **kwargs: Any) -> int:
+        events.append("exec")
+        return real_exec(*args, **kwargs)
+
+    def notify(notice: Any) -> None:
+        events.append(notice.code)
+        notices.append(notice)
+
+    monkeypatch.setattr(fake, "unshare", unshare_and_change)
+    monkeypatch.setattr(fake, "exec_interactive", exec_and_record)
+    hooks = replace(make_hooks(lifecycle_hooks), notify=notify)
+
+    assert enter(env, fake, "lab", user, hooks, argv=["true"]) == 0
+
+    assert events == ["GINN-W-HOST-CHANGED", "exec"]
+    assert "/etc/hosts" in notices[0].message
+
+
 @pytest.mark.fr("FR-064")
 @pytest.mark.fr("FR-066")
 def test_a_source_that_appears_after_start_is_attached_at_enter_and_not_again(

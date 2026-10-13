@@ -1,0 +1,200 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The production objects of the realm commands and their recovery report (IR-010, FR-122, NFR-042).
+
+These tests read `ginn.cli._context` as the commands do. The defaults are the real ones: the host
+tree is `/`, the helper is the installed one, and a create runs its package steps.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from ginn.__main__ import main
+from ginn.cli import _context
+from ginn.cli.output import Output
+from ginn.domain import RealmState
+from ginn.errors import EXEC_GINN_FAILURE, make
+from ginn.podman.cli import PodmanCli
+from ginn.store.journal import Journal
+from tests.unit.realm_cli_support import World, make_realm, stored
+from tests.unit.test_ops_recovery import _dead, _entry, _write_journal
+
+REAL_PODMAN = _context.podman
+"""The production adapter builder, captured before the `world` fixture replaces it."""
+
+
+@pytest.mark.fr("IR-010")
+def test_the_default_seams_are_the_real_host() -> None:
+    seams = _context.seams()
+    assert seams.root_dir == Path("/")
+    assert seams.helper is None
+    assert seams.integrate is True
+    assert seams.mountinfo == Path("/proc/self/mountinfo")
+
+
+@pytest.mark.fr("NFR-042")
+def test_the_real_adapter_echoes_its_commands_to_verbose_output(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = Output(json_mode=False, verbose=True)
+    adapter = REAL_PODMAN(world.paths, out)
+    assert isinstance(adapter, PodmanCli)
+    assert adapter.verbose == out.verbose_line
+    assert adapter.binary == "podman"
+    assert adapter.oci_runtime == "crun"
+
+
+@pytest.mark.fr("FR-025")
+def test_tightened_directories_are_verbose_lines_only(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = Output(json_mode=False, verbose=False)
+    adapter = REAL_PODMAN(world.paths, out)
+    adapter.tightened.append("tightened /x/ginn/realms from 0755 to 0700")
+    realms = _context.Realms(
+        paths=world.paths,
+        env=_context.op_env(world.paths),
+        podman=adapter,
+        host=_context.host_user(),
+        gid=0,
+    )
+    _context.finish(realms, out)
+    assert capsys.readouterr().err == ""
+    verbose = Output(json_mode=False, verbose=True)
+    _context.finish(realms, verbose)
+    assert "tightened /x/ginn/realms" in capsys.readouterr().err
+
+
+@pytest.mark.fr("FR-122")
+def test_a_settled_interrupted_create_is_a_warning_with_its_remedy(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_realm(world, "debian", RealmState.CREATING, running=False)
+    _write_journal(world.paths, _dead(op="create", realm="debian", step="pulled"))
+    assert main(["list"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err.startswith(
+        "GINN-W-RECOVERED: recovery settled an interrupted create of realm 'debian' as broken: "
+    )
+    assert "  fix: run 'ginn status debian'" in captured.err
+    assert "realm debian is broken" in captured.out
+
+
+@pytest.mark.fr("FR-122")
+def test_a_live_journal_entry_is_only_a_verbose_line(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_realm(world, "debian", RealmState.CREATING, running=False)
+    own = os.getpid()
+    _write_journal(world.paths, _entry(op="create", realm="debian", pid=own, pid_start=None))
+    assert main(["list"]) == 0
+    captured = capsys.readouterr()
+    assert "GINN-W" not in captured.err
+    assert captured.err == ""
+
+
+@pytest.mark.fr("FR-122")
+def test_a_json_list_carries_the_recovery_warning_in_its_result(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_realm(world, "debian", RealmState.CREATING, running=False)
+    _write_journal(world.paths, _dead(op="create", realm="debian", step="pulled"))
+    assert main(["--json", "list"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["warnings"][0]["code"] == "GINN-W-RECOVERED"
+
+
+@pytest.mark.fr("IR-011")
+def test_the_ginn_side_exit_status_for_exec_is_125() -> None:
+    assert EXEC_GINN_FAILURE == 125
+
+
+@pytest.mark.fr("IR-011")
+def test_json_exec_flag_before_the_command_parses(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True, distro="arch")
+    assert main(["--json", "exec", "arch", "--", "true"]) == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.fr("IR-011")
+def test_a_failure_prints_each_note_it_collected_in_text_mode(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    err = make("GINN-E-INTERNAL")
+    err.add_note("stop after failed start: GINN-E-NETWORK")
+    err.add_note("record not set stopped: GINN-E-INTERNAL")
+    Output(json_mode=False, verbose=False).error(err)
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0].startswith("GINN-E-INTERNAL: ")
+    assert lines[1].startswith("  fix: ")
+    assert lines[2:] == [
+        "  note: stop after failed start: GINN-E-NETWORK",
+        "  note: record not set stopped: GINN-E-INTERNAL",
+    ]
+
+
+@pytest.mark.fr("IR-011")
+def test_a_json_failure_carries_its_notes_in_one_object_per_line(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    err = make("GINN-E-INTERNAL")
+    err.add_note("rollback: container: removed")
+    Output(json_mode=True, verbose=False).error(err)
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1
+    error = json.loads(lines[0])["error"]
+    assert error["notes"] == ["rollback: container: removed"]
+
+
+@pytest.mark.fr("IR-011")
+def test_a_failure_without_notes_has_an_empty_notes_list(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    Output(json_mode=True, verbose=False).error(make("GINN-E-USAGE", detail="x"))
+    error = json.loads(capsys.readouterr().err.splitlines()[-1])["error"]
+    assert error["notes"] == []
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize("command", ["status", "list"])
+def test_status_and_list_warn_and_go_on_when_the_journal_scan_raises_os_error(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+
+    def denied(self: Journal) -> list[object]:
+        raise PermissionError(13, "Permission denied", str(world.paths.journal))
+
+    monkeypatch.setattr(Journal, "scan", denied)
+    argv = [command, "arch"] if command == "status" else [command]
+    assert main(argv) == 0
+    captured = capsys.readouterr()
+    assert "arch" in captured.out
+    assert captured.err.startswith("GINN-W-RECOVERY-UNSETTLED: ")
+    assert "PermissionError" in captured.err
+
+
+@pytest.mark.fr("FR-122")
+def test_a_realm_command_that_changes_state_stops_when_the_journal_scan_raises(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+
+    def denied(self: Journal) -> list[object]:
+        raise PermissionError(13, "Permission denied", str(world.paths.journal))
+
+    monkeypatch.setattr(Journal, "scan", denied)
+    assert main(["start", "arch"]) == 70
+    assert capsys.readouterr().err.startswith("GINN-E-INTERNAL: ")
+    assert stored(world, "arch").state is RealmState.STOPPED

@@ -61,6 +61,7 @@ from typing import Final
 from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError, make
+from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
 from ginn.podman.adapter import PODMAN_ERROR_EXIT, Podman
@@ -105,7 +106,9 @@ class EnterHooks:
     `lifecycle` carries the probes and the helper path that runtime/ reads, and it is passed to
     `start_realm`. `isatty` decides whether the exec gets a TTY. `clock` times the steps and bounds
     the wait for a lock holder, and `sleep` separates two checks of that wait. `observe` receives
-    `listing`, `precheck` and `exec`, each with the seconds it took (NFR-004, T4.9).
+    `listing`, `precheck` and `exec`, each with the seconds it took (NFR-004, T4.9). `notify`
+    receives each FR-006 warning of a re-attach or a start that this enter made, before the command
+    runs, so the caller can show it first (the command's own output comes after).
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
@@ -113,6 +116,7 @@ class EnterHooks:
     clock: Callable[[], float] = time.perf_counter
     sleep: Callable[[float], None] = time.sleep
     observe: Callable[[str, float], None] | None = None
+    notify: Callable[[GinnWarning], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -230,17 +234,21 @@ def _settle(
     *,
     session: HostUser,
     hooks: EnterHooks,
+    notices: list[GinnWarning],
 ) -> RealmRecord:
     """Make the realm run with its grants current, and return its record (ADR-008, FR-017).
 
     The lock is taken only for a change: a running realm with nothing pending returns at once. A
-    realm that stopped after the look is started, which takes the lock itself.
+    realm that stopped after the look is started, which takes the lock itself. The FR-006 warnings
+    of a re-attach or a start are appended to `notices`.
     """
     if look.running and not look.pending:
         return look.record
-    if look.running and _reattach_locked(env, podman, name, look, session=session, hooks=hooks):
+    if look.running and _reattach_locked(
+        env, podman, name, look, session=session, hooks=hooks, notices=notices
+    ):
         return look.record
-    return start_realm(env, podman, name, session=session, hooks=hooks.lifecycle)
+    return start_realm(env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices)
 
 
 def _await_holder(
@@ -251,6 +259,7 @@ def _await_holder(
     *,
     session: HostUser,
     hooks: EnterHooks,
+    notices: list[GinnWarning],
 ) -> RealmRecord:
     """Wait a bounded time for the re-attach or the start that holds the realm lock (FR-123).
 
@@ -267,7 +276,7 @@ def _await_holder(
         if look.running and not look.pending:
             return look.record
         try:
-            return _settle(env, podman, name, look, session=session, hooks=hooks)
+            return _settle(env, podman, name, look, session=session, hooks=hooks, notices=notices)
         except GinnError as again:
             if not _waits_for_holder(again):
                 raise
@@ -295,12 +304,18 @@ def enter_realm(
     if argv is not None and not argv:
         raise make("GINN-E-USAGE", detail="exec needs a command after '--'")
     look = _look(env, podman, name, session=session, hooks=hooks)
+    notices: list[GinnWarning] = []
     try:
-        record = _settle(env, podman, name, look, session=session, hooks=hooks)
+        record = _settle(env, podman, name, look, session=session, hooks=hooks, notices=notices)
     except GinnError as err:
         if not _waits_for_holder(err):
             raise
-        record = _await_holder(env, podman, name, err, session=session, hooks=hooks)
+        record = _await_holder(
+            env, podman, name, err, session=session, hooks=hooks, notices=notices
+        )
+    if hooks.notify is not None:
+        for notice in notices:
+            hooks.notify(notice)
     cid = record.container_id
     if cid is None:
         raise _internal("the realm has no container to enter")
@@ -348,6 +363,7 @@ def _reattach_locked(
     *,
     session: HostUser,
     hooks: EnterHooks,
+    notices: list[GinnWarning],
 ) -> bool:
     """Re-attach the changed grants under the realm lock (FR-123, ADR-008 amendment).
 
@@ -358,54 +374,72 @@ def _reattach_locked(
     its grant list or its share list changed (DR-032). A failure raises, and the realm is left as it
     was: a failed re-attach never stops the realm.
     """
+    with mutating(env, "reattach", name, {"generation": look.record.generation}) as mutation:
+        running = _reattach_in_lock(
+            env, podman, name, look, session=session, hooks=hooks, mutation=mutation
+        )
+    notices.extend(mutation.warnings)
+    return running
+
+
+def _reattach_in_lock(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    look: _Look,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+    mutation: Mutation,
+) -> bool:
+    """The body of a re-attach, under the lock. Return False when the realm no longer runs."""
     store = RealmStore(env.paths, env.clock)
     mountinfo = hooks.lifecycle.mountinfo
-    with mutating(env, "reattach", name, {"generation": look.record.generation}) as mutation:
-        info = _listed(podman, name, look.record.container_id)
-        current = _load(store, name)
-        cid = current.container_id
-        if cid is None or info is None or cid != info.id:
-            _noop(mutation, _STOPPED_SINCE_LOOK)
-            return False
-        if info.state in _HALTED or current.state is not RealmState.RUNNING:
-            _noop(mutation, _STOPPED_SINCE_LOOK)
-            return False
-        if info.pid < 2:
-            raise _internal("the running realm has no init process to attach into")
-        if not needs_reattach(current.grants, look.session, admit=look.admit, mountinfo=mountinfo):
-            _noop(mutation, "no grant changed since the pre-check")
-            return True
-        result = reattach(
-            podman,
-            cid,
-            pid=info.pid,
-            grants=current.grants,
-            session=look.session,
-            realm_home=env.paths.homes / name.value,
-            host_home=session.host_home,
-            admit=look.admit,
-            helper=hooks.lifecycle.helper,
-            mountinfo=mountinfo,
-        )
-        share = share_after(
-            current.share_skipped,
-            current.grants,
-            result.records,
-            look.session,
-            result,
-            session.host_home,
-        )
-        if result.records != current.grants or set(share) != set(current.share_skipped):
-            store.save(
-                replace(
-                    current,
-                    grants=result.records,
-                    share_skipped=share,
-                    updated_at=utc_from_epoch(env.clock()),
-                )
-            )
-        mutation.step("reattached")
+    info = _listed(podman, name, look.record.container_id)
+    current = _load(store, name)
+    cid = current.container_id
+    if cid is None or info is None or cid != info.id:
+        _noop(mutation, _STOPPED_SINCE_LOOK)
+        return False
+    if info.state in _HALTED or current.state is not RealmState.RUNNING:
+        _noop(mutation, _STOPPED_SINCE_LOOK)
+        return False
+    if info.pid < 2:
+        raise _internal("the running realm has no init process to attach into")
+    if not needs_reattach(current.grants, look.session, admit=look.admit, mountinfo=mountinfo):
+        _noop(mutation, "no grant changed since the pre-check")
         return True
+    result = reattach(
+        podman,
+        cid,
+        pid=info.pid,
+        grants=current.grants,
+        session=look.session,
+        realm_home=env.paths.homes / name.value,
+        host_home=session.host_home,
+        admit=look.admit,
+        helper=hooks.lifecycle.helper,
+        mountinfo=mountinfo,
+    )
+    share = share_after(
+        current.share_skipped,
+        current.grants,
+        result.records,
+        look.session,
+        result,
+        session.host_home,
+    )
+    if result.records != current.grants or set(share) != set(current.share_skipped):
+        store.save(
+            replace(
+                current,
+                grants=result.records,
+                share_skipped=share,
+                updated_at=utc_from_epoch(env.clock()),
+            )
+        )
+    mutation.step("reattached")
+    return True
 
 
 __all__ = [

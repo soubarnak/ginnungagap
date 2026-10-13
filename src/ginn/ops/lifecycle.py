@@ -50,6 +50,10 @@ running or failed record that names no container id is refused by start and stop
 GINN-E-INTERNAL, before any state write. Its remedy is `ginn delete`, which finds the container by
 its labels (T4.7).
 
+Warnings. The FR-006 warning of a start or a stop is known only after the body has run, so it
+is appended to the `warnings` list of the call, once the operation has finished. A call that
+writes nothing has none. A failed operation raises, and its warning goes into the error's notes.
+
 Status and list. `RealmStatus.to_json()` gives these keys, in this order, and a golden test pins
 them: name, state, container_state, state_mismatch, distro, tier, services, generation,
 image_digest, created_at, updated_at, restart_required, share_skipped, disk, exported_apps, error.
@@ -86,6 +90,7 @@ from typing import Any, Final
 
 from ginn.domain import RealmName, RealmState, Tier, transition
 from ginn.errors import GinnError, make
+from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
@@ -442,11 +447,14 @@ def start_realm(
     *,
     session: HostUser | None = None,
     hooks: LifecycleHooks | None = None,
+    warnings: list[GinnWarning] | None = None,
 ) -> RealmRecord:
     """Start realm `name` and attach its grants. Return the record that now reads running.
 
     A realm that podman runs already comes back as stored, with its `restart_required` flag. See
-    the module docstring for the states it accepts, the refusals and the journal steps.
+    the module docstring for the states it accepts, the refusals and the journal steps. The FR-006
+    warnings of the start (a host change found after the start) are appended to `warnings` when it
+    is given, after the operation has finished.
     """
     hooks = LifecycleHooks() if hooks is None else hooks
     current = _load(RealmStore(env.paths, env.clock), name)
@@ -458,7 +466,10 @@ def start_realm(
         return current
     params = {"generation": current.generation}
     with mutating(env, "start", name, params) as mutation:
-        return _start(env, podman, name, user, hooks, mutation)
+        record = _start(env, podman, name, user, hooks, mutation)
+    if warnings is not None:
+        warnings.extend(mutation.warnings)
+    return record
 
 
 def _start(
@@ -576,11 +587,13 @@ def stop_realm(
     name: RealmName,
     *,
     hooks: LifecycleHooks | None = None,
+    warnings: list[GinnWarning] | None = None,
 ) -> RealmRecord:
     """Stop realm `name` and return its record. A stopped record stays stopped (FR-016).
 
     A stopped record whose container podman runs is stopped with `podman stop`, and its record is
-    kept as it is. A stopped record whose container is not running writes nothing.
+    kept as it is. A stopped record whose container is not running writes nothing. The FR-006
+    warnings of a stop are appended to `warnings` when it is given, once the operation has finished.
     """
     hooks = LifecycleHooks() if hooks is None else hooks
     current = _load(RealmStore(env.paths, env.clock), name)
@@ -589,7 +602,10 @@ def stop_realm(
         return current
     params = {"generation": current.generation}
     with mutating(env, "stop", name, params) as mutation:
-        return _stop(env, podman, name, hooks, mutation)
+        record = _stop(env, podman, name, hooks, mutation)
+    if warnings is not None:
+        warnings.extend(mutation.warnings)
+    return record
 
 
 def _stop(

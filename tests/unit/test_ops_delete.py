@@ -1141,3 +1141,29 @@ def test_a_paused_container_is_stopped_before_removal(env: OpEnv, fake: FakePodm
 
     assert ("stop", (cid, 30)) in fake.calls
     assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-006")
+def test_a_host_change_during_a_delete_is_on_the_result_as_a_warning(
+    env: OpEnv, fake: FakePodman, host: Path
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+
+    def change_hosts_after_stop(step: str) -> None:
+        if step == "stopped":
+            (host / "etc" / "hosts").write_text("10.0.0.1 changed\n", encoding="utf-8")
+
+    result = delete_realm(
+        env, fake, RealmName("lab"), hooks=DeleteHooks(on_step=change_hosts_after_stop)
+    )
+
+    assert [warning.code for warning in result.warnings] == ["GINN-W-HOST-CHANGED"]
+    assert "/etc/hosts" in result.warnings[0].message
+    assert result.home == "kept"
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-006")
+def test_a_clean_delete_has_no_warnings(env: OpEnv, fake: FakePodman) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    assert delete_realm(env, fake, RealmName("lab")).warnings == ()

@@ -1297,3 +1297,68 @@ def test_the_disk_walk_skips_an_entry_on_another_device(
     assert partial is False
     expected = lifecycle._allocated(os.lstat(root)) + lifecycle._allocated(os.lstat(root / "f"))
     assert total == expected
+
+
+def _change_etc_hosts(host: Path) -> None:
+    (host / "etc" / "hosts").write_text("10.0.0.1 changed\n", encoding="utf-8")
+
+
+@pytest.mark.fr("FR-006")
+def test_a_host_change_during_a_start_is_handed_to_the_caller_after_the_start(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    host: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_realm(env, fake, "arch", RealmState.STOPPED, running=False)
+    real_start = fake.start
+
+    def start_and_change(container_id: str) -> None:
+        _change_etc_hosts(host)
+        real_start(container_id)
+
+    monkeypatch.setattr(fake, "start", start_and_change)
+    notices: list[Any] = []
+
+    record = start_realm(env, fake, RealmName("arch"), session=user, hooks=hooks, warnings=notices)
+
+    assert record.state is RealmState.RUNNING
+    assert [notice.code for notice in notices] == ["GINN-W-HOST-CHANGED"]
+    assert "/etc/hosts" in notices[0].message
+
+
+@pytest.mark.fr("FR-006")
+def test_a_clean_start_hands_over_no_warning_and_no_warnings_list_is_needed(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    make_realm(env, fake, "arch", RealmState.STOPPED, running=False)
+    notices: list[Any] = []
+    start_realm(env, fake, RealmName("arch"), session=user, hooks=hooks, warnings=notices)
+    assert notices == []
+    start_realm(env, fake, RealmName("arch"), session=user, hooks=hooks)  # the old call shape
+
+
+@pytest.mark.fr("FR-006")
+def test_a_host_change_during_a_stop_is_handed_to_the_caller_after_the_stop(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    hooks: LifecycleHooks,
+    host: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_realm(env, fake, "arch", RealmState.RUNNING, running=True)
+    real_stop = fake.stop
+
+    def stop_and_change(container_id: str, timeout_s: int) -> None:
+        _change_etc_hosts(host)
+        real_stop(container_id, timeout_s)
+
+    monkeypatch.setattr(fake, "stop", stop_and_change)
+    notices: list[Any] = []
+
+    record = stop_realm(env, fake, RealmName("arch"), hooks=hooks, warnings=notices)
+
+    assert record.state is RealmState.STOPPED
+    assert [notice.code for notice in notices] == ["GINN-W-HOST-CHANGED"]

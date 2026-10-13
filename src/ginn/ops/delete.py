@@ -87,12 +87,13 @@ import os
 import re
 import stat
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
 from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError, make
+from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import STOP_TIMEOUT_S
 from ginn.podman.adapter import Podman
@@ -200,7 +201,8 @@ class DeleteResult:
     was asked but not confirmed, so the home was kept because of the answer. `image` is "removed",
     "kept" (in use, or its rmi failed) or "absent". `image_code` is the code of a failed rmi, else
     None. `notes` lists what was recovered from or skipped: stop failures, containers that show no
-    image name, and the container that keeps the image.
+    image name, and the container that keeps the image. `warnings` holds the FR-006 warnings of the
+    delete (a host change found after the operation), once it has finished.
     """
 
     realm: str
@@ -209,6 +211,7 @@ class DeleteResult:
     image: str
     image_code: str | None
     notes: tuple[str, ...]
+    warnings: tuple[GinnWarning, ...] = ()
 
 
 def delete_realm(
@@ -248,7 +251,28 @@ def delete_realm(
     }
     distro = current.settings.distro.value
     with image_lock(env.paths, distro, "delete"), mutating(env, "delete", name, params) as mutation:
-        return _delete(env, podman, name, purge, declined, hooks, mutation)
+        result = _delete(env, podman, name, purge, declined, hooks, mutation)
+    return replace(result, warnings=tuple(mutation.warnings))
+
+
+def check_purge(env: OpEnv, name: RealmName, *, hooks: DeleteHooks | None = None) -> None:
+    """Refuse a purge that cannot run, before the caller asks for confirmation (AS-014, DR-021).
+
+    The CLI calls this before its prompt, because `delete_realm` runs `confirm` before any check.
+    It is read-only: no lock, no journal, no audit entry, no write. It raises GINN-E-NO-SUCH-REALM
+    for an unknown realm, GINN-E-NOT-SUPPORTED-YET for a services-on realm (until M7), and the
+    Realm Home refusals of a purge. `delete_realm` checks again under the locks, so an answer
+    given here can still be refused there.
+    """
+    current = RealmStore(env.paths, env.clock).load(name)
+    if current.settings.services:
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=name.value,
+            feature="delete of a services-on realm",
+            milestone="M7",
+        )
+    _check_home(env, name, DeleteHooks() if hooks is None else hooks)
 
 
 def _delete(
@@ -756,6 +780,7 @@ __all__ = [
     "STEPS",
     "DeleteHooks",
     "DeleteResult",
+    "check_purge",
     "delete_realm",
     "mount_id_of_fd",
 ]

@@ -7,11 +7,12 @@ Stream contract:
   their text to stdout even in JSON mode (IR-010). Output does not render them. `ginn doctor` is
   the one exception to "stdout is empty on failure": it prints its report and then fails with
   GINN-E-DOCTOR-FAILED, because FR-007 AC-1 needs the fix command in the output.
-- stderr in text mode: a failure or warning is `CODE: message` then `  fix: remedy`; verbose
-  lines are plain text.
+- stderr in text mode: a failure or warning is `CODE: message` then `  fix: remedy`; a failure
+  then has one `  note: text` line for each note it collected; verbose lines are plain text.
 - stderr in JSON mode: every line is one JSON object. Verbose lines are `{"verbose": "..."}`.
   Warnings that cannot ride in a result are `{"warning": {code, message, remedy}}`. On failure the
-  error object `{"error": {code, message, remedy, exit_code, details}}` is always the last line.
+  error object `{"error": {code, message, remedy, exit_code, details, notes}}` is always the last
+  line. `notes` is a list, empty when the failure collected none.
 
 Warnings (GINN-W-*) do not fail a command. In JSON mode `warn()` queues them and `emit()` adds
 them to a dict result as `"warnings": [{code, message, remedy}]`. A non-dict result, or a failure,
@@ -70,7 +71,12 @@ class Output:
             sys.stderr.write(f"{w.code}: {w.message}\n  fix: {w.remedy}\n")
 
     def error(self, err: GinnError) -> None:
-        """Write a failure to stderr. In JSON mode, queued warnings come first, the error last."""
+        """Write a failure to stderr. In JSON mode, queued warnings come first, the error last.
+
+        The notes that the failure collected on its way up (`add_note`) are printed too: one
+        `  note: ...` line each in text mode, and the `notes` list of the error object in JSON mode.
+        """
+        notes = list(getattr(err, "__notes__", []))
         if self.json_mode:
             self._flush_warnings()
             payload = {
@@ -80,11 +86,14 @@ class Output:
                     "remedy": err.remedy,
                     "exit_code": err.exit_code,
                     "details": err.details,
+                    "notes": notes,
                 }
             }
             sys.stderr.write(json.dumps(payload, sort_keys=True, default=str) + "\n")
         else:
-            sys.stderr.write(f"{err.code}: {err.message}\n  fix: {err.remedy}\n")
+            lines = [f"{err.code}: {err.message}", f"  fix: {err.remedy}"]
+            lines.extend(f"  note: {note}" for note in notes)
+            sys.stderr.write("\n".join(lines) + "\n")
 
     def verbose_line(self, text: str) -> None:
         """Write `text` to stderr, only when verbose mode is on."""
@@ -94,6 +103,14 @@ class Output:
             sys.stderr.write(json.dumps({"verbose": text.rstrip("\n")}, sort_keys=True) + "\n")
         else:
             sys.stderr.write(_line(text))
+
+    def flush_warnings(self) -> None:
+        """Write the queued warnings to stderr now. For a command whose stdout is not its result.
+
+        `ginn exec` and `ginn enter` send the inner process's output to stdout, so no result is
+        emitted to carry the warnings. In text mode nothing is queued, so this does nothing there.
+        """
+        self._flush_warnings()
 
     def _flush_warnings(self) -> None:
         for w in self._warnings:

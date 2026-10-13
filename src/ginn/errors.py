@@ -27,8 +27,13 @@ EXEC_GINN_FAILURE = 125
 """Exit status for ginn-side failures of `ginn exec` and `ginn enter` (IR-011, FR-049).
 
 `ginn exec` returns the inner command's exit status, so a ginn failure must not reuse a status
-a command can return. The exec command remaps its own failures to this value (used in M4).
-No catalogue entry uses it.
+a command can return. The exec and enter run (ginn/cli/_enter.py) remaps a ginn-side failure to
+this value: a GinnError, or any other exception, which becomes GINN-E-INTERNAL. Only a GINN-E line
+or a JSON error object on stderr marks a ginn failure. A 125 that podman's own exec returns, or the
+inner command returns, is passed through unchanged, and the exit status alone cannot tell them
+apart. argparse refusals (exit 2) and Ctrl-C (130) are the documented exceptions: they are raised
+before the realm is touched, or by the interrupt itself.
+No catalogue code has this exit status.
 """
 
 
@@ -405,6 +410,22 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="use a realm this build can run; docs/roadmap.md lists the milestones",
         source="FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-W-RECOVERED",
+        exit_code=0,
+        summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",
+        remedy="run 'ginn status {realm}'; a broken realm can be resumed with "
+        "'ginn create --resume {realm}' (arrives in M8) or removed with 'ginn delete {realm}'",
+        source="FR-122 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-RECOVERY-UNSETTLED",
+        exit_code=0,
+        summary="recovery could not settle an interrupted operation: {detail}",
+        remedy="run 'ginn doctor' and inspect the journal file named above; do not delete the "
+        "realm until it is settled",
+        source="FR-122 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
@@ -438,7 +459,11 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "Host Setup must run as root, has not run for this user, or refuses an unsafe path it "
         "cannot repair (EX_NOPERM)",
     ),
-    (EXEC_GINN_FAILURE, "reserved; see EXEC_GINN_FAILURE"),
+    (
+        EXEC_GINN_FAILURE,
+        "ginn-side failure of `ginn exec` and `ginn enter`, marked by a GINN-E line or JSON error "
+        "object on stderr; a 125 from podman or from the command is passed through unchanged",
+    ),
     (130, "interrupted by the user"),
 )
 """Exit statuses by category, in ascending order (NFR-040, IR-010, IR-011)."""
