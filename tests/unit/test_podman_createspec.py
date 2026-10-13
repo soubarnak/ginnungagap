@@ -249,12 +249,40 @@ def test_command_follows_the_image_and_is_absent_when_unset() -> None:
     assert basic_spec().to_argv()[-1] == DIGEST
 
 
-@pytest.mark.fr("FR-010")
+ENTRY = "alice:*:1000:1000:alice:/home/alice:/bin/bash"
+
+
+@pytest.mark.fr("FR-048")
 @pytest.mark.fr("NFR-SEC-001")
-def test_passwd_renders_only_when_false_so_podman_keeps_its_default_otherwise() -> None:
-    """Realms pass `--passwd=false`, so keep-id writes no passwd entry (T4.4 review, ADR-006)."""
-    assert "--passwd=false" not in basic_spec().to_argv()
-    assert "--passwd=false" not in basic_spec(passwd=True).to_argv()
-    argv = basic_spec(passwd=False).to_argv()
-    assert argv[argv.index("--passwd=false") - 1] == "keep-id"
-    assert argv.count("--passwd=false") == 1
+def test_passwd_entry_renders_after_keep_id_and_passwd_false_is_never_sent() -> None:
+    """The realm user is podman's keep-id entry, sent with `--passwd-entry` (T4.9b, ADR-006).
+
+    `--passwd=false` is not a `podman create` flag on podman 5.8.8, so it is never rendered.
+    """
+    assert "--passwd-entry" not in basic_spec().to_argv()
+    argv = basic_spec(passwd_entry=ENTRY).to_argv()
+    assert argv[argv.index("--passwd-entry") - 1] == "keep-id"
+    assert argv[argv.index("--passwd-entry") + 1] == ENTRY
+    assert argv.count("--passwd-entry") == 1
+    assert not any(arg.startswith("--passwd=") for arg in argv)
+
+
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "alice:*:1000:1000:alice:/home/a$USERNAMEb:/bin/bash",  # podman expands placeholders
+        "alice:*:1000:1000:alice:/home/alice:/bin/bash\nroot::0:0::/:/bin/sh",  # a second line
+        "alice:*:1000:1000:alice:/home/alice",  # six fields
+        "alice:*:1000:1000:alice:/home/a:b:/bin/bash",  # eight fields
+    ],
+)
+def test_a_passwd_entry_podman_would_rewrite_is_refused(entry: str) -> None:
+    with pytest.raises(ValueError, match="passwd entry"):
+        basic_spec(passwd_entry=entry).to_argv()
+
+
+@pytest.mark.fr("FR-048")
+def test_a_passwd_entry_needs_keep_id() -> None:
+    with pytest.raises(ValueError, match="keep-id"):
+        basic_spec(passwd_entry=ENTRY, userns=None).to_argv()

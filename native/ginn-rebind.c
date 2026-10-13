@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /*
- * ginn-rebind: attach host grants into a realm's mount namespace (ADR-008). It runs under
- * `podman unshare` and joins the container's mount namespace only. Realm-side steps use a parent fd
- * opened with RESOLVE_NO_SYMLINKS. Groups: [--force] [--ro] <host> <realm> | --unmount <realm>.
- * stdout per group: "<i> attached <dev> <ino>", "<i> skipped", "<i> missing". Exit 0 ok, 2 usage,
- * 1 failure. Needs Linux 5.12+ (mount_setattr).
+ * ginn-rebind: attach host grants into a realm's mount namespace (ADR-008). The host runs it, not
+ * `podman unshare`: it joins the realm's user namespace, copies the host mount table (unshare
+ * CLONE_NEWNS), clones each source from that copy without following a symbolic link, joins the
+ * realm's mount namespace and moves the clones in. Groups: [--force] [--ro] <host> <realm> |
+ * --unmount <realm>. stdout per group: "<i> attached <dev> <ino>", "<i> skipped", "<i> missing".
+ * Exit 0 ok, 2 usage, 1 failure. Needs Linux 5.12+ (mount_setattr, openat2).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -59,24 +60,23 @@ static int valid(const char *p) {
 	return p[0] == '/' && !strstr(p, "/../") && (n < 3 || strcmp(p + n - 3, "/.."));
 }
 
+/* openat2 of `name` in `dfd`, refusing any symbolic link on the way. -1 with errno on failure. */
+static int open_nolink(int dfd, const char *name, int flags) {
+	struct ginn_open_how how = { (uint64_t)flags, 0, G_RESOLVE_NO_SYMLINKS };
+	return (int)syscall(SYS_openat2, dfd, name, &how, sizeof how);
+}
+
 /* The directory of `dst`, with no symbolic link on the way. The last name goes to *base. */
 static int parent_fd(const char *dst, const char **base) {
 	static char dir[PATH_MAX];
 	const char *slash = strrchr(dst, '/');
 	size_t n = slash == dst ? 1 : (size_t)(slash - dst);
-	struct ginn_open_how how = { O_PATH | O_DIRECTORY | O_CLOEXEC, 0, G_RESOLVE_NO_SYMLINKS };
 
 	*base = slash + 1;
 	if (n >= sizeof dir || **base == '\0' || !strcmp(*base, ".")) { errno = EINVAL; return -1; }
 	memcpy(dir, dst, n);
 	dir[n] = '\0';
-	return (int)syscall(SYS_openat2, AT_FDCWD, dir, &how, sizeof how);
-}
-
-/* O_PATH open of `name` inside `dfd`, refusing a symbolic link. -1 with errno on failure. */
-static int target_at(int dfd, const char *name) {
-	struct ginn_open_how how = { O_PATH | O_CLOEXEC, 0, G_RESOLVE_NO_SYMLINKS };
-	return (int)syscall(SYS_openat2, dfd, name, &how, sizeof how);
+	return open_nolink(AT_FDCWD, dir, O_PATH | O_DIRECTORY | O_CLOEXEC);
 }
 
 /* Make the missing placeholder that `name` in `dfd` mounts over: a directory, or an empty file. */
@@ -90,13 +90,12 @@ static void make_placeholder(int dfd, const char *name, const char *dst, int dir
 	close(fd);
 }
 
-/* Unmount whatever is stacked on `name` until EINVAL. The parent is the working directory. */
-static void detach(int dfd, const char *name, const char *dst, int dir) {
-	int flags = G_UMOUNT_NOFOLLOW | (dir ? G_MNT_DETACH : 0);
-
+/* Unmount whatever is stacked on `name` until EINVAL. Always MNT_DETACH: an open descriptor on the
+ * mount gives EBUSY under plain umount2 (ADR-008, T4.9 section 4.1). The cwd is `dfd`. */
+static void detach(int dfd, const char *name, const char *dst) {
 	if (fchdir(dfd) < 0) fail(1, "fchdir", dst);
 	for (int i = 0; i < G_UMOUNT_MAX; i++) {
-		if (umount2(name, flags) == 0) continue;
+		if (umount2(name, G_UMOUNT_NOFOLLOW | G_MNT_DETACH) == 0) continue;
 		if (errno == EINVAL) return;
 		fail(1, "umount2", dst);
 	}
@@ -108,9 +107,9 @@ int main(int argc, char **argv) {
 	char *end = NULL, nsp[64];
 	long pid;
 	struct grant *g;
-	struct stat st;
+	struct stat st, me;
 	struct ginn_mount_attr attr = { .attr_set = G_ATTR_RDONLY };
-	int n = 0, nsfd;
+	int n = 0, nsfd, usfd, pfd;
 
 	if (argc < 4) usage();
 	errno = 0;
@@ -138,26 +137,34 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	/* Open the namespace and every host tree before setns: the host paths are not visible after. */
-	snprintf(nsp, sizeof nsp, "/proc/%ld/ns/mnt", pid);
-	if ((nsfd = open(nsp, O_RDONLY | O_CLOEXEC)) < 0) fail(1, "open", nsp);
+	/* Pin the realm's init process by one lookup of /proc/<pid>, and open both namespaces from that
+	 * fd. Join its user namespace (skipped when ours already), then copy the mount table of the
+	 * caller's namespace: a host mount made after the realm started is in that copy. */
+	snprintf(nsp, sizeof nsp, "/proc/%ld", pid);
+	if ((pfd = open(nsp, O_PATH | O_DIRECTORY | O_CLOEXEC)) < 0) fail(1, "open", nsp);
+	if ((nsfd = openat(pfd, "ns/mnt", O_RDONLY | O_CLOEXEC)) < 0) fail(1, "open", "ns/mnt");
+	if ((usfd = openat(pfd, "ns/user", O_RDONLY | O_CLOEXEC)) < 0) fail(1, "open", "ns/user");
+	close(pfd); if (fstat(usfd, &st) < 0 || stat("/proc/self/ns/user", &me) < 0) fail(1, "stat", "ns/user");
+	if (st.st_ino != me.st_ino && setns(usfd, CLONE_NEWUSER) < 0) fail(1, "setns", "ns/user");
+	close(usfd); if (unshare(CLONE_NEWNS) < 0) fail(1, "unshare", "CLONE_NEWNS");
 	for (int k = 0; k < n; k++) {
 		struct grant *x = &g[k];
-
+		int sfd;
 		if (x->unmount) continue;
-		x->tree = (int)syscall(SYS_open_tree, AT_FDCWD, x->src, G_TREE_CLONE | G_AT_RECURSIVE | O_CLOEXEC);
-		if (x->tree < 0 && errno != ENOENT) fail(1, "open_tree", x->src);
-		if (x->tree < 0) continue;
+		/* The source is opened with no symbolic link on the way: the caller passes resolved paths. */
+		sfd = open_nolink(AT_FDCWD, x->src, O_PATH | O_CLOEXEC);
+		x->tree = sfd < 0 ? -1 : (int)syscall(SYS_open_tree, sfd, "", G_TREE_CLONE | G_AT_EMPTY_PATH | G_AT_RECURSIVE | O_CLOEXEC);
+		if (sfd >= 0) close(sfd);
+		if (x->tree < 0) { if (errno != ENOENT) fail(1, "open_tree", x->src); continue; }
 		if (fstat(x->tree, &st) < 0) fail(1, "fstat", x->src);
-		x->dev = st.st_dev;
-		x->ino = st.st_ino;
+		x->dev = st.st_dev; x->ino = st.st_ino;
 		x->dir = S_ISDIR(st.st_mode) != 0;
 		if (x->ro && syscall(SYS_mount_setattr, x->tree, "", G_AT_EMPTY_PATH | G_AT_RECURSIVE,
 				     &attr, sizeof attr) < 0)
 			fail(1, "mount_setattr", x->src);
 	}
 
-	/* One setns for the whole batch: the mount namespace only (ADR-008 variant b). */
+	/* One setns for the whole batch: the realm's mount namespace (ADR-008, variant c). */
 	if (setns(nsfd, CLONE_NEWNS) < 0) fail(1, "setns", nsp);
 	close(nsfd);
 
@@ -167,15 +174,10 @@ int main(int argc, char **argv) {
 		int dfd = parent_fd(x->dst, &base), t = -1;
 
 		if (dfd < 0 && errno != ENOENT) fail(1, "open parent", x->dst);
-		if (dfd >= 0 && (t = target_at(dfd, base)) < 0 && errno != ENOENT)
+		if (dfd >= 0 && (t = open_nolink(dfd, base, O_PATH | O_CLOEXEC)) < 0 && errno != ENOENT)
 			fail(1, "open target", x->dst);
 		if (x->tree < 0) {
-			if ((x->force || x->unmount) && t >= 0) {
-				if (fstat(t, &st) < 0) fail(1, "fstat", x->dst);
-				close(t);
-				t = -1;  /* an open fd on the mount makes a plain umount2 fail with EBUSY */
-				detach(dfd, base, x->dst, S_ISDIR(st.st_mode) != 0);
-			}
+			if ((x->force || x->unmount) && t >= 0) detach(dfd, base, x->dst);
 			printf("%d missing\n", k);
 		} else if (t >= 0 && !x->force && fstat(t, &st) == 0 &&
 			   st.st_dev == x->dev && st.st_ino == x->ino) {
@@ -184,16 +186,14 @@ int main(int argc, char **argv) {
 			if (dfd < 0) fail(1, "mountpoint parent", x->dst);
 			if (t < 0) make_placeholder(dfd, base, x->dst, x->dir);
 			close(t);
-			detach(dfd, base, x->dst, x->dir);
-			t = target_at(dfd, base);
+			detach(dfd, base, x->dst);
+			t = open_nolink(dfd, base, O_PATH | O_CLOEXEC);
 			if (t < 0) fail(1, "open target", x->dst);
 			if (syscall(SYS_move_mount, x->tree, "", t, "", G_MOVE_FROM_EMPTY | G_MOVE_TO_EMPTY) < 0)
 				fail(1, "move_mount", x->dst);
 			printf("%d attached %lu %lu\n", k, (unsigned long)x->dev, (unsigned long)x->ino);
 		}
-		close(t);
-		close(dfd);
-		close(x->tree);
+		close(t); close(dfd); close(x->tree);
 	}
 	free(g);
 	return 0;

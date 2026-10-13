@@ -31,14 +31,16 @@ from ginn.ops._mutating import OpEnv
 from ginn.runtime.attach import MOUNTINFO
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.mounts import Exists
-from ginn.runtime.spec import RealmSpec, realm_spec
+from ginn.runtime.spec import RealmSpec, realm_passwd_entry, realm_spec
 from ginn.trust import manifest as trust
 from ginn.trust.manifest import TrustEntry, TrustManifest
 
 DISK_MARGIN_PERCENT: Final = 110
 """The FR-121 factor: free space must cover the estimate times 110 percent."""
 USER_NAME: Final = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-"""A realm user name: one path component, no leading `-`, and what useradd accepts."""
+"""The `<user>` field of the realm's passwd entry (T4.9b, ADR-006 amendment). The entry is one
+field, so there is no `:`, `$`, newline or leading `-`. The name is a lowercase login name: a
+letter or `_` first, then up to 31 letters, digits, `_` or `-`."""
 
 
 def _free_bytes(path: Path) -> int:
@@ -126,8 +128,10 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
     """Check the request and build the spec, with no side effect (NFR-SEC-005, AS-013).
 
     Raises GINN-E-USAGE for an unknown distribution, GINN-E-OPTION-INVALID for a bad setting and
-    GINN-E-PKG-NAME-INVALID for a bad package name. A tier, services mode or distribution that the
-    code does not support yet (T6.2, M7, T10.1) is refused by RealmSpec, as NotImplementedError.
+    GINN-E-PKG-NAME-INVALID for a bad package name. A host home or user name that the passwd entry
+    cannot carry is refused with GINN-E-REALM-USER (T4.9b). A tier, services mode or distribution
+    that the code does not support yet (T6.2, M7, T10.1) is refused by RealmSpec, as
+    NotImplementedError.
     """
     distro = DistroId(request.distro)
     definition = load_distro(distro.value)
@@ -140,11 +144,13 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
         everything=request.everything,
     )
     if USER_NAME.fullmatch(env.user) is None:
-        err = make("GINN-E-INTERNAL")
-        err.details.update(
-            {"detail": "the user name cannot be a realm user name", "user": env.user}
-        )
-        raise err
+        detail = f"host user {env.user!r} is not a realm user name"
+        raise make("GINN-E-REALM-USER", realm=request.name.value, detail=detail)
+    try:
+        # The same check RealmSpec makes, here so that it refuses before any side effect.
+        realm_passwd_entry(env.user, request.uid, request.gid, request.host_home, definition.shell)
+    except ValueError as exc:
+        raise make("GINN-E-REALM-USER", realm=request.name.value, detail=str(exc)) from exc
     packages = tuple(PackageName(raw, distro).value for raw in request.with_packages)
     owned = env.paths.all_owned_roots()
     spec = realm_spec(
@@ -152,6 +158,8 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
         distro,
         uid=request.uid,
         gid=request.gid,
+        user=env.user,
+        login_shell=definition.shell,
         host_home=request.host_home,
         realm_home=env.paths.homes / request.name.value,
         owned_paths=owned,

@@ -1,18 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Attach variable grants into a running realm, and re-attach them at enter and launch.
 
-ADR-008 (amended 2026-10-12) decides this flow. `mounts.attach_plan` and `env.session_env` give the
-grants. This module runs the helper `native/ginn-rebind.c` under `podman unshare` (ADR-002: through
-the adapter, so the global flags apply), and it keeps the grant list the next enter or launch needs
-(FR-061, FR-064, FR-065, FR-066, IR-025).
+ADR-008 (amended 2026-10-12 and 2026-10-13) decides this flow. `mounts.attach_plan` and
+`env.session_env` give the grants. This module runs the helper `native/ginn-rebind.c` directly on
+the host, not under `podman unshare` (ADR-008 amendment, 2026-10-13): the helper joins the realm's
+user namespace and copies the host mount table, so a drive mounted on the host after the realm
+started is in the copy. The module keeps the grant list the next enter or launch needs (FR-061,
+FR-064, FR-065, FR-066, IR-025).
 
 - `attach_at_start` attaches every grant after `podman start`, each without --force. A missing
   source is skipped and the start goes on (FR-064). A device or inode that differs from the host
-  identity is skipped too, and its mount is removed. Any other failure raises GINN-E-ATTACH-FAILED,
-  and the caller stops the realm again (ADR-008, T4.10 notes).
+  identity, or a realm that shows fewer mounts below the source than the host does, is skipped and
+  its mount is removed (NOT_VISIBLE). Any other failure raises GINN-E-ATTACH-FAILED, and the caller
+  stops the realm again (ADR-008, T4.10 notes).
 - `reattach` runs at enter and launch, before exec. It passes only the grants whose host identity
   changed since their last attach, each with --force. A grant whose source is gone loses its old
-  mount. A device or inode that differs raises, and the realm keeps running (FR-081, ADR-003).
+  mount. A NOT_VISIBLE grant is held until its host identity changes (see `_held`). Any other
+  failure raises, and the realm keeps running (FR-081, ADR-003).
 - `needs_reattach` is the pre-check of enter (ADR-008 amendment, ADR-010). It makes the decision
   that `reattach` would make, from the same code, and it reads the host only. It makes no helper
   call and no podman call, so enter takes the realm lock only when it returns True.
@@ -26,10 +30,18 @@ The grant list is fixed at the last start (FR-066). Its realm paths stay as they
 grant takes its host from the session current at each start or enter, by its fixed realm path
 (ADR-008, fixed names). A session grant with no host now is missing, and its old mount is removed.
 
-The identity of a host source is `(st_dev, st_ino)`, read on the host, as podman follows the path.
-A folder or a mount root adds the host mount points below its real path, so a drive mounted under
-`/run/media/<user>` changes the identity (ADR-008 amendment). The helper prints the device and inode
-it attached, so a mount that succeeded over the wrong tree is caught.
+The identity of a host source is `(st_dev, st_ino)`, read on the host, as podman follows the path,
+and the mounts below it. A folder or a mount root adds the mount points below its real path that
+hang from the mount it resolves to, so a drive mounted under `/run/media/<user>` changes the
+identity (ADR-008 amendment, Resolution A). The helper prints the device and inode of the tree it
+cloned from its copy of the host table. A device or inode that differs from the host identity read
+before the attach, or a realm that shows fewer mounts below its path than the identity lists, is not
+recorded as attached (NOT_VISIBLE). The mount is removed, and the identity read before the attach is
+kept as the hold key (see `_held`).
+
+Symbolic links are resolved here, before admission: the helper is given the resolved path, and it
+opens it with no symbolic link on the way (ADR-008, Resolution A). The record keeps the path that
+the user named.
 
 The helper makes each missing placeholder itself, a directory or an empty file by source kind. This
 module makes only the parent directories, as root, in the container (`mkdir -p`). A placeholder
@@ -42,6 +54,7 @@ the stop. The helper's per-group status lines are read by position, so argv orde
 import os
 import re
 import stat
+import subprocess  # noqa: S404 - the helper runs from a fixed argv list, never a shell
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +63,7 @@ from typing import Final, Literal
 from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError, make
 from ginn.podman.adapter import Podman
+from ginn.podman.models import ExecResult
 from ginn.runtime.env import SessionEnv
 from ginn.runtime.mounts import AttachPlan, Skipped, recheck
 
@@ -57,17 +71,54 @@ HELPER_ENV: Final = "GINN_REBIND_HELPER"
 """Overrides the helper path, for tests and for a build tree that is not installed."""
 DEFAULT_HELPER: Final = "/usr/libexec/ginn/ginn-rebind"
 """Where `make -C native install` puts the helper (native/Makefile, LIBEXECDIR)."""
+HELPER_TIMEOUT: Final = 60.0
+"""Seconds a helper run may take. A run is a few syscalls, so this only bounds a hang."""
 MOUNTINFO: Final = Path("/proc/self/mountinfo")
 _OCTAL: Final = re.compile(rb"\\([0-7]{3})")
 """A mount table escape, such as `\\040` for a space. The table is bytes, so it is undone first."""
-NOT_VISIBLE: Final = "host source not visible in the store namespace"
-"""The skip reason for an attach whose device and inode differ from the host identity (FR-064)."""
+NOT_VISIBLE: Final = "the realm does not show the host source as it is; retried on a host change"
+"""The skip reason for an attach whose tree does not match the host (FR-064): a device or inode that
+differs, or fewer mounts below the path than the host identity lists. The grant is held until the
+host identity changes, so a repeated mismatch costs no helper run at enter (see `_held`)."""
 Op = Literal["attach", "force", "unmount"]
 """One helper group: a first attach, a forced attach, or an unmount of the realm path alone."""
+HelperRun = Callable[[Podman, Sequence[str]], ExecResult]
+"""Runs the helper from an argv list and returns its status and output (see `run_on_host`)."""
 
 
 Admit = Callable[[GrantRecord], str | None]
 """Applies the DR-004 rules to a grant. Returns the refusal, or None if it may be attached."""
+
+
+def run_on_host(podman: Podman, argv: Sequence[str]) -> ExecResult:
+    """The default `HelperRun`: the helper on the host. `podman` is not used (see `run_helper`).
+
+    It is passed so that a unit test can answer the helper through its own fake podman, which logs
+    the call (tests/unit/conftest.py). Nothing else depends on it.
+    """
+    del podman
+    return run_helper(argv)
+
+
+def run_helper(argv: Sequence[str]) -> ExecResult:
+    """Run the helper on the host, with no shell (NFR-SEC-005) and no podman (ADR-008 amendment).
+
+    The helper must start in the host's mount namespace: it copies the mount table of the caller's
+    namespace, and a podman-started process sees the store's table, which is the stale copy.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 - argv list built by rebind_argv, no shell
+            list(argv),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            check=False,
+            timeout=HELPER_TIMEOUT,
+            env={"LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _failed(f"cannot run the helper {argv[0]}: {exc}") from exc
+    return ExecResult(done.returncode, done.stdout, done.stderr)
 
 
 @dataclass(frozen=True)
@@ -175,25 +226,87 @@ def read_identity(host: str, *, mountinfo: Path = MOUNTINFO) -> SourceIdentity |
 
 
 def _mounts_below(real: str, mountinfo: Path) -> tuple[str, ...]:
-    """The mount points strictly under `real`, from the host mount table (ADR-008 amendment).
+    """The mount points below `real` that hang from the mount `real` resolves to (see `_below`).
 
     The table is read as bytes. Its octal escapes are undone before decoding, so a name that is not
     valid UTF-8 still compares equal. `real` is a resolved path, as the table records it.
     """
-    prefix = real.rstrip("/") + "/"
     try:
-        lines = mountinfo.read_bytes().split(b"\n")
+        table = mountinfo.read_bytes()
     except OSError as exc:
         raise _failed(f"cannot read {mountinfo}: {exc.strerror or exc}") from exc
-    points: list[str] = []
-    for line in lines:
+    return _below(_mounts(table), real)
+
+
+@dataclass(frozen=True)
+class _Mount:
+    """One line of a mount table: its id, its parent's id, and its mount point, escapes undone."""
+
+    ident: int
+    parent: int
+    point: str
+
+
+def _mounts(table: bytes) -> list[_Mount]:
+    """Every line of a mount table, in table order (a later line of the same point is on top)."""
+    mounts: list[_Mount] = []
+    for line in table.split(b"\n"):
         fields = line.split(b" ")
-        if len(fields) > 4:
+        if len(fields) > 4 and fields[0].isdigit() and fields[1].isdigit():
             escaped = _OCTAL.sub(lambda m: bytes([int(m.group(1), 8)]), fields[4])
-            point = os.fsdecode(escaped)
-            if point.startswith(prefix):
-                points.append(point)
+            mounts.append(_Mount(int(fields[0]), int(fields[1]), os.fsdecode(escaped)))
+    return mounts
+
+
+def _below(mounts: Sequence[_Mount], target: str) -> tuple[str, ...]:
+    """The mount points strictly below `target` that hang from the mount `target` resolves to.
+
+    `target` resolves to the last mount, in table order, whose point is the longest prefix of it.
+    A mount below `target` counts when its chain of parents (by mount id) reaches that mount. A
+    mount hidden under another mount at the same place is not on that chain, and open_tree does not
+    clone it, so it does not count. A mount that is not below the source but is mounted on the same
+    parent does not count either. The realm's table follows the same rule, with `target` as the
+    realm path the clone was moved to, so both sides count the same tree (ADR-008, Resolution A).
+    """
+    prefix = target.rstrip("/") + "/"
+    root: _Mount | None = None
+    for mount in mounts:
+        covers = target == mount.point or prefix.startswith(mount.point.rstrip("/") + "/")
+        if covers and (root is None or len(mount.point) >= len(root.point)):
+            root = mount
+    if root is None:
+        return ()
+    by_id = {mount.ident: mount for mount in mounts}
+    points = [
+        mount.point
+        for mount in mounts
+        if mount.point != target
+        and mount.point.startswith(prefix)
+        and _hangs_from(mount, root.ident, by_id)
+    ]
     return tuple(sorted(points))
+
+
+def _hangs_from(mount: _Mount, ident: int, by_id: Mapping[int, _Mount]) -> bool:
+    """True when the parent chain of `mount` reaches the mount with id `ident`."""
+    current = mount
+    for _ in range(len(by_id) + 1):
+        if current.parent == ident:
+            return True
+        parent = by_id.get(current.parent)
+        if parent is None:
+            return False
+        current = parent
+    return False
+
+
+def _resolved(grant: GrantRecord) -> GrantRecord:
+    """The grant with its host path resolved: the path the helper opens and admission checks.
+
+    A symbolic link on the way is followed here, so the helper never meets one: it refuses a link
+    with RESOLVE_NO_SYMLINKS (ADR-008, Resolution A). The record keeps the path the user named.
+    """
+    return grant if not grant.host else replace(grant, host=os.path.realpath(grant.host))
 
 
 def _plain(path: str) -> bool:
@@ -295,12 +408,13 @@ def _in_container(podman: Podman, container: str, argv: Sequence[str]) -> None:
 
 def _attach(
     podman: Podman,
+    run: HelperRun,
     helper: str,
     pid: int,
     ops: Sequence[tuple[GrantRecord, Op]],
 ) -> list[_Row]:
     """Run the helper once for `ops`, and return one row per group, in argv order."""
-    result = podman.unshare(rebind_argv(helper, pid, ops))
+    result = run(podman, rebind_argv(helper, pid, ops))
     if result.exit_code != 0:
         err = _failed(_decisive(result.stderr))
         err.details["exit"] = result.exit_code
@@ -351,7 +465,7 @@ def _refused(
     for index in indices:
         if current[index] is None:
             continue
-        reason = admit(grants[index])
+        reason = admit(grants[index]) or admit(_resolved(grants[index]))
         if reason is not None:
             refused[index] = reason
     return refused
@@ -368,6 +482,7 @@ def _run(
     realm_home: Path,
     host_home: Path,
     helper: str | None,
+    run: HelperRun,
 ) -> list[_Row]:
     """Make the parent directories that `points` need, then run the helper for `ops`.
 
@@ -376,7 +491,8 @@ def _run(
     if not ops:
         return []
     make_mountpoints(podman, container, points, realm_home=realm_home, host_home=host_home)
-    return _attach(podman, helper or helper_path(), pid, [(grants[i], op) for i, op in ops])
+    attach_ops = [(_resolved(grants[i]), op) for i, op in ops]
+    return _attach(podman, run, helper or helper_path(), pid, attach_ops)
 
 
 def _settle(
@@ -385,14 +501,18 @@ def _settle(
     ops: Sequence[tuple[int, Op]],
     rows: Sequence[_Row],
     reasons: dict[int, str],
+    children: Mapping[int, int],
 ) -> tuple[list[GrantRecord], list[int]]:
     """Fold the helper's rows into the grant list. Return it, and the grants to unmount.
 
     A grant the helper attached or found identical takes the identity read before the run. When the
     source was not there at the read, the helper's device and inode stand for it. A grant that is
-    missing now, or that the helper found missing, has no identity, so it is tried again later. A
-    device and inode that differ from the host identity are a skip, with NOT_VISIBLE in `reasons`.
-    That grant keeps the host identity as `not_visible`, and it is listed for unmount.
+    missing now, or that the helper found missing, has no identity, so it is tried again later. An
+    attached tree that does not match is a NOT_VISIBLE skip, and it is listed for unmount. It does
+    not match when its device and inode differ from the identity read, or when the realm shows
+    fewer mounts below it than the identity lists (`children`, see `_visible_children`). More
+    mounts in the realm are not a mismatch: a nested grant may be one. Such a grant keeps the
+    identity read before the run as its hold key (`not_visible`), so `_held` stops the retries.
     """
     records = list(grants)
     mismatched: list[int] = []
@@ -408,7 +528,7 @@ def _settle(
                 raise _failed(f"{grant.host} came back attached without an identity")
             if now is None:
                 records[index] = replace(grant, identity=seen, not_visible=None)
-            elif (seen.dev, seen.ino) != (now.dev, now.ino):
+            elif (seen.dev, seen.ino) != (now.dev, now.ino) or _fewer(children.get(index), now):
                 reasons[index] = NOT_VISIBLE
                 mismatched.append(index)
                 records[index] = replace(grant, identity=None, not_visible=now)
@@ -417,8 +537,46 @@ def _settle(
     return records, mismatched
 
 
+def _fewer(shown: int | None, now: SourceIdentity) -> bool:
+    """True when the realm shows fewer mounts below its path than the identity lists. None: not
+    counted, which is the same as shown in full (no mounts below)."""
+    return shown is not None and shown < len(now.below)
+
+
+def _visible_children(
+    podman: Podman,
+    container: str,
+    grants: Sequence[GrantRecord],
+    current: Sequence[SourceIdentity | None],
+    ops: Sequence[tuple[int, Op]],
+    rows: Sequence[_Row],
+) -> dict[int, int]:
+    """The mounts the realm shows below each attached realm path, for the groups with mounts below.
+
+    ADR-008, Resolution A. The identity lists the host mounts that hang from the source's mount, and
+    the realm must show at least as many below the clone. One `cat` in the realm reads its mount
+    table, and it runs only when a group with mounts below its source was attached.
+    """
+    checked = [
+        index
+        for (index, _), row in zip(ops, rows, strict=True)
+        if row.status == "attached" and (now := current[index]) is not None and now.below
+    ]
+    if not checked:
+        return {}
+    result = podman.exec(container, ["cat", "/proc/self/mountinfo"], user="0:0")
+    if result.exit_code != 0:
+        raise _failed(_decisive(result.stderr))
+    mounts = _mounts(result.stdout.encode())
+    return {index: len(_below(mounts, grants[index].realm)) for index in checked}
+
+
 def _held(grant: GrantRecord, now: SourceIdentity | None) -> bool:
-    """True while the host identity is the one that did not match. Such a grant is not retried."""
+    """True while the host identity is the one a NOT_VISIBLE attach was made against.
+
+    Such a grant is not passed again, so a repeated mismatch costs no helper run at enter. It is
+    passed again when the host identity changes (ADR-008, Resolution A).
+    """
     return grant.not_visible is not None and now == grant.not_visible
 
 
@@ -432,6 +590,7 @@ def _unmount(
     realm_home: Path,
     host_home: Path,
     helper: str | None,
+    run: HelperRun,
 ) -> None:
     """Remove the mount that a group left on each realm path whose source is not visible (FR-064).
 
@@ -447,6 +606,7 @@ def _unmount(
         realm_home=realm_home,
         host_home=host_home,
         helper=helper,
+        run=run,
     )
     if any(row.status != "missing" for row in rows):
         raise _failed("a mount over a source that is not visible could not be removed")
@@ -489,15 +649,19 @@ def attach_at_start(
     admit: Admit,
     helper: str | None = None,
     mountinfo: Path = MOUNTINFO,
+    run: HelperRun | None = None,
 ) -> AttachResult:
     """Attach every grant after `podman start`. Each one is passed without --force.
 
     `session` gives the host of each session grant now. `admit` is applied to each present grant
-    first. A missing source is skipped. A device or inode that differs from the host identity is
+    first, as named and as resolved. A missing source is skipped. A device or inode that differs
+    from the host identity, or a realm that shows fewer mounts below it than the host does, is
     skipped with NOT_VISIBLE, and its mount is removed. The start goes on in both cases (FR-064).
     Any other failure raises GINN-E-ATTACH-FAILED, and the caller stops the realm again (ADR-008,
-    T4.10 notes). `pid` is the container's init process, read after start.
+    T4.10 notes). `pid` is the container's init process, read after start. `run` runs the helper
+    (see `run_on_host`).
     """
+    runner = run or run_on_host
     grants = _with_session(grants, session)
     current = [read_identity(grant.host, mountinfo=mountinfo) for grant in grants]
     refused = _refused(grants, current, admit, range(len(grants)))
@@ -515,8 +679,10 @@ def attach_at_start(
         realm_home=realm_home,
         host_home=host_home,
         helper=helper,
+        run=runner,
     )
-    records, mismatched = _settle(grants, current, ops, rows, reasons)
+    children = _visible_children(podman, container, grants, current, ops, rows)
+    records, mismatched = _settle(grants, current, ops, rows, reasons, children)
     if mismatched:
         _unmount(
             podman,
@@ -527,6 +693,7 @@ def attach_at_start(
             realm_home=realm_home,
             host_home=host_home,
             helper=helper,
+            run=runner,
         )
     return AttachResult(records=records, skipped=_skipped(records, reasons))
 
@@ -599,6 +766,7 @@ def reattach(
     admit: Admit,
     helper: str | None = None,
     mountinfo: Path = MOUNTINFO,
+    run: HelperRun | None = None,
 ) -> AttachResult:
     """Re-attach the grants whose host identity changed since their last attach (ADR-008 amendment).
 
@@ -606,10 +774,13 @@ def reattach(
     is passed, with --force, and an unchanged grant makes no helper call. A grant whose source is
     now gone is passed too, so the helper removes its old mount. A grant that was attached before
     and is refused now is unmounted and skipped with the refusal. A device or inode that differs
-    from the host identity is skipped with NOT_VISIBLE and unmounted. Such a grant is not retried
-    while its host identity stays the same. Any other failure raises, and the caller reports it
-    without stopping the realm: a services-on realm is stopped only by its `sv` service (FR-081).
+    from the host identity, or a realm that shows fewer mounts below it than the host does, is
+    skipped with NOT_VISIBLE and unmounted. Such a grant is held until its host identity changes, so
+    the next enter costs no helper run while nothing changed. Any other failure raises, and the
+    caller reports it without stopping the realm: a services-on realm is stopped only by its `sv`
+    service (FR-081).
     """
+    runner = run or run_on_host
     decision = _decide(grants, session, admit, mountinfo)
     checked = decision.grants
     forced = [i for i, op in decision.ops if op == "force" and checked[i].identity is None]
@@ -623,8 +794,12 @@ def reattach(
         realm_home=realm_home,
         host_home=host_home,
         helper=helper,
+        run=runner,
     )
-    records, mismatched = _settle(checked, decision.current, decision.ops, rows, decision.reasons)
+    children = _visible_children(podman, container, checked, decision.current, decision.ops, rows)
+    records, mismatched = _settle(
+        checked, decision.current, decision.ops, rows, decision.reasons, children
+    )
     if mismatched:
         _unmount(
             podman,
@@ -635,5 +810,6 @@ def reattach(
             realm_home=realm_home,
             host_home=host_home,
             helper=helper,
+            run=runner,
         )
     return AttachResult(records=records, skipped=_skipped(records, decision.reasons))

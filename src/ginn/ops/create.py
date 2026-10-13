@@ -16,7 +16,9 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   The record is saved again with the container ID, so a crash cannot leave an unnamed container.
 - started: the container starts, and its init process is read.
 - attached: the variable grants are attached (ADR-008 amendment). A failed attach fails the create.
-- user: the realm user is created with the `-K` flags (ADR-006, capabilities.md).
+- user: the realm user is the passwd entry that podman wrote at create from `--passwd-entry`. No
+  `useradd` runs. `getent passwd <uid>` must return that entry exactly, or the create fails with
+  GINN-E-REALM-USER (FR-048, ADR-006 amendment of 2026-10-13, T4.9b).
 - integrated: `refresh` runs once, then the Integration Package Set and its steps (FR-013,
   ADR-011, CL-9). The refresh is not conditional on `refresh_before`, because creation always
   refreshes (ADR-011).
@@ -97,9 +99,7 @@ from ginn.store.paths import OWNED_DIR_MODE
 from ginn.store.records import RealmRecord, RealmStore
 
 ROOT_USER: Final = "0:0"
-"""Package steps and the realm user run as container root (ADR-008, FR-042)."""
-USERADD_FLAGS: Final[tuple[str, ...]] = ("-K", "SUB_UID_COUNT=0", "-K", "SUB_GID_COUNT=0")
-"""No /etc/subuid or /etc/subgid line for the realm user (ADR-006, capabilities.md)."""
+"""Package steps and the realm user check run as container root (ADR-008, FR-042)."""
 RETRY_DELAYS: Final[tuple[float, ...]] = (5.0, 15.0, 45.0)
 """Seconds before retries 1 to 3 of a network failure (FR-120, AS-023)."""
 STOP_TIMEOUT_S: Final = 30
@@ -182,7 +182,7 @@ class _Create:
         self._create_container()
         self._start()
         self._attach()
-        self._make_user()
+        self._check_user()
         self._integrate()
         self._install_with()
         return self._finish()
@@ -325,19 +325,27 @@ class _Create:
         self._skips = share_skipped(grants, plan.session, result)
         self._step("attached")
 
-    def _make_user(self) -> None:
-        # -d names the bound Realm Home, so the passwd home is the host home path (FR-048).
-        argv = [
-            "useradd",
-            *USERADD_FLAGS,
-            "-m",
-            "-d",
-            str(self._request.host_home),
-            "-u",
-            str(self._request.uid),
-            self._plan.user,
-        ]
-        self._exec(argv, step="user", package=False)
+    def _check_user(self) -> None:
+        """Check that the realm user is the passwd entry ginn sent (FR-048, ADR-006 amendment).
+
+        Podman writes the entry at create, from `--passwd-entry` (T4.9b), and ginn runs no
+        `useradd`. The lookup must return that entry exactly. A missing entry (exit 2), a missing
+        getent (exit 127) or a different entry fails the create, and the rollback removes the
+        realm. The uid is the host user's, so it is the lookup key.
+        """
+        expected = self._plan.spec.passwd_entry
+        result = self._podman.exec(
+            self._container_id(), ["getent", "passwd", str(self._request.uid)], user=ROOT_USER
+        )
+        found = result.stdout.strip()
+        if result.exit_code != 0 or found != expected:
+            if result.exit_code != 0:
+                detail = f"getent passwd exited {result.exit_code}"
+            else:
+                detail = f"found {found!r}, expected {expected!r}"
+            err = make("GINN-E-REALM-USER", realm=self._request.name.value, detail=detail)
+            err.details.update({"expected": expected, "found": found, "exit": result.exit_code})
+            raise err
         self._step("user")
 
     def _integrate(self) -> None:
@@ -504,7 +512,6 @@ def create_realm(
 
 
 __all__ = [
-    "USERADD_FLAGS",
     "CreateHooks",
     "CreateRequest",
     "CreateResult",

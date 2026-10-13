@@ -40,7 +40,12 @@ def _require_object(data: object, what: str) -> Mapping[str, object]:
 
 @dataclass(frozen=True)
 class SourceIdentity:
-    """The host identity of a grant's source. `below` lists the mount points under a folder."""
+    """The host identity of a grant's source.
+
+    `below` lists the mount points that hang from the mount the source resolves to and lie under the
+    source (ADR-008, Resolution A). A change in any of them changes the identity, so the next enter
+    attaches the source again.
+    """
 
     dev: int
     ino: int
@@ -66,10 +71,12 @@ class GrantRecord:
 
     `host` and `realm` are absolute, except that a session grant may have an empty `host`, until a
     session binds its realm path. `is_dir` says what the placeholder must be: a folder for a
-    directory source, and an empty file for a socket or a file. `not_visible` is the host identity
-    whose device and inode did not match the attach, so the grant is not retried until the host
-    identity changes (NFR-004). The caller stores the list with `to_dict`, and reads it back with
-    `from_dict`.
+    directory source, and an empty file for a socket or a file.
+
+    `not_visible` is the hold key. It is the host identity read before an attach whose tree did not
+    match it. While the host identity still equals it, the grant is not passed again, so a repeated
+    mismatch costs no helper run at enter. A changed host identity releases it (ADR-008, Resolution
+    A). The caller stores the list with `to_dict`, and reads it back with `from_dict`.
     """
 
     kind: str

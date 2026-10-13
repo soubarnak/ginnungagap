@@ -75,12 +75,26 @@ class _Container:
     state: ContainerState = ContainerState.CREATED
     pid: int = 0
     exit_code: int = 0
+    passwd_entry: str | None = None
+    """The `--passwd-entry` podman writes for the keep-id user. `getent passwd` reads it (T4.9b)."""
 
 
 def _error(code: str, ref: str) -> GinnError:
     if code == "GINN-E-IMAGE-UNVERIFIED":
         return make(code, distro=ref.partition("@")[0])
     return make(code)
+
+
+def _getent_passwd(container: _Container, uid: str) -> ExecResult:
+    """What `getent passwd <uid>` prints in a container: the entry podman wrote, or exit 2.
+
+    Podman writes the `--passwd-entry` verbatim, so the fake answers with that line. A container
+    created without one has no entry for the uid, and getent exits 2 (T4.9b).
+    """
+    entry = container.passwd_entry
+    if entry is not None and entry.split(":")[2] == uid:
+        return ExecResult(0, f"{entry}\n", "")
+    return ExecResult(2, "", "")
 
 
 @dataclass
@@ -195,6 +209,7 @@ class FakePodman:
             name=spec.name,
             image=spec.image_digest_ref,
             labels=dict(spec.labels),
+            passwd_entry=spec.passwd_entry,
         )
         return container_id
 
@@ -304,7 +319,12 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         if self.fail_exec_with is not None:
             raise _error(self.fail_exec_with, container.image)
-        return self.exec_results.get(tuple(argv), ExecResult(0, "", ""))
+        canned = self.exec_results.get(tuple(argv))
+        if canned is not None:
+            return canned  # a test can inject any answer, a mismatched entry included
+        if len(argv) == 3 and tuple(argv[:2]) == ("getent", "passwd"):
+            return _getent_passwd(container, argv[2])
+        return ExecResult(0, "", "")
 
     def exec(
         self,

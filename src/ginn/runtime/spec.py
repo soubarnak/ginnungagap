@@ -14,9 +14,10 @@ What the argv carries, and the decision behind each item (docs/capabilities.md, 
 Basic table, unless a row says otherwise):
 - `--name ginn-<realm>-g<generation>`. A services toggle makes a new generation (ADR-003, FR-083).
 - `--user <uid>:<gid>` with `--userns keep-id`. The ids are the host user's (roadmap, design).
-- `--passwd=false`. Podman would otherwise write a passwd entry for the keep-id user into the realm,
-  and the realm user step (`useradd -u <uid>`, ops/create.py) would then find that uid taken. The
-  user is created by `useradd` alone (ADR-006 amendment of 2026-10-13, T4.4 review).
+- `--passwd-entry <user>:*:<uid>:<gid>:<user>:<home>:<shell>`. Under keep-id, podman writes this
+  entry for the realm user, verbatim (T4.9b measurement). The realm user is that entry: ginn runs
+  no `useradd`, and ops/create.py checks the entry with `getent passwd` (ADR-006 amendment of
+  2026-10-13). The shell is the distribution's login shell, the one `enter` runs (FR-048).
 - `--network host`. Non-Kali realms share the host network namespace (AS-006). Kali is refused
   here, because it needs pasta and NET_RAW (FR-026, FR-027, T10.1).
 - `--http-proxy=false`. Podman does not copy the host's proxy variables into the realm. The proxy
@@ -79,6 +80,9 @@ class RealmSpec:
     `--user` argv value is the realm-side user, which equals the host ids under keep-id. A
     services-on realm later runs as `--user 0:0` (ADR-003), so the two can differ. Only host
     uid 0 is refused (CR-003, OOS-3, OOS-10).
+
+    `user` and `login_shell` make the realm user's passwd entry (`passwd_entry`). `login_shell`
+    is the distribution's login shell (distros/data), which `enter` runs too (FR-048).
     """
 
     name: RealmName
@@ -86,6 +90,8 @@ class RealmSpec:
     image: str
     uid: int
     gid: int
+    user: str
+    login_shell: str
     home: Path
     binds: CreateBinds
     tier: Tier = Tier.BASIC
@@ -100,6 +106,8 @@ class RealmSpec:
         if not isinstance(self.binds, CreateBinds):
             raise TypeError("binds must be CreateBinds from mounts.create_binds")
         require_digest_ref(self.image)
+        # The passwd entry checks its fields (no ":", "$" or newline), so a bad one fails here.
+        realm_passwd_entry(self.user, self.uid, self.gid, self.home, self.login_shell)
         if self.tier is not Tier.BASIC:
             raise NotImplementedError(f"tier {self.tier.value} arrives in M6 (T6.1, T6.2)")
         if self.services:
@@ -133,6 +141,28 @@ class RealmSpec:
             LABEL_GENERATION: str(self.generation),
         }
 
+    @property
+    def passwd_entry(self) -> str:
+        """The realm user's passwd entry: what `--passwd-entry` sends and the user check expects."""
+        return realm_passwd_entry(self.user, self.uid, self.gid, self.home, self.login_shell)
+
+
+def realm_passwd_entry(user: str, uid: int, gid: int, home: Path, login_shell: str) -> str:
+    """The realm user's passwd entry, `<user>:*:<uid>:<gid>:<user>:<home>:<shell>` (T4.9b).
+
+    The `*` password is the locked form, which podman also writes. Podman writes the entry as
+    given under keep-id. A field that holds `:` adds a field, a newline adds a line, and `$` starts
+    a placeholder that podman expands (measured: `$USERNAME` in a path). Nothing is escaped, so such
+    a field, and an empty one, raises ValueError.
+    """
+    values = (user, str(uid), str(gid), str(home), login_shell)
+    for value in values:
+        if value == "" or any(ch in value for ch in ":\n$"):
+            raise ValueError(
+                f"a passwd field must not be empty or hold ':', '$' or a newline: {value!r}"
+            )
+    return f"{user}:*:{uid}:{gid}:{user}:{home}:{login_shell}"
+
 
 def realm_spec(
     name: RealmName,
@@ -140,6 +170,8 @@ def realm_spec(
     *,
     uid: int,
     gid: int,
+    user: str,
+    login_shell: str,
     host_home: Path,
     realm_home: Path,
     owned_paths: Sequence[Path],
@@ -169,6 +201,8 @@ def realm_spec(
         image=pull_reference(distro.value, manifest),
         uid=uid,
         gid=gid,
+        user=user,
+        login_shell=login_shell,
         home=host_home,
         binds=binds,
     )
@@ -182,7 +216,7 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         network="host",
         user=f"{spec.uid}:{spec.gid}",
         userns="keep-id",
-        passwd=False,
+        passwd_entry=spec.passwd_entry,
         http_proxy=False,
         init=True,
         entrypoint_argv=list(KEEP_ALIVE_ENTRYPOINT),

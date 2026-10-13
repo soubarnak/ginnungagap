@@ -57,7 +57,7 @@ These options are added to every Development realm, beyond the base argv.
 | Proc unmask | `--security-opt unmask=/proc/*` | The inner proc mount and `ping_group_range` need the unmasked entries. | S-07e E5b (`ping_group_range` fails without it, rc 126). S-07d M-unmask. S-07 M3 and M4 (narrower values fail). | proven |
 | Seccomp profile | `--security-opt seccomp=<generated profile>` (rule below) | The inner crun calls `sethostname`. The default profile refuses that call without CAP_SYS_ADMIN. | S-07e E3 (default profile: rc 126, EPERM). S-07e E4c (generated profile passes). | proven for `sethostname`. `setdomainname` is not ungated, and it is not needed (S-07e Finding 3). |
 
-The base argv also carries `--runtime crun`, `--userns keep-id`, `--passwd=false`, `--network host` and `--init`. Dated 2026-10-13 (T4.4 review): `--passwd=false` is added, so keep-id writes no passwd entry for the realm user, and the realm user step finds its uid free. Unverified on a host until T4.9. The argv form is in `CreateSpec.to_argv`. The S-07e and S-07f runs used the same options, with `--init-path` pointing at a spike copy of catatonit. The product argv has no `--init-path`. ginn adds no `--cap-add`, and nothing in this table grants a capability.
+The base argv also carries `--runtime crun`, `--userns keep-id`, `--passwd-entry <entry>`, `--network host` and `--init`. Dated 2026-10-13 (T4.9b): `--passwd-entry` carries the realm user, which is the entry podman writes for the keep-id user. `--passwd=false` is never sent, because podman 5.8.8 refuses it on `podman create` (ADR-006 amendment, T4.9b). The argv form is in `CreateSpec.to_argv`. The S-07e and S-07f runs used the same options, with `--init-path` pointing at a spike copy of catatonit. The product argv has no `--init-path`. ginn adds no `--cap-add`, and nothing in this table grants a capability.
 
 ### Realm contents and create-time steps
 
@@ -65,7 +65,7 @@ These steps run inside the realm or in the Realm Home. They do not change the ho
 
 | Item | Change | Why | Evidence | Status |
 |---|---|---|---|---|
-| Realm user | Create the realm user with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -d <host home> -u <uid> <name>` (dated 2026-10-13: `-d <host home>` makes the passwd home the bound Realm Home, FR-048; the create argv carries `--passwd=false`, see ADR-006's amendment of 2026-10-13). No line for the realm user goes into `/etc/subuid` or `/etc/subgid`. | Plain `useradd` adds `dev:100000:65536`. Inner podman then calls newuidmap, which fails without CAP_SYS_ADMIN. | S-07e2 useradd check (plain useradd writes both lines, `-K` writes none). S-07e2 E1d-u1 (plain useradd: rc 125, newuidmap EPERM). S-07e2 E1d-u2 (`-K`: passes). S-07f check 4 (`-K` writes no line on Debian, Arch and Fedora 44). S-07f check 5 (plain useradd wrote `dev:100000:65536` on Debian and Arch, and `dev:524288:65536` on Fedora 44; the cause was not checked). | proven on Debian stable: AC-3 passes with podman inside (S-07f). Arch and Fedora 44: `-K` writes no line, no podman run. |
+| Realm user | The realm user is podman's keep-id passwd entry. It is sent at create as `--passwd-entry <user>:*:<uid>:<gid>:<user>:<host home>:<login shell>` (T4.9b, ADR-006 amendment). ginn runs no `useradd`. After start, `getent passwd <uid>` must return that entry exactly, or the create fails with GINN-E-REALM-USER and rolls back. Nothing writes a line for the realm user into `/etc/subuid` or `/etc/subgid`. | Plain `useradd` adds `dev:100000:65536`, and inner podman then calls newuidmap, which fails without CAP_SYS_ADMIN. Without the entry flag, podman writes `:/:/bin/sh`, which is neither the host home nor the login shell. | T4.9 section 4.3 (`--passwd=false` refused on podman 5.8.8, exit 125; the injected entry). T4.9b: on debian, gate items d-create-product-argv (entry, one uid line, host home, no subuid or subgid line) and d-control-without-passwd-entry (injected `:/:/bin/sh`) pass. S-07e2 and S-07f show the subuid cause. | exercised on debian (T4.9b). Arch and Fedora: `getent` and the entry are unverified. |
 | Inner storage config | ginn writes `~/.config/containers/storage.conf` in the Realm Home. Overlay form: `[storage]` with `driver = "overlay"`, then `[storage.options.overlay]` with `mount_program = "/usr/bin/fuse-overlayfs"` and `ignore_chown_errors = "true"`. | Single-ID mode needs `ignore_chown_errors`. Without it, the image unpack fails on `/etc/shadow`. | S-07e2 E1d (pass; its image had the subordinate lines removed by `sed`). S-07e2 E1d-u2 (pass with `-K`). S-07e2 E1d-nokey (no key: lchown EINVAL, rc 125). | proven on Debian stable, podman 5.4.2 inside |
 | Inner storage config, vfs form | The same file uses `driver = "vfs"` and `[storage.options.vfs]` with `ignore_chown_errors = "true"`. | An alternative that does not need fuse-overlayfs. Not the default. | S-07e2 E1d-vfs and E1d-u2-vfs (pass). S-07e2 E1d-vfs-nokey (fails without the key). | proven as an alternative. Disk and speed cost not measured. |
 | Inner container config | ginn writes `~/.config/containers/containers.conf` with `[engine]`, `cgroup_manager = "cgroupfs"` and `events_logger = "file"`. | Pins two choices that podman otherwise infers. S-07f showed that podman infers `cgroupManager=cgroupfs` and `eventLogger=file` in a services-off realm. | S-07f cases B and D pass without the file (`podman info` reports the same two values in all four cases). S-07e2 (same file as S-07e). | written; pins choices podman otherwise infers; required for services-on realms; untested until M7. Not needed for AC-3 (S-07f cases B and D). |
@@ -91,7 +91,7 @@ These options and actions must not appear in a Development realm.
 | No `--privileged`. | NFR-SEC-001, CR-003 | Refused by the argv builder. |
 | No `seccomp=unconfined`. | It disables the whole filter, not the one call that needs relief. | S-07d G1 passes, as an informative run only. |
 | No setcap, no libcap package, no change to a helper binary. | They conflict with FR-013 and CR-007 (CL-8). The single-ID set does not need them. | S-07e E1o-realm (helpers unused), S-07e2 E1d-u2 (no setcap, no libcap). |
-| No `/etc/subuid` or `/etc/subgid` line for the realm user. | A line makes inner podman call newuidmap, which fails. | S-07e E0 (rc 125). S-07e2 E1d-u1 (rc 125). |
+| No `/etc/subuid` or `/etc/subgid` line for the realm user. | A line makes inner podman call newuidmap, which fails. | S-07e E0 (rc 125). S-07e2 E1d-u1 (rc 125). T4.9b: none after create on debian (gate item d-create-product-argv, `subid_lines_for_user` 0). |
 | No host ACL on `/dev/kvm`. | keep-groups already opens the device. An ACL would need a root step. | S-07c K1. |
 | No `label=disable`. | The reference host has no SELinux, and S-07 notes that the option may be inert there. The passing runs do not use it. | S-07e E1o and S-07 C3c-g2 (pass without it). An SELinux host is untested. |
 | No `no-new-privileges`. | NNP is compatible with the nested-podman set (S-07f case C). It is not adopted because setuid and file-capability workflows inside a realm are untested: sudo, su, passwd, ping, and the FR-043 AUR flow where makepkg escalates. Revisit in M6 with that list. | S-07f case C passes (outer rc 0, inner rc 0). S-07 M5 (old set: blocks the setuid helper). |
@@ -110,13 +110,13 @@ These options and actions must not appear in a Development realm.
 
 The single-ID design adds no package, no helper file change and no setcap step. Its realm-side changes are these:
 
-- The realm user is created with the `-K` flags. That is part of realm creation (T4.4), not a package addition.
+- The realm user is the keep-id passwd entry (T4.9b). It is not a package addition, and no `useradd` runs.
 - The two config files go into the Realm Home. They are ginn-owned data (DR-006).
 
 Two points stay open:
 
 - The image must contain podman and its helpers. A realm can get them only as requested packages, which CR-007 allows. FR-013 AC-1 allows no other additions, so ginn does not add podman by itself. S-07e2 left the request path to the user.
-- The `-K` user creation is not in the Install Manifest. FR-021 names only the Install Manifest for replay. The rebuild must repeat the creation step by design (T8.3). The SRS does not say so.
+- The realm user entry is not in the Install Manifest. FR-021 names only the Install Manifest for replay. The rebuild must send the same entry by design (T8.3). The SRS does not say so.
 
 CL-8 is withdrawn for the setcap and libcap steps. See `docs/clarifications.md`.
 
@@ -155,9 +155,9 @@ The M6 host test `tests/integration/test_tiers_real.py` must prove these. The sp
 - The Realm package route for podman inside the realm (CR-007). Open. The user decides how the request is made (CL-8).
 - KVM ioctls, not only open() (S-07c K1, S-07f).
 - `setdomainname` through `--domainname` in an inner container, under the sethostname-only profile (S-07e follow-up 2).
-- A realm created as Basic and later changed to Development. The `-K` rule applies at create time. It does not remove a subordinate line that already exists. Not tested.
+- A realm created as Basic and later changed to Development. No line for the realm user is written at create time (T4.9b). A later change to the realm user is not tested.
 - The disk and speed cost of the vfs form, if it is chosen.
 - Other distributions (Arch, Fedora, Kali) and other podman versions. Tested so far: a Debian stable image with podman 5.4.2 inside, and podman 5.8.8 outside.
-- Rebuild repeats the `-K` user creation (T8.3).
+- Rebuild sends the same passwd entry (T8.3).
 - The Basic grant under crun, with and without `keep-groups`. S-06 ran on runc only (ADR-012, pending T6.6).
 - The CDI `env` field for `LD_LIBRARY_PATH` (pending T6.6, ADR-012).

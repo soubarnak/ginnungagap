@@ -5,10 +5,10 @@ Run with `GINN_INTEGRATION=1 pytest tests/integration -q` on a Void host. The ga
 verdicts are in spikes/results/T4.9-lifecycle-real.md. Each item writes one JSON line to the file
 named by GINN_T49_RESULTS (see conftest.py).
 
-Gate 3 (no package install, no refresh): the gate realm is created with
-`CreateHooks(integrate=False)`.
-Its realm user step (`useradd`) is skipped there and measured on its own by test_d, because that
-step fails on this podman (keep-id writes the passwd entry itself).
+Gate 3 (no package install, no refresh): the gate realm is created with the product create and
+`CreateHooks(integrate=False)`. The realm user is podman's keep-id passwd entry, sent with
+`--passwd-entry` (T4.9b, ADR-006 amendment of 2026-10-13). test_d measures that entry, and the
+control without the flag. The product create checks the entry with `getent` itself.
 
 `admit` is "admit everything" in the attach calls of this file. The DR-004 rules are unit-tested in
 tests/unit/test_runtime_attach.py. The sources here sit under the temp base, and a mount root needs
@@ -31,21 +31,25 @@ from typing import Any
 
 import pytest
 
+from ginn.distros import load as load_distro
 from ginn.domain import DistroId, RealmName, RealmState
 from ginn.domain.grants import GrantRecord
 from ginn.domain.paths import Mode
 from ginn.errors import GinnError
-from ginn.ops import create as create_mod
-from ginn.ops.create import USERADD_FLAGS, CreateHooks, CreateRequest, create_realm
+from ginn.ops.create import CreateHooks, CreateRequest, create_realm
 from ginn.ops.delete import delete_realm
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
-from ginn.podman.adapter import CreateSpec
-from ginn.podman.cli import PodmanCli
 from ginn.runtime import attach as attach_mod
-from ginn.runtime.attach import AttachResult, attach_at_start, needs_reattach, reattach
+from ginn.runtime.attach import (
+    AttachResult,
+    attach_at_start,
+    needs_reattach,
+    reattach,
+    run_helper,
+)
 from ginn.runtime.enter import EnterHooks, enter_realm
 from ginn.runtime.env import SessionEnv
-from ginn.runtime.spec import create_spec, realm_spec
+from ginn.runtime.spec import RealmSpec, create_spec, realm_spec
 from ginn.store.records import RealmRecord, RealmStore
 from tests.integration.conftest import (
     DISTRO,
@@ -115,26 +119,20 @@ class Box:
     cid: str
 
 
-class _PasswdTrue:
-    """A PodmanCli that sends `passwd=True` to `create`, so no `--passwd=false` reaches podman.
-
-    `podman create` on podman 5.8.8 has no `--passwd` flag (only `podman run` has one). test_d
-    shows that, so this wrapper builds the realm with the same argv otherwise.
-    """
-
-    def __init__(self, inner: PodmanCli) -> None:
-        self._inner = inner
-
-    def create(self, spec: CreateSpec) -> str:
-        return self._inner.create(dataclasses.replace(spec, passwd=True))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-
-def _skip_user_step(self: create_mod._Create) -> None:
-    """Gate 3 seam: the useradd step is measured by test_d on its own. This skips it."""
-    self._step("user")
+def _realm_spec(host: Host, name: str, home: Path) -> RealmSpec:
+    """The product spec of a Basic, services-off gate realm, with this host's realm user (T4.9b)."""
+    return realm_spec(
+        RealmName(name),
+        DistroId(DISTRO),
+        uid=host.uid,
+        gid=host.gid,
+        user=host.user,
+        login_shell=load_distro(DISTRO).shell,
+        host_home=host.host_home,
+        realm_home=home,
+        owned_paths=host.paths.all_owned_roots(),
+        env={},
+    )
 
 
 def _admit_all(grant: GrantRecord) -> None:
@@ -237,6 +235,21 @@ def pause_pid(host: Host) -> int:
     return pid
 
 
+def host_mount(host: Host, target: Path, tag: str) -> None:
+    """A writable FUSE mount in the host namespace, unmounted at teardown (host.fuse).
+
+    The helper copies the host's mount table, so the realm sees this mount after an attach. Its
+    lower, upper and work directories are under the temp base.
+    """
+    area = host.base / "hostmounts" / tag
+    dirs = {name: area / name for name in ("lower", "upper", "work")}
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    options = f"lowerdir={dirs['lower']},upperdir={dirs['upper']},workdir={dirs['work']}"
+    run_tool([tool("fuse-overlayfs"), "-o", options, str(target)])
+    host.fuse.append(target)
+
+
 def pause_mount(host: Host, target: Path) -> None:
     """A tmpfs mounted inside the store's namespace (nsenter -t <pause>), as the owner uid may."""
     pid = pause_pid(host)
@@ -275,17 +288,7 @@ def box(host: Host) -> Iterator[Box]:
     home = host.realm_home(BOX)
     home.mkdir(parents=True, exist_ok=True)
     home.chmod(0o700)
-    spec = realm_spec(
-        RealmName(BOX),
-        DistroId(DISTRO),
-        uid=host.uid,
-        gid=host.gid,
-        host_home=host.host_home,
-        realm_home=home,
-        owned_paths=host.paths.all_owned_roots(),
-        env={},
-    )
-    cid = host.cli.create(dataclasses.replace(create_spec(spec), passwd=True))
+    cid = host.cli.create(create_spec(_realm_spec(host, BOX, home)))
     host.cli.start(cid)
     yield Box(BOX, cid)
 
@@ -309,14 +312,12 @@ def gate(host: Host) -> Iterator[Gate]:
     image_present_before = host.cli.image_exists(host.image)
     mark = len(host.cli.history)
     started = time.perf_counter()
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(create_mod._Create, "_make_user", _skip_user_step)
-        result = create_realm(
-            host.env,
-            _PasswdTrue(host.cli),  # type: ignore[arg-type]
-            request,
-            hooks=CreateHooks(helper=host.helper, integrate=False, exists=_gate_exists),
-        )
+    result = create_realm(
+        host.env,
+        host.cli,
+        request,
+        hooks=CreateHooks(helper=host.helper, integrate=False, exists=_gate_exists),
+    )
     elapsed = time.perf_counter() - started
     pulled = any("pull" in argv for argv in host.cli.history[mark:])
     yield Gate(GATE, result.record, elapsed, image_present_before, pulled, removed_image)
@@ -360,72 +361,116 @@ def test_env_podman_runtime(host: Host) -> None:
     assert info.oci_runtime == "crun"
 
 
-# ------------------------------------------------------------------- d: create and keep-id passwd
+# ------------------------------------------------------------------- d: create and realm user
+
+
+def _realm_user_facts(host: Host, cid: str) -> dict[str, Any]:
+    """The realm user as a started realm shows it: the passwd entry, its uid lines, HOME, subid."""
+    uid, gid = str(host.uid), str(host.gid)
+    return {
+        "getent_passwd": sh(host, cid, 'getent passwd "$1"', uid).stdout.strip(),
+        "passwd_lines_with_uid": sh(
+            host, cid, 'grep -c "^[^:]*:[^:]*:$1:" /etc/passwd', uid
+        ).stdout,
+        "getent_group": sh(host, cid, 'getent group "$1"', gid).stdout.strip(),
+        "home_seen_by_exec": host.cli.exec(
+            cid, ["/bin/sh", "-c", 'echo "$HOME"'], user=f"{uid}:{gid}"
+        ).stdout.strip(),
+        "subid_lines_for_user": sh(
+            host, cid, 'grep -c "^$1:" /etc/subuid /etc/subgid', host.user
+        ).stdout.split(),
+    }
+
+
+def _drop_realm(host: Host, name: str) -> None:
+    """Delete a realm this test created, through the product delete. The image stays pulled."""
+    if RealmStore(host.paths, time.time).exists(RealmName(name)):
+        delete_realm(host.env, host.cli, RealmName(name), purge_home=False, confirm=lambda _p: True)
 
 
 @pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-048")
 def test_d_create_with_the_product_argv(host: Host) -> None:
-    """The product create with its own argv. Only integrate=False is set (Gate 3)."""
+    """The product create, with its own argv (T4.9b). Only integrate=False is set (Gate 3).
+
+    The realm user is the entry podman writes from `--passwd-entry`, and the create checks it with
+    getent. The same entry is read again from the started realm, with its uid lines and HOME.
+    """
+    name = "rej"
     request = CreateRequest(
-        name=RealmName("rej"),
+        name=RealmName(name),
         distro=DISTRO,
         uid=host.uid,
         gid=host.gid,
         host_home=host.host_home,
         host_env=host.session_env(),
     )
-    facts: dict[str, Any] = {}
-    with gate_item(host.results, "d-create-product-argv", facts):
-        try:
-            create_realm(
-                host.env, host.cli, request, hooks=CreateHooks(helper=host.helper, integrate=False)
-            )
-        except GinnError as err:
-            facts.update(code=err.code, details={k: str(v)[:300] for k, v in err.details.items()})
-            raise
-        finally:
+    shell = load_distro(DISTRO).shell
+    expected = f"{host.user}:*:{host.uid}:{host.gid}:{host.user}:{host.host_home}:{shell}"
+    facts: dict[str, Any] = {"expected_entry": expected}
+    try:
+        with gate_item(host.results, "d-create-product-argv", facts):
+            try:
+                create_realm(
+                    host.env,
+                    host.cli,
+                    request,
+                    hooks=CreateHooks(helper=host.helper, integrate=False, exists=_gate_exists),
+                )
+            except GinnError as err:
+                details = {k: str(v)[:300] for k, v in err.details.items()}
+                facts.update(code=err.code, details=details)
+                raise
             # The argv the product create sent, read back from the recorded podman calls.
-            facts["argv_has_passwd_false"] = any(
-                "--passwd=false" in argv and "create" in argv for argv in host.cli.history
+            create_argv = [argv for argv in host.cli.history if "create" in argv][-1]
+            facts.update(
+                created=True,
+                create_argv_has_passwd_false=any(
+                    arg.startswith("--passwd=") for arg in create_argv
+                ),
+                create_argv_passwd_entry=(
+                    create_argv[create_argv.index("--passwd-entry") + 1]
+                    if "--passwd-entry" in create_argv
+                    else None
+                ),
             )
-        facts["created"] = True
+            assert not facts["create_argv_has_passwd_false"], "podman create got --passwd=false"
+            assert facts["create_argv_passwd_entry"] == expected
+            cid = _container_of(host, name)
+            host.cli.start(cid)
+            try:
+                facts.update(_realm_user_facts(host, cid))
+                assert facts["getent_passwd"] == expected
+                assert facts["passwd_lines_with_uid"].strip() == "1", facts["passwd_lines_with_uid"]
+                assert facts["home_seen_by_exec"] == host.host_home.as_posix()
+            finally:
+                host.cli.stop(cid, 30)
+    finally:
+        _drop_realm(host, name)
 
 
-@pytest.mark.fr("FR-010")
-def test_d_keep_id_passwd_injection_and_useradd(host: Host) -> None:
-    """Keep-id writes a passwd entry for uid 1000 at create. The realm useradd then clashes."""
+@pytest.mark.fr("FR-048")
+def test_d_control_without_the_passwd_entry(host: Host) -> None:
+    """Control for (d): the same spec with no `--passwd-entry`. Podman writes its own entry.
+
+    That entry has the home `/` and the shell `/bin/sh`, not the host home and the distribution's
+    login shell. The product create would refuse it at the user check, so the flag is needed.
+    """
     name = "ctl2"
     home = host.realm_home(name)
     home.mkdir(parents=True, exist_ok=True)
     home.chmod(0o700)
-    spec = realm_spec(
-        RealmName(name),
-        DistroId(DISTRO),
-        uid=host.uid,
-        gid=host.gid,
-        host_home=host.host_home,
-        realm_home=home,
-        owned_paths=host.paths.all_owned_roots(),
-        env={},
-    )
-    cid = host.cli.create(dataclasses.replace(create_spec(spec), passwd=True))
-    facts: dict[str, Any] = {"passwd_false_flag": "unknown to podman create (test_d-create)"}
+    spec = dataclasses.replace(create_spec(_realm_spec(host, name, home)), passwd_entry=None)
+    cid = host.cli.create(spec)
+    facts: dict[str, Any] = {"passwd_entry_sent": False}
     try:
-        host.cli.start(cid)
-        passwd = sh(host, cid, 'getent passwd "$1"', str(host.uid))
-        facts["passwd_before_useradd"] = passwd.stdout.strip()
-        facts["group_entries"] = sh(host, cid, 'getent group "$1"', str(host.uid)).stdout.strip()
-        argv = ["useradd", *USERADD_FLAGS, "-m", "-d", str(host.host_home), "-u", str(host.uid),
-                host.user]
-        step = host.cli.exec(cid, argv, user=ROOT_USER)
-        facts.update(
-            useradd_argv=argv,
-            useradd_exit=step.exit_code,
-            useradd_stderr=step.stderr.strip()[-300:],
-            passwd_after_useradd=sh(host, cid, 'getent passwd "$1"', str(host.uid)).stdout.strip(),
-        )
-        with gate_item(host.results, "d-useradd-under-keep-id", facts):
-            assert step.exit_code == 0, f"useradd exit {step.exit_code}"
+        with gate_item(host.results, "d-control-without-passwd-entry", facts):
+            host.cli.start(cid)
+            injected = sh(host, cid, 'getent passwd "$1"', str(host.uid)).stdout.strip()
+            fields = injected.split(":")
+            facts.update(injected_entry=injected, injected_fields=fields[5:])
+            assert fields[0] == host.user and fields[2:4] == [str(host.uid), str(host.gid)]
+            assert fields[5:] == ["/", "/bin/sh"]
     finally:
         with contextlib.suppress(GinnError):
             host.cli.rm(cid, force=True)
@@ -521,17 +566,8 @@ def test_c_control_without_init_stop_waits_for_the_timeout(host: Host) -> None:
     home = host.realm_home(name)
     home.mkdir(parents=True, exist_ok=True)
     home.chmod(0o700)
-    spec = realm_spec(
-        RealmName(name),
-        DistroId(DISTRO),
-        uid=host.uid,
-        gid=host.gid,
-        host_home=host.host_home,
-        realm_home=home,
-        owned_paths=host.paths.all_owned_roots(),
-        env={},
-    )
-    cid = host.cli.create(dataclasses.replace(create_spec(spec), passwd=True, init=False))
+    spec = dataclasses.replace(create_spec(_realm_spec(host, name, home)), init=False)
+    cid = host.cli.create(spec)
     try:
         host.cli.start(cid)
         t0 = time.perf_counter()
@@ -737,12 +773,16 @@ def test_a_read_only_file_and_directory(host: Host, box: Box) -> None:
 
 @pytest.mark.fr("FR-061")
 def test_a_read_only_reaches_a_child_mount_recursively(host: Host, box: Box) -> None:
-    """AT_RECURSIVE clones a child mount, and mount_setattr(AT_RECURSIVE) makes it read-only."""
+    """AT_RECURSIVE clones a child mount, and mount_setattr(AT_RECURSIVE) makes it read-only.
+
+    The child is a writable FUSE mount made in the host namespace, so the copy the helper clones
+    from contains it (ADR-008 amendment, 2026-10-13). Before the attach it is writable.
+    """
     src = host.base / "att" / "a3"
     child = src / "d" / "child"
     child.mkdir(parents=True)
     run = RUN_DIR.format(uid=host.uid)
-    pause_mount(host, child)
+    host_mount(host, child, "a3")
     facts: dict[str, Any] = {}
     with gate_item(host.results, "a-recursive-ro-child-mount", facts):
         attach(host, box, [grant(src / "d", f"{run}/ginn-ro-tree", mode="ro", is_dir=True)])
@@ -766,7 +806,7 @@ def test_a_compare_and_skip_without_force(host: Host, box: Box) -> None:
     pid = str(host.cli.inspect(box.cid).pid)
     facts: dict[str, Any] = {}
     with gate_item(host.results, "a-compare-and-skip-no-force", facts):
-        again = host.cli.unshare([host.helper, pid, str(src / "c.txt"), realm])
+        again = run_helper([host.helper, pid, str(src / "c.txt"), realm])
         facts.update(
             exit=again.exit_code,
             stdout=again.stdout.strip(),
@@ -810,7 +850,7 @@ def test_a_busy_directory_grant_is_detached_with_mnt_detach(host: Host, box: Box
     (src / "d" / "sub").mkdir(parents=True)
     (src / "d" / "busy.txt").write_text("busy-v1\n", encoding="utf-8")
     realm = f"{RUN_DIR.format(uid=host.uid)}/ginn-busy"
-    pause_mount(host, src / "d" / "sub")
+    host_mount(host, src / "d" / "sub", "a5")
     facts: dict[str, Any] = {}
     pids: list[str] = []
     try:
@@ -819,6 +859,7 @@ def test_a_busy_directory_grant_is_detached_with_mnt_detach(host: Host, box: Box
             pids.append(holder(host, box, 'cd "$1/sub" && exec 3<"$1/busy.txt"; sleep 600', realm))
             # Replace the host folder with a new inode under the same path, so the attach is forced.
             os.replace(src / "d", src / "d.old")
+            host.fuse.append(src / "d.old" / "sub")  # the submount moved with its folder
             (src / "d").mkdir()
             (src / "d" / "new.txt").write_text("new-v2\n", encoding="utf-8")
             asked, result = lazy(host, box, first.records)
@@ -844,7 +885,7 @@ def test_a_busy_directory_under_plain_umount2_control(host: Host, box: Box) -> N
     (src / "d" / "sub").mkdir(parents=True)
     (src / "d" / "busy.txt").write_text("busy-v1\n", encoding="utf-8")
     realm = f"{RUN_DIR.format(uid=host.uid)}/ginn-busy-ctl"
-    pause_mount(host, src / "d" / "sub")
+    host_mount(host, src / "d" / "sub", "a8")
     attach(host, box, [grant(src / "d", realm, is_dir=True)])
     pid = holder(host, box, 'cd "$1/sub" && exec 3<"$1/busy.txt"; sleep 600', realm)
     init_pid = str(host.cli.inspect(box.cid).pid)
@@ -884,7 +925,9 @@ def test_a_busy_directory_under_plain_umount2_control(host: Host, box: Box) -> N
 
 @pytest.mark.fr("FR-061")
 def test_a_plain_umount2_file_with_an_open_descriptor(host: Host, box: Box) -> None:
-    """ADR-008 open question: a file grant with an open descriptor, under a plain umount2."""
+    """A file grant with an open descriptor is re-attached. Plain umount2 gave EBUSY here (T4.9
+    section 4.1), so every re-attach detaches with MNT_DETACH (ADR-008 amendment, 2026-10-13).
+    The realm must then read the new contents."""
     src = host.base / "att" / "a6"
     src.mkdir(parents=True)
     (src / "h.txt").write_text("h-v1\n", encoding="utf-8")
@@ -897,8 +940,11 @@ def test_a_plain_umount2_file_with_an_open_descriptor(host: Host, box: Box) -> N
         tmp.write_text("h-v2\n", encoding="utf-8")
         os.replace(tmp, src / "h.txt")
         facts.update(reattach_outcome(host, box, first.records))
+        seen = sh(host, box.cid, 'cat "$1"', realm, user="1000:1000").stdout.strip()
+        facts["realm_sees"] = seen
         with gate_item(host.results, "a-plain-umount2-file-open-fd", facts):
             assert facts["raised"] is None, f"the helper refused the file grant: {facts}"
+            assert seen == "h-v2", "the realm does not read the new file"
     finally:
         unholder(host, box, pid)
 
@@ -945,10 +991,12 @@ def test_a_plain_umount2_socket_with_a_connected_descriptor(host: Host, box: Box
 
 @pytest.mark.fr("FR-064")
 def test_b_drive_mounted_on_the_host_after_start(host: Host, box: Box) -> None:
-    """A FUSE drive under a mount root, mounted in the host namespace after the pause exists.
+    """A FUSE drive under a mount root, mounted in the host namespace after the realm started.
 
-    ADR-008 (T4.9 notes): host mounts are private, so a negative result is expected and is a FAIL
-    that escalates. The realm root is the host mount root, which the attach runs with admit=all.
+    ADR-008 amendment (2026-10-13): the helper clones the sources from a copy of the host's mount
+    table, so the drive is in the copy, and the next enter re-attaches the root (the identity lists
+    the mounts below it). The store's own namespace does not see the drive (recorded below), and
+    that is not needed any more.
     """
     root = host.mount_root
     drive = root / "drive"
@@ -980,12 +1028,16 @@ def test_b_drive_mounted_on_the_host_after_start(host: Host, box: Box) -> None:
             admit=_admit_all,
             helper=host.helper,
         )
-        outcome = {"raised": None, "records": len(again.records)}
+        outcome = {"raised": None, "records": len(again.records), "skipped": len(again.skipped)}
         asked_after = needs_reattach(again.records, SessionEnv(env={}, binds=[]), admit=_admit_all)
     except GinnError as err:
         outcome = {"raised": err.code, "detail": str(err.details)[:200]}
     realm_sees = sh(
-        host, box.cid, 'cat "$1/drive/drive-marker.txt" 2>&1; echo rc=$?', realm_root
+        host,
+        box.cid,
+        'cat "$1/drive/drive-marker.txt" 2>&1; echo rc=$?',
+        realm_root,
+        user="1000:1000",
     ).stdout
     facts: dict[str, Any] = {
         "host_mountinfo_has_drive": host_sees,
@@ -996,33 +1048,43 @@ def test_b_drive_mounted_on_the_host_after_start(host: Host, box: Box) -> None:
         "realm_output": realm_sees.strip()[:200],
     }
     with gate_item(host.results, "b-drive-mounted-on-host-after-start", facts):
-        assert host_sees and store_sees == "SEEN", "the host drive is not in the store namespace"
+        assert host_sees and asked, "the drive did not change the identity of the root"
+        assert outcome.get("raised") is None, f"the re-attach failed: {outcome}"
         assert realm_sees.splitlines()[:1] == ["drive"], "the realm does not see the drive"
+        assert asked_after is False, "the identity still differs after the re-attach"
 
 
 @pytest.mark.fr("FR-066")
-def test_b_drive_mounted_in_the_store_namespace_reaches_the_realm(host: Host, box: Box) -> None:
-    """Positive control: a mount made in the store namespace, carried by the helper with --force."""
+def test_b_mount_made_in_the_store_namespace_is_not_copied(host: Host, box: Box) -> None:
+    """Negative control (ADR-008 amendment, 2026-10-13): a mount that exists only in the store's
+    namespace is not in the copy of the host table, so the realm does not see it. Recorded as a
+    measurement, not a pass: the attach reads the host, and the store is not a source."""
     root = host.mount_root
     ctl = root / "drive2"
     ctl.mkdir(parents=True, exist_ok=True)
     pause_mount(host, ctl)
     host.cli.unshare([tool("sh"), "-c", f"echo ctl > {ctl}/ctl-marker.txt"])
     pid = str(host.cli.inspect(box.cid).pid)
-    helper_run = host.cli.unshare([host.helper, pid, "--force", str(root), "/run/media/user"])
-    realm_sees = sh(host, box.cid, "cat /run/media/user/drive2/ctl-marker.txt 2>&1; echo rc=$?")
+    helper_run = run_helper([host.helper, pid, "--force", str(root), "/run/media/user"])
+    realm_sees = sh(
+        host,
+        box.cid,
+        "cat /run/media/user/drive2/ctl-marker.txt 2>&1; echo rc=$?",
+        user="1000:1000",
+    )
     facts: dict[str, Any] = {
         "helper_exit": helper_run.exit_code,
         "helper_stderr": helper_run.stderr[:200],
         "realm_output": realm_sees.stdout.strip(),
     }
-    with gate_item(host.results, "b-drive-store-namespace-control", facts):
-        assert helper_run.exit_code == 0
-        assert realm_sees.stdout.splitlines()[0] == "ctl"
+    verdict = "MEASURED" if helper_run.exit_code == 0 else "FAIL"
+    host.results.record("b-store-namespace-mount-not-copied", verdict, **facts)
+    assert helper_run.exit_code == 0
+    assert "rc=0" not in realm_sees.stdout
 
 
 @pytest.mark.fr("FR-061")
-def test_g_rebind_flags_pass_through_podman_unshare(host: Host, box: Box) -> None:
+def test_g_rebind_flags_are_parsed_by_the_helper(host: Host, box: Box) -> None:
     run = RUN_DIR.format(uid=host.uid)
     src = host.base / "att" / "g"
     src.mkdir(parents=True)
@@ -1030,8 +1092,8 @@ def test_g_rebind_flags_pass_through_podman_unshare(host: Host, box: Box) -> Non
     realm = f"{run}/ginn-unmount-me"
     first = attach(host, box, [grant(src / "u.txt", realm)])
     pid = str(host.cli.inspect(box.cid).pid)
-    usage = host.cli.unshare([host.helper, pid, "--unmount", realm, "--ro"])
-    unmount = host.cli.unshare([host.helper, pid, "--unmount", realm])
+    usage = run_helper([host.helper, pid, "--unmount", realm, "--ro"])
+    unmount = run_helper([host.helper, pid, "--unmount", realm])
     facts: dict[str, Any] = {
         "unmount_with_ro_exit": usage.exit_code,
         "unmount_exit": unmount.exit_code,
@@ -1096,9 +1158,7 @@ def test_musl_smoke_create_start_exec_delete(host: Host) -> None:
         host_env=host.session_env(),
     )
     hooks = CreateHooks(helper=host.helper, integrate=False)
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(create_mod._Create, "_make_user", _skip_user_step)
-        create_realm(host.env, _PasswdTrue(host.cli), request, hooks=hooks)  # type: ignore[arg-type]
+    create_realm(host.env, host.cli, request, hooks=hooks)
     try:
         start_realm(
             host.env,

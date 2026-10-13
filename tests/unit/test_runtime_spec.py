@@ -14,14 +14,17 @@ from pathlib import Path
 import pytest
 
 from ginn.distros import available
+from ginn.distros import load as load_distro
 from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
 from ginn.podman.adapter import CreateSpec
+from ginn.runtime._enter_plan import login_argv
 from ginn.runtime.mounts import Skipped, create_binds
-from ginn.runtime.spec import RealmSpec, create_argv, create_spec, realm_spec
+from ginn.runtime.spec import RealmSpec, create_argv, create_spec, realm_passwd_entry, realm_spec
 from ginn.trust import pull_reference
 
 HOME = Path("/home/alice")
+USER = "alice"
 OWNED = Path("/home/alice/.local/share/ginn")
 REALM_HOME = OWNED / "homes" / "arch"
 UID = 1000
@@ -71,7 +74,8 @@ GOLDEN_ARCH = [
     "1000:1000",
     "--userns",
     "keep-id",
-    "--passwd=false",
+    "--passwd-entry",
+    "alice:*:1000:1000:alice:/home/alice:/bin/bash",
     "--network",
     "host",
     "--http-proxy=false",
@@ -132,6 +136,8 @@ def make_spec(
         image=image,
         uid=uid,
         gid=gid,
+        user=USER,
+        login_shell=load_distro(distro).shell,
         home=HOME,
         binds=binds,
         tier=tier,
@@ -163,6 +169,8 @@ def spec_from_binds(
         image=DIGEST,
         uid=uid,
         gid=GID,
+        user=USER,
+        login_shell="/bin/bash",
         home=home,
         binds=binds,
     )
@@ -192,7 +200,9 @@ def assert_basic_argv(argv: list[str]) -> None:
     assert "--security-opt" not in argv
     assert "--env" not in argv
     assert "--http-proxy=false" in argv
-    assert "--passwd=false" in argv
+    assert "--passwd=false" not in argv
+    entry = argv[argv.index("--passwd-entry") + 1]
+    assert entry.startswith("alice:*:") and entry.endswith(":alice:/home/alice:/bin/bash")
     assert "--init" in argv
     assert "--init-path" not in argv
     assert not any(arg.startswith("--systemd") for arg in argv)
@@ -278,6 +288,8 @@ def test_image_is_the_digest_the_trust_manifest_pins() -> None:
         DistroId("arch"),
         uid=UID,
         gid=GID,
+        user=USER,
+        login_shell="/bin/bash",
         host_home=HOME,
         realm_home=REALM_HOME,
         owned_paths=[OWNED],
@@ -401,6 +413,43 @@ def test_the_spec_refuses_binds_that_did_not_come_from_create_binds() -> None:
             image=DIGEST,
             uid=UID,
             gid=GID,
+            user=USER,
+            login_shell="/bin/bash",
             home=HOME,
             binds=Skipped("share", FONTS, "missing"),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.fr("FR-048")
+def test_the_passwd_entry_names_the_host_user_its_ids_home_and_shell() -> None:
+    """The entry has the form `<user>:*:<uid>:<gid>:<user>:<home>:<shell>` (T4.9b)."""
+    entry = make_spec().passwd_entry
+    assert entry == "alice:*:1000:1000:alice:/home/alice:/bin/bash"
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.parametrize("distro", NON_KALI)
+def test_the_passwd_entry_shell_is_the_one_enter_runs(distro: str) -> None:
+    """`enter` runs the distribution's login shell (FR-048). The entry names the same shell."""
+    assert make_spec(distro).passwd_entry.split(":")[6] == login_argv(load_distro(distro).shell)[0]
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("user", "a:b"),
+        ("user", "a$b"),
+        ("user", ""),
+        ("login_shell", "/bin/sh\n"),
+        ("home", "/home/a:b"),
+        ("home", "/home/a$USERNAMEb"),
+        ("home", "/home/a\nb"),
+    ],
+)
+def test_a_passwd_field_podman_would_rewrite_is_refused(field: str, bad: str) -> None:
+    values = {"user": USER, "login_shell": "/bin/bash", "home": str(HOME)}
+    values[field] = bad
+    with pytest.raises(ValueError, match="passwd field"):
+        realm_passwd_entry(values["user"], UID, GID, Path(values["home"]), values["login_shell"])

@@ -6,6 +6,7 @@
 - Amended: 2026-10-12 (D3). FR-062 AC-3 passes with the decided set (S-07f case A; scope in Assumptions). The no-new-privileges reason and the containers.conf rationale are recorded in the Decision.
 - Amended: 2026-10-12 (D5; the count is corrected in D6). Three statements are corrected to match S-07: the SELinux scope, what podman chose with containers.conf absent, and the XDG_RUNTIME_DIR pin disclosure. No decision changes.
 - Amended: 2026-10-13 (T4.4 review). The realm user is created with `useradd -m -d <host home>`, and the create argv carries `--passwd=false`, so keep-id writes no passwd entry for the realm user. See the section "Amendment (2026-10-13): realm user and keep-id passwd". Unverified until the T4.9 host gate.
+- Amended: 2026-10-13 (T4.9b). The `useradd` step and `--passwd=false` of the 2026-10-13 (T4.4 review) amendment are superseded. The realm user is podman's keep-id passwd entry, sent with `--passwd-entry` and checked with `getent passwd`. Measured on podman 5.8.8. See the section "Amendment (2026-10-13, T4.9b): the realm user is the passwd entry".
 - Amended: 2026-10-12 (D8). The FR-085 re-run is named by its roadmap task (T7.7, conditional on CL-2), and T10.6 carries the deferral if FR-085 stays deferred. The earlier "after M7" wording named no task. No decision changes.
 
 ## Context
@@ -56,7 +57,7 @@ Open conflict: the setcap step and the libcap package are withdrawn (CL-8). The 
 
 A Development realm gets no added capability. ginn adds no `--cap-add`, no SYS_ADMIN, and no `--privileged`. Each Development realm carries these outer options, beyond the base argv: `--device /dev/fuse`, `--device /dev/net/tun`, `--device /dev/kvm` (only when the host has `/dev/kvm`, IR-040), `--group-add keep-groups`, `--security-opt unmask=/proc/*` and `--security-opt seccomp=<generated profile>`. ginn never sets `no-new-privileges`. NNP is compatible with the nested-podman set (S-07f case C). It is not adopted because setuid and file-capability workflows inside a realm are untested: sudo, su, passwd, ping, and the FR-043 AUR flow where makepkg escalates. Revisit in M6 with that list. ginn does not set `label=disable`.
 
-The realm user is created without subordinate IDs. ginn runs `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, so the realm's `/etc/subuid` and `/etc/subgid` get no line for it. Inside the realm, podman then uses the single mapping `0 1000 1`.
+The realm user is created without subordinate IDs. ginn runs `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0`, so the realm's `/etc/subuid` and `/etc/subgid` get no line for it. Inside the realm, podman then uses the single mapping `0 1000 1`. (T4.9b, 2026-10-13: the `useradd` above is superseded. Nothing writes a subuid or subgid line for the realm user. See the amendment.)
 
 ginn writes two files into the Realm Home, `~/.config/containers/storage.conf` and `~/.config/containers/containers.conf`. The storage file uses the overlay driver with fuse-overlayfs and `ignore_chown_errors = "true"`. The vfs form also passes and is kept as an alternative. The containers file sets `cgroup_manager = "cgroupfs"` and `events_logger = "file"`. These pin choices. With the file absent, S-07f (cases B and D, services-off) reported `cgroupManager=cgroupfs` and `eventLogger=file`, and the image's system containers.conf sets neither key, so podman chose both values itself. AC-3 passes without the file (cases B and D), so the file is not needed for AC-3. For services-on realms the file is expected to be needed, because podman would otherwise infer systemd and journald, and nested rootless podman has no user systemd to talk to. That expectation is not tested. Status: pins choices podman made by itself in a services-off realm (S-07f); expected to be needed for services-on realms; untested until M7. The user runs the inner podman with no `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt`.
 
@@ -70,10 +71,40 @@ The enumerated set is in `docs/capabilities.md`. `security/caps.py` (T6.1) must 
 
 This amendment keeps the Decision and adds two things to the realm user step, which is part of realm creation (T4.4).
 
-- The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -d <host home> -u <uid> <name>`. The `-d` names the Realm Home that is bound at the host home path (FR-048), so the passwd home and the bound home are the same path.
-- The create argv carries `--passwd=false` (`CreateSpec.passwd`, set by `runtime/spec.py`). Podman's keep-id mode otherwise writes an entry for the host uid into the realm's /etc/passwd. The user step then runs `useradd -u <uid>` on a uid that is already taken, and it fails on a real host. The S-07 spikes did not show this, because their images already held the `dev` user before the container started, so keep-id had no entry to add. ginn runs `useradd` after start, so the two conflict.
+- SUPERSEDED (T4.9b): The realm user is created with `useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -d <host home> -u <uid> <name>`. The `-d` names the Realm Home that is bound at the host home path (FR-048), so the passwd home and the bound home are the same path.
+- SUPERSEDED (T4.9b): The create argv carries `--passwd=false` (`CreateSpec.passwd`, set by `runtime/spec.py`). Podman's keep-id mode otherwise writes an entry for the host uid into the realm's /etc/passwd. The user step then runs `useradd -u <uid>` on a uid that is already taken, and it fails on a real host. The S-07 spikes did not show this, because their images already held the `dev` user before the container started, so keep-id had no entry to add. ginn runs `useradd` after start, so the two conflict.
 
-Not verified. The clash is inferred from the podman and useradd behaviour above, and it is not shown on a host. The T4.9 gate runs the user step with and without `--passwd=false` (roadmap T4.9, dated 2026-10-13).
+Verified on podman 5.8.8 by the T4.9 host gate (`spikes/results/T4.9-lifecycle-real.md` section 4.3): `podman create` refuses `--passwd=false`, keep-id writes the entry, and the `useradd` step clashes. The fix is the next amendment.
+
+## Amendment (2026-10-13, T4.9b): the realm user is the passwd entry
+
+This amendment supersedes the `useradd` step and the `--passwd=false` flag of the amendment above. The rest of the Decision stands. It replaces the user step with podman's own keep-id entry, which the T4.9 host gate showed to be the only entry that exists (`spikes/results/T4.9-lifecycle-real.md` section 4.3). The measurements are in `spikes/results/T4.9b-realm-user.md`.
+
+Measured on podman 5.8.8, rootless, isolated storage, with the pinned debian image:
+
+- `podman create --passwd=false` exits 125 (`unknown flag: --passwd`). `--passwd` is a `podman run` flag. `podman create` has `--passwd-entry` and `--group-entry`.
+- Under `--userns keep-id`, podman writes `soubarna:*:1000:1000:Soubarna:/:/bin/sh` for the host user, with the group entry `soubarna:x:1000:soubarna`. The home is `/`.
+- A `--passwd-entry` is written verbatim. Podman expands `$USERNAME`, `$UID`, `$GID`, `$NAME` (the host GECOS) and `$HOME` wherever they occur, including in a home path. Nothing escapes `$`, so ginn refuses `$`, `:` and a newline in a field.
+- The exec `HOME` follows the entry's home when the create environment does not set `HOME`. ginn's create argv sets no `HOME`.
+- The debian image has `/bin/bash` and `/usr/bin/getent`. Arch and Fedora are unverified.
+- `useradd -m -d <dir>` on an existing directory copies no `/etc/skel` file. The Realm Home already exists when the step runs, so the step never copied one, and dropping it changes no file there.
+- Plain `useradd` writes `probe:100000:65536` to `/etc/subuid` and `/etc/subgid`. With no `useradd`, no line is written for the realm user (gate item `d-create-product-argv`: none).
+
+Decision:
+
+1. The realm user is the entry podman writes for the keep-id user, sent with `--passwd-entry <user>:*:<uid>:<gid>:<user>:<host home>:<login shell>`. The login shell is the distribution's `shell` in `distros/data`, the one `enter` runs (FR-048). The ids are the host user's.
+2. `CreateSpec.passwd` is replaced by `passwd_entry`. ginn never sends `--passwd=false`. The adapter refuses an entry without keep-id, an entry that is not seven colon fields, and an entry with `$` or a newline.
+3. `ops/create.py` runs no `useradd`. After start and attach, it runs `getent passwd <uid>` as container root, in the journal step `user` (unchanged). The output must equal the entry sent. Exit 2 (no entry), exit 127 (no getent) and any other entry fail the create with GINN-E-REALM-USER, and the rollback removes the realm.
+4. A host home or user name that the entry cannot carry is refused before any podman call, with GINN-E-REALM-USER.
+5. The `-K` flags go with `useradd`. The rule of this ADR still holds: nothing writes a line for the realm user into `/etc/subuid` or `/etc/subgid`.
+
+Consequences:
+
+- Positive: the realm user no longer depends on a `useradd` that clashes with podman's entry. The check is exact, and a mismatch fails the create.
+- Negative: a host home with `$`, `:` or a newline cannot host a realm. No escape was measured, and none is attempted. The user moves the home.
+- Verified for debian only (the T4.9b gate). Arch and Fedora: `getent` and the login shell are unverified.
+- Not measured: when the image already has a user with the host uid, keep-id may write no entry, and `getent passwd <uid>` then returns the image's line on every create. The check fails the create with GINN-E-REALM-USER, and its remedy says to use another distro or report a bug. Debian has no uid 1000 (measured in T4.9b). Arch and Fedora are not measured here.
+- The T6.7 roadmap line and the rebuild (T8.3) follow this section, not the `useradd -K` text above.
 
 ## Alternatives considered
 
@@ -91,10 +122,10 @@ Not verified. The clash is inferred from the podman and useradd behaviour above,
 - Negative: nested containers see one ID. `chown` to any other ID fails with EINVAL (S-07e E6). Images that need other IDs run as root inside a nested container. This is a known limitation. A user who needs a full ID map inside the realm needs a different design, and that design is not decided.
 - Negative: the seccomp profile lets a realm process call `sethostname` without CAP_SYS_ADMIN. The kernel still checks the UTS namespace. The realm cannot change its own outer hostname (S-07d U1). The change is still a change to the host's filter, so it is a documented rule, not a loose setting.
 - The code must not add a capability for any Development option. It must not use `seccomp=unconfined`, `--privileged` or `no-new-privileges`.
-- The code must create the realm user with the `-K` flags. It must not write a subordinate line for that user. The rebuild (T8.3) must repeat the same creation step. A realm changed to Development after create needs its own check. That check was not tested.
+- The code must write no subordinate line for the realm user, and it runs no `useradd` for it (T4.9b). The rebuild (T8.3) must send the same passwd entry. A realm changed to Development after create needs its own check. That check was not tested.
 - The code must write the Realm Home config files. It must not pass `--root`, `--runroot`, `--tmpdir`, `--storage-driver` or `--storage-opt` to inner podman.
 - The seccomp source is a host file. On Void it belongs to the `containers-common` package (checked in the xbps file list on 2026-10-12), and the ginn package template declares that package. A dedicated GINN error code is needed for a missing source or entry. None exists in `docs/errors.md`, and one is requested for the errors owner, as ADR-004 did for the runtime directory.
-- Follow-up tasks: T6.1 (`security/caps.py`), T6.7 (realm user creation with `-K`, the Realm Home config files with the containers.conf pin, and the seccomp profile), T8.3 (the rebuild repeats the user creation), the M6 test `test_tiers_real.py` (the open items in `docs/capabilities.md`), and CL-8 (withdrawn; the podman request route is still open).
+- Follow-up tasks: T6.1 (`security/caps.py`), T6.7 (the realm user as the passwd entry, T4.9b, the Realm Home config files with the containers.conf pin, and the seccomp profile), T8.3 (the rebuild sends the same passwd entry), the M6 test `test_tiers_real.py` (the open items in `docs/capabilities.md`), and CL-8 (withdrawn; the podman request route is still open).
 - FR-085 (Docker in a realm) is deferred. Its options are not in this decision. Re-run S-07 Part B in T7.7, which has services on (conditional on CL-2). If FR-085 stays deferred, T10.6 lists it in the release notes (gate 8). CL-2 records the open question.
 - The Launch path reservation that the ADR index gave to ADR-006 now sits at ADR-010. See the ADR index.
 
@@ -105,8 +136,8 @@ Not verified. The clash is inferred from the podman and useradd behaviour above,
 | NFR-SEC-002 | Decides the enumerated Development set and the seccomp rule. `docs/capabilities.md` lists it, and T6.1 tests it. |
 | FR-062 | AC-3 passes with the decided set (S-07f case A, scope in Assumptions), with no SYS_ADMIN and no setcap. AC-4 open() passes under crun with keep-groups (S-07c K1, S-07f cases A to D). KVM ioctls and the Arch and Fedora inner runs are pending in M6. |
 | FR-013 | ginn adds no package in the Development tier. The libcap package is withdrawn. Podman comes in only as a requested package (CR-007). |
-| CR-007 | The realm changes are the user creation at create time, and the Realm Home config files, which are ginn-owned data. Podman enters as a requested package. No helper file changes. |
-| FR-021 | The rebuild must repeat the user creation step. FR-021 names only the Install Manifest, so the replay is a design choice (T8.3). The SRS does not say it. |
+| CR-007 | The realm changes are the passwd entry at create time (T4.9b), and the Realm Home config files, which are ginn-owned data. Podman enters as a requested package. No helper file changes. |
+| FR-021 | The rebuild must send the same realm user entry (T4.9b). FR-021 names only the Install Manifest, so the replay is a design choice (T8.3). The SRS does not say it. |
 | NFR-SEC-001 | Realms are never privileged. The argv builder refuses `--privileged`. |
 | CR-003 | Rootless only. No capability is added to the host. |
 | CR-002 | Host platform is Void. The decision omits `label=disable` because the reference host has no SELinux (S-07). An SELinux host is untested. |
@@ -117,3 +148,5 @@ Not verified. The clash is inferred from the podman and useradd behaviour above,
 | NFR-040 | Errors map to catalogue codes. A dedicated code for the seccomp case is requested. |
 | AS-005 | Host Setup still adds the outer subordinate range, which the outer map needs. A nested level under this design draws on no range. |
 | FR-085 | Deferred (Should). Its options are not decided here. CL-2 records the deferral. |
+| FR-010 | The create checks the realm user with `getent passwd` after start, and rolls back on a mismatch (GINN-E-REALM-USER, T4.9b). |
+| FR-048 | The realm user is the host user, with the host home and the login shell `enter` runs, as the passwd entry (T4.9b). |

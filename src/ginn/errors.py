@@ -8,8 +8,9 @@ GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), 
 (NFR-060), GINN-E-SUBID-LOCKED (FR-001), GINN-E-TRUST-DATA (DR-040), GINN-E-NO-SUCH-USER
 (FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009),
 GINN-E-SETUP-BUSY (FR-001), GINN-E-UNDO-CGROUP-BUSY, GINN-E-UNDO-SERVICE-RUNNING and
-GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020) and GINN-E-ATTACH-FAILED
-(ADR-008). `source` cites the requirement that defines the failure.
+GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH-FAILED
+(ADR-008) and GINN-E-REALM-USER (FR-048, ADR-006). `source` cites the requirement that defines the
+failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -371,6 +372,17 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="ADR-008 (T4.10 notes); FR-061, FR-066 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-REALM-USER",
+        exit_code=1,
+        summary="the realm user of '{realm}' cannot be set up: {detail}",
+        remedy="if the detail shows a line for the host uid that is not the expected entry, the "
+        "image already has that uid, and keep-id may then write no entry: use a different distro, "
+        "or report a bug; if the host home holds '$', ':' or a newline, move it; if the host user "
+        "name is not a realm user name, a retry cannot change it, so report it; otherwise retry "
+        "the create, and report the detail if it repeats",
+        source="FR-048, ADR-006 amendment of 2026-10-13 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-REALM-STATE",
         exit_code=4,
         summary="realm '{realm}' is {state}; {action} needs it {allowed}",
@@ -399,7 +411,11 @@ CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}
 
 EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (0, "success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions."),
-    (1, "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED"),
+    (
+        1,
+        "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, "
+        "GINN-E-REALM-USER",
+    ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
     (

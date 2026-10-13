@@ -90,7 +90,7 @@ class CreateSpec:
     hostname: str | None = None
     user: str | None = None
     userns: str | None = None
-    passwd: bool = True
+    passwd_entry: str | None = None
     init: bool = False
     init_path: str | None = None
     systemd: str | None = None
@@ -122,9 +122,9 @@ class CreateSpec:
         _opt(argv, "--hostname", self.hostname)
         _opt(argv, "--user", self.user)
         _opt(argv, "--userns", self.userns)
-        if not self.passwd:
-            # False keeps podman from writing a passwd entry for the keep-id user (T4.4 review).
-            argv.append("--passwd=false")
+        # Podman writes this entry verbatim for the keep-id user (T4.9b). `--passwd=false` is not
+        # a `podman create` flag on 5.8.8, so it is never sent.
+        _opt(argv, "--passwd-entry", self.passwd_entry)
         argv += ["--network", self.network]
         if self.http_proxy is not None:
             # False keeps the host's proxy variables out of the realm (T4.1, ADR-004 amendment).
@@ -174,6 +174,8 @@ def _check_spec(spec: CreateSpec) -> None:
         raise ValueError(f"user must be uid:gid, got {spec.user!r}")
     if spec.userns not in (None, "keep-id"):
         raise ValueError(f"userns must be 'keep-id' or None, got {spec.userns!r}")
+    if spec.passwd_entry is not None:
+        _check_passwd_entry(spec.passwd_entry, keep_id=spec.userns == "keep-id")
     if spec.network not in _NETWORKS and not spec.network.startswith("pasta:"):
         raise ValueError(f"network must be host, pasta or pasta:<opts>, got {spec.network!r}")
     if spec.systemd not in (None, "always"):
@@ -188,6 +190,19 @@ def _check_spec(spec: CreateSpec) -> None:
             raise ValueError(f"label name {key!r} is not valid")
     for mount in spec.mounts:
         _check_mount(mount)
+
+
+def _check_passwd_entry(entry: str, *, keep_id: bool) -> None:
+    """Refuse an entry that podman would rewrite, or that the realm user does not use (T4.9b).
+
+    Podman expands `$NAME` placeholders anywhere in the entry (measured: `$USERNAME` in a home
+    path). A newline or a field count other than seven would change the file. The entry belongs to
+    the keep-id realm user only.
+    """
+    if not keep_id:
+        raise ValueError("passwd_entry belongs to the keep-id realm user: use keep-id")
+    if "$" in entry or "\n" in entry or len(entry.split(":")) != 7:
+        raise ValueError(f"passwd entry needs seven colon fields, no $ and no newline: {entry!r}")
 
 
 def _check_mount(mount: Mount) -> None:
@@ -295,9 +310,11 @@ class Podman(Protocol):
         ...
 
     def unshare(self, argv: Sequence[str]) -> ExecResult:
-        """Run `argv` under `podman unshare`, in the store's user namespace (ADR-008).
+        """Run `argv` under `podman unshare`, in the store's user namespace.
 
-        The command's own status comes back in the result and is not raised. The first word must
-        be an absolute path. Podman's own failure (exit 125) raises GinnError.
+        No attach path calls it: the grant helper runs on the host (ADR-008, Resolution A). The host
+        gate and the test cleanup use it. The command's own status comes back in the result and is
+        not raised. The first word must be an absolute path. Podman's own failure (exit 125) raises
+        GinnError.
         """
         ...

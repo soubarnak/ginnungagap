@@ -29,7 +29,6 @@ from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import (
-    USERADD_FLAGS,
     CreateHooks,
     CreateRequest,
     CreateResult,
@@ -330,15 +329,15 @@ def test_pull_then_create_then_start_then_root_steps_then_stop_in_that_order(
     assert fake.ops().count("pull") == 1
     assert fake.exec_users == ["0:0", "0:0", "0:0"]
     assert execs(fake) == [
-        ["useradd", *USERADD_FLAGS, "-m", "-d", str(home), "-u", str(UID), USER],
+        ["getent", "passwd", str(UID)],
         ["apt-get", "update"],
         ["apt-get", "--yes", "--no-install-recommends", "install", "ca-certificates", "locales"],
     ]
 
 
 @pytest.mark.fr("FR-010")
-@pytest.mark.fr("FR-013")
-def test_the_realm_user_is_created_with_the_keyless_useradd_argv(
+@pytest.mark.fr("FR-048")
+def test_the_realm_user_is_the_passwd_entry_podman_writes_and_no_useradd_runs(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -347,19 +346,11 @@ def test_the_realm_user_is_created_with_the_keyless_useradd_argv(
     mountinfo: Path,
 ) -> None:
     create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
-    assert execs(fake)[0] == [
-        "useradd",
-        "-K",
-        "SUB_UID_COUNT=0",
-        "-K",
-        "SUB_GID_COUNT=0",
-        "-m",
-        "-d",
-        str(home),
-        "-u",
-        "1000",
-        "alice",
-    ]
+    argv = fake.created_specs[0].to_argv()
+    assert argv[argv.index("--passwd-entry") + 1] == f"alice:*:1000:1000:alice:{home}:/bin/bash"
+    assert "--passwd=false" not in argv
+    assert not any("useradd" in token for call in execs(fake) for token in call)
+    assert execs(fake)[0] == ["getent", "passwd", str(UID)]
     assert fake.exec_users[0] == "0:0"
 
 
@@ -582,7 +573,7 @@ def test_requests_the_code_does_not_support_are_refused_with_no_side_effect(
 
 @pytest.mark.fr("FR-010")
 @pytest.mark.fr("NFR-SEC-005")
-def test_a_user_name_that_useradd_cannot_take_is_refused_before_any_podman_call(
+def test_a_user_name_that_a_realm_user_cannot_take_is_refused_before_any_podman_call(
     paths: OwnedPaths,
     host: Path,
     fake: ScriptedPodman,
@@ -594,8 +585,9 @@ def test_a_user_name_that_useradd_cannot_take_is_refused_before_any_podman_call(
     bad_env = OpEnv.for_paths(paths, "-rf /", root_dir=host, clock=FakeClock())
     with pytest.raises(GinnError) as caught:
         create_realm(bad_env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
-    assert caught.value.code == "GINN-E-INTERNAL"
-    assert caught.value.details["user"] == "-rf /"
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert caught.value.details["realm"] == "debian"
+    assert "'-rf /'" in caught.value.details["detail"]
     assert fake.calls == []
 
 
@@ -942,24 +934,59 @@ def test_an_image_that_was_already_present_is_kept_when_the_create_fails(
 
 
 @pytest.mark.fr("FR-040")
-@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-048")
 @pytest.mark.fr("DR-018")
-def test_a_failed_realm_user_step_is_an_internal_error_and_rolls_back(
+@pytest.mark.parametrize(
+    ("answer", "fragment"),
+    [
+        (ExecResult(2, "", ""), "getent passwd exited 2"),
+        (ExecResult(127, "", ""), "getent passwd exited 127"),
+        # The entry podman writes when no --passwd-entry is sent: home / and shell /bin/sh.
+        (
+            ExecResult(0, "alice:*:1000:1000:Alice:/:/bin/sh\n", ""),
+            "found 'alice:*:1000:1000:Alice:/:/bin/sh'",
+        ),
+    ],
+)
+def test_a_realm_user_that_is_not_the_entry_sent_is_refused_and_rolls_back(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
     tmp_path: Path,
     sleeps: list[float],
     mountinfo: Path,
+    answer: ExecResult,
+    fragment: str,
 ) -> None:
-    argv = ["useradd", *USERADD_FLAGS, "-m", "-d", str(home), "-u", "1000", USER]
-    fake.exec_results[tuple(argv)] = ExecResult(9, "", "useradd: user 'alice' exists\n")
+    fake.exec_results[("getent", "passwd", str(UID))] = answer
     with pytest.raises(GinnError) as caught:
         create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
-    assert caught.value.code == "GINN-E-INTERNAL"
-    assert caught.value.details["step"] == "user"
-    assert caught.value.details["detail"] == "useradd: user 'alice' exists"
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert caught.value.details["realm"] == "debian"
+    assert fragment in caught.value.details["detail"]
+    assert caught.value.details["expected"] == f"alice:*:1000:1000:alice:{home}:/bin/bash"
     assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("name", ["a$b", "a:b", "a\nb"])
+def test_a_host_home_the_passwd_entry_cannot_carry_is_refused_before_any_podman_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    name: str,
+) -> None:
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env, fake, request(home.parent / name), hooks=hooks_for(tmp_path, sleeps, mountinfo)
+        )
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert "must not be empty or hold" in caught.value.details["detail"]
+    assert fake.calls == []
 
 
 @pytest.mark.fr("FR-012")

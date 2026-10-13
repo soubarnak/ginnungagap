@@ -69,6 +69,12 @@ echo data > "$S/src/f"
 "$H" "$C" --unmount "$S/realm/f"
 echo "EMPTY $(nsenter -t "$C" -m cat "$S/realm/f" | wc -c | tr -d ' ')"
 """
+SYMLINK_BODY = """\
+echo data > "$S/src/f"
+ln -s "$S/src/f" "$S/src/link"
+rc=0; "$H" "$C" "$S/src/link" "$S/realm/f" 2>"$S/err" || rc=$?; echo "RC $rc"
+cat "$S/err"
+"""
 
 
 def _compiler() -> str | None:
@@ -174,7 +180,7 @@ def test_a_pid_with_no_namespace_fails_before_any_mount(helper: Path) -> None:
         check=False,
     )
     assert run.returncode == 1, run.stderr
-    assert "/proc/2147483000/ns/mnt" in run.stderr
+    assert "/proc/2147483000: No such file" in run.stderr
 
 
 @pytest.mark.fr("FR-066")
@@ -224,3 +230,17 @@ def test_an_unmount_group_detaches_the_realm_path(helper: Path, tmp_path: Path) 
     assert run.returncode == 0, run.stderr
     assert "0 missing" in run.stdout.splitlines()
     assert "EMPTY 0" in run.stdout.splitlines()
+
+
+@pytest.mark.fr("FR-061")
+@needs_namespaces
+def test_a_symbolic_link_source_is_refused_and_nothing_is_attached(
+    helper: Path, tmp_path: Path
+) -> None:
+    """The source is opened with RESOLVE_NO_SYMLINKS (ADR-008, Resolution A). The caller passes
+    resolved paths, so a link here is a race or a bug, and the helper refuses it."""
+    run = _run_namespace(helper, tmp_path, SYMLINK_BODY)
+    assert run.returncode == 0, run.stderr
+    assert "RC 1" in run.stdout.splitlines()
+    assert "Too many levels of symbolic links" in run.stdout
+    assert "attached" not in run.stdout

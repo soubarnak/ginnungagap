@@ -58,6 +58,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-DISTRO-DATA": 70,
     "GINN-E-TRUST-DATA": 70,
     "GINN-E-ATTACH-FAILED": 1,
+    "GINN-E-REALM-USER": 1,
     "GINN-E-RECOVERY-PENDING": 4,
     "GINN-W-HOST-CHANGED": 0,
     "GINN-W-REPLAY-MISSING": 0,
@@ -210,6 +211,19 @@ def test_host_not_set_up_names_doctor_then_host_setup_then_the_supervisor() -> N
     assert err.remedy.startswith("run 'ginn doctor'; if Host Setup has not run")
     assert "sudo ginn host-setup --user <name>" in err.remedy
     assert "sudo sv status ginn-<user>" in err.remedy
+    assert "\n" not in err.remedy
+
+
+@pytest.mark.fr("FR-048")
+def test_realm_user_remedy_names_the_image_uid_case() -> None:
+    """keep-id may write no entry when the image already has the host uid (T4.9b, unmeasured)."""
+    err = make("GINN-E-REALM-USER", realm="debian", detail="found 'x:*:1000:1000:x:/:/bin/sh'")
+    assert err.message == (
+        "the realm user of 'debian' cannot be set up: found 'x:*:1000:1000:x:/:/bin/sh'"
+    )
+    assert "image already has that uid" in err.remedy
+    assert "use a different distro, or report a bug" in err.remedy
+    assert "retry" in err.remedy
     assert "\n" not in err.remedy
 
 

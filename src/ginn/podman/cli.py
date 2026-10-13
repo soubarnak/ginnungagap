@@ -648,11 +648,12 @@ class PodmanCli:
         return result.stdout
 
     def unshare(self, argv: Sequence[str]) -> ExecResult:
-        """Run `argv` under `podman unshare` and return its status (ADR-008, ADR-002).
+        """Run `argv` under `podman unshare` and return its status (ADR-002, ADR-004).
 
-        The command's status is not raised: the rebind helper reports its own failures with exit 1
-        or 2. Podman's own failure, exit 125, is mapped to a catalogue code. The first word must
-        be an absolute path, so no later word can be read as a podman option (NFR-SEC-005).
+        No attach path calls this: the grant helper runs on the host (ADR-008, Resolution A). The
+        host gate and the test cleanup use it. The command's status is not raised. Podman's own
+        failure, exit 125, is mapped to a catalogue code. The first word must be an absolute path,
+        so no later word can be read as a podman option (NFR-SEC-005).
         """
         if not argv or not argv[0].startswith("/"):
             raise ValueError("unshare needs an absolute command path first (NFR-SEC-005)")
