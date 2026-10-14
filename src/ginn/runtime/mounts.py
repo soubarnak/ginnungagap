@@ -577,10 +577,16 @@ def _internal_refusal(
     It must lie under the runtime root, resolved, and be a socket (`S_ISSOCK`, lstat of the
     resolved target), so no other Owned Path, such as the state root or the audit log, can stand
     in for it. Every other rule of `path_refusal` still applies, with no Owned Path list.
+
+    The relay's socket and its lock directory are ginn's too, but they are not clients' sockets:
+    a bind of either one would hand a container the relay's control (ADR-014). So they are refused
+    by name, before the socket test.
     """
     root = Path(os.path.realpath(runtime_root))
     if root not in target.parents:
         return "not under the ginn runtime root (ADR-008)"
+    if _is_exec_relay_path(target, root):
+        return "the exec relay's socket or lock directory, which only ginn uses (ADR-014)"
     if not _is_socket(target):
         return "not a socket, and the ginn runtime root holds only ginn's sockets (ADR-008)"
     return path_refusal(target, env=env, home=home, owned_paths=(), mode=mode)
@@ -592,6 +598,15 @@ def _is_socket(path: Path) -> bool:
         return stat.S_ISSOCK(os.lstat(path).st_mode)
     except OSError:
         return False
+
+
+def _is_exec_relay_path(target: Path, root: Path) -> bool:
+    """True for the relay's socket, `<root>/exec.sock`, and the lock directory and all below it."""
+    # Imported here: services/exec_relay reaches this module through runtime/spec (a cycle).
+    from ginn.services.exec_relay import LOCK_DIR_NAME, SOCKET_NAME
+
+    lock_dir = root / LOCK_DIR_NAME
+    return target == root / SOCKET_NAME or target == lock_dir or lock_dir in target.parents
 
 
 def _session_parents(realm: str, uid: int) -> tuple[str, ...]:

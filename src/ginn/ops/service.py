@@ -22,6 +22,7 @@ give-up. Only the record move and its audit entry go through ops/_mutating.py (D
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -39,6 +40,7 @@ from ginn.ops.security_ops import leave_agent, reconcile_proxy
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
 from ginn.services import autostart
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import (
     WAIT_HELPER,
     conmon_pidfile,
@@ -198,7 +200,12 @@ def finish_service(
     if exit_code == 0:
         if not rebuilding:
             _record_stopped(env, name, exit_code, signal_no, warnings)
+        # A clean stop clears the crash count, so the count is cleared before the relay is synced:
+        # a failed sync must not leave stale crashes to count toward a give-up (FR-081).
         crash_log(env.paths, name).unlink(missing_ok=True)
+        notice = _sync_relay(env.paths)  # NFR-001: the relay follows a realm that stopped (ADR-014)
+        if notice is not None:
+            _finish_notice(notice, warnings)
         return ServiceExit.STOPPED
     log = crash_log(env.paths, name)
     stamps, give_up = note_crash(read_crashes(log), env.clock())
@@ -213,7 +220,41 @@ def finish_service(
     log.unlink(missing_ok=True)
     if not rebuilding:
         _record_failed(env, name, exit_code, signal_no)
+    notice = _sync_relay(env.paths)  # NFR-001: a realm given up is no longer running (ADR-014)
+    if notice is not None:
+        _finish_notice(notice, warnings)
     return ServiceExit.GAVE_UP
+
+
+def _sync_relay(paths: OwnedPaths, podman: Podman | None = None) -> GinnWarning | None:
+    """Sync the relay after an operation that has been recorded, and return a failure (ADR-014).
+
+    The outcome is already recorded, so a failed sync does not change it. The failure comes back as
+    a GINN-W-RELAY-SYNC warning, and the next sync retries it.
+    """
+    try:
+        sync_exec_service(paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the outcome is recorded, so the failure is a warning
+        return relay_failure(exc)
+    return None
+
+
+def _finish_notice(notice: GinnWarning, warnings: list[GinnWarning] | None) -> None:
+    """Pass a finish's warning to its caller, which prints it; with no list, write it to stderr.
+
+    The CLI passes a list, so the warning is printed as every other warning is. A finish with no
+    list has no user, so its stderr is the runit log of the service (FR-081).
+    """
+    if warnings is not None:
+        warnings.append(notice)
+    else:
+        _runit_log(notice)
+
+
+def _runit_log(notice: GinnWarning) -> None:
+    """Write a warning to stderr as the CLI's text output does. A finish has no user, so its
+    stderr is the runit log of the service (FR-081)."""
+    sys.stderr.write(f"{notice.code}: {notice.message}\n  fix: {notice.remedy}\n")
 
 
 def _rebuilding(env: OpEnv, name: RealmName) -> bool:
@@ -234,6 +275,7 @@ def set_services_mode(
     *,
     on: bool,
     warnings: list[GinnWarning] | None = None,
+    podman: Podman | None = None,
 ) -> RealmRecord:
     """`ginn services <realm> on|off`: set the services mode (FR-083, ADR-003). Return the record.
 
@@ -253,6 +295,9 @@ def set_services_mode(
     Setting the mode the realm already has is a no-op: the record is returned and nothing is
     written. A realm that is neither stopped nor running is refused with GINN-E-REALM-STATE before
     any write. The change's GINN-W-REBUILD-PENDING notice is appended to `warnings` (CL-19).
+
+    The relay service follows the change at once (ADR-014). `podman` is the adapter whose podman
+    command the service renders, and None applies only the running state of an installed service.
     """
     store = RealmStore(env.paths, env.clock)
     current = store.load(name)  # GINN-E-NO-SUCH-REALM before any audit entry
@@ -260,8 +305,13 @@ def set_services_mode(
         return current
     with mutating(env, "services", name, {"services": on}) as mutation:
         record = _services_body(env, store, name, on, mutation)
+    # After the journal entry is finished: a body error would roll the change back, and a relay
+    # failure must not fail a change that is already saved (ADR-014, the _mutating.py contract).
+    notice = _sync_relay(env.paths, podman)
     if warnings is not None:
         warnings.extend(mutation.warnings)
+        if notice is not None:
+            warnings.append(notice)
     return record
 
 

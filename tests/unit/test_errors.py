@@ -104,6 +104,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-REBUILD-DEFERRED": 0,
     "GINN-W-REBUILD-PENDING": 0,
     "GINN-W-RELAY-ORPHAN": 0,
+    "GINN-W-RELAY-SYNC": 0,
 }
 
 

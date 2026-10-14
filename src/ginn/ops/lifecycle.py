@@ -153,6 +153,7 @@ from ginn.runtime.spec import LABEL_REALM
 from ginn.security import agent
 from ginn.security.caps import option_keys
 from ginn.services import autostart, supervisor
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.supervisor import SupervisorHooks
 from ginn.store._time import utc_from_epoch, utc_iso
 from ginn.store.locks import realm_lock
@@ -730,6 +731,13 @@ def start_realm(
     if not user.host_home.is_absolute():
         raise ValueError(f"host home must be absolute, not {user.host_home}")
     if current.state is RealmState.RUNNING and _running(podman, name, current.container_id):
+        if current.services_at_create:
+            # A running realm needs no start, but its relay is synced, so a relay that is down comes
+            # back (ADR-014, NFR-001). A failure is a warning, and the start still succeeds.
+            early: list[GinnWarning] = []
+            _sync_relay_noted(env, podman, early)
+            if warnings is not None:
+                warnings.extend(early)
         return current
     if current.state is RealmState.RUNNING and not current.services_at_create:
         _settle_idle_stop(env, podman, name)
@@ -749,6 +757,9 @@ def start_realm(
             env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
         )
         started = start_through_sv(env, podman, name, hooks)
+        # The realm reads running now. The relay comes up before the sync below, which execs from
+        # the session, so it is up before any exec the start needs (ADR-014, NFR-001).
+        _sync_relay_noted(env, podman, notices)
         if rebuilt:
             notices.extend(_sync_rebuilt(env, podman, name, hooks))
         if warnings is not None:
@@ -761,6 +772,9 @@ def start_realm(
         record = _start(env, podman, name, user, hooks, mutation)
         if not record.services_at_create:
             _arm_idle(env, podman, record, hooks, mutation)
+    if record.services_at_create:
+        # The supervised start has recorded running; its attach ran in the leaf (direct route).
+        _sync_relay_noted(env, podman, notices)
     notices.extend(mutation.warnings)
     if rebuilt:
         notices.extend(_sync_rebuilt(env, podman, name, hooks))
@@ -865,6 +879,18 @@ def _start_timeout(name: RealmName, elapsed: float, detail: str) -> GinnError:
         seconds=round(elapsed),
         detail=detail,
     )
+
+
+def _sync_relay_noted(env: OpEnv, podman: Podman, notices: list[GinnWarning]) -> None:
+    """Sync the relay after a start or stop that has been recorded (ADR-014).
+
+    The command has already succeeded, so a failed sync does not fail it. The failure is added to
+    `notices` as GINN-W-RELAY-SYNC, and the next sync retries it.
+    """
+    try:
+        sync_exec_service(env.paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the command has succeeded, so this is a warning
+        notices.append(relay_failure(exc))
 
 
 def _settle_idle_stop(env: OpEnv, podman: Podman, name: RealmName) -> None:
@@ -1210,8 +1236,10 @@ def _stop_supervised(
             stopped = record
         else:
             stopped = _stop(env, podman, name, hooks, mutation)
+    notices = list(mutation.warnings)
+    _sync_relay_noted(env, podman, notices)  # NFR-001: the relay goes down when nothing needs it
     if warnings is not None:
-        warnings.extend(mutation.warnings)
+        warnings.extend(notices)
     return stopped
 
 

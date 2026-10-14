@@ -13,8 +13,9 @@ GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH
 GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
 (FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
-GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014), and
-GINN-W-RELAY-ORPHAN (FR-123, ADR-014). `source` cites the requirement that defines the failure.
+GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014),
+GINN-W-RELAY-ORPHAN (FR-123, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
+the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -573,6 +574,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="the exec lock is released, so other commands can run; check the listed pids with "
         "'ps -p {pids}' and stop any that the interrupted command left running with 'kill'",
         source="FR-123, FR-124, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-RELAY-SYNC",
+        exit_code=0,
+        summary="the relay service could not follow the realm states after the operation was "
+        "recorded: {detail}",
+        remedy="the operation keeps its result; the next start, stop or services change syncs the "
+        "relay again, and if it keeps failing, run 'ginn doctor'",
+        source="FR-084, ADR-014 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-RECOVERED",

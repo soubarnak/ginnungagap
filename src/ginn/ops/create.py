@@ -129,6 +129,7 @@ from ginn.runtime.spec import INIT_PATH, MACHINE_ID_PATH, create_spec, new_machi
 from ginn.security.nested import write_config
 from ginn.security.nvidia import Status
 from ginn.security.seccomp import write as write_profile
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import remove_service, write_journald_dropin, write_service_dir
 from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
@@ -257,14 +258,24 @@ class _Create:
         if not notes:
             try:
                 self._store.delete(self._request.name)
-                return notes
             except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
                 notes.append(f"record: {type(exc).__name__}: {exc}")
+            else:
+                self._sync_relay_after_undo(notes)
+                return notes
         try:
             self._store.set_state(self._request.name, RealmState.BROKEN)
         except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
             notes.append(f"record broken: {type(exc).__name__}: {exc}")
+        self._sync_relay_after_undo(notes)
         return notes
+
+    def _sync_relay_after_undo(self, notes: list[str]) -> None:
+        """Let the relay service follow the records after the undo (ADR-014). A failure is noted."""
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
+            notes.append(f"relay service: {type(exc).__name__}: {exc}")
 
     # Phases.
 
@@ -624,6 +635,10 @@ class _Create:
         because no package is installed. The notice names what this create did not do.
         """
         self._write_service()
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - the realm is made, so a relay failure is a warning
+            self._mutation.warnings.append(relay_failure(exc))
         notice = warn("GINN-W-SERVICES-PENDING", realm=self._request.name.value)
         self._mutation.warnings.append(notice)
         self._step("stopped")
