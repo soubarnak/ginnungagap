@@ -40,12 +40,19 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 
-from ginn.domain import RealmName, RealmState
+from ginn.domain import RealmState
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export._files import write_file_atomic
 from ginn.podman.adapter import Podman
 from ginn.podman.cli import PodmanCli
+from ginn.services._exec_lock import (
+    LOCK_DIR_NAME,
+    exec_lock_busy,
+    exec_lock_dir,
+    exec_lock_path,
+    exec_orphan_path,
+)
 from ginn.services.runit_user import DOWN, DOWN_MODE, RUN, SCRIPT_MODE
 from ginn.services.supervisor import (
     COMMAND_MARGIN_S,
@@ -64,10 +71,6 @@ EXEC_RELAY_HELPER: Final = "/usr/libexec/ginn/ginn-exec-relay"
 """The installed listener (native/ginn-exec-relay.c), beside ginn-wait (runit_user.WAIT_HELPER)."""
 SOCKET_NAME: Final = "exec.sock"
 """The listener's socket, directly under the runtime root (ADR-014)."""
-LOCK_DIR_NAME: Final = "exec"
-"""The directory under the runtime root that holds one exec lock and one orphan marker per realm."""
-LOCK_SUFFIX: Final = ".lock"
-ORPHAN_SUFFIX: Final = ".orphan"
 OWNED_ENV: Final = ("XDG_RUNTIME_DIR", "CONTAINERS_CONF", "CONTAINERS_STORAGE_CONF", "TMPDIR")
 """The ginn-owned keys of PodmanCli._env() that the run script exports. Others are not carried.
 PATH is not among them: the relay has a fixed PATH of its own (`relay_path`)."""
@@ -86,21 +89,6 @@ _FORBIDDEN_IN_SCRIPT: Final = ("\n", "\r", "\0")
 def exec_socket(paths: OwnedPaths) -> Path:
     """The listener's socket, `<runtime root>/exec.sock` (ADR-014, DR-010)."""
     return paths.runtime / SOCKET_NAME
-
-
-def exec_lock_dir(paths: OwnedPaths) -> Path:
-    """The directory of the exec locks and orphan markers, `<runtime root>/exec` (ADR-014)."""
-    return paths.runtime / LOCK_DIR_NAME
-
-
-def exec_lock_path(paths: OwnedPaths, name: RealmName) -> Path:
-    """The realm's exec lock, `<runtime root>/exec/<realm>.lock` (FR-123, ADR-014)."""
-    return exec_lock_dir(paths) / f"{name.value}{LOCK_SUFFIX}"
-
-
-def exec_orphan_path(paths: OwnedPaths, name: RealmName) -> Path:
-    """The realm's orphan marker, `<runtime root>/exec/<realm>.orphan` (FR-124, ADR-014)."""
-    return exec_lock_dir(paths) / f"{name.value}{ORPHAN_SUFFIX}"
 
 
 def exec_service_dir(paths: OwnedPaths) -> Path:
@@ -149,28 +137,6 @@ def render(paths: OwnedPaths, podman: PodmanCli) -> str:
     argv = [EXEC_RELAY_HELPER, str(paths.runtime), *podman.global_argv()]
     lines.append("exec " + " ".join(_word(arg) for arg in argv))
     return "\n".join(lines) + "\n"
-
-
-def exec_lock_busy(paths: OwnedPaths, name: RealmName) -> bool:
-    """True while a mutating exec of the realm holds its lock (FR-123, ADR-014). Read only.
-
-    The lock file is opened read-only and never created, and a missing file is not busy. So this
-    creates neither `exec/` nor the lock. A held LOCK_EX makes LOCK_SH|LOCK_NB fail, and a lock that
-    is free is released at once.
-    """
-    try:
-        fd = os.open(exec_lock_path(paths, name), os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-    except FileNotFoundError:
-        return False
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
 
 
 def sync_exec_service(

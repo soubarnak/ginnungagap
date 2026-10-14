@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 import select
 import shutil
 import signal
@@ -591,6 +592,75 @@ def test_a_failed_kill_fork_writes_kill_not_run_and_still_releases_the_lock_and_
     assert _finish(proc)[0] == 0
     marker = (tmp_path / "exec" / f"{REALM}.orphan").read_text(encoding="utf-8")
     assert "kill not run" in marker and f"token {TOKEN}" in marker, marker
+
+
+@pytest.mark.fr("FR-124")
+def test_a_survivor_record_is_appended_after_an_earlier_record_and_does_not_replace_it(
+    built: Path, tmp_path: Path
+) -> None:
+    """The kill helper opens the marker for append (ADR-014): an unsettled record stays."""
+    lib = _build_shim(tmp_path, _SURVIVE_SOURCE, "libsurvive-append.so")
+    token = "f" * 32
+    earlier = f"token {'9' * 32}\ntime 1700000000\npid 5\n"
+    cgroup = tmp_path / "cg"
+    cgroup.mkdir()
+    sleepers = [
+        subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            [sys.executable, "-c", "import time; time.sleep(300)"],
+            env={"GINN_EXEC_TOKEN": token},
+        )
+        for _ in range(2)
+    ]
+    _RUNNING.extend(sleepers)
+    (cgroup / "cgroup.procs").write_text("".join(f"{p.pid}\n" for p in sleepers), encoding="utf-8")
+    marker = tmp_path / "orphan"
+    marker.write_text(earlier, encoding="utf-8")
+    run = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(built / "ginn-exec-kill"), str(cgroup), token, str(marker)],
+        env={"LD_PRELOAD": str(lib)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert run.returncode == 3, run.stderr
+    text = marker.read_text(encoding="utf-8")
+    assert text.startswith(earlier), text
+    # One record, written in one write: the token line, the time line, then a pid line per survivor.
+    record = text[len(earlier) :].splitlines()
+    assert text.endswith("\n") and len(record) == 4, text
+    assert record[0] == f"token {token}", text
+    assert re.fullmatch(r"time \d+", record[1]), text
+    assert sorted(record[2:]) == sorted(f"pid {p.pid}" for p in sleepers), text
+    for proc in sleepers:
+        proc.kill()
+        proc.wait(timeout=WAIT_S)
+
+
+@pytest.mark.fr("FR-124")
+def test_a_kill_not_run_record_is_appended_after_an_earlier_record_and_does_not_replace_it(
+    built: Path, tmp_path: Path
+) -> None:
+    """ginn-exec-run opens the marker for append too, so the same rule holds for its record."""
+    lib = _build_shim(tmp_path, _FORK_SOURCE, "libforkfail-append.so")
+    earlier = f"token {'9' * 32}\ntime 1700000000\npid 5\n"
+    exec_dir = tmp_path / "exec"
+    exec_dir.mkdir()
+    marker = exec_dir / f"{REALM}.orphan"
+    marker.write_text(earlier, encoding="utf-8")
+    parent, child = _pair()
+    env = {**_env(tmp_path), "LD_PRELOAD": str(lib)}
+    proc = _spawn(built, tmp_path, LOCK, _stdio_numbers(), child, _stand_in(tmp_path), env)
+    child.close()
+    assert _recv(parent)[0] == ACK
+    assert _recv(parent) == bytes([EXIT, 0, 0])
+    assert _finish(proc)[0] == 0
+    text = marker.read_text(encoding="utf-8")
+    assert text.startswith(earlier), text
+    # The record is whole: its token and time lines and its kill-not-run line, written at once.
+    assert re.fullmatch(re.escape(earlier) + rf"token {TOKEN}\ntime \d+\nkill not run\n", text), (
+        text
+    )
 
 
 @pytest.mark.fr("FR-123")

@@ -123,8 +123,9 @@ int main(int argc, char **argv) {
 	if (mutating) { /* the token kill runs, and the lock is released, before EXIT */
 		char *kav[] = {kpath, cg, argv[4], orphan, NULL}, *kenv[] = {NULL};
 		if ((kp = fork()) < 0) { /* the kill cannot run: mark the token's processes as unknown */
-			int mfd = open(orphan, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
-			if (mfd >= 0) dprintf(mfd, "token %s\ntime %lld\nkill not run\n", argv[4], (long long)time(NULL)), close(mfd);
+			char rec[256]; int n = snprintf(rec, sizeof rec, "token %s\ntime %lld\nkill not run\n", argv[4], (long long)time(NULL));
+			int mfd = open(orphan, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+			if (mfd >= 0) { if (write(mfd, rec, n) != n) fprintf(stderr, "ginn-exec-run: the marker record was not written whole\n"); close(mfd); }
 		} else if (kp == 0) {
 			sigprocmask(SIG_SETMASK, &none, NULL), execve(kpath, kav, kenv), _exit(127);
 		} else {

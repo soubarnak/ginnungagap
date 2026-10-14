@@ -7,6 +7,8 @@
  * pidfd, and SIGKILL from the 20th sweep on. It sweeps every 100 ms until none is left or 10 s pass. A
  * survivor gets the orphan marker (token, time, pids), GINN-W-RELAY-ORPHAN on stderr, and exit 3. Exit
  * 0: none left, or no cgroup. Exit 2: usage. Exit 1: a system call failed.
+ * The marker is opened for append, so each survivor run adds one record and keeps the records of
+ * earlier execs that no ginn command has settled yet.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -109,7 +111,8 @@ static int sweep(const char *dir, int sig) {
 int main(int argc, char **argv) {
 	const struct timespec tick = {0, 100000000};
 	long long t0 = now_ms();
-	int round = 0, n, fd, i;
+	char buf[8192];
+	int round = 0, n, fd, i, len;
 	if (argc != 4 || argv[1][0] != '/' || argv[3][0] != '/') {
 		fprintf(stderr, "usage: ginn-exec-kill <realm-cgroup> <token> <orphan-marker>\n");
 		return 2;
@@ -123,10 +126,11 @@ int main(int argc, char **argv) {
 		round++;
 		nanosleep(&tick, NULL);
 	}
-	fd = open(argv[3], O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+	len = snprintf(buf, sizeof buf, "token %s\ntime %lld\n", token, (long long)time(NULL));
+	for (i = 0; i < nfound; i++) len += snprintf(buf + len, sizeof buf - len, "pid %d\n", found[i]);
+	fd = open(argv[3], O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
 	if (fd >= 0) {
-		dprintf(fd, "token %s\ntime %lld\n", token, (long long)time(NULL));
-		for (i = 0; i < nfound; i++) dprintf(fd, "pid %d\n", found[i]);
+		if (write(fd, buf, len) != len) fprintf(stderr, "ginn-exec-kill: the marker record was not written whole\n");
 		close(fd);
 	}
 	fprintf(stderr, "%s: %d processes of the exec survived the token kill\n", GINN_EXEC_W_ORPHAN, nfound);

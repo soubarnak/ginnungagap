@@ -569,11 +569,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec(
         code="GINN-W-RELAY-ORPHAN",
         exit_code=0,
-        summary="processes of a command in realm '{realm}' survived the kill after its client was "
-        "lost: pids {pids}",
-        remedy="the exec lock is released, so other commands can run; check the listed pids with "
-        "'ps -p {pids}' and stop any that the interrupted command left running with 'kill'",
+        summary="a command in realm '{realm}' left processes that the token kill could not stop: "
+        "{pids}",
+        remedy="the exec lock is released, so other commands can run; check the processes with "
+        "'ps' and stop any the interrupted command left running with 'kill'; this warning clears "
+        "after the next operation that changes realm '{realm}'",
         source="FR-123, FR-124, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-ORPHAN-UNSETTLED",
+        exit_code=0,
+        summary="the orphan marker of realm '{realm}' could not be settled, so it is kept: "
+        "{detail}",
+        remedy="the next operation on realm '{realm}' tries again, and 'ginn status {realm}' lists "
+        "what the marker still holds",
+        source="FR-124, ADR-014 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-RELAY-SYNC",
