@@ -109,6 +109,7 @@ from ginn.runtime.spec import create_spec
 from ginn.security.nested import write_config
 from ginn.security.nvidia import Status
 from ginn.security.seccomp import write as write_profile
+from ginn.services.runit_user import remove_service, write_journald_dropin, write_service_dir
 from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
 from ginn.store.paths import OWNED_DIR_MODE
@@ -320,6 +321,32 @@ class _Create:
         self._update(container_id=cid)
         self._step("created")
 
+    def _write_service(self) -> None:
+        """Write the realm's runit service directory and, when set, the journald drop-in.
+
+        The undo is registered before the write, and it removes the directory only for this realm
+        name, which the name check proved free. The drop-in is shared by all realms, so its undo
+        leaves it in place (as the NVIDIA spec does).
+        """
+        program = self._hooks.program
+        if program is None or not os.path.isabs(program):
+            err = make("GINN-E-INTERNAL")
+            err.details.update({"detail": "no absolute ginn command for the service scripts"})
+            raise err
+        paths = self._env.paths
+        name = self._request.name
+        self._rollback.add("service directory", lambda: remove_service(paths, name))
+        try:
+            if self._plan.spec.services_mitigations:
+                write_journald_dropin(paths)
+            write_service_dir(paths, name, program)
+        except OSError as exc:
+            # A GinnError rolls the create back, as any other failed step does (FR-120 AC-1).
+            err = make("GINN-E-INTERNAL")
+            err.details.update({"detail": f"runit service directory: {exc}"})
+            raise err from exc
+        self._step("service")
+
     def _start(self) -> None:
         cid = self._container_id()
         self._podman.start(cid)
@@ -419,9 +446,11 @@ class _Create:
         """Finish a services-on create with no start (ADR-003, FR-081).
 
         The container is made and left stopped. Its start goes through the runit entry, so nothing
-        runs in it here. The Install Manifest is left as it is, because no package is installed.
-        The notice names what this create did not do.
+        runs in it here. The runit service directory is written with `down` present, so runit does
+        not start the realm until it is turned on (DR-012). The Install Manifest is left as it is,
+        because no package is installed. The notice names what this create did not do.
         """
+        self._write_service()
         notice = warn("GINN-W-SERVICES-PENDING", realm=self._request.name.value)
         self._mutation.warnings.append(notice)
         self._step("stopped")

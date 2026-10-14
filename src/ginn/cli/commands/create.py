@@ -116,7 +116,9 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         with_packages=tuple(args.with_packages or ()),
     )
     try:
-        result = create_realm(realms.env, realms.podman, request, hooks=_context.create_hooks())
+        result = create_realm(
+            realms.env, realms.podman, request, hooks=_context.create_hooks(realms.paths)
+        )
     except NotImplementedError as exc:
         # The spec refuses what _refuse_unbuilt does not name (RealmSpec, runtime/spec.py).
         message = f"realm '{name.value}' cannot be used yet: {exc}"

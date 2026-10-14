@@ -5,6 +5,7 @@
 - Amended: 2026-10-12 (D5). The keep-id form, the chown scope (S-01 step 6) and the FR-083 generation wording are corrected. No decision changes.
 - Amended: 2026-10-12 (D6). The chown scope and the leaf ownership are stated in full, with the evidence for a root-owned leaf and the reason the user does not need write access to it. No decision changes. F6a changes the code to match.
 - Amended: 2026-10-12 (D7). Status qualifier added. The root-owned leaf is evidenced by the unpinned runc leg only, the order of the root writes is stated, and the stale `cgroups.py` note is removed. No decision changes.
+- Amended: 2026-10-14 (per-realm service contract). The runit service directory, the run and finish scripts, the crash rule and the create-time forms of ADR-007 a, b and d are decided at the end of this file. No decision above changes.
 - Amended: 2026-10-12 (D9). Host Setup does not make the root writes under the subtree. The supervisor run script makes them at each start of its service, and Host Setup only captures their pre-images (ADR-013). The Context, the placement paragraph of the Decision, the Consequences and the FR-001 and R-001 rows said otherwise, and they are corrected. Undo follows ADR-013 Decision 15, not "restores the recorded value". No decision changes. Each statement was confirmed against the render template in `src/ginn/hostsetup/runit_system.py`, which is the state at the time of this amendment.
 
 ## Context
@@ -90,3 +91,94 @@ The `supervisor` leaf stays root-owned, and so does everything else under the su
 | FR-083 | Services flags are create-time flags. `ginn services on\|off` recreates the container as a new generation, so the toggle applies at the next start of that generation. Whether installed packages survive depends on the manifest replay (FR-021, T8.3), which is not measured. |
 | NFR-003 | The memory budget for this argv is in ADR-007. The NFR-003 runs used the same flags, except that they omitted `--stop-timeout 30`. |
 | R-001 | S-01 is the early spike. The run script's delegation (step 2) and its supervisor leaf (step 3) close the placement gap. R-001 stays open for musl, Arch, Fedora and the open FR-080 checks. |
+
+## Amendment 2026-10-14: per-realm service contract
+
+This amendment decides what runit runs for one services-on realm. It keeps the argv and the cgroup
+placement above, and it adds the supervision contract. `services/runit_user.py` and
+`services/supervise.py` render and check it, and `ops/service.py` runs it (T7.3).
+
+### Decision
+
+1. **Service directory.** Each services-on realm has `<SV_DIR>/<realm>/` under the user's runit
+   supervisor, where `SV_DIR` is `$XDG_STATE_HOME/ginn/sv` (`runit_system.py`). It holds `run`,
+   `finish` and `down`. The directory is built as `<SV_DIR>/.<realm>.tmp` and renamed into place once
+   all three are in it. runsvdir skips dotted names, so it never starts a half-made service (FR-081).
+2. **`run`** is `exec '<ginn>' _service-run '<realm>'`, with `<ginn>` the absolute ginn command. The
+   hidden command runs `start_service` (ops/service.py): it checks that ginn-wait is executable and
+   podman is absolute, then starts the realm through `start_realm(supervised=True)`. That start
+   removes the stale conmon pidfile only on the path that calls `podman start`. It attaches the
+   grants and writes `running`, in the order the services-off start uses (ADR-008 amendment). The
+   process then execs `ginn-wait <pidfile> <podman> <global flags> -- <container>`, so runsv
+   supervises ginn-wait (NFR-033). The pidfile is `<runtime>/services/<realm>.conmon.pid`, and
+   `--conmon-pidfile` on the services-on create argv names the same path.
+3. **`finish`** is `exec '<ginn>' _service-finish '<realm>' "$1" "$2"`, where runsv passes the exit
+   code of run, or -1, and the signal that ended run (runsv(8)). Exit 0 is a stop request: the realm
+   moves to `stopped` under the realm lock, the Agent Proxy filter and the D-Bus proxy release, and
+   the crash log is cleared. Any other end is a crash, and it is counted in
+   `<state>/services/<realm>.crashes`, which keeps the last five times (AS-028).
+4. **Restart and give-up.** A crash that is not the fifth within 60 s waits 5 s, and runsv restarts
+   run inside the 10 s of NFR-033 (AS-028). The fifth crash within 60 s gives the realm up. The
+   finish script writes the `down` file, writes the byte `d` to runsv's control FIFO, and removes
+   the crash log. Then a running realm moves to `failed` (DR-020, running to failed), and the audit
+   entry `service-exit` records the give-up. A stopped realm stays stopped, because DR-020 has no
+   stopped-to-failed move, and the audit entry says so.
+5. **`down`** means runit does not start the realm when runsv starts. Autostart is off by default
+   (DR-012). T7.5 toggles the file. The create writes it, so a new realm is not started by runit.
+6. **Create and delete.** A services-on create writes the service directory after the container
+   exists, and its rollback removes it. Delete removes the directory, the conmon pidfile and the
+   crash log as the `service-removed` step, after the containers are gone. A running services-on
+   realm is still refused until T7.4 stops it through `sv`.
+7. **ADR-007 forms.** Mitigations a and b are coded as create-time forms, behind
+   `SERVICES_MITIGATIONS`, which is `False` until S-05s passes or CL-10 is decided. With the flag on,
+   the argv binds the ginn-owned journald drop-in read-only at `/etc/systemd/journald.conf.d/ginn.conf`
+   and binds `/dev/null` read-only over each of the ten units in `spikes/s05/masks-base.txt` under
+   `/etc/systemd/system`. Mitigation d (`SYSTEMD_LOG_LEVEL=warning`) stays on by default. No file is
+   written into the realm's `/etc` (CR-007).
+
+### Deviation from the brief: runsv and the `down` file
+
+runsv(8) reads `down` when runsv starts, not before each restart: a running runsv keeps its own
+state. A `down` file alone therefore does not stop the restart after the fifth crash. The give-up
+also writes `d` to `<service>/supervise/control`, which is what `sv down` does, with a non-blocking
+open that ignores ENXIO (no runsv reading). runsv handles `d` while finish runs, and only signals
+the service process, so finish is not signalled. Whether runsv has processed `d` before it restarts
+run is not measured. T7.7 measures it on a host.
+
+### Alternatives considered
+
+- Give-up by `down` alone. Rejected, as above: runsv keeps restarting.
+- Give-up by `sv down` from finish. Rejected: `sv` waits for the service to stop, and the service is
+  in its finish phase, so the wait would run to the timeout. The control byte does the same without
+  the wait.
+- Crash counting under the realm lock. Rejected: a busy realm or an unacknowledged host change
+  (GINN-E-HOST-UNACKED) would stop the give-up, and the restart loop would not end. The crash log
+  and the `down` file are the supervisor's own files, so they are written without the lock. Only the
+  record move goes through `mutating()`.
+- Mitigations a and b on by default. Rejected until S-05s. The S-05r median margin is thin, and the
+  create-time form is unmeasured (ADR-007).
+
+### Consequences
+
+- A services-on realm starts only through its runit service. `ginn start` still refuses it.
+- The runit environment is sparse (`setpriv --reset-env`). A supervised start sees no DISPLAY,
+  WAYLAND_DISPLAY, SSH_AUTH_SOCK or D-Bus address, so its session grants skip, and the lazy attach at
+  enter re-attaches them (ADR-008 amendment). The services path is therefore not a full desktop
+  start. T7.4 owns the rest.
+- The crash log and the `down` file are not realm state, so a busy lock can delay the realm move but
+  not the restart. A give-up while the lock is busy leaves the record `running`, and `ginn status`
+  shows a state mismatch until the next start.
+- Every path written is an Owned Path (DR-010): `<SV_DIR>/<realm>`, `<state>/services`,
+  `<runtime>/services` and `<data>/services` for the drop-in.
+
+### Requirement IDs
+
+| ID | How this amendment bears on it |
+|---|---|
+| FR-081 | `run` starts the realm through `start_service` and execs ginn-wait; `finish` records each end of run. AC-1 (runit status shows the realm up) and AC-2 (restart within 10 s) are host proofs in T7.7. AC-3 (five crashes in 60 s leave the realm stopped and `failed`) is unit-tested in tests/unit/test_ops_service.py, with the `down` file and the runsv control byte. |
+| AS-028 | The crash window is `note_crash` (services/supervise.py): five crashes within 60 s, the restart delay of 5 s, and the last five times kept. |
+| NFR-033 | The 5 s delay and runsv's restart keep the restart inside 10 s, which the host gate measures. The give-up path is unit-tested. |
+| FR-084 | The SRS text of FR-084 is autostart (Should). The `down` file is autostart off (DR-012), and T7.5 owns the toggle. The grant attachment on every service start is the ADR-008 amendment, which `start_realm` runs for a supervised start too. |
+| NFR-003 | The ADR-007 forms a and b, behind `SERVICES_MITIGATIONS`. Their memory effect is measured in S-05s and T7.7. |
+| CR-007 | The mitigations are create-time mounts and environment. ginn writes no file into a realm's `/etc`. |
+| DR-010 | Every path listed above is an Owned Path, and each write goes through an Owned Path helper. |

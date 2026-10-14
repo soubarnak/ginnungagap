@@ -64,6 +64,8 @@ COMMAND_MODULES: tuple[str, ...] = (
     "remove",
     "tier",
     "perms",
+    "service_run",
+    "service_finish",
 )
 
 

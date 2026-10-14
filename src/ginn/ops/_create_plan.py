@@ -37,11 +37,17 @@ from ginn.runtime.attach import MOUNTINFO
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.mounts import Exists
 from ginn.runtime.realm_security import SecurityHooks
-from ginn.runtime.spec import RealmSpec, realm_passwd_entry, realm_spec
+from ginn.runtime.spec import (
+    SERVICES_MITIGATIONS,
+    RealmSpec,
+    realm_passwd_entry,
+    realm_spec,
+)
 from ginn.security import seccomp
 from ginn.security.caps import KVM_DEVICE, NESTED_DEVICES, CdiGrant, TierExtras, option_keys
 from ginn.security.nvidia import DEVICE as NVIDIA_DEVICE
 from ginn.security.nvidia import NvidiaPlan, Status
+from ginn.services.runit_user import conmon_pidfile, journald_dropin
 from ginn.trust import manifest as trust
 from ginn.trust.manifest import TrustEntry, TrustManifest
 
@@ -124,6 +130,8 @@ class CreateHooks:
     """Options that another security module adds to the create (security/caps.py). None is none."""
     security: SecurityHooks = field(default_factory=SecurityHooks)
     """The NVIDIA probe and the other security seams of the create (FR-069, ADR-012)."""
+    program: str | None = None
+    """The absolute ginn command that a services-on realm's run and finish scripts execute."""
 
 
 @dataclass(frozen=True)
@@ -242,6 +250,14 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
     # realm_spec takes the tier. Replaying only the services flag sets it on the spec, and RealmSpec
     # checks the result (the Kali refusal, M10).
     spec = replace(spec, services=request.services)
+    if request.services:
+        # The services-on fields come after `services`, which RealmSpec checks (ADR-003, ADR-007).
+        spec = replace(
+            spec,
+            conmon_pidfile=str(conmon_pidfile(env.paths, request.name)),
+            services_mitigations=SERVICES_MITIGATIONS,
+            journald_dropin=(str(journald_dropin(env.paths)) if SERVICES_MITIGATIONS else None),
+        )
     manifest = trust.load() if hooks.manifest is None else hooks.manifest
     session = session_env(
         request.host_env,

@@ -67,7 +67,7 @@ from typing import Final
 from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.permissions import Permissions, effective_toggles
-from ginn.podman.adapter import CreateSpec, require_digest_ref
+from ginn.podman.adapter import CreateSpec, Mount, require_digest_ref
 from ginn.runtime.mounts import CreateBinds, Exists, create_binds, runtime_dir
 from ginn.security.caps import CreateOptions, TierExtras, create_options
 from ginn.trust.manifest import TrustManifest, pull_reference
@@ -88,6 +88,28 @@ SERVICES_STOP_TIMEOUT_S: Final = 30
 """Seconds podman waits for a services-on realm to stop before it kills it (ADR-003)."""
 SERVICES_ENV: Final[tuple[tuple[str, str], ...]] = (("SYSTEMD_LOG_LEVEL", "warning"),)
 """The services-on environment: systemd logs warnings only (ADR-007 mitigation d)."""
+SERVICES_MITIGATIONS: Final = False
+"""Whether a services-on create ships ADR-007 mitigations a and b (journald drop-in, unit masks).
+Off until spike S-05s passes, or CL-10 is decided (roadmap T7.3). Mitigation d is always on."""
+JOURNALD_DROPIN_TARGET: Final = "/etc/systemd/journald.conf.d/ginn.conf"
+"""Where the ginn-owned journald drop-in is bind-mounted read-only (ADR-007 a)."""
+JOURNALD_DROPIN_TEXT: Final = "[Journal]\nStorage=volatile\nRuntimeMaxUse=8M\n"
+"""The drop-in: the journal stays in RAM and is capped at 8 MiB (ADR-007 a)."""
+SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
+    "systemd-udevd.service",
+    "systemd-udevd-control.socket",
+    "systemd-udevd-kernel.socket",
+    "systemd-udev-trigger.service",
+    "getty@tty1.service",
+    "console-getty.service",
+    "apt-daily.timer",
+    "apt-daily-upgrade.timer",
+    "e2scrub_all.timer",
+    "fstrim.timer",
+)
+"""The ten units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over its
+unit path under /etc/systemd/system. The list is spikes/s05/masks-base.txt (tests pin it)."""
+UNIT_DIR: Final = "/etc/systemd/system"
 KALI: Final = "kali"
 
 
@@ -120,6 +142,12 @@ class RealmSpec:
     tier: Tier = Tier.BASIC
     services: bool = False
     """Services on: systemd is the realm's init, and only its runit entry starts it (ADR-003)."""
+    conmon_pidfile: str | None = None
+    """Services on only: the conmon pidfile under ginn's runtime root (FR-081, ginn-wait)."""
+    services_mitigations: bool = False
+    """Services on only: create the ADR-007 mitigations a and b. Off by default (S-05s)."""
+    journald_dropin: str | None = None
+    """Host path of the ginn-owned journald drop-in, bound when `services_mitigations` is set."""
     generation: int = 1
     options: CreateOptions = field(default_factory=CreateOptions)
     """The tier's create-time options, beyond the Basic binds (security/caps.py, ADR-006)."""
@@ -152,6 +180,12 @@ class RealmSpec:
             raise ValueError(f"the runtime tmpfs must be {runtime_dir(self.uid)} (ADR-012)")
         if self.generation < 1:
             raise ValueError(f"generation must be at least 1, not {self.generation}")
+        if not self.services and (
+            self.conmon_pidfile is not None or self.services_mitigations or self.journald_dropin
+        ):
+            raise ValueError("the services-on fields are set on a services-off realm")
+        if self.services_mitigations and self.journald_dropin is None:
+            raise ValueError("ADR-007 mitigation a needs the journald drop-in path")
 
     @property
     def container_name(self) -> str:
@@ -267,6 +301,29 @@ def services_cgroup_parent(uid: int, name: RealmName) -> str:
     return f"/ginn/{uid}/{name.value}"
 
 
+def mitigation_mounts(spec: RealmSpec) -> list[Mount]:
+    """The create-time mounts of ADR-007 mitigations a and b; none unless the spec sets them.
+
+    Mitigation a binds the ginn-owned drop-in read-only. Mitigation b binds `/dev/null` read-only
+    over each masked unit path. A missing target is made by podman in the container layer (CR-007).
+    """
+    if not spec.services_mitigations:
+        return []
+    mounts = [
+        Mount(
+            type="bind",
+            source=str(spec.journald_dropin),
+            target=JOURNALD_DROPIN_TARGET,
+            options=("ro",),
+        )
+    ]
+    mounts += [
+        Mount(type="bind", source="/dev/null", target=f"{UNIT_DIR}/{unit}", options=("ro",))
+        for unit in SERVICES_MASKED_UNITS
+    ]
+    return mounts
+
+
 def create_spec(spec: RealmSpec) -> CreateSpec:
     """The adapter's `CreateSpec` for `spec`. Pure: the spec is read and nothing else happens.
 
@@ -305,9 +362,11 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         systemd="always",
         cgroupns="private",
         cgroup_parent=services_cgroup_parent(spec.uid, spec.name),
+        conmon_pidfile=spec.conmon_pidfile,
         stop_signal=SERVICES_STOP_SIGNAL,
         stop_timeout=SERVICES_STOP_TIMEOUT_S,
         env=dict(SERVICES_ENV),
+        mounts=[*base.mounts, *mitigation_mounts(spec)],
     )
 
 

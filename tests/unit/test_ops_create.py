@@ -81,7 +81,18 @@ STEPS = (
     "packages",
     "stopped",
 )
-SERVICES_STEPS = ("checked", "space-checked", "recorded", "homed", "pulled", "created", "stopped")
+GINN_PROGRAM = "/usr/bin/ginn"
+"""The absolute ginn command the services-on run and finish scripts name (ADR-003)."""
+SERVICES_STEPS = (
+    "checked",
+    "space-checked",
+    "recorded",
+    "homed",
+    "pulled",
+    "created",
+    "service",
+    "stopped",
+)
 """A services-on create makes the container and stops there: nothing runs in it (ADR-003)."""
 FORBIDDEN_TOKENS = frozenset(
     {
@@ -360,11 +371,13 @@ def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
     mountinfo: Path,
 ) -> None:
     steps: list[str] = []
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append, program=GINN_PROGRAM)
     result = create_realm(env, fake, request(home, services=True), hooks=hooks)
     record = result.record
     assert record.state is RealmState.STOPPED
     assert record.settings.services is True
+    service = env.paths.sv / "debian"
+    assert sorted(p.name for p in service.iterdir()) == ["down", "finish", "run"]
     assert record.container_id in fake.containers
     assert [c.state for c in fake.containers.values()] == [ContainerState.CREATED]
     assert record.grants == []
@@ -1796,3 +1809,40 @@ def test_a_custom_create_without_the_gpu_toggle_has_no_device_no_cdi_and_no_spec
     assert result.record.gpu_cdi is False
     assert result.record.gpu_at_create is False
     assert not (env.paths.cdi / "nvidia.json").exists()
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-010")
+def test_a_services_on_create_that_fails_after_its_service_directory_removes_it(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    def fail_at_stopped(name: str) -> None:
+        if name == "stopped":
+            raise make("GINN-E-INTERNAL")
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at_stopped, program=GINN_PROGRAM)
+    with pytest.raises(GinnError):
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert not (env.paths.sv / "debian").exists(), "the rollback removes the service directory"
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_create_without_an_absolute_ginn_command_is_refused_before_it_stops(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program="ginn")
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert not (env.paths.sv / "debian").exists()

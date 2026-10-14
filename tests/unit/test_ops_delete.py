@@ -964,6 +964,7 @@ def test_the_journal_steps_are_the_listed_ones_in_order(env: OpEnv, fake: FakePo
         "deleting",
         "stopped",
         "container-removed",
+        "service-removed",
         "exports-removed",
         "image-removed",
         "home",

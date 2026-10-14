@@ -15,6 +15,8 @@ these steps. Each one is a journal step, in this order. The names are stable and
 - container-removed: each container that podman lists for the realm is removed with force. The
   realm root is the container, so this removes it (FR-019). A container that is already gone is
   not an error.
+- service-removed: the realm's runit service directory and its per-realm files go (FR-081). A
+  services-off realm has none, so this is a no-op for it.
 - exports-removed: the realm's exported entries go: its menu entries and icon copies, its CLI
   launchers, and its sync state (FR-019 AC-1, DR-008). Nothing reads the realm, so this runs
   whether or not the realm still runs, and a rerun removes what is left.
@@ -108,6 +110,7 @@ from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_REALM
+from ginn.services.runit_user import remove_service
 from ginn.store.locks import image_lock
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -115,6 +118,7 @@ STEPS: Final[tuple[str, ...]] = (
     "deleting",
     "stopped",
     "container-removed",
+    "service-removed",
     "exports-removed",
     "image-removed",
     "home",
@@ -322,6 +326,9 @@ def _delete(
 
     _remove_containers(podman, name)
     _step(mutation, hooks, "container-removed")
+
+    remove_service(env.paths, name)
+    _step(mutation, hooks, "service-removed")
 
     unexport_all(env.paths, name)
     _step(mutation, hooks, "exports-removed")

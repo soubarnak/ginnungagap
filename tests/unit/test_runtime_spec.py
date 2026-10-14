@@ -128,6 +128,8 @@ GOLDEN_ARCH_SERVICES_ON = [
     "private",
     "--cgroup-parent",
     "/ginn/1000/arch",
+    "--conmon-pidfile",
+    "/run/ginn/1000/services/arch.conmon.pid",
     "--systemd=always",
     "--stop-signal",
     "SIGRTMIN+3",
@@ -195,6 +197,7 @@ def make_spec(
         binds=binds,
         tier=tier,
         services=services,
+        conmon_pidfile=f"/run/ginn/{uid}/services/arch.conmon.pid" if services else None,
         generation=generation,
     )
 

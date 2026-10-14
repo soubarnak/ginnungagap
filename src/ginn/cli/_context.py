@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Final
 
 from ginn.cli.output import Output
-from ginn.errors import GinnError, warn
+from ginn.errors import GinnError, make, warn
 from ginn.integrity.fingerprint import HOST_ROOT
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks
@@ -45,11 +45,13 @@ from ginn.ops.recovery import (
     RecoveryOutcome,
     recover,
 )
+from ginn.ops.service import ServiceHooks
 from ginn.podman.adapter import Podman
 from ginn.podman.cli import PodmanCli
 from ginn.runtime.attach import MOUNTINFO
 from ginn.runtime.enter import EnterHooks
 from ginn.runtime.mounts import Exists
+from ginn.services.runit_user import WAIT_HELPER
 from ginn.store.paths import OwnedPaths
 
 _SETTLED: Final = frozenset({OUTCOME_RECOVERED, OUTCOME_BROKEN})
@@ -68,6 +70,8 @@ class Seams:
 
     root_dir: Path = HOST_ROOT
     helper: str | None = None
+    wait_helper: str | None = None
+    """The ginn-wait path, where None means the installed helper (FR-081)."""
     integrate: bool = True
     exists: Exists = os.path.exists
     mountinfo: Path = MOUNTINFO
@@ -158,16 +162,35 @@ def op_env(paths: OwnedPaths) -> OpEnv:
     return OpEnv.for_paths(paths, account_name(), root_dir=seams().root_dir)
 
 
-def create_hooks() -> CreateHooks:
+def create_hooks(paths: OwnedPaths | None = None) -> CreateHooks:
+    """The create seams. `paths` finds the ginn command that a services-on realm's scripts run."""
     s = seams()
     return CreateHooks(
-        helper=s.helper, integrate=s.integrate, exists=s.exists, mountinfo=s.mountinfo
+        helper=s.helper,
+        integrate=s.integrate,
+        exists=s.exists,
+        mountinfo=s.mountinfo,
+        program=ginn_program(paths),
     )
 
 
 def lifecycle_hooks() -> LifecycleHooks:
     s = seams()
     return LifecycleHooks(helper=s.helper, exists=s.exists, mountinfo=s.mountinfo)
+
+
+def service_hooks() -> ServiceHooks:
+    """The supervised start and finish of a services-on realm (FR-081)."""
+    s = seams()
+    helper = WAIT_HELPER if s.wait_helper is None else s.wait_helper
+    return ServiceHooks(lifecycle=lifecycle_hooks(), wait_helper=helper)
+
+
+def podman_global(podman: Podman) -> list[str]:
+    """The podman binary and global flags of the adapter, for ginn-wait's stop (FR-081)."""
+    if not isinstance(podman, PodmanCli):
+        raise make("GINN-E-INTERNAL")
+    return podman.global_argv()
 
 
 def enter_hooks() -> EnterHooks:

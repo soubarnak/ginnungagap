@@ -99,6 +99,9 @@ class CreateSpec:
     http_proxy: bool | None = None
     cgroupns: str | None = None
     cgroup_parent: str | None = None
+    conmon_pidfile: str | None = None
+    """The conmon pidfile of a services-on realm, under ginn's runtime root (FR-081, ADR-003).
+    `ginn-wait` reads it, so podman keeps the same path for every start of this container."""
     stop_signal: str | None = None
     stop_timeout: int | None = None
     env: dict[str, str] = field(default_factory=dict)
@@ -136,6 +139,7 @@ class CreateSpec:
             argv.append(f"--http-proxy={'true' if self.http_proxy else 'false'}")
         _opt(argv, "--cgroupns", self.cgroupns)
         _opt(argv, "--cgroup-parent", self.cgroup_parent)
+        _opt(argv, "--conmon-pidfile", self.conmon_pidfile)
         if self.systemd is not None:
             argv.append(f"--systemd={self.systemd}")
         if self.init:
@@ -206,6 +210,8 @@ def _check_spec(spec: CreateSpec) -> None:
     for key in spec.labels:
         if not key or "=" in key:
             raise ValueError(f"label name {key!r} is not valid")
+    if spec.conmon_pidfile is not None:
+        _check_plain_path("conmon pidfile", spec.conmon_pidfile)
     for mount in spec.mounts:
         _check_mount(mount)
     for group in spec.group_add:
@@ -223,6 +229,12 @@ def _check_passwd_entry(entry: str, *, keep_id: bool) -> None:
         raise ValueError("passwd_entry belongs to the keep-id realm user: use keep-id")
     if "$" in entry or "\n" in entry or len(entry.split(":")) != 7:
         raise ValueError(f"passwd entry needs seven colon fields, no $ and no newline: {entry!r}")
+
+
+def _check_plain_path(label: str, value: str) -> None:
+    """An absolute path with no line break, NUL or comma, as podman takes it in one argv word."""
+    if not value.startswith("/") or "," in value or any(c in value for c in "\0\n\r"):
+        raise ValueError(f"NFR-SEC-005: {label} must be a plain absolute path: {value!r}")
 
 
 def _check_mount(mount: Mount) -> None:

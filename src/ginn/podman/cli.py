@@ -336,6 +336,14 @@ class PodmanCli:
         self.history: list[list[str]] = []
         self.tightened: list[str] = []
 
+    def global_argv(self) -> list[str]:
+        """The binary and the global flags that every call of this adapter carries (FR-081).
+
+        `ginn-wait` runs `podman stop` with these, so the supervised stop uses the same storage,
+        tmpdir and runtime as the adapter. The list starts with the binary.
+        """
+        return self._global_flags()
+
     def _global_flags(self, per_call: Sequence[str] = ()) -> list[str]:
         """Global flags come before the subcommand. --cdi-spec-dir is global (S-06).
 

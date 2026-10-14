@@ -299,7 +299,7 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 id = "NFR-003"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested as a growth guard: it stays under 2 MiB resident (about 1.5 MiB on the dynamic glibc build, tests/unit/test_native_wait.py). The NFR-003 proof is the services-on RSS table of a real realm under the ADR-003 argv, on glibc and musl, which runs in T7.7 (test_services_real)"
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard: it stays under 2 MiB resident (about 1.5 MiB on the dynamic glibc build, tests/unit/test_native_wait.py). The ADR-007 create-time forms (T7.3) are unit-tested as argv: the default carries mitigation d only, and the forms a and b are golden-tested behind SERVICES_MITIGATIONS, which stays off until S-05s (tests/unit/test_runtime_services_forms.py). The NFR-003 proof is the services-on RSS table of a real realm under the ADR-003 argv, on glibc and musl, which runs in T7.7 (test_services_real)"
 
 [[deferred]]
 id = "NFR-004"

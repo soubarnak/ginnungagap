@@ -188,8 +188,9 @@ def test_a_locale_fallback_is_printed_as_a_note(
 @pytest.mark.fr("FR-010")
 @pytest.mark.fr("FR-080")
 def test_services_on_is_accepted_and_leaves_the_realm_stopped_with_the_pending_notice(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
     assert main(["create", "debian", "--services", "on", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "stopped"

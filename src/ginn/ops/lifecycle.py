@@ -257,6 +257,9 @@ class LifecycleHooks:
     tree_usage: Callable[[Path], tuple[int, bool]] = _tree_usage
     security: SecurityHooks = field(default_factory=SecurityHooks)
     """The seams of the security helpers: the filter, the proxy, gpg and the NVIDIA probe."""
+    before_start: Callable[[], None] | None = None
+    """Runs when the start is about to call `podman start`, not when it returns early for a
+    container that runs. A services-on start removes the stale conmon pidfile here (FR-081)."""
 
 
 @dataclass(frozen=True)
@@ -556,6 +559,7 @@ def start_realm(
     session: HostUser | None = None,
     hooks: LifecycleHooks | None = None,
     warnings: list[GinnWarning] | None = None,
+    supervised: bool = False,
 ) -> RealmRecord:
     """Start realm `name` and attach its grants. Return the record that now reads running.
 
@@ -563,10 +567,18 @@ def start_realm(
     the module docstring for the states it accepts, the refusals and the journal steps. The FR-006
     warnings of the start (a host change found after the start) are appended to `warnings` when it
     is given, after the operation has finished.
+
+    `supervised` is True only for the start that the realm's runit service makes (`ginn
+    _service-run`, FR-081). Only such a start runs a services-on realm; a services-off realm is
+    refused, because its runit service does not exist.
     """
     hooks = LifecycleHooks() if hooks is None else hooks
     current = _load(RealmStore(env.paths, env.clock), name)
-    _refuse_unsupported(current, "start")
+    if supervised:
+        if not current.settings.services:
+            raise _internal("the supervisor starts only a services-on realm", realm=name.value)
+    else:
+        _refuse_unsupported(current, "start")
     user = _host_user(env) if session is None else session
     if not user.host_home.is_absolute():
         raise ValueError(f"host home must be absolute, not {user.host_home}")
@@ -620,6 +632,8 @@ def _start(
     if record.gpu_cdi:
         # The CDI spec is written before the container starts, so podman finds the device (ADR-012).
         nvidia_plan_write(env, hooks)
+    if hooks.before_start is not None:
+        hooks.before_start()
     try:
         podman.start(cid)
         info = podman.inspect(cid)
