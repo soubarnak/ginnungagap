@@ -155,8 +155,9 @@ def test_a_record_survives_an_encode_and_decode_round_trip() -> None:
 
 
 @pytest.mark.fr("DR-009")
-def test_the_json_names_kind_setup_schema_4_home_user_ids_subids_boot_id_status_and_timestamp(
-) -> None:
+def test_the_json_names_kind_setup_schema_4_home_user_ids_subids_boot_id_status_and_timestamp() -> (
+    None
+):
     body = _json(_sample())
     assert body["schema"] == 4
     assert body["home"] == HOME
@@ -410,8 +411,11 @@ def test_the_shared_record_has_no_status_and_only_its_own_file_has_a_post_image(
         rec.encode_shared(with_post)
     service_post = replace(
         _shared_sample(),
-        service_paths=(replace(_shared_sample().service_paths[0], post=rec.Image("file", mode=0o644,
-                                                                              sha256=DIGEST)),)
+        service_paths=(
+            replace(
+                _shared_sample().service_paths[0], post=rec.Image("file", mode=0o644, sha256=DIGEST)
+            ),
+        )
         + _shared_sample().service_paths[1:],
     )
     with pytest.raises(ValueError, match="post-image"):
@@ -426,8 +430,12 @@ def test_the_shared_record_must_list_its_own_file_with_its_pre_image_absent() ->
     own_with_data = replace(
         _shared_sample(),
         paths=tuple(
-            rec.PathEntry(path=entry.path, kind="file", pre=rec.Image("file", mode=0o600, data=b""),
-                          shared=True)
+            rec.PathEntry(
+                path=entry.path,
+                kind="file",
+                pre=rec.Image("file", mode=0o600, data=b""),
+                shared=True,
+            )
             if entry.path == rec.SHARED_RELPATH
             else entry
             for entry in _shared_sample().paths

@@ -231,8 +231,14 @@ def _teardown(host: Host | None, base: Path, tools: dict[str, str]) -> list[str]
             with contextlib.suppress(*errors):
                 run_tool(
                     [
-                        tools["nsenter"], "-t", str(pause), "-U", "-m", "--",
-                        tools["umount"], str(mount),
+                        tools["nsenter"],
+                        "-t",
+                        str(pause),
+                        "-U",
+                        "-m",
+                        "--",
+                        tools["umount"],
+                        str(mount),
                     ],
                     check=False,
                     timeout=60,

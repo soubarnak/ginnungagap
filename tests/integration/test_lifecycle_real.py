@@ -254,8 +254,19 @@ def pause_mount(host: Host, target: Path) -> None:
     """A tmpfs mounted inside the store's namespace (nsenter -t <pause>), as the owner uid may."""
     pid = pause_pid(host)
     run_tool(
-        [tool("nsenter"), "-t", str(pid), "-U", "-m", "--", tool("mount"), "-t", "tmpfs", "tmpfs",
-         str(target)]
+        [
+            tool("nsenter"),
+            "-t",
+            str(pid),
+            "-U",
+            "-m",
+            "--",
+            tool("mount"),
+            "-t",
+            "tmpfs",
+            "tmpfs",
+            str(target),
+        ]
     )
     host.pause_mounts.append(target)
 
@@ -703,7 +714,7 @@ def test_a_socket_directory_and_file_under_keep_id(host: Host, box: Box) -> None
             types = sh(
                 host,
                 box.cid,
-                "stat -c '%F' \"$1\" \"$2\" \"$3\"",
+                'stat -c \'%F\' "$1" "$2" "$3"',
                 f"{run}/ginn-dir",
                 f"{run}/ginn-file",
                 f"{run}/ginn-sock",
@@ -715,7 +726,7 @@ def test_a_socket_directory_and_file_under_keep_id(host: Host, box: Box) -> None
                 host,
                 box.cid,
                 "perl -MIO::Socket::UNIX -e '$s=IO::Socket::UNIX->new(Peer=>$ARGV[0]) or die $!; "
-                "print <$s>' \"$1\"",
+                'print <$s>\' "$1"',
                 f"{run}/ginn-sock",
                 user="1000:1000",
             )
@@ -892,14 +903,34 @@ def test_a_busy_directory_under_plain_umount2_control(host: Host, box: Box) -> N
     init_pid = str(host.cli.inspect(box.cid).pid)
     attempts = {
         "nsenter_mount_ns_umount": [
-            tool("nsenter"), "-t", init_pid, "-m", "--", "/usr/bin/umount", realm,
+            tool("nsenter"),
+            "-t",
+            init_pid,
+            "-m",
+            "--",
+            "/usr/bin/umount",
+            realm,
         ],
         "nsenter_mount_pid_ns_umount": [
-            tool("nsenter"), "-t", init_pid, "-m", "-p", "--", "/usr/bin/umount", realm,
+            tool("nsenter"),
+            "-t",
+            init_pid,
+            "-m",
+            "-p",
+            "--",
+            "/usr/bin/umount",
+            realm,
         ],
         "nsenter_mount_ns_perl_umount2": [
-            tool("nsenter"), "-t", init_pid, "-m", "--", "/usr/bin/perl", "-e",
-            'syscall(166, $ARGV[0], 0) == 0 or print "errno=", $!+0, "\\n"', realm,
+            tool("nsenter"),
+            "-t",
+            init_pid,
+            "-m",
+            "--",
+            "/usr/bin/perl",
+            "-e",
+            'syscall(166, $ARGV[0], 0) == 0 or print "errno=", $!+0, "\\n"',
+            realm,
         ],
     }
     observed: dict[str, str] = {}
@@ -961,7 +992,7 @@ def test_a_plain_umount2_socket_with_a_connected_descriptor(host: Host, box: Box
         host,
         box,
         "perl -MIO::Socket::UNIX -e '$s=IO::Socket::UNIX->new(Peer=>$ARGV[0]) or die; "
-        "sleep 600' \"$1\"",
+        'sleep 600\' "$1"',
         realm,
     )
     facts: dict[str, Any] = {"holder_pid": pid}
@@ -974,7 +1005,7 @@ def test_a_plain_umount2_socket_with_a_connected_descriptor(host: Host, box: Box
             host,
             box.cid,
             "perl -MIO::Socket::UNIX -e '$s=IO::Socket::UNIX->new(Peer=>$ARGV[0]) or die $!; "
-            "print <$s>' \"$1\"",
+            'print <$s>\' "$1"',
             realm,
             user="1000:1000",
         )

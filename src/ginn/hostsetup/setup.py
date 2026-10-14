@@ -133,6 +133,8 @@ before its rename), "pending", "dirs", "subuid", "subgid", "subids", "sv", "syml
 and "shared" (a later setup that added a shared directory, after shared.json is written).
 """
 Clock = Callable[[], float]
+
+
 @dataclass(frozen=True)
 class SetupResult:
     """The outcome of one `run_setup` call. `paths` counts the per-user record's paths."""
@@ -599,9 +601,7 @@ def _intact(host: Host, current: rec.HostSetupRecord, target: _Target) -> bool:
             return False
         if _read(host, entry.path, pre=False) != entry.post:
             return False
-    return _covers(host, SUBUID, current.subids.uid) and _covers(
-        host, SUBGID, current.subids.gid
-    )
+    return _covers(host, SUBUID, current.subids.uid) and _covers(host, SUBGID, current.subids.gid)
 
 
 def _covers(host: Host, rel: str, entry: subids.SubIdEntry) -> bool:
