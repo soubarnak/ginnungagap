@@ -68,8 +68,8 @@ from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_in_lock
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.ops.create import RETRY_DELAYS
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
+from ginn.ops.retry import network_retry_hook
 from ginn.packages.aur import install_aur
 from ginn.packages.manager import (
     explicit_packages,
@@ -115,15 +115,8 @@ class PackageHooks:
 
 
 def _retry(hooks: PackageHooks) -> RetryHook:
-    """The FR-120 retry rule: wait the delay of the failed attempt, then retry (AS-023)."""
-
-    def retry(attempt: int, err: GinnError) -> bool:
-        if attempt > len(RETRY_DELAYS):
-            return False
-        hooks.sleep(RETRY_DELAYS[attempt - 1])
-        return True
-
-    return retry
+    """The FR-120 retry rule of ops/retry.py, waiting with the hook's sleep (AS-023)."""
+    return network_retry_hook(hooks.sleep)
 
 
 def _checked(record: RealmRecord, packages: Sequence[str]) -> list[str]:

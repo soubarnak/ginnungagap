@@ -47,6 +47,7 @@ from types import FrameType
 from typing import Final
 
 from ginn.errors import GinnError, make
+from ginn.ops.retry import NETWORK_PATTERNS
 from ginn.podman.adapter import (
     PODMAN_ERROR_EXIT,
     CreateSpec,
@@ -58,16 +59,7 @@ from ginn.podman.adapter import (
 from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
 from ginn.store.paths import OwnedPaths, check_runtime_dir
 
-_NETWORK_PATTERNS: Final = (
-    re.compile(r"dial tcp", re.IGNORECASE),
-    re.compile(r"TLS handshake timeout", re.IGNORECASE),
-    re.compile(r"no route to host", re.IGNORECASE),
-    re.compile(r"temporary failure in name resolution", re.IGNORECASE),
-    re.compile(r"connection refused", re.IGNORECASE),
-    re.compile(r"i/o timeout", re.IGNORECASE),
-    re.compile(r"\bEOF\b"),
-    re.compile(r"\b(?:503|429)\b"),
-)
+_IN_USE_PATTERNS: Final = (re.compile(r"image is in use by a container", re.IGNORECASE),)
 _DIGEST_PATTERNS: Final = (
     re.compile(r"manifest unknown", re.IGNORECASE),
     re.compile(r"digest did not match", re.IGNORECASE),
@@ -487,8 +479,13 @@ class PodmanCli:
             err = make("GINN-E-IMAGE-UNVERIFIED", distro=pull_ref.partition("@")[0])
         elif _matches(_CDI_PATTERNS, stderr):
             err = make("GINN-E-NVIDIA-CDI", detail=_decisive_line(stderr))
-        elif result.returncode == _NETWORK_EXIT and _matches(_NETWORK_PATTERNS, stderr):
+        elif result.returncode == _NETWORK_EXIT and _matches(NETWORK_PATTERNS, stderr):
             err = make("GINN-E-NETWORK")
+        elif op == "rmi" and _matches(_IN_USE_PATTERNS, stderr):
+            # No catalogue code names an image in use, so this stays GINN-E-INTERNAL, with the
+            # reason in the details. create and delete check for a user before they call rmi.
+            err = make("GINN-E-INTERNAL")
+            err.details["reason"] = "the image is in use by a container, so rmi refused it"
         else:
             err = make("GINN-E-INTERNAL")
         err.details.update({"op": op, "exit": result.returncode, "stderr": _decisive_line(stderr)})

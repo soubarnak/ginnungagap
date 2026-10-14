@@ -53,6 +53,10 @@ def with_network_retry[T](action: Callable[[], T], retry_hook: RetryHook | None)
 
     `attempt` passed to the hook is the 1-based number of the attempt that failed. Other error
     codes are never retried.
+
+    Superseded by ops/retry.py (T8.1, FR-120): its `with_retry` and `network_retry_hook` hold the
+    5, 15 and 45 s delays and the shared network classifier. This function stays until every caller
+    moves to ops/retry.py, because ops/create.py still calls it through the adapter.
     """
     failures = 0
     while True:

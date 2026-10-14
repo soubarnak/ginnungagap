@@ -25,6 +25,8 @@ from typing import Any
 import pytest
 
 from ginn.errors import GinnError
+from ginn.ops import retry
+from ginn.podman import cli as podman_cli
 from ginn.podman.adapter import CreateSpec, Podman, RetryHook
 from ginn.podman.cli import PodmanCli
 from ginn.store.paths import OwnedPaths
@@ -1168,3 +1170,22 @@ def test_shim_never_runs_a_real_podman() -> None:
     source = (SHIM_DIR / "podman").read_text(encoding="utf-8")
     for forbidden in ("subprocess", "os.exec", "os.spawn", "os.system", "pty"):
         assert forbidden not in source
+
+
+@pytest.mark.fr("FR-120")
+def test_the_podman_client_classifies_network_text_with_the_one_list_of_ops_retry() -> None:
+    """The podman client and the package managers share NETWORK_PATTERNS (T8.1, FR-120)."""
+    assert podman_cli.NETWORK_PATTERNS is retry.NETWORK_PATTERNS
+
+
+@pytest.mark.fr("FR-019")
+def test_rmi_of_an_image_in_use_is_internal_with_the_reason_named(
+    shim: Path, tmp_path: Path
+) -> None:
+    """No catalogue code names an image in use, so the code stays INTERNAL, with the reason."""
+    stderr = "Error: image used by 3f2a: image is in use by a container\n"
+    use_fixture_dir(tmp_path, {"rmi": {"stdout": "", "stderr": stderr, "exit": 2}})
+    err = expect_error(lambda: make_cli(tmp_path).rmi(DIGEST_REF))
+    assert err.code == "GINN-E-INTERNAL"
+    assert err.details["reason"] == "the image is in use by a container, so rmi refused it"
+    assert err.details["op"] == "rmi"

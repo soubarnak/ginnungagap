@@ -8,9 +8,9 @@ that ginn parses is in English.
 
 A non-zero status is classified in this order (`failure`, `network_failure`):
 1. A signature match is GINN-E-PKG-SIGNATURE (FR-012 AC-1). It wins over every other text.
-2. A match of the distribution's `network_error` pattern is a transient network failure. `run_step`
-   retries it through the caller's hook with the FR-120 delays, and after the last retry it is
-   GINN-E-NETWORK.
+2. A match of the shared classifier (ops/retry.py, with the distribution's `network_error`
+   pattern as `extra`) is a transient network failure. `run_step` retries it through the caller's
+   hook with the FR-120 delays, and after the last retry it is GINN-E-NETWORK.
 3. Anything else is GINN-E-PKG-MANAGER. A stale-metadata match adds `stale_metadata` to its details
    (ADR-011). Stale metadata is not retried, because a retry cannot fix it.
 
@@ -27,12 +27,16 @@ fail, so an unread plan never lets a removal go ahead.
 """
 
 import re
+import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
 
 from ginn.distros import DistroDef, Verb
+from ginn.distros.loader import UpdateStatus, arch_check_status
 from ginn.errors import GinnError, make
+from ginn.ops.retry import is_network
 from ginn.podman.adapter import Podman, RetryHook, with_network_retry
 from ginn.podman.models import ExecResult
 
@@ -109,18 +113,19 @@ def failure(definition: DistroDef, result: ExecResult, *, realm: str, step: str)
 
 
 def network_failure(definition: DistroDef, result: ExecResult) -> bool:
-    """True when a non-zero status is a transient network failure (FR-120, ADR-011).
+    """True when a non-zero status is a transient network failure (FR-120, ADR-011, T8.1).
 
-    A signature match wins: its output is not retried. Stale metadata is not checked here, because
-    a stale 404 names no network marker, and a network marker in a stale line is still a network
-    failure that a retry can fix.
+    The shared classifier of ops/retry.py decides. The distribution's `network_error` pattern is
+    its `extra`, and its signature pattern is excluded: a signature match wins, so its output is
+    not retried. Stale metadata is not checked here, because a stale 404 names no network marker,
+    and a network marker in a stale line is still a network failure that a retry can fix.
     """
-    if result.exit_code == 0:
-        return False
-    text = f"{result.stderr}\n{result.stdout}"
-    if definition.signature_error.search(text) is not None:
-        return False
-    return definition.network_error.search(text) is not None
+    return is_network(
+        f"{result.stderr}\n{result.stdout}",
+        exit_code=result.exit_code,
+        extra=definition.network_error,
+        signature=definition.signature_error,
+    )
 
 
 def _network(realm: str, step: str, result: ExecResult) -> GinnError:
@@ -339,10 +344,252 @@ def removal_dependents(
     return frozenset(listed - set(names))
 
 
+CHECK_UPDATES_EXIT: Final = 100
+"""The status of dnf5 `check-upgrade` when updates exist. It exits 0 when none (ADR-011, FR-024).
+
+Only dnf uses it. apt exits 100 on an error, so for apt distros 100 is a failure (see `_single`).
+"""
+SCRATCH_PREFIX: Final = "/tmp/ginn-check-"  # noqa: S108 - a path inside the realm, not the host
+"""The start of an Arch check's scratch directory in the realm (ADR-011). A uuid4 hex follows it."""
+_ARCH: Final = "arch"
+_DEBIAN_LIKE: Final = frozenset({"debian", "kali"})
+_DNF_LIKE: Final = frozenset({"fedora"})
+_APT_UPGRADABLE: Final = re.compile(r"\[upgradable from: ")
+"""The mark apt puts on each upgradable package of `apt list --upgradable`."""
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """What check-updates found in one realm (FR-024). `count` is None when it is not read."""
+
+    status: UpdateStatus
+    count: int | None
+
+    @property
+    def updates(self) -> bool:
+        """True when the realm has at least one package with a newer version."""
+        return self.status is UpdateStatus.UPDATES
+
+
+def _exec(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    argv: Sequence[str],
+    *,
+    realm: str,
+    step: str,
+    retry_hook: RetryHook | None,
+) -> ExecResult:
+    """One check step as container root under the locale. A non-zero status is returned, not raised.
+
+    A transient network failure is raised as GINN-E-NETWORK inside the attempt, so the retry hook
+    sees it and waits the FR-120 delay, as `run_step` does.
+    """
+
+    def attempt() -> ExecResult:
+        result = podman.exec(container_id, argv, user=ROOT_USER, env=LOCALE)
+        if network_failure(definition, result):
+            raise _network(realm, step, result)
+        return result
+
+    return with_network_retry(attempt, retry_hook)
+
+
+def _listed(definition: DistroDef, stdout: str, *, realm: str, step: str) -> int | None:
+    """How many packages a check's output lists, or None when this module does not read it.
+
+    The output is bounded first (`_bounded`). Arch lists one non-blank line per upgradable package
+    (ADR-011). Debian and Kali mark each upgradable package with `[upgradable from:`, and their
+    header and warnings do not carry the mark. Fedora's rows are not read until M4, so its count is
+    None. The rule is code, keyed by the distribution id, because the TOML has no key for it yet.
+    """
+    _bounded(stdout, realm=realm, step=step)
+    if definition.id == _ARCH:
+        return sum(1 for line in stdout.splitlines() if line.strip())
+    if definition.id in _DEBIAN_LIKE:
+        return sum(1 for line in stdout.splitlines() if _APT_UPGRADABLE.search(line))
+    return None
+
+
+def _fatal(definition: DistroDef, stderr: str) -> bool:
+    """True when a stderr line of a check matches a fatal-warning pattern of the distribution."""
+    return any(
+        pattern.search(line) is not None
+        for line in stderr.splitlines()
+        for pattern in definition.check_fatal_warnings
+    )
+
+
+def _single(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    argv: Sequence[str],
+    *,
+    realm: str,
+    retry_hook: RetryHook | None,
+) -> CheckResult:
+    """A one-step check: Debian, Kali and Fedora. Exit 0 is none, or updates if rows are listed."""
+    result = _exec(
+        podman, container_id, definition, argv, realm=realm, step="check", retry_hook=retry_hook
+    )
+    listed = _listed(definition, result.stdout, realm=realm, step="check")
+    if _fatal(definition, result.stderr):
+        raise failure(definition, result, realm=realm, step="check")
+    if result.exit_code == CHECK_UPDATES_EXIT and definition.id in _DNF_LIKE:
+        return CheckResult(UpdateStatus.UPDATES, listed)
+    if result.exit_code != 0:
+        raise failure(definition, result, realm=realm, step="check")
+    if listed:
+        return CheckResult(UpdateStatus.UPDATES, listed)
+    return CheckResult(UpdateStatus.NONE, listed)
+
+
+def _layered(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    steps: Sequence[Sequence[str]],
+    *,
+    realm: str,
+    retry_hook: RetryHook | None,
+) -> CheckResult:
+    """The Arch check of ADR-011: setup steps, then the scratch sync, then the query.
+
+    Each setup step must exit 0. The sync must exit 0, or the query does not run. The query's
+    result goes to `arch_check_status`, which fails closed. Every other outcome is an error.
+    """
+    *setup, sync, query = steps
+    for argv in setup:
+        result = _exec(
+            podman,
+            container_id,
+            definition,
+            argv,
+            realm=realm,
+            step="check-setup",
+            retry_hook=retry_hook,
+        )
+        if result.exit_code != 0:
+            raise failure(definition, result, realm=realm, step="check-setup")
+    sync_result = _exec(
+        podman,
+        container_id,
+        definition,
+        sync,
+        realm=realm,
+        step="check-sync",
+        retry_hook=retry_hook,
+    )
+    if sync_result.exit_code != 0:
+        raise failure(definition, sync_result, realm=realm, step="check-sync")
+    query_result = _exec(
+        podman,
+        container_id,
+        definition,
+        query,
+        realm=realm,
+        step="check-query",
+        retry_hook=retry_hook,
+    )
+    listed = _listed(definition, query_result.stdout, realm=realm, step="check-query")
+    status = arch_check_status(
+        sync_result.exit_code,
+        query_result.exit_code,
+        query_result.stdout,
+        query_result.stderr,
+        definition.check_fatal_warnings,
+    )
+    if status is UpdateStatus.ERROR:
+        raise failure(definition, query_result, realm=realm, step="check-query")
+    return CheckResult(status, listed)
+
+
+def _remove_scratch(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    scratch: str,
+    *,
+    realm: str,
+    retry_hook: RetryHook | None,
+) -> None:
+    """Remove the scratch directory. `rm -rf` does not follow the `local` link (ADR-011)."""
+    result = _exec(
+        podman,
+        container_id,
+        definition,
+        ["rm", "-rf", "--", scratch],
+        realm=realm,
+        step="check-cleanup",
+        retry_hook=retry_hook,
+    )
+    if result.exit_code != 0:
+        detail = f"the scratch directory {printable(scratch)} is not removed"
+        raise refused(realm, "check-cleanup", detail)
+
+
+def run_check(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    *,
+    realm: str,
+    retry_hook: RetryHook | None = None,
+    tmpdir: str | None = None,
+) -> CheckResult:
+    """Run check-updates in a running realm and return what it found (FR-024, ADR-011).
+
+    The check changes no installed package. Arch checks a scratch copy of the sync database under
+    `tmpdir`, which is made here when the caller gives none. The scratch directory is removed after
+    the last step, also when a step failed. A removal that fails after a clean check is an error.
+    A distribution whose data lists `refresh` before check-updates runs it first (Debian and Kali).
+    Any failure raises: the caller gets GINN-E-PKG-MANAGER, GINN-E-PKG-SIGNATURE or GINN-E-NETWORK.
+    """
+    scratch = tmpdir
+    if definition.check_updates_needs_tmpdir and scratch is None:
+        scratch = f"{SCRATCH_PREFIX}{uuid.uuid4().hex}"
+    steps = definition.check_updates(scratch)
+    if Verb.CHECK_UPDATES in definition.refresh_before:
+        run_step(
+            podman,
+            container_id,
+            definition,
+            definition.argv(Verb.REFRESH),
+            realm=realm,
+            step="refresh",
+            retry_hook=retry_hook,
+        )
+    if not definition.check_updates_needs_tmpdir:
+        return _single(
+            podman, container_id, definition, steps[0], realm=realm, retry_hook=retry_hook
+        )
+    if scratch is None:
+        raise refused(realm, "check", "the scratch directory is not set")
+    try:
+        result = _layered(
+            podman, container_id, definition, steps, realm=realm, retry_hook=retry_hook
+        )
+    except BaseException:
+        try:
+            _remove_scratch(
+                podman, container_id, definition, scratch, realm=realm, retry_hook=retry_hook
+            )
+        except GinnError:
+            pass  # the check's own error is the one raised; the leftover is a scratch copy
+        raise
+    _remove_scratch(podman, container_id, definition, scratch, realm=realm, retry_hook=retry_hook)
+    return result
+
+
 __all__ = [
+    "CHECK_UPDATES_EXIT",
     "LOCALE",
     "MAX_NAMES",
     "ROOT_USER",
+    "SCRATCH_PREFIX",
+    "CheckResult",
     "explicit_packages",
     "failure",
     "network_failure",
@@ -352,6 +599,7 @@ __all__ = [
     "printable",
     "refused",
     "removal_dependents",
+    "run_check",
     "run_step",
     "shown",
 ]
