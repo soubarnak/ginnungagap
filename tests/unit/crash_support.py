@@ -113,6 +113,25 @@ class Probe:
         os.kill(os.getpid(), signal.SIGKILL)
 
 
+class LabelProbe(Probe):
+    """A Probe that kills at the first point with `label`, not at an index.
+
+    A test builds a starting state with it: the operation that it kills has its effects up to the
+    point, and the point is the one that `Probe.points` names. The kill is in-process.
+    """
+
+    def __init__(self, label: str) -> None:
+        super().__init__(None)
+        self.label = label
+
+    def _point(self, label: str) -> None:
+        self.points.append(label)
+        if label != self.label or self.dead:
+            return
+        self.dead = True
+        raise SimulatedCrash(label)
+
+
 def podman_state(podman: Any) -> dict[str, Any]:
     """The attributes of the fake podman, without the instance wrappers of `probing()`."""
     return {key: value for key, value in vars(podman).items() if key not in PODMAN_MUTATORS}

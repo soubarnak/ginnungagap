@@ -3,7 +3,6 @@
 
 The JSON keys of a status come from `RealmStatus.to_json()`, which a golden test pins, so this
 module adds nothing to them. A broken realm's text names both recovery commands (FR-122 AC-1).
-`create --resume` is M8 (T8.5), so the text says so.
 """
 
 from __future__ import annotations
@@ -162,6 +161,6 @@ def _notes(status: RealmStatus) -> list[str]:
 
 def _broken_hint(name: str) -> str:
     return (
-        f"realm {name} is broken: run 'ginn create --resume {name}' (arrives in M8) "
+        f"realm {name} is broken: run 'ginn create --resume {name}' if its create was interrupted, "
         f"or 'ginn delete {name}'"
     )

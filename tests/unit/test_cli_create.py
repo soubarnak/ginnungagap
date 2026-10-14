@@ -98,27 +98,86 @@ def test_a_bad_realm_name_is_an_argument_error_before_anything_runs(
     assert "GINN-E-NAME-INVALID" in capsys.readouterr().err
 
 
+def _resumed(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace resume_create with a recorder that returns a stopped record (no ops run)."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_resume(
+        env: Any,
+        podman: Any,
+        name: RealmName,
+        *,
+        uid: int,
+        gid: int,
+        host_home: Any,
+        host_env: Any,
+        hooks: Any,
+    ) -> CreateResult:
+        calls.append({"name": name, "hooks": hooks})
+        record = record_of(name.value, RealmState.STOPPED, "c" * 64)
+        return CreateResult(record=record, warnings=[], locale_note=None, resumed=True)
+
+    monkeypatch.setattr(create_cmd, "resume_create", fake_resume)
+    return calls
+
+
+@pytest.mark.fr("FR-122")
+def test_resume_names_the_realm_and_reports_it_resumed(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = _resumed(monkeypatch)
+    assert main(["create", "--resume", "arch"]) == 0
+    assert [call["name"] for call in calls] == [RealmName("arch")]
+    assert "realm arch resumed: state stopped" in capsys.readouterr().out
+
+
+@pytest.mark.fr("FR-122")
+def test_resume_in_json_has_the_create_payload(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _resumed(monkeypatch)
+    assert main(["--json", "create", "--resume", "arch"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["name"] == "arch"
+    assert payload["state"] == "stopped"
+    assert payload["resumed"] is True
+
+
+@pytest.mark.fr("FR-122")
 @pytest.mark.fr("IR-011")
 @pytest.mark.parametrize(
-    ("argv", "feature", "milestone"),
+    "extra",
     [
-        (["create", "arch", "--resume"], "create --resume", "M8"),
+        ["--name", "x"],
+        ["--tier", "basic"],
+        ["--services", "off"],
+        ["--with", "htop"],
+        ["--everything"],
     ],
 )
-def test_options_not_built_yet_are_refused_with_their_milestone(
+def test_resume_takes_only_the_realm_name_and_yes(
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    argv: list[str],
-    feature: str,
-    milestone: str,
+    extra: list[str],
 ) -> None:
-    requests = _recorded(monkeypatch)
-    assert main(argv) == 2
-    assert requests == []
-    err = capsys.readouterr().err
-    assert err.startswith("GINN-E-NOT-SUPPORTED-YET: ")
-    assert f"{feature} arrives in {milestone}" in err
+    calls = _resumed(monkeypatch)
+    assert main(["create", "--resume", "arch", *extra]) == 2
+    assert calls == []
+    assert capsys.readouterr().err.startswith("GINN-E-USAGE: --resume takes only the realm name")
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-014")
+def test_resume_answers_the_everything_prompt_with_yes_or_not_at_all_without_a_terminal(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _resumed(monkeypatch)
+    assert main(["create", "--resume", "kali", "--yes"]) == 0
+    confirm = calls[-1]["hooks"].confirm
+    assert confirm is not None and confirm("prompt") is True
+    assert main(["--json", "create", "--resume", "kali"]) == 0
+    assert calls[-1]["hooks"].confirm is None
 
 
 @pytest.mark.fr("FR-014")
@@ -342,6 +401,7 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
         "services": False,
         "generation": 1,
         "image_digest": payload["image_digest"],
+        "resumed": False,
         "locale_note": payload["locale_note"],
         "gpu_note": payload["gpu_note"],
         "everything": None,

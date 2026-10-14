@@ -10,6 +10,8 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   estimate times 1.10, rounded up (FR-121, ops/disk.py).
 - recorded: the record is saved as `creating` (DR-020), with the pinned reference and digest. It is
   saved before the pull, so an interrupted create leaves a record that recovery can find (FR-122).
+  It also keeps the request that `create --resume` needs: `create_pending`, the `--with` packages
+  and, once the Kali prompt is answered yes, `everything_confirmed` (store/records.py).
 - homed: the Realm Home is made, mode 0700 (Owned Paths, DR-010, FR-048). A realm with nested
   containers also gets its seccomp profile under the Owned Path `seccomp` and its inner podman
   config in the Realm Home (ADR-006, security/seccomp.py, security/nested.py).
@@ -65,13 +67,17 @@ own failure (exit 125). A package manager's own download failure (apt exit 100, 
 exit 1) is GINN-E-PKG-MANAGER and is not retried. Each retry waits 5, 15 and 45 s (FR-120,
 AS-023). The waits and the hook are ops/retry.py's (`network_retry_hook`, T8.1).
 
-Not in this module: `--resume` (T2.8), the classifier of package-manager output (ops/retry.py and
-packages/manager.py), the Install Manifest (M5), and a CLI command, since T4.4 has no CLI task.
+`create --resume` is ops/resume.py (T8.5). It is a subclass of `_Create` that runs the same phases
+from the request kept in the record, and `run_journaled` below is the journaled body both share.
+
+Not in this module: the classifier of package-manager output (ops/retry.py and packages/manager.py),
+and the Install Manifest (M5).
 """
 
 import contextlib
 import os
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
@@ -80,6 +86,7 @@ from ginn.distros import Verb
 from ginn.domain import (
     InstallMethod,
     InstallSource,
+    RealmName,
     RealmState,
     transition,
 )
@@ -140,7 +147,8 @@ class CreateResult:
 
     `warnings` holds GINN-W-HOST-CHANGED from the after-check (FR-006). `locale_note` is set when
     the host LANG cannot be used, so the realm gets C.UTF-8 instead (FR-013, distros/loader.py).
-    `estimate` is the size of the everything set that was confirmed, or None (FR-014).
+    `estimate` is the size of the everything set that was confirmed, or None (FR-014). `resumed` is
+    True when the result comes from `create --resume` (ops/resume.py).
     """
 
     record: RealmRecord
@@ -148,6 +156,7 @@ class CreateResult:
     locale_note: str | None
     gpu_note: str | None = None
     estimate: SizeEstimate | None = None
+    resumed: bool = False
 
 
 def _remove_tree(path: Path) -> None:
@@ -156,6 +165,11 @@ def _remove_tree(path: Path) -> None:
         path.unlink()
     elif path.is_dir():
         shutil.rmtree(path)
+
+
+def _cleared_request() -> dict[str, Any]:
+    """The fields that the save writing `stopped` clears, as the create is no longer pending."""
+    return {"create_pending": False, "with_at_create": [], "everything_confirmed": False}
 
 
 class _Create:
@@ -281,6 +295,8 @@ class _Create:
             gpu_cdi=plan.gpu_cdi,
             gpu_at_create=Toggle.GPU in plan.toggles,
             fonts_at_create=Toggle.FONTS_TIMEZONE in plan.toggles,
+            create_pending=True,
+            with_at_create=list(plan.packages),
         )
         # Claimed before the write: an interrupt inside the write must still find the record.
         self._owns_record = True
@@ -493,8 +509,15 @@ class _Create:
         self._exec(self._plan.definition.argv(Verb.INSTALL, names), step="everything")
 
     def _confirm_everything(self, prompt: str) -> bool:
-        """Answer the everything prompt. A create asks `hooks.confirm`; None declines (FR-014)."""
-        return self._hooks.confirm is not None and self._hooks.confirm(prompt)
+        """Answer the everything prompt. A create asks `hooks.confirm`; None declines (FR-014).
+
+        A yes is saved in the record before the install, so `create --resume` does not ask again
+        (FR-122). `--yes` answers through the same hook, so it is recorded too.
+        """
+        if self._hooks.confirm is None or not self._hooks.confirm(prompt):
+            return False
+        self._update(everything_confirmed=True)
+        return True
 
     def _estimate_everything(self) -> SizeEstimate:
         """The size of the everything closure, read from the realm's package lists (FR-014 AC-1).
@@ -555,7 +578,7 @@ class _Create:
         self._step("stopped")
         record = self._current()
         transition(record.state, RealmState.STOPPED, record.previous_state)
-        self._update(state=RealmState.STOPPED)
+        self._update(state=RealmState.STOPPED, **_cleared_request())
         return self._current()
 
     def _finish(self) -> RealmRecord:
@@ -577,6 +600,7 @@ class _Create:
                 source=InstallSource.REPO,
                 method=InstallMethod.GINN,
             ),
+            **_cleared_request(),
         )
         return self._current()
 
@@ -644,33 +668,28 @@ class _Create:
         )
 
 
-def create_realm(
+def run_journaled(
     env: OpEnv,
-    podman: Podman,
-    request: CreateRequest,
+    plan: _Plan,
+    name: RealmName,
+    params: dict[str, Any],
+    body: Callable[[Mutation], _Create],
     *,
-    hooks: CreateHooks | None = None,
+    resumed: bool = False,
 ) -> CreateResult:
-    """Create realm `request.name` as a stopped Basic realm with services off (FR-010).
+    """Run one create or resume inside the image lock and `mutating("create")` (FR-122).
 
-    Validation runs first, and it writes nothing. The body runs inside `mutating()`. A GINN-E error
-    from the body rolls back the body's artifacts and is re-raised. See the module docstring.
+    `body` builds the phases over the mutation that the journal gives it, so the rollback can reach
+    them. A GinnError from the phases rolls them back and is re-raised with the rollback notes. A
+    KeyboardInterrupt rolls back the same way and becomes GINN-E-INTERRUPTED. Any other exception
+    keeps the journal entry, as `mutating()` does (FR-122). `resumed` is copied to the result.
     """
-    hooks = CreateHooks() if hooks is None else hooks
-    plan = _validate(env, request, hooks)
-    params: dict[str, object] = {
-        "distro": plan.definition.id,
-        "tier": request.tier.value,
-        "services": request.services,
-        "with": list(plan.packages),
-        "everything": list(plan.everything),
-    }
     image = f"create of {plan.definition.id} image"
     with (
         image_lock(env.paths, plan.definition.id, image),
-        mutating(env, "create", request.name, params) as mutation,
+        mutating(env, "create", name, params) as mutation,
     ):
-        create = _Create(env, podman, request, hooks, plan, mutation)
+        create = body(mutation)
         try:
             record = create.run()
         except GinnError as err:
@@ -688,6 +707,37 @@ def create_realm(
         locale_note=create.locale_note,
         gpu_note=create.gpu_note,
         estimate=create.estimate,
+        resumed=resumed,
+    )
+
+
+def create_realm(
+    env: OpEnv,
+    podman: Podman,
+    request: CreateRequest,
+    *,
+    hooks: CreateHooks | None = None,
+) -> CreateResult:
+    """Create realm `request.name` as a stopped Basic realm with services off (FR-010).
+
+    Validation runs first, and it writes nothing. The body runs inside `mutating()`. A GINN-E error
+    from the body rolls back the body's artifacts and is re-raised. See the module docstring.
+    """
+    hooks = CreateHooks() if hooks is None else hooks
+    plan = _validate(env, request, hooks)
+    params: dict[str, Any] = {
+        "distro": plan.definition.id,
+        "tier": request.tier.value,
+        "services": request.services,
+        "with": list(plan.packages),
+        "everything": list(plan.everything),
+    }
+    return run_journaled(
+        env,
+        plan,
+        request.name,
+        params,
+        lambda mutation: _Create(env, podman, request, hooks, plan, mutation),
     )
 
 

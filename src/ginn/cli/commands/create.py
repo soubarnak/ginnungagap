@@ -7,10 +7,15 @@ development or custom (FR-060), and each tier's options are in security/caps.py 
 its start goes through its runit entry, and the CLI never starts a services-on container. The
 options that the build does not have yet are refused before anything is written, with
 GINN-E-NOT-SUPPORTED-YET: `--with` and `--everything` on a services-on create, since the packages
-go in after the realm's first supervised start, with `ginn install`, and `--resume` (M8, T8.5). A
-failure that ops/create.py reports is raised as it is. A real services-off create runs its package
-steps; a services-on create runs none, since it starts nothing. Only the tests and the host gate
-set `CreateHooks.integrate` to False, which skips them (T4.9 Gate 3).
+go in after the realm's first supervised start, with `ginn install`. A failure that ops/create.py
+reports is raised as it is. A real services-off create runs its package steps; a services-on create
+runs none, since it starts nothing. Only the tests and the host gate set `CreateHooks.integrate` to
+False, which skips them (T4.9 Gate 3).
+
+`ginn create --resume <realm>` finishes an interrupted create (FR-122, ops/resume.py). The realm
+name is the argument, and the options of the create come from the realm's record. So any other
+option with `--resume` is GINN-E-USAGE, and only `--yes` is allowed. A Kali everything set that the
+create did not confirm is asked for as a create asks, and `--yes` answers it.
 
 Kali (FR-026, FR-027, FR-014). A Kali realm is created like any other, on pasta with NET_RAW
 (runtime/spec.py). `--everything` installs the Kali metapackage. Its size is estimated from the
@@ -31,12 +36,12 @@ from typing import Final
 from ginn.cli import _context
 from ginn.cli.commands import CommandSpec, Context
 from ginn.domain import RealmName, Tier
-from ginn.errors import GinnError, make
+from ginn.errors import make
 from ginn.ops.create import CreateRequest, CreateResult, create_realm, human_bytes
+from ginn.ops.resume import resume_create
 from ginn.runtime.spec import KALI
 
 TIERS: Final = tuple(tier.value for tier in Tier)
-_NOT_YET: Final = "GINN-E-NOT-SUPPORTED-YET"
 _YES: Final = frozenset({"y", "yes"})
 _KALI_NOTE: Final = (
     "Kali (FR-026, FR-027, R-002, OOS-9): a Kali realm has its own network namespace with outbound "
@@ -48,7 +53,10 @@ _KALI_NOTE: Final = (
 
 def _configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "distro", metavar="DISTRO", help="distribution to build from: arch, debian, fedora or kali"
+        "distro",
+        metavar="DISTRO",
+        help="distribution to build from: arch, debian, fedora or kali; with --resume, the "
+        "realm to resume",
     )
     parser.add_argument(
         "--name",
@@ -58,13 +66,13 @@ def _configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--tier",
         choices=TIERS,
-        default=Tier.BASIC.value,
+        default=None,
         help="permission tier: basic, development or custom (default: basic, FR-060)",
     )
     parser.add_argument(
         "--services",
         choices=("on", "off"),
-        default="off",
+        default=None,
         help="run systemd inside the realm (default: off; on creates it stopped, for runit)",
     )
     parser.add_argument(
@@ -89,13 +97,10 @@ def _configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="resume an interrupted create (arrives in M8)",
+        help="finish the interrupted create of the realm named by DISTRO, with no other option "
+        "(FR-122)",
     )
     parser.epilog = _KALI_NOTE
-
-
-def _not_yet(name: RealmName, feature: str, milestone: str) -> GinnError:
-    return make(_NOT_YET, realm=name.value, feature=feature, milestone=milestone)
 
 
 def _is_terminal(stream: object) -> bool:
@@ -123,16 +128,12 @@ def _confirmed(_prompt: str) -> bool:
     return True
 
 
-def _refuse_unbuilt(
-    args: argparse.Namespace, name: RealmName, distro: str, *, json_mode: bool
-) -> None:
-    """Refuse an option this build cannot run, or one that would need a yes nobody can give.
+def _refuse_unbuilt(args: argparse.Namespace, distro: str, *, json_mode: bool) -> None:
+    """Refuse a request that needs a yes nobody can give, or the Kali option on another distro.
 
     Both checks run before any write. The services-on refusal of `--everything` is made by
     ops/_create_plan.py, which runs before the first write too.
     """
-    if args.resume:
-        raise _not_yet(name, "create --resume", "M8")
     if not args.everything:
         return
     if distro != KALI:
@@ -152,9 +153,32 @@ def _refuse_unbuilt(
         )
 
 
+def _refuse_with_resume(args: argparse.Namespace) -> None:
+    """`--resume` takes the realm name and `--yes` only. Any other create option is a usage error.
+
+    The options of the interrupted create are kept in its record (ops/resume.py), so a second copy
+    on the command line could only disagree with them. The check runs before any write.
+    """
+    given = [
+        flag
+        for flag, value in (
+            ("--name", args.name),
+            ("--tier", args.tier),
+            ("--services", args.services),
+            ("--with", args.with_packages),
+            ("--everything", args.everything),
+        )
+        if value
+    ]
+    if given:
+        detail = f"--resume takes only the realm name and --yes, not {', '.join(given)}"
+        raise make("GINN-E-USAGE", detail=detail)
+
+
 def _text(result: CreateResult) -> str:
     record = result.record
-    lines = [f"realm {record.settings.name.value} created: state {record.state.value}"]
+    verb = "resumed" if result.resumed else "created"
+    lines = [f"realm {record.settings.name.value} {verb}: state {record.state.value}"]
     if result.locale_note is not None:
         lines.append(f"note: {result.locale_note}")
     if result.gpu_note is not None:
@@ -170,9 +194,11 @@ def _text(result: CreateResult) -> str:
 
 
 def _run(args: argparse.Namespace, ctx: Context) -> int:
+    if args.resume:
+        return _resume(args, ctx)
     distro = str(args.distro)
     name = RealmName(str(args.name or distro))
-    _refuse_unbuilt(args, name, distro, json_mode=ctx.output.json_mode)
+    _refuse_unbuilt(args, distro, json_mode=ctx.output.json_mode)
     realms = _context.realms(ctx.output)
     _context.settle_interrupted(realms, ctx.output)
     request = CreateRequest(
@@ -182,14 +208,48 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         gid=realms.gid,
         host_home=realms.host.host_home,
         host_env=realms.host.host_env,
-        tier=Tier.parse(str(args.tier)),
-        services=args.services == "on",
+        tier=Tier.parse(str(args.tier or Tier.BASIC.value)),
+        services=(args.services or "off") == "on",
         everything=bool(args.everything),
         with_packages=tuple(args.with_packages or ()),
     )
     confirm: Callable[[str], bool] = _confirmed if args.yes else _ask
     hooks = replace(_context.create_hooks(realms.paths), confirm=confirm)
     result = create_realm(realms.env, realms.podman, request, hooks=hooks)
+    return _report(result, realms, ctx)
+
+
+def _resume(args: argparse.Namespace, ctx: Context) -> int:
+    """`create --resume REALM`: finish the realm's interrupted create (FR-122, ops/resume.py).
+
+    The answer to the Kali prompt is `--yes`, or the prompt on a terminal. Without either, a
+    resume that needs the answer is refused by ops/resume.py before any write, as a create is.
+    """
+    name = RealmName(str(args.distro))
+    _refuse_with_resume(args)
+    realms = _context.realms(ctx.output)
+    _context.settle_interrupted(realms, ctx.output)
+    confirm: Callable[[str], bool] | None = None
+    if args.yes:
+        confirm = _confirmed
+    elif _can_prompt() and not ctx.output.json_mode:
+        confirm = _ask
+    hooks = replace(_context.create_hooks(realms.paths), confirm=confirm)
+    result = resume_create(
+        realms.env,
+        realms.podman,
+        name,
+        uid=realms.host.uid,
+        gid=realms.gid,
+        host_home=realms.host.host_home,
+        host_env=realms.host.host_env,
+        hooks=hooks,
+    )
+    return _report(result, realms, ctx)
+
+
+def _report(result: CreateResult, realms: _context.Realms, ctx: Context) -> int:
+    """Show the warnings and the result of a create or a resume, and finish the adapter's output."""
     for notice in result.warnings:
         ctx.output.warn(notice)
     _context.finish(realms, ctx.output)
@@ -197,12 +257,13 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
     estimate = result.estimate
     payload: dict[str, object] = {
         "name": record.settings.name.value,
-        "distro": distro,
+        "distro": record.settings.distro.value,
         "state": record.state.value,
         "tier": record.settings.tier.value,
         "services": record.settings.services,
         "generation": record.generation,
         "image_digest": record.image_digest,
+        "resumed": result.resumed,
         "locale_note": result.locale_note,
         "gpu_note": result.gpu_note,
         "everything": None

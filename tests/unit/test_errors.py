@@ -321,7 +321,8 @@ def test_generated_errors_doc_is_current() -> None:
 
 
 @pytest.mark.fr("FR-122")
-def test_the_recovered_remedy_names_both_recovery_commands_and_their_milestone() -> None:
+def test_the_recovered_remedy_names_both_recovery_commands() -> None:
     remedy = CATALOGUE["GINN-W-RECOVERED"].remedy
-    assert "'ginn create --resume {realm}' (arrives in M8)" in remedy
+    assert "an interrupted create is resumed with 'ginn create --resume {realm}'" in remedy
     assert "'ginn delete {realm}'" in remedy
+    assert "M8" not in remedy

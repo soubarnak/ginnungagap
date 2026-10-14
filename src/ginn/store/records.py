@@ -37,6 +37,11 @@ from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
 _PREVIOUS_BOUND: frozenset[RealmState] = frozenset({RealmState.UPDATING, RealmState.REBUILDING})
 _RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.RUNNING})
 """The only states that lead to `updating` or `rebuilding`, so the only valid previous states."""
+_PENDING_STATES: frozenset[RealmState] = frozenset(
+    {RealmState.CREATING, RealmState.BROKEN, RealmState.DELETING}
+)
+"""The states in which a record may keep an unfinished create's request (FR-122). A delete of such
+a realm keeps it too, and `create --resume` refuses any state but broken."""
 
 
 def write_json_atomic(path: Path, obj: object) -> None:
@@ -201,6 +206,15 @@ class RealmRecord:
     # the rebuild's swap clears it. Added without a schema bump: a record without the key reads as
     # None.
     autostart_before_off: bool | None = None
+    # The create that made this realm is not finished (FR-122, ops/resume.py). `create_pending` is
+    # set by the create's `recorded` save, with the packages its request named in `with_at_create`,
+    # and the save that writes `stopped` clears all three. `everything_confirmed` is the yes at the
+    # Kali everything prompt, saved before that install, so `create --resume` does not ask again.
+    # Recovery keeps them, since it moves the record only to `broken`, and a delete keeps them too.
+    # Added without a schema bump: a record without the keys reads as no pending create.
+    create_pending: bool = False
+    with_at_create: list[str] = field(default_factory=list)
+    everything_confirmed: bool = False
 
     def create_grants_match(self, toggles: frozenset[Toggle]) -> bool:
         """True when `toggles` asks for the GPU and fonts and timezone grants this container has.
@@ -232,6 +246,10 @@ class RealmRecord:
             raise ValueError(f"{self.state.value} must not record a building container")
         if self.services_at_create is None:
             self.services_at_create = self.settings.services
+        if self.create_pending and self.state not in _PENDING_STATES:
+            raise ValueError(f"{self.state.value} must not record a pending create")
+        if not self.create_pending and (self.with_at_create or self.everything_confirmed):
+            raise ValueError("a create's request is kept only while the create is pending")
 
     @property
     def name(self) -> RealmName:
@@ -271,6 +289,9 @@ class RealmRecord:
             "building_container_id": self.building_container_id,
             "building_generation": self.building_generation,
             "autostart_before_off": self.autostart_before_off,
+            "create_pending": self.create_pending,
+            "with_at_create": list(self.with_at_create),
+            "everything_confirmed": self.everything_confirmed,
         }
         if self.gpg_extra_known:
             data["gpg_extra"] = self.gpg_extra
@@ -329,6 +350,9 @@ class RealmRecord:
                 ),
                 gpg_extra=_opt_str(data.get("gpg_extra")),
                 gpg_extra_known="gpg_extra" in data,
+                create_pending=_bool(data.get("create_pending", False)),
+                with_at_create=_str_list(data.get("with_at_create", [])),
+                everything_confirmed=_bool(data.get("everything_confirmed", False)),
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

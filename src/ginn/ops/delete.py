@@ -338,7 +338,7 @@ def _delete(
     unexport_all(env.paths, name)
     _step(mutation, hooks, "exports-removed")
 
-    image, image_code, image_notes = _remove_image(podman, record.image_ref)
+    image, image_code, image_notes = remove_image(podman, record.image_ref)
     notes.extend(image_notes)
     _step(mutation, hooks, "image-removed")
 
@@ -433,11 +433,12 @@ def _uses_image(listed: str, names: Sequence[str]) -> bool:
     return any(name != "" and (name in listed or listed in name) for name in names)
 
 
-def _remove_image(podman: Podman, ref: str) -> tuple[str, str | None, list[str]]:
+def remove_image(podman: Podman, ref: str) -> tuple[str, str | None, list[str]]:
     """Remove the image unless a container uses it, as ops/create.py does. Return the outcome, the
     code of a failed rmi, and the notes that say why the image was kept or a container skipped.
 
-    A failed rmi is not fatal: the image stays, and the delete goes on.
+    A failed rmi is not fatal: the image stays, and the delete goes on. A resume that replaces an
+    older pin uses this too (ops/resume.py), so both remove an image by one rule.
     """
     if not podman.image_exists(ref):
         return "absent", None, []
@@ -827,4 +828,5 @@ __all__ = [
     "check_purge",
     "delete_realm",
     "mount_id_of_fd",
+    "remove_image",
 ]

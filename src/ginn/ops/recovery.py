@@ -48,13 +48,16 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
 
 - create: `creating` becomes `broken`, with no error code. A container that podman runs is stopped
   first, as `_broken_verdict` describes. Partial artifacts stay, for `ginn create --resume` or
-  `ginn delete` (FR-122). A record already `stopped` is a complete create, because `stopped` is the
-  last record write of a create, so it is recovered without a change. A record already `broken` is
-  settled as broken, with no state write, and a container that runs is stopped too.
+  `ginn delete` (FR-122). The record keeps the request of the create (`create_pending`), so the
+  resume can finish it (ops/resume.py). A record already `stopped` is a complete create, because
+  `stopped` is the last record write of a create, so it is recovered without a change. A record
+  already `broken` is settled as broken, with no state write, and a container that runs is stopped
+  too.
 - start: a record that already reads `running` is a completed start, because the record is saved
   running only after the attach. So is a journal step of `running`. Both are matched to podman. Any
   other step means the start did not finish: a container that podman runs is stopped, and the
-  record becomes `stopped`.
+  record becomes `stopped`. A services-on realm is not told `d`: runsv restarts its run script,
+  `ginn _service-run`, after a kill, and that restart is the retry (AS-028).
 - stop, install, remove, tier, perms, services and any other op with no state of its own: the
   record takes the state that podman reports, `running` or `stopped`, when the record is `stopped`,
   `running` or `failed`.
@@ -893,7 +896,10 @@ def _decide_start(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _
             record, state, "interrupted start after its record was saved running"
         )
     # The start did not reach its final record save. The realm is left stopped, and a container
-    # that podman still runs is stopped, so no realm runs without its grants attached.
+    # that podman still runs is stopped, so no realm runs without its grants attached. A services-on
+    # realm is not told `d`. Its run script is `ginn _service-run`, and runsv restarts that script
+    # after a kill, so the restart is the retry (AS-028). A `d` would make runsv end the new run
+    # without a restart, and the realm would stay down.
     reason = (
         f"interrupted start at step {entry.step!r}, before its record was saved running: the "
         "container is stopped if it runs, and the record is left stopped"

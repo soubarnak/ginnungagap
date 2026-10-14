@@ -461,7 +461,8 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=4,
         summary="realm '{realm}' is {state}; {action} needs it {allowed}",
         remedy="run 'ginn status {realm}', then the command that state allows; a broken realm "
-        "is resumed with 'ginn create --resume {realm}' or removed with 'ginn delete {realm}'",
+        "from an interrupted create is resumed with 'ginn create --resume {realm}', and any other "
+        "broken realm is removed with 'ginn delete {realm}'",
         source="DR-020 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
@@ -515,8 +516,8 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-W-RECOVERED",
         exit_code=0,
         summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",
-        remedy="run 'ginn status {realm}'; a broken realm can be resumed with "
-        "'ginn create --resume {realm}' (arrives in M8) or removed with 'ginn delete {realm}'",
+        remedy="run 'ginn status {realm}'; an interrupted create is resumed with "
+        "'ginn create --resume {realm}', and a broken realm is removed with 'ginn delete {realm}'",
         source="FR-122 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

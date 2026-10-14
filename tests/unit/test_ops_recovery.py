@@ -581,6 +581,67 @@ def test_an_interrupted_start_stops_the_container_before_the_record_is_saved_run
     assert entry.params["step"] == step
 
 
+def _told_down(reader: int) -> bytes:
+    """What runsv would read from its control FIFO now: b"" unless a `d` was written (runsv(8))."""
+    try:
+        return os.read(reader, 8)
+    except BlockingIOError:
+        return b""
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("AS-028")
+def test_an_interrupted_services_on_start_leaves_runsv_up_so_its_restart_is_the_retry(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """A killed `ginn _service-run` is restarted by runsv, and that restart is the retry (AS-028).
+    So recovery writes no `d`: runsv would end the new run without a restart, and stay down."""
+    base = _record(state=RealmState.STOPPED)
+    record = replace(base, settings=replace(base.settings, services=True), services_at_create=True)
+    _save(paths, record)
+    _write_journal(paths, _dead(op="start", step="attached"))
+    control = _services_on_control(paths, is_fifo=True)
+    reader = os.open(control, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        podman = _Podman(ContainerState.RUNNING)
+        outcome = _only(recover(env, podman))
+        told = _told_down(reader)
+    finally:
+        os.close(reader)
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert told == b""
+    assert podman.stops == [CID]
+    assert _state(paths) is RealmState.STOPPED
+    [entry] = _audit(paths)
+    assert (entry.op, entry.outcome) == ("start", "recovered")
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-081")
+def test_an_interrupted_services_on_start_is_recovered_without_signalling_runsv(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """Recovery signals no runsv for a services-on start, so a control path that cannot take a
+    `d` (here a directory) does not block the entry (ADR-003)."""
+    base = _record(state=RealmState.STOPPED)
+    record = replace(base, settings=replace(base.settings, services=True), services_at_create=True)
+    _save(paths, record)
+    journal = _write_journal(paths, _dead(op="start", step="attached"))
+    _services_on_control(paths, is_fifo=False)
+    podman = _Podman(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert podman.stops == [CID]
+    assert _state(paths) is RealmState.STOPPED
+    assert not journal.exists()
+    [entry] = _audit(paths)
+    assert (entry.op, entry.outcome) == ("start", "recovered")
+
+
 @pytest.mark.fr("FR-122")
 @pytest.mark.fr("DR-020")
 @pytest.mark.parametrize(

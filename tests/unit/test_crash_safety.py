@@ -12,6 +12,11 @@ points are the same on every run. The NFR asks for random points, and this cover
 each starting state, which includes any random sample of them. Each operation type must reach
 MIN_POINTS, and the suite asserts the count.
 
+Resume. `create --resume` (ops/resume.py) has its own sweep. Each starting state is a create killed
+after one of its steps, then settled by recovery to broken, so the resume starts from a realm with
+a stale container, or a runit directory, that it must clear. Its records are checked
+like a create's.
+
 Oracle. After each kill, recovery (ops/recovery.py) runs, and these must hold:
 - The journal is empty, and every outcome is a finished one. A blocked, busy or corrupt outcome
   fails.
@@ -22,10 +27,13 @@ Oracle. After each kill, recovery (ops/recovery.py) runs, and these must hold:
   of the realm is of the record's generation. No orphan generation is left (DR-034).
 - The Realm Home marker is unchanged (NFR-030). Delete keeps the Realm Home, since it does not
   purge.
-- The realm is usable afterwards. A stopped or running realm that the services mode does not run
-  under runit starts and stops again. Then the realm is deleted, which leaves no record, no
-  container and no journal entry. A services-on realm is started only by its runit entry
-  (ADR-003), so its follow-up is the delete alone.
+- A services-on realm is never started by podman (ADR-003), and no runit directory is left without
+  a record.
+- The realm is usable afterwards. A broken realm with a pending create is first finished by a second
+  `create --resume`, which must reach stopped (FR-122). A stopped or running realm that the services
+  mode does not run under runit starts and stops again. Then the realm is deleted, which leaves no
+  record, no container, no runit directory and no journal entry. A services-on realm is started
+  only by its runit entry (ADR-003), so its follow-up is the delete alone.
 
 The rebuild points are split. The `after journal step` points of the steps in REBUILD_STEPS are
 killed by test_ops_rebuild_faults, which runs those 44 kill-kind cases, so this file counts them
@@ -70,16 +78,23 @@ from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
 from ginn.ops.packages import PackageHooks, install_packages, remove_packages
 from ginn.ops.permissions import set_permissions, set_tier
 from ginn.ops.recovery import OUTCOME_BROKEN, OUTCOME_FINISHED, OUTCOME_RECOVERED, recover
+from ginn.ops.resume import resume_create
 from ginn.ops.service import set_services_mode
 from ginn.ops.update import update_realm
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security import nvidia
-from ginn.services.runit_user import write_service_dir
+from ginn.services.runit_user import service_dir, write_service_dir
 from ginn.store.records import RealmRecord, RealmStore
 from tests.fakes.clock import FakeClock
-from tests.unit.crash_support import Probe, SimulatedCrash, load_podman_state, probing
+from tests.unit.crash_support import (
+    LabelProbe,
+    Probe,
+    SimulatedCrash,
+    load_podman_state,
+    probing,
+)
 from tests.unit.realm_cli_support import DIGEST, World, build_world, record_of
 from tests.unit.test_ops_create import GINN_PROGRAM, ScriptedPodman, hooks_for
 from tests.unit.test_ops_create import request as create_request
@@ -94,6 +109,7 @@ MIN_POINTS: Final = 50
 """Each operation type must reach this many kill points (NFR-030)."""
 OPS: Final = (
     "create",
+    "resume",
     "delete",
     "start",
     "stop",
@@ -135,6 +151,10 @@ class Bed:
     hooks: LifecycleHooks
     run: Callable[[], object] | None = None
     done: Callable[[], list[str]] | None = None
+    resume: Callable[[], object] | None = None
+    """The `create --resume` of this realm's pending create, with the same request (FR-122)."""
+    services: bool = False
+    """True when the realm is services-on, so ADR-003 allows no podman start of it."""
 
 
 @dataclass(frozen=True)
@@ -249,6 +269,7 @@ def _realm(
         bed = _bed(world, NAME, world.fake)
         bed.run = lambda: op_run(bed)
         bed.done = lambda: done(bed)
+        bed.services = services
         return bed
 
     return build
@@ -311,9 +332,20 @@ def _create(tmp: Path, mp: pytest.MonkeyPatch, **request_kwargs: Any) -> Bed:
     fake = ScriptedPodman(root=str(tmp))
     bed = _bed(world, CREATE_NAME, fake)
     bed.marker = None
+    bed.services = bool(request_kwargs.get("services", False))
     hooks = hooks_for(tmp, [], world.tmp / "mountinfo", program=GINN_PROGRAM)
     request = create_request(world.home, **request_kwargs)
     bed.run = lambda: create_realm(bed.env, fake, request, hooks=hooks)
+    bed.resume = lambda: resume_create(
+        bed.env,
+        fake,
+        CREATE_NAME,
+        uid=request.uid,
+        gid=request.gid,
+        host_home=request.host_home,
+        host_env=request.host_env,
+        hooks=hooks,
+    )
     bed.done = lambda: _state_is(bed, RealmState.STOPPED)
     return bed
 
@@ -330,6 +362,49 @@ def _rebuild(tmp: Path, mp: pytest.MonkeyPatch, *, running: bool) -> Bed:
     bed.marker.write_bytes(MARKER_BYTES)
     bed.run = lambda: rebuild_run(bed.env, fake, world.home, tmp, sleeps, mountinfo)
     bed.done = lambda: _generation_is(bed, 2)
+    return bed
+
+
+def _resume(
+    tmp: Path,
+    mp: pytest.MonkeyPatch,
+    *,
+    killed_after: str,
+    services: bool = False,
+    with_packages: tuple[str, ...] = (),
+) -> Bed:
+    """A broken debian realm that `create --resume` finishes, killed after one create step.
+
+    The create is killed in its own probe, and recovery settles it to broken, as a restart does. The
+    Realm Home marker is written after that, and the resume must keep it.
+    """
+    world = _world(tmp, mp)
+    fake = ScriptedPodman(root=str(tmp))
+    bed = _bed(world, CREATE_NAME, fake)
+    hooks = hooks_for(tmp, [], world.tmp / "mountinfo", program=GINN_PROGRAM)
+    request = create_request(world.home, services=services, with_packages=with_packages)
+    with probing(LabelProbe(f"after journal step {killed_after}"), fake):
+        with pytest.raises(SimulatedCrash):
+            create_realm(bed.env, fake, request, hooks=hooks)
+    _orphan(bed)
+    recover(bed.env, fake)
+    assert _store(bed).load(bed.name).state is RealmState.BROKEN
+    bed.marker = world.paths.homes / CREATE_NAME.value / MARKER
+    bed.marker.write_bytes(MARKER_BYTES)
+    fake.calls.clear()
+    bed.run = lambda: resume_create(
+        bed.env,
+        fake,
+        CREATE_NAME,
+        uid=request.uid,
+        gid=request.gid,
+        host_home=request.host_home,
+        host_env=request.host_env,
+        hooks=hooks,
+    )
+    bed.resume = bed.run
+    bed.services = services
+    bed.done = lambda: _state_is(bed, RealmState.STOPPED)
     return bed
 
 
@@ -413,6 +488,33 @@ def _variants() -> dict[str, tuple[Variant, ...]]:
             Variant("create", "services-on", lambda tmp, mp: _create(tmp, mp, services=True)),
             Variant(
                 "create", "with-package", lambda tmp, mp: _create(tmp, mp, with_packages=("curl",))
+            ),
+        ),
+        "resume": (
+            Variant(
+                "resume",
+                "basic-after-pulled",
+                lambda tmp, mp: _resume(tmp, mp, killed_after="pulled"),
+            ),
+            Variant(
+                "resume",
+                "basic-after-created",
+                lambda tmp, mp: _resume(tmp, mp, killed_after="created"),
+            ),
+            Variant(
+                "resume",
+                "basic-after-started",
+                lambda tmp, mp: _resume(tmp, mp, killed_after="started"),
+            ),
+            Variant(
+                "resume",
+                "with-package-after-created",
+                lambda tmp, mp: _resume(tmp, mp, killed_after="created", with_packages=("curl",)),
+            ),
+            Variant(
+                "resume",
+                "services-after-service",
+                lambda tmp, mp: _resume(tmp, mp, killed_after="service", services=True),
             ),
         ),
         "delete": tuple(
@@ -600,7 +702,7 @@ VARIANTS: Final = _variants()
 
 def _allowed(op: str, killed: RealmState | None) -> frozenset[RealmState | None]:
     """The record states that recovery may leave, given the state at the kill (DR-020, FR-122)."""
-    if op == "create":
+    if op in ("create", "resume"):
         if killed is None:
             return frozenset({None})
         if killed is RealmState.STOPPED:
@@ -648,6 +750,8 @@ def _verify(
     env, fake, name = bed.env, bed.fake, bed.name
     if env.journal.pending():
         problems.append("a journal entry is still pending after recovery")
+    if bed.services and "start" in fake.ops():
+        problems.append("a services-on realm was started by podman start (ADR-003)")
     if journal_existed and len(outcomes) != 1:
         problems.append(f"recovery reported {len(outcomes)} outcomes for one entry")
     for outcome in outcomes:
@@ -664,6 +768,8 @@ def _verify(
             problems.append("containers are left without a record")
         if op == "create" and (env.paths.homes / name.value).exists():
             problems.append("a Realm Home is left without a record")
+        if service_dir(env.paths, name).exists():
+            problems.append("a runit directory is left without a record")
         return problems
     if sum(1 for c in containers if c.state is ContainerState.RUNNING) > 1:
         problems.append("two containers of the realm run")
@@ -691,11 +797,31 @@ def _runs(fake: Any, record: RealmRecord) -> bool:
     )
 
 
+def _second_resume(bed: Bed) -> list[str]:
+    """Run `create --resume` again on a broken realm with a pending create, with no kill (FR-122).
+
+    The first resume was killed, or the create was. Whatever the kill left, the second resume must
+    reach stopped, including after a kill inside the first resume's `_clear` (ops/resume.py).
+    """
+    if bed.resume is None:
+        return ["a broken realm with a pending create has no resume to run"]
+    bed.resume()
+    state = _store(bed).load(bed.name).state
+    if state is RealmState.STOPPED:
+        return []
+    return [f"a second resume left the realm {state}"]
+
+
 def _follow_up(bed: Bed) -> list[str]:
-    """The realm is usable afterwards: it starts and stops, and it can be deleted (FR-122)."""
+    """The realm is usable afterwards: it starts and stops, and it can be deleted (FR-122).
+
+    A broken realm with a pending create is finished first, by a second resume (`_second_resume`).
+    """
     env, fake, name, store = bed.env, bed.fake, bed.name, _store(bed)
     problems: list[str] = []
     try:
+        if store.exists(name) and store.load(name).create_pending:
+            problems.extend(_second_resume(bed))
         if store.exists(name):
             record = store.load(name)
             state = record.state
@@ -715,6 +841,8 @@ def _follow_up(bed: Bed) -> list[str]:
             problems.append("the record is still there after delete")
         if fake.ps({LABEL_REALM: name.value}):
             problems.append("a container of the realm is left after delete")
+        if service_dir(env.paths, name).exists():
+            problems.append("a runit directory is left after delete")
         if env.journal.pending():
             problems.append("a journal entry is left after delete")
     except Exception as exc:  # noqa: BLE001 - reported as a problem of this kill point
@@ -892,6 +1020,7 @@ def _real_point_problems(op: str, variant_label: str, point: str, run_dir: Path)
     ("op", "variant_label", "point"),
     [
         ("create", "basic", "after podman start"),
+        ("resume", "basic-after-started", "after podman start"),
         ("update", "basic", "after record state updating"),
     ],
 )
