@@ -1,0 +1,7 @@
+podman: podman version 5.8.8
+crun: crun version 1.30.1
+conmon: conmon version 2.2.1
+catatonit: tini version 0.1.7_catatonit (/usr/libexec/catatonit/catatonit, sha256 95ce983a2c24d75674ecc2a7df0627d4269464e919c8b427e692aee0b60e1285)
+kernel: 7.2.10_1
+launcher cgroup: /ginn/1000/s05s-launch
+cgroup2 mount: cgroup2 rw,relatime,nsdelegate

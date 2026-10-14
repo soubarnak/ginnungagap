@@ -27,7 +27,7 @@ import statistics
 import subprocess
 import sys
 
-SPIKE_XRD_TAIL = "/ginn-spike-s05r-xrd"
+SPIKE_XRD_TAILS = ("/ginn-spike-s05r-xrd", "/ginn-spike-s05s-xrd")
 PAUSE_COMM = "catatonit"
 # Summary columns, in MiB in the output. Names match runs.tsv.
 SUMMARY_COLUMNS = ("realm_rss_kib", "pause_rss_kib", "total_rss_kib", "realm_pss_kib",
@@ -111,8 +111,8 @@ def _spike_pause(pause_file, spike_xdg):
 
 
 def _pss_via_unshare(pids, args):
-    if not args.spike_xdg.endswith(SPIKE_XRD_TAIL):
-        raise SystemExit(f"refusing: {args.spike_xdg} is not the S-05r spike dir")
+    if not args.spike_xdg.endswith(SPIKE_XRD_TAILS):
+        raise SystemExit(f"refusing: {args.spike_xdg} is not an S-05r or S-05s spike dir")
     # Full pinned form: XDG_RUNTIME_DIR in the environ, and the three storage flags plus runtime.
     cmd = ["podman", "--runtime", args.podman_runtime, "--root", args.podman_root,
            "--runroot", args.podman_runroot, "--tmpdir", args.podman_tmpdir,

@@ -1,0 +1,60 @@
+18:36:53 podman: podman version 5.8.8
+  PID COMMAND         COMMAND                       RSS
+14719 catatonit       catatonit -P                  704
+18:36:53 pause pid 14719 comm=catatonit rss_kib=704
+18:37:11 prepare done: image localhost/ginn-s05s:base
+18:37:26 unprivileged move refused: spikes/s05/s05s.sh: line 233: echo: write error: Permission denied
+18:37:26 gate open: launcher 16891 in /ginn/1000/s05s-launch
+18:37:26 podman: podman version 5.8.8
+  PID COMMAND         COMMAND                       RSS
+14719 catatonit       catatonit -P                  688
+18:37:26 pause pid 14719 comm=catatonit rss_kib=688
+18:37:28 prepare done: image localhost/ginn-s05s:base
+18:37:28 sweep id s05s-20261014T183728
+18:37:28 gate open before run: MemAvailable_kB psi_some psi_full = 7340972 0.08 0.08
+18:37:34 on-trial abd: started | ok	1.2	running	0 | -
+18:37:34 gate open before run: MemAvailable_kB psi_some psi_full = 7292800 0.04 0.04
+18:38:39 on-abd attempt 1: status=ok settle=ok boot=1.3s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1976	29828	688	30516	15710	684	16394	4	0	0	14719
+18:38:39 gate open before run: MemAvailable_kB psi_some psi_full = 7403416 0.00 0.00
+18:39:41 on-abd attempt 2: status=ok settle=ok boot=1.3s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1964	37472	688	38160	18711	684	19395	4	0	0	14719
+18:39:41 gate open before run: MemAvailable_kB psi_some psi_full = 7444588 0.01 0.01
+18:40:43 on-abd attempt 3: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 2036	37560	688	38248	18911	684	19595	4	0	0	14719
+18:40:44 gate open before run: MemAvailable_kB psi_some psi_full = 7693568 0.00 0.00
+18:41:46 on-abd attempt 4: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1840	37140	688	37828	18784	684	19468	4	0	0	14719
+18:41:46 gate open before run: MemAvailable_kB psi_some psi_full = 6102040 0.00 0.00
+18:42:48 on-abd attempt 5: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1972	37472	688	38160	18690	684	19374	4	0	0	14719
+18:42:48 gate open before run: MemAvailable_kB psi_some psi_full = 7363036 0.08 0.08
+18:43:50 on-abd attempt 6: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1836	18308	672	18980	10743	668	11411	4	0	0	14719
+18:43:50 gate open before run: MemAvailable_kB psi_some psi_full = 7636344 0.00 0.00
+18:44:52 on-abd attempt 7: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1948	36208	672	36880	18526	668	19194	4	0	0	14719
+18:44:52 gate open before run: MemAvailable_kB psi_some psi_full = 7031552 0.00 0.00
+18:45:54 on-abd attempt 8: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1928	36092	672	36764	18520	668	19188	4	0	0	14719
+18:45:54 gate open before run: MemAvailable_kB psi_some psi_full = 7785968 0.00 0.00
+18:46:56 on-abd attempt 9: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1832	35780	672	36452	18476	668	19144	4	0	0	14719
+18:46:56 gate open before run: MemAvailable_kB psi_some psi_full = 6065692 0.00 0.00
+18:47:58 on-abd attempt 10: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1924	35824	672	36496	18499	668	19167	4	0	0	14719
+18:47:58 gate open before run: MemAvailable_kB psi_some psi_full = 7597728 0.00 0.00
+18:49:02 on-base attempt 1: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1928	39088	672	39760	21498	668	22166	4	0	0	14719
+18:49:02 gate open before run: MemAvailable_kB psi_some psi_full = 7431728 0.06 0.03
+18:50:05 on-base attempt 2: status=ok settle=ok boot=1.3s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1952	39276	672	39948	21297	668	21965	4	0	0	14719
+18:50:05 gate open before run: MemAvailable_kB psi_some psi_full = 7383048 0.00 0.00
+18:51:07 on-base attempt 3: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1948	39016	672	39688	21408	668	22076	4	0	0	14719
+18:51:07 gate open before run: MemAvailable_kB psi_some psi_full = 6851548 0.00 0.00
+18:52:09 on-base attempt 4: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 2016	39036	672	39708	21305	668	21973	4	0	0	14719
+18:52:09 gate open before run: MemAvailable_kB psi_some psi_full = 7009140 0.00 0.00
+18:53:11 on-base attempt 5: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1948	39244	672	39916	21415	668	22083	4	0	0	14719
+18:53:11 gate open before run: MemAvailable_kB psi_some psi_full = 6960152 0.00 0.00
+18:54:13 on-base attempt 6: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1912	39300	672	39972	21374	668	22042	4	0	0	14719
+18:54:13 gate open before run: MemAvailable_kB psi_some psi_full = 6895080 0.00 0.00
+18:55:15 on-base attempt 7: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1940	39024	672	39696	21277	668	21945	4	0	0	14719
+18:55:15 gate open before run: MemAvailable_kB psi_some psi_full = 4886264 0.00 0.00
+18:56:17 on-base attempt 8: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 2016	39216	672	39888	21434	668	22102	4	0	0	14719
+18:56:17 gate open before run: MemAvailable_kB psi_some psi_full = 4987120 0.00 0.00
+18:57:19 on-base attempt 9: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 1948	38976	672	39648	21352	668	22020	4	0	0	14719
+18:57:19 gate open before run: MemAvailable_kB psi_some psi_full = 6821924 0.00 0.00
+18:58:21 on-base attempt 10: status=ok settle=ok boot=1.2s state=running failed=0 realm_vmswap_kib=0 window_ok=1 2012	39292	672	39964	21441	668	22109	4	0	0	14719
+18:58:22 services-on leg exit status 0; tearing down
+18:58:22 stopped spike pause pid 14719
+18:58:22 removed cgroup leaf /sys/fs/cgroup/ginn/1000/s05s-launch
+18:58:23 teardown done: S-05s processes left = 0
+18:58:41 split: 20 raw samples -> /home/soubarna/.cache/ginn-spike/s05s/split.tsv

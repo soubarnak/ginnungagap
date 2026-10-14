@@ -1,0 +1,2 @@
+2026-10-14T18:37:26+05:30	pid=16891	sudo -n sh -c 'echo 16891 > /sys/fs/cgroup/ginn/1000/s05s-launch/cgroup.procs'
+2026-10-14T18:37:26+05:30	pid=16891	  rc=0

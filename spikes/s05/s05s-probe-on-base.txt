@@ -1,0 +1,147 @@
+## systemd --version
+systemd 257 (257.13-1~deb13u1)
+## /etc/debian_version
+13.7
+## systemctl is-system-running
+running
+## systemctl --failed
+## running services
+dbus.service             loaded active running D-Bus System Message Bus
+systemd-journald.service loaded active running Journal Service
+systemd-logind.service   loaded active running User Login Management
+## systemd-analyze cat-config systemd/journald.conf
+# /etc/systemd/journald.conf
+#  This file is part of systemd.
+#
+#  systemd is free software; you can redistribute it and/or modify it under the
+#  terms of the GNU Lesser General Public License as published by the Free
+#  Software Foundation; either version 2.1 of the License, or (at your option)
+#  any later version.
+#
+# Entries in this file show the compile time defaults. Local configuration
+# should be created by either modifying this file (or a copy of it placed in
+# /etc/ if the original file is shipped in /usr/), or by creating "drop-ins" in
+# the /etc/systemd/journald.conf.d/ directory. The latter is generally
+# recommended. Defaults can be restored by simply deleting the main
+# configuration file and all drop-ins located in /etc/.
+#
+# Use 'systemd-analyze cat-config systemd/journald.conf' to display the full config.
+#
+# See journald.conf(5) for details.
+
+[Journal]
+#Storage=auto
+#Compress=yes
+#Seal=yes
+#SplitMode=uid
+#SyncIntervalSec=5m
+#RateLimitIntervalSec=30s
+#RateLimitBurst=10000
+#SystemMaxUse=
+#SystemKeepFree=
+#SystemMaxFileSize=
+#SystemMaxFiles=100
+#RuntimeMaxUse=
+#RuntimeKeepFree=
+#RuntimeMaxFileSize=
+#RuntimeMaxFiles=100
+#MaxRetentionSec=0
+#MaxFileSec=1month
+#ForwardToSyslog=no
+#ForwardToKMsg=no
+#ForwardToConsole=no
+#ForwardToWall=yes
+#TTYPath=/dev/console
+#MaxLevelStore=debug
+#MaxLevelSyslog=debug
+#MaxLevelKMsg=notice
+#MaxLevelConsole=info
+#MaxLevelWall=emerg
+#MaxLevelSocket=debug
+#LineMax=48K
+#ReadKMsg=yes
+#Audit=yes
+
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+# Undo upstream commit 46b131574fdd7d77 for now. For details see
+#  http://lists.freedesktop.org/archives/systemd-devel/2014-November/025550.html
+
+[Journal]
+ForwardToSyslog=yes
+## journalctl -b -u systemd-journald
+Oct 14 13:17:58 xserve systemd-journald[15]: Journal started
+Oct 14 13:17:58 xserve systemd-journald[15]: Runtime Journal (/run/log/journal/6951dcb0dee6419ba94cc0ca0f3265e0) is 8M, max 759.5M, 751.5M free.
+Oct 14 13:17:58 xserve systemd-journald[15]: Time spent on flushing to /var/log/journal/6951dcb0dee6419ba94cc0ca0f3265e0 is 1.382ms for 5 entries.
+Oct 14 13:17:58 xserve systemd-journald[15]: System Journal (/var/log/journal/6951dcb0dee6419ba94cc0ca0f3265e0) is 8M, max 759.5M, 751.5M free.
+## findmnt on the drop-in
+## write attempt on the drop-in (expect a read-only error)
+touch: cannot touch '/etc/systemd/journald.conf.d/ginn.conf': No such file or directory
+## journal directories
+/run/log/journal:
+total 0
+drwxr-sr-x+ 2 root systemd-journal 40 Oct 14 13:17 .
+drwxr-xr-x  3 root root            60 Oct 14 13:17 ..
+
+/var/log/journal:
+total 4
+drwxr-sr-x+ 3 root systemd-journal   60 Oct 14 13:17 .
+drwxr-xr-x  1 root root            4096 Oct 14 13:07 ..
+drwxr-sr-x+ 2 root systemd-journal   60 Oct 14 13:17 6951dcb0dee6419ba94cc0ca0f3265e0
+## journalctl --disk-usage
+Archived and active journals take up 8M in the file system.
+## journal lines since boot
+54
+## podman diff (what podman wrote into the container layer)
+C /etc
+C /etc/.pwd.lock
+A /etc/.updated
+C /etc/group
+C /etc/ld.so.cache
+C /etc/machine-id
+C /etc/passwd
+C /var
+A /var/.updated
+C /var/cache/ldconfig
+C /var/cache/ldconfig/aux-cache
+C /var/lib/systemd
+C /var/lib/systemd/catalog
+C /var/lib/systemd/catalog/database
+C /var/lib
+A /var/lib/systemd/linger
+A /var/lib/systemd/timers
+A /var/lib/systemd/timers/stamp-apt-daily-upgrade.timer
+A /var/lib/systemd/timers/stamp-apt-daily.timer
+A /var/lib/systemd/timers/stamp-dpkg-db-backup.timer
+C /var/tmp
+A /var/tmp/systemd-private-a1f225e953bb41f7aa9af21aeff8f5a0-systemd-logind.service-mM86wp
+A /var/tmp/systemd-private-a1f225e953bb41f7aa9af21aeff8f5a0-systemd-logind.service-mM86wp/tmp
+## systemctl show -p LoadState,ActiveState systemd-udevd.service
+LoadState=not-found
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState systemd-udevd-control.socket
+LoadState=not-found
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState systemd-udevd-kernel.socket
+LoadState=not-found
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState systemd-udev-trigger.service
+LoadState=not-found
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState getty@tty1.service
+LoadState=loaded
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState console-getty.service
+LoadState=loaded
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState apt-daily.timer
+LoadState=loaded
+ActiveState=active
+## systemctl show -p LoadState,ActiveState apt-daily-upgrade.timer
+LoadState=loaded
+ActiveState=active
+## systemctl show -p LoadState,ActiveState e2scrub_all.timer
+LoadState=not-found
+ActiveState=inactive
+## systemctl show -p LoadState,ActiveState fstrim.timer
+LoadState=loaded
+ActiveState=inactive

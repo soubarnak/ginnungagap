@@ -27,6 +27,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-19 | A lazy rebuild at a start may pull the image and replay without a prompt, and the change that causes it is the consent | FR-066, FR-083, FR-014 AC-2, FR-021 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-20 | The records keep schema 1 when a change adds fields, so downgrade across T8.3 is unsupported while a change is pending | DR-035, FR-122, FR-066, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-22 | The Kali everything estimate is read-only for ginn's state, but it pulls the base image and refreshes the lists in a throwaway container | FR-014 AC-1, DR-032, FR-123, FR-124, FR-121, IR-002 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
+| CL-23 | The S-05s idle band is read as a ceiling: a median below 37.63 MiB minus 1 MiB passes when the masks and the journald cap are proven | NFR-003, ADR-007 | decided by the orchestrator 2026-10-14; the build proceeds under this reading |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -224,3 +225,12 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Evidence: `tests/unit/test_ops_estimate.py` (no record, Realm Home, journal, audit entry or container after success, a failed step, an interrupt, a failed undo and a short disk; a stale labelled container removed first; the image lock held by a delete or a rebuild and by a real delete in each direction; each step reported in order; the host gate; a refusal naming `estimate:kali`; an alias of the image keeps it; the sweep, including a held lock and a refused step), `tests/unit/test_ops_delete.py` (a leftover estimate container is removed before the image check), `tests/unit/test_cli_create.py` (the JSON shape, the refusals before any podman call, one progress line per step, the host gate exit code, the estimate's sweep after its own work, and no sweep by a read-only list), `tests/unit/test_cli_context.py` (create, resume, delete, rebuild and update sweep a killed estimate before their work; enter, start, install and the read-only commands do not), `tests/gui/test_views_smoke.py` (the confirmation shows the sizes, cancel runs nothing further, a refused estimate).
 - IR-010 and IR-030: `--estimate` extends the IR-010 `create` line, which the SRS does not list, and its JSON object is new. The estimate's list of metapackages is `metapackages`, because `everything` is the sizes object of the create's JSON.
 - Status: open, for SRS v1.1 (2026-10-14, T8.8); the build proceeds under this behaviour.
+
+## CL-23: the S-05s idle band is read as a ceiling
+
+- Requirement IDs: NFR-003, ADR-007.
+- Issue: the roadmap's S-05s pass rule asks for an idle median within plus or minus 1 MiB of 37.63 MiB, the S-05r a+b+d median. On 2026-10-14 S-05s measured 35.96 MiB (spikes/results/S-05s.md), 0.67 MiB below the band. The journald drop-in and all ten masks were proven to take effect.
+- Reading: the band exists to show that the create-time forms of mitigations a+b+d work as well as the file forms that S-05r measured. A lower median cannot mean that a mitigation failed, because each failure adds memory. The base control moved too, from 39.68 MiB in S-05r to 38.89 MiB, after a kernel update from 7.2.9_1 to 7.2.10_1. The saving against the control is 2.93 MiB, against 2.05 MiB in S-05r. The band is therefore read as a ceiling of 38.63 MiB, with the masks and the journald cap checked separately.
+- Consequence: S-05s passes, and T7.3 keeps shipping the a+b+d create-time forms. NFR-003 is still measured per distribution at T7.7 with the ADR-003 argv.
+- Status: decided by the orchestrator 2026-10-14; the user may overrule it.
+
