@@ -23,13 +23,17 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-15 | An abstract-socket session bus with the host network (FR-026) | FR-068, FR-026, AS-012 | open, for SRS v1.1 |
 | CL-16 | The size of the Kali everything set is known only after the base image | FR-014, IR-002 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-17 | A missing package on a rebuild, including a manifest whose packages have all gone | FR-021, FR-022, NFR-031 | open, for SRS v1.1; the build proceeds under this rule (2026-10-14) |
-| CL-18 | A services-on create installs no packages, and its Integration Package Set waits for a rebuild | FR-010, FR-014, FR-080, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
+| CL-18 | A services-on create installs no packages, and its Integration Package Set waits for a rebuild | FR-010, FR-014, FR-080, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14); amended by CL-30 (ADR-015, proposed) |
 | CL-19 | A lazy rebuild at a start may pull the image and replay without a prompt, and the change that causes it is the consent | FR-066, FR-083, FR-014 AC-2, FR-021 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-20 | The records keep schema 1 when a change adds fields, so downgrade across T8.3 is unsupported while a change is pending | DR-035, FR-122, FR-066, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-22 | The Kali everything estimate is read-only for ginn's state, but it pulls the base image and refreshes the lists in a throwaway container | FR-014 AC-1, DR-032, FR-123, FR-124, FR-121, IR-002 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-23 | The S-05s idle band is read as a ceiling: a median below 37.63 MiB minus 1 MiB passes when the masks and the journald cap are proven | NFR-003, ADR-007 | decided by the orchestrator 2026-10-14; the build proceeds under this reading |
 | CL-28 | A services-on realm gets a per-realm machine-id copied into /etc/machine-id before its first start, and systemd-logind.service is masked by default (eleven units); the create checks /sbin/init first, and delete removes the empty realm cgroup directory | ADR-007, FR-080, NFR-003, FR-019, FR-122 | decided by the user 2026-10-14 (machine-id and logind); the init check and the cgroup removal follow the brief of 2026-10-14; the build proceeds under this behaviour |
 | CL-29 | `supervisor` is a reserved realm name, because it is the name of Host Setup's cgroup leaf; delete never removes that leaf | DR-002, FR-001, FR-019, ADR-003 | decided by the reviewer 2026-10-15 (review of the void branch); the build proceeds under this reading |
+| CL-30 | A services-on create installs systemd and the init set through a provisioning stage, with one derived image per realm | FR-010, FR-013, FR-066, FR-080, FR-082, FR-083, CR-007, CL-18, ADR-003 | decided by the user 2026-10-14 (systemd at create, not a repin; one derived image per realm and on-to-off keeps the init set, both user decisions of 2026-10-14); open, for SRS v1.1; ADR-015 (proposed) builds under this behaviour |
+| CL-31 | The init set is part of a services-on realm's package list | FR-010, FR-013, CR-007 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
+| CL-32 | A derived image is trusted by its matched base, its signature checks and its recorded ID | DR-040, NFR-SEC-004, FR-010, FR-011, FR-012 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
+| CL-33 | CR-007 names the per-realm machine-id copy | CR-007, FR-080, ADR-007, CL-28 | decided by the user 2026-10-14 for the machine-id (CL-28); the CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -187,7 +191,7 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Proposed wording: "A services-on create leaves the realm stopped with nothing installed. Its Integration Package Set comes with its first rebuild, and packages are added with `ginn install` once the realm runs under its supervisor."
 - How ginn works now: `ops/create.py` takes its services-on path (`_finish_services`) once the container is made. It writes the runit directory with `down` present, writes GINN-W-SERVICES-PENDING and saves the record as stopped. No integration, package or everything step runs. A supervised start (`ginn start`, through runit) starts the container and installs nothing. The Integration Package Set is installed only by a rebuild (`ops/rebuild.py` runs the integration steps), so it arrives with `ginn rebuild`, or with the start that rebuilds a realm whose create-time state changed (FR-066, FR-083). `ginn create --services on` with `--with` or `--everything` is refused with GINN-E-NOT-SUPPORTED-YET before any write (`ops/_create_plan.py`), and the Control Plane wizard refuses the same combination (FR-101, `gui/viewmodels/wizard.py`).
 - Evidence: unit tests (`tests/unit/test_ops_create.py`, `tests/unit/test_cli_create.py`, `tests/unit/test_ops_rebuild.py`, `tests/unit/test_gui_viewmodels.py`). No host run.
-- Status: open, for SRS v1.1 (2026-10-14, ADR-003 amendment); the build proceeds under this behaviour.
+- Status: open, for SRS v1.1 (2026-10-14, ADR-003 amendment); the build proceeds under this behaviour. Amended by CL-30 (ADR-015, proposed): a services-on create installs the init set and the Integration Package Set.
 
 ## CL-19: a lazy rebuild at a start may pull and replay without a prompt
 
@@ -254,4 +258,43 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Checked: no test, fixture or code path uses `supervisor` as a realm name (grep of `src`, `tests` and `tools`). The fixture `tests/fixtures/hostsetup/ginn-alice/run` names the leaf of a Host Setup run, not a realm.
 - Consequence: `ginn create supervisor` is refused with GINN-E-NAME-INVALID (reserved word). ginn does not migrate a record that already names `supervisor`. Such a record reads as corrupt (GINN-E-INTERNAL), so its owner removes it by hand. No such record exists in this repository.
 - Status: decided in the coordinator's review of the void branch, 2026-10-15; the build proceeds under this reading.
+
+## CL-30: a services-on create installs systemd and the init set through a provisioning stage
+
+- Requirement IDs: FR-010, FR-013, FR-066, FR-080, FR-082, FR-083, CR-007, ADR-003. It amends CL-18.
+- Issue: FR-080 requires systemd as the realm's init. The pinned official images for debian (`debian:stable-slim`), fedora (`fedora-minimal:44`) and kali (`kali-rolling`) have no `/sbin/init` (F1, `spikes/results/F6-F1-probe.md`), so a services-on realm on those three cannot start. A services-on create on them is refused with GINN-E-NO-INIT (CL-28). CL-18 says a services-on create installs no packages. The SRS does not say where systemd comes from, or what a services-on realm keeps across a mode change or a rebuild.
+- Decision, by the user on 2026-10-14: keep the official pinned images (DR-040 trust). Install systemd at services-on create with the distribution's own package manager, and record the packages in the Install Manifest, so a rebuild replays them. The user chose this over repinning the images to ones that ship systemd.
+- Reading (ADR-015):
+  - A services-on create runs a provisioning stage on every distribution, Arch included. The stage installs the init set (`services_packages`) and the Integration Package Set with its steps, cleans the package cache, checks `/sbin/init`, and commits the stopped container to a derived image, `localhost/ginn-init-<realm>:g<gen>`. The services-on container starts from that image with `/sbin/init` as its entrypoint. The create leaves the realm stopped, as before.
+  - Each realm has its own derived image for v1 (user decision Q4, 2026-10-14). One derived image shared by all realms of a distribution was rejected.
+  - A services-on to services-off change keeps the derived image and the init set (user decision Q1, 2026-10-14, FR-083 read literally). The services-off container starts from the derived image, with systemd installed and not run (FR-082).
+  - A tier or permission change of a realm with a derived image re-provisions from the current pin (FR-066). A services-mode change alone reuses the derived image, with no pull and no commit.
+  - This amends CL-18. A services-on create now installs the init set and the Integration Package Set, so its realm is not left with nothing installed.
+  - A rebuild does not replay the init entries through the Install Manifest. `_replay` filters them out, and a provisioning build reinstalls the init set from the current distribution data, so a realm rebuilt after a data change gets the new names. The words "so a rebuild replays them" in the decision are met this way.
+- Evidence: `spikes/results/S-11.md` (2026-10-15). The derived images of all four distributions boot to `running` with zero failed units in 12 of 12 boots, and a services-off container from a derived image starts with no systemd process.
+- Status: decided by the user 2026-10-14 for systemd at create (install, not repin). Q1 and Q4 are user decisions of 2026-10-14, and ADR-015 records them that way. Open, for SRS v1.1; ADR-015 (proposed) and tasks T7.17 to T7.27 build under this behaviour.
+
+## CL-31: the init set is part of a services-on realm's package list
+
+- Requirement IDs: FR-010 AC-1, FR-013 AC-1, CR-007.
+- Issue: FR-010 AC-1 says a created realm's installed-package list equals the image's list plus the Integration Package Set. FR-013 AC-1 says the only additions to a new realm are the documented Integration Package Set. CR-007 limits realm contents to the official minimal image, the Integration Package Set and requested packages with their dependencies. A services-on realm also holds the init set of CL-30, which none of these lists. Read literally, every services-on realm would fail FR-010 AC-1.
+- Proposed wording: "For a services-on realm, the installed-package list equals the image's list plus the Integration Package Set plus the init set of its distribution. The init set is a fixed, documented, per-distribution list, kept apart from the Integration Package Set. It is needed for the realm to boot (FR-080). A realm with no derived image (created services-off and never switched on) keeps FR-010 AC-1 and FR-013 AC-1 as written."
+- Reading (ADR-015 Decisions 3 and 14): the init set is `services_packages` in the distribution data. Debian and kali take `systemd`, `systemd-sysv` and `dbus`; fedora takes `systemd` and `dbus-broker`; arch takes none, because its image already ships systemd. The Install Manifest records these entries with an `init` mark. `ginn install` of one is a manifest no-op with a note, and `ginn remove` refuses it.
+- Status: open, for SRS v1.1; ADR-015 (proposed) builds under this reading.
+
+## CL-32: a derived image is trusted by its matched base, its signature checks and its recorded ID
+
+- Requirement IDs: DR-040, NFR-SEC-004, FR-010, FR-011, FR-012.
+- Issue: DR-040 defines the Trust Manifest per distribution, as an image source and verification material. NFR-SEC-004 says images are used only if they match the Trust Manifest. The derived image of CL-30, `localhost/ginn-init-<realm>:g<gen>`, is built by ginn from the pinned base, and no registry publishes it. It has no Trust Manifest entry, so read literally, NFR-SEC-004 refuses it.
+- Proposed wording: "A derived image that ginn builds from a verified official image needs no Trust Manifest entry of its own. It is used only when its base is the pinned digest, verified before the build (FR-011); its packages came from the realm's own package manager with the signature checks on (FR-012); and its image ID is the one recorded on the realm, checked before each create from it and each start. Ginn never pushes a derived image."
+- Reading (ADR-015 Decision 9): the pin decision of ADR-005 stands, so ADR-005 is amended, not superseded. A derived realm moves to a new pin only in a provisioning build. A mismatched image ID refuses with GINN-E-IMAGE-DERIVED.
+- Status: open, for SRS v1.1; ADR-015 (proposed) builds under this reading. ADR-005 gets a dated amendment when the code lands.
+
+## CL-33: CR-007 names the per-realm machine-id copy
+
+- Requirement IDs: CR-007, FR-080, ADR-007, CL-28.
+- Issue: CR-007 limits realm contents to the official minimal image, the Integration Package Set and requested packages with their dependencies. CL-28 writes a random 32-hex machine-id into `/etc/machine-id` of every services-on realm with `podman cp`, before its first start, and keeps the value on the record. The image's own file holds the literal word `uninitialized`, and a valid value written before the first start gives zero failed units, while a bind mount of the file breaks `systemd-machine-id-commit.service` (F6, `spikes/results/F6-F1-probe.md`). CR-007 does not name this write, so it reads as content outside the three listed sources.
+- Proposed wording: "Realm contents also include the machine-id that ginn writes into `/etc/machine-id` of a services-on realm before its first start. It is a random 32-hex value kept on the realm record, and a rebuild writes the same value again. It is not a bind mount of a host file."
+- Reading (ADR-015, Context and the CR-007 row): the copy is existing code (CL-28) and does not change. This CL only names it in CR-007.
+- Status: decided by the user 2026-10-14 for the machine-id (CL-28). The CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code.
 
