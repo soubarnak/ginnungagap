@@ -40,6 +40,7 @@ import shlex
 import shutil
 import signal
 import subprocess  # noqa: S404 - fixed argv lists only, never a shell (NFR-SEC-005)
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -51,6 +52,7 @@ import pytest
 
 from ginn.domain import RealmName
 from ginn.podman.cli import PodmanCli
+from ginn.services.exec_relay import exec_service_dir, exec_socket
 from ginn.services.runit_user import service_dir
 from ginn.services.supervisor import parse_status
 from ginn.store.paths import OwnedPaths
@@ -93,15 +95,6 @@ F2_CLI_ATTACH = (
     "F2/F7: a lazy rebuild's grant attach runs from the CLI session and fails with "
     "GINN-E-ATTACH-FAILED; see spikes/results/T7.7-services-real.md"
 )
-F10_RESTART = (
-    "F10: a kill during a supervised start's attach makes the start fail (ATTACH-FAILED, container "
-    "state improper) and stops the realm, so the give-up cannot record failed; see "
-    "spikes/results/T7.7-services-real.md"
-)
-F11_BUDGET = (
-    "F11: the NFR-003 and NFR-021 budgets are read from VmRSS, and the budget method is open "
-    "(ADR-007); see spikes/results/T7.7-services-real.md"
-)
 FR080_CASES = [
     pytest.param(
         "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
@@ -115,7 +108,7 @@ NFR003_CASES = [
     pytest.param(
         "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
-    pytest.param("arch", marks=pytest.mark.xfail(strict=True, reason=F11_BUDGET, raises=KnownGap)),
+    pytest.param("arch"),
     pytest.param(
         "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
@@ -427,6 +420,40 @@ def paths() -> OwnedPaths:
     return OwnedPaths.from_env()
 
 
+def write_launcher(bin_dir: Path) -> Path:
+    """Write the gate's `ginn` command into `bin_dir` and return its path (harness only).
+
+    The script imports ginn from this checkout, the one that holds the tests, and fails loudly when
+    the import resolves elsewhere. The helper paths point at native/build, and the relay listener
+    is `ginn-exec-relay` there, so its worker, run and kill helpers are the built siblings. Realm
+    run and finish scripts and the relay's script embed this path (ginn_program), so they run the
+    same code. Nothing is written under /usr.
+    """
+    script = bin_dir / "ginn"
+    src = str(REPO / "src")
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "# Host-gate launcher (harness only): ginn from this checkout, helpers from native/build.\n"
+        "import sys\n"
+        f"sys.path.insert(0, {src!r})\n"
+        "import ginn\n"
+        f"assert ginn.__file__.startswith({src!r}), ginn.__file__\n"
+        "from ginn.__main__ import main\n"
+        "from ginn.cli import _context\n"
+        "from ginn.runtime import attach\n"
+        "from ginn.services import exec_relay\n"
+        f"NATIVE = {str(NATIVE_BUILD)!r}\n"
+        "_context.WAIT_HELPER = NATIVE + '/ginn-wait'\n"
+        "attach.DEFAULT_HELPER = NATIVE + '/ginn-rebind'\n"
+        "exec_relay.EXEC_RELAY_HELPER = NATIVE + '/ginn-exec-relay'\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 @pytest.fixture(scope="module")
 def launcher(paths: OwnedPaths) -> Iterator[Path]:
     """The gate's ginn command: the product CLI with the helper paths of native/build (see the
@@ -435,22 +462,7 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
     base = Path(tempfile.mkdtemp(prefix="ginn-t77-", dir="/tmp"))  # noqa: S108 - mkdtemp, mode 0700
     bin_dir = base / "bin"
     bin_dir.mkdir(mode=0o700)
-    script = bin_dir / "ginn"
-    script.write_text(
-        f"#!{REPO / '.venv' / 'bin' / 'python'}\n"
-        "# T7.7 host-gate launcher (harness only): the helper paths point at native/build.\n"
-        "import sys\n"
-        "from ginn.__main__ import main\n"
-        "from ginn.cli import _context\n"
-        "from ginn.runtime import attach\n"
-        f"NATIVE = {str(NATIVE_BUILD)!r}\n"
-        "_context.WAIT_HELPER = NATIVE + '/ginn-wait'\n"
-        "attach.DEFAULT_HELPER = NATIVE + '/ginn-rebind'\n"
-        "if __name__ == '__main__':\n"
-        "    sys.exit(main())\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
+    script = write_launcher(bin_dir)
     try:
         yield script
     finally:
@@ -460,10 +472,26 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
 
 @pytest.fixture(scope="module", autouse=True)
 def no_leftovers(launcher: Path, paths: OwnedPaths) -> Iterator[None]:
-    """Stale t77 realms are removed before the module, and its own realms are removed after it."""
+    """Stale t77 realms are removed before the module, and its own realms are removed after it.
+
+    The sv directory is snapshotted before the module. The relay service `_exec` is made by this
+    module's services-on realms and ginn's sync never removes it (ADR-014), so the teardown removes
+    it, with its sync lock, its socket and its ._exec.* temporaries, only when it was absent before
+    the module ran. A relay that was there before is left as it was.
+    """
+    sv_before = {entry.name for entry in paths.sv.iterdir()} if paths.sv.exists() else set()
+    exec_present_before = "_exec" in sv_before
     assert sweep(launcher, paths) == [], "stale t77 realms could not be removed before the gate"
     yield
     assert sweep(launcher, paths) == [], "t77 realms could not be removed after the gate"
+    if not exec_present_before:
+        _retire(exec_service_dir(paths))
+        for stale in sorted(paths.sv.glob("._exec.*")):
+            shutil.rmtree(stale, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            (paths.sv / ".exec-relay.lock").unlink()
+        with contextlib.suppress(OSError):
+            exec_socket(paths).unlink()
 
 
 def create(launcher: Path, distro: str, name: str, services: str) -> Ran:
@@ -684,7 +712,6 @@ def test_fr081_ac2_a_killed_init_restarts_within_10_s(
 
 
 @pytest.mark.fr("FR-081")
-@pytest.mark.xfail(strict=True, reason=F10_RESTART, raises=KnownGap)
 def test_fr081_ac3_five_crashes_in_60_s_give_up(
     launcher: Path, paths: OwnedPaths, running_realm: str
 ) -> None:
@@ -707,7 +734,7 @@ def test_fr081_ac3_five_crashes_in_60_s_give_up(
     assert parse_status(sv_status(paths, running_realm)).state == "down"
     state = str(ginn(launcher, "status", running_realm).body.get("state"))
     if state != "failed":
-        raise KnownGap(f"five crashes left the realm {state}, not failed (F10)")
+        assert state == "failed", f"five crashes left the realm {state}, not failed"
 
 
 @pytest.mark.fr("FR-084")
@@ -743,6 +770,33 @@ def test_fr084_autostart_starts_the_realm_when_runsv_starts(
     finally:
         ginn(launcher, "stop", name)
         delete(launcher, name)
+
+
+def relay_listener_rss() -> dict[str, int]:
+    """The user's ginn-exec-relay listener, when it runs: VmRSS and Pss in KiB, by comm and uid.
+
+    With no listener, or more than one, the sample is zero and the count says why (ADR-007).
+    """
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if (
+                entry.stat().st_uid != UID
+                or (entry / "comm").read_text(encoding="utf-8").strip() != "ginn-exec-relay"
+            ):
+                continue
+        except OSError:
+            continue
+        found.append(int(entry.name))
+    if len(found) != 1:
+        return {"count": len(found), "pid": 0, "VmRSS": 0, "Pss": 0}
+    try:
+        vm = rss_kib(found[0])["VmRSS"]
+    except (OSError, ValueError):
+        return {"count": 1, "pid": found[0], "VmRSS": 0, "Pss": 0}
+    return {"count": 1, "pid": found[0], "VmRSS": vm, "Pss": pss_kib(found[0]) or 0}
 
 
 @pytest.mark.parametrize("distro", NFR003_CASES)
@@ -783,11 +837,9 @@ def test_nfr003_idle_rss_of_a_services_on_realm(
     median_mib = totals[len(totals) // 2] / 1024
     print("NFR003_SAMPLES " + json.dumps({"distro": distro, "rows": rows}, sort_keys=True))
     print(f"NFR003_MEDIAN_MIB {distro} {median_mib:.2f} MAX_MIB {totals[-1] / 1024:.2f}")
-    if median_mib > 40:
-        raise KnownGap(f"F11: VmRSS median {median_mib:.2f} MiB is over the 40 MiB budget")
+    assert median_mib <= 40, f"NFR-003: VmRSS median {median_mib:.2f} MiB is over the 40 MiB budget"
 
 
-@pytest.mark.xfail(strict=True, reason=F11_BUDGET, raises=KnownGap)
 @pytest.mark.fr("NFR-021")
 def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) -> None:
     """NFR-021 (Should): five idle services-on realms running together, on arch. The pause is
@@ -805,8 +857,9 @@ def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) 
     finally:
         for name in names:
             delete(launcher, name)
-    vmrss_mib = sum(r["kib"]["VmRSS"] for r in per_realm.values()) / 1024
-    pss_mib = sum(r["kib"]["Pss"] for r in per_realm.values()) / 1024
+    relay = relay_listener_rss()
+    vmrss_mib = (sum(r["kib"]["VmRSS"] for r in per_realm.values()) + relay["VmRSS"]) / 1024
+    pss_mib = (sum(r["kib"]["Pss"] for r in per_realm.values()) + relay["Pss"]) / 1024
     print(
         "NFR021_TOTAL "
         + json.dumps(
@@ -814,13 +867,15 @@ def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) 
                 "per_realm_vmrss_kib": {n: r["kib"]["VmRSS"] for n, r in per_realm.items()},
                 "per_realm_pss_kib": {n: r["kib"]["Pss"] for n, r in per_realm.items()},
                 "pss_unreadable": {n: r["pss_unreadable"] for n, r in per_realm.items()},
+                "relay_listener": relay,
                 "vmrss_total_mib": round(vmrss_mib, 2),
                 "pss_total_mib": round(pss_mib, 2),
             }
         )
     )
-    if vmrss_mib > 5 * 40:
-        raise KnownGap(f"F11: five realms total {vmrss_mib:.2f} MiB (VmRSS) against 200")
+    assert vmrss_mib <= 5 * 40, (
+        f"NFR-021: five realms and the relay total {vmrss_mib:.2f} MiB (VmRSS) against 200"
+    )
 
 
 @pytest.mark.fr("FR-080")
