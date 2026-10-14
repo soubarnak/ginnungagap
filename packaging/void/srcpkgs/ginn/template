@@ -1,13 +1,16 @@
 # Template file for 'ginn'
 pkgname=ginn
-version=0.1.0
+# Must equal the project version in pyproject.toml without .dev0 (docs/packaging.md, release
+# procedure). tools/release.sh check compares the two.
+version=1.0.0
 revision=1
 archs="x86_64 x86_64-musl"
 build_style=python3-pep517
 # The release tarball has no git metadata, so the repo hygiene test cannot run here.
 # CI runs it on the checkout.
 make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
-hostmakedepends="python3-setuptools python3-wheel"
+# gcc and make build the five native helpers in native/ (post_install).
+hostmakedepends="python3-setuptools python3-wheel gcc make"
 # containers-common ships /usr/share/containers/seccomp.json. ginn generates its seccomp profile
 # from that file and fails closed without it (ADR-006).
 depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux containers-common"
@@ -17,11 +20,36 @@ maintainer="Bongbetic <soubarna@live.in>"
 license="Apache-2.0"
 homepage="https://github.com/soubarnak/ginnungagap"
 distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
+# checksum is a placeholder until the release tag exists. tools/release.sh checksum <tarball-url>
+# rewrites this line with the sha256 of the v<version> tag archive (docs/packaging.md, step 4).
+# Do not write a value by hand. The line must stay exactly as it is: the scripts match it.
 checksum=@CHECKSUM@
 
 post_install() {
+	# native/Makefile builds the five helpers (HELPERS) and installs them to LIBEXECDIR, the path
+	# that runtime code calls (FR-081, ADR-008). make install builds them first.
+	make -C native install DESTDIR="${DESTDIR}" LIBEXECDIR=/usr/libexec/ginn
+	for helper in ginn-wait ginn-rebind ginn-watch ginn-agent-filter ginn-idle; do
+		test -x "${DESTDIR}/usr/libexec/ginn/${helper}" || return 1
+	done
+	# The desktop entry and icon are not in the wheel. They are staged here, from the source
+	# tree, and ginn-gui moves them out of this package. Paths are relative to wrksrc.
+	vinstall src/ginn/gui/data/org.bongbetic.ginn.desktop 644 usr/share/applications
+	vinstall src/ginn/gui/data/org.bongbetic.ginn.svg 644 usr/share/icons/hicolor/scalable/apps
 	vlicense NOTICE
 	vdoc README.md
 }
 
-# ginn-gui subpackage is added in M9 (FR-100..107) once src/ginn/gui exists.
+# The GUI subpackage owns the Control Plane (FR-100..107, ADR-001) and the desktop entry (IR-029).
+ginn-gui_package() {
+	depends="ginn>=${version}_${revision} python3-gobject gtk4 libadwaita"
+	short_desc="Control Plane GUI for Ginnungagap (GTK4, libadwaita)"
+	pkg_install() {
+		# The GUI module, the console script, the desktop entry and the icon move out of the main
+		# package. py3_sitelib is the Python 3 site-packages directory (usr/lib/python3.X).
+		vmove "${py3_sitelib}/ginn/gui"
+		vmove usr/bin/ginn-gui
+		vmove usr/share/applications/org.bongbetic.ginn.desktop
+		vmove usr/share/icons/hicolor/scalable/apps/org.bongbetic.ginn.svg
+	}
+}
