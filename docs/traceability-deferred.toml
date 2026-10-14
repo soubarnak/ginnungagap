@@ -21,7 +21,8 @@ reason = "a rerun that changes no byte or mtime is unit-tested (T3.4). G1 (spike
 [[deferred]]
 id = "FR-005"
 milestone = "M10"
-reason = "host write confinement is proven by tools/host-diff.sh (T10.2); the M3 heading range lists it but the proving test lands in M10"
+partial = true
+reason = "unit tests run for tools/host-diff.sh (T10.2); the host run that proves write confinement is deferred to M10"
 
 [[deferred]]
 id = "FR-006"
@@ -98,7 +99,7 @@ reason = "not covered yet; the roadmap assigns its test to T8.3 (M8)"
 id = "FR-023"
 milestone = "M8"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M8"
+reason = "update unit-tested on FakePodman (argv, refresh rule, state moves, restore, --all); Gate 3 and real distros not run."
 
 [[deferred]]
 id = "FR-025"
@@ -110,7 +111,7 @@ reason = "a start, a stop, a status or a delete of an unknown realm is refused w
 id = "FR-026"
 milestone = "M4"
 partial = true
-reason = "the golden argv proves --network host for non-Kali realms (T4.1); the Kali pasta network and NET_RAW land in T10.1, and Kali is refused until then"
+reason = "the golden argv proves --network host for non-Kali realms (T4.1), and --network pasta with one --cap-add NET_RAW for Kali, services off and on (T10.1). No Kali realm has been created on a host through ginn, so the outbound and raw-socket proof is open"
 
 [[deferred]]
 id = "FR-040"
@@ -215,7 +216,7 @@ reason = "the services-on argv is unit-tested (T7.1, tests/unit/test_runtime_spe
 id = "FR-081"
 milestone = "M7"
 partial = true
-reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M7; the T4.10 attach tests prove a failed lazy re-attach at enter or launch raises and never stops the realm (services-on stop stays with sv); T4.5 refuses a services-on start and stop before any write, until M7 (test_ops_lifecycle)"
+reason = "unit tests cover the supervised start and finish, the sv control, the start that waits without the realm lock, stop and delete through sv, and the autostart file (tests/unit/test_ops_service.py, test_ops_lifecycle.py, test_ops_delete.py, test_services_supervisor.py). AC-1 (runit shows the realm up) and AC-2 (restart within 10 s) need the host run in T7.7"
 
 [[deferred]]
 id = "FR-082"
@@ -226,17 +227,20 @@ reason = "the services-off create argv carries --init, a keep-alive entrypoint a
 [[deferred]]
 id = "FR-083"
 milestone = "M7"
-reason = "not covered yet; the roadmap assigns its test to M7"
+partial = true
+reason = "ginn services on|off is refused with GINN-E-NOT-SUPPORTED-YET until T8.3, which creates the next generation; the same-mode no-op and the refusal are unit-tested (tests/unit/test_ops_service.py, test_cli_services.py). AC-1 (htop stays installed, systemd is PID 1) needs T8.3 and the host run in T7.7"
 
 [[deferred]]
 id = "FR-100"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
 
 [[deferred]]
 id = "FR-101"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
 
 [[deferred]]
 id = "FR-102"
@@ -246,12 +250,14 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 [[deferred]]
 id = "FR-103"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
 
 [[deferred]]
 id = "FR-105"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
 
 [[deferred]]
 id = "FR-106"
@@ -262,12 +268,12 @@ reason = "not covered yet; the roadmap assigns its test to M9"
 id = "FR-120"
 milestone = "M8"
 partial = true
-reason = "unit tests (T4.4) check the create retries: 4 attempts in all, delays of 5, 15 and 45 s, a recovery after two failed attempts, and the rollback when the last retry fails. Package-manager network failures are not retried, because the distribution data has no classifier for them. Not yet covered: network failure during install, update or rebuild, and the broken state from a package database (T8.1, T8.4). T5.1 review: a realistic non-zero status of a package step (Debian's `Temporary failure resolving`, Arch's `Could not resolve host`, dnf's `Curl error`) is classified by the distribution's `network_error_regex` and retried with the FR-120 delays, and then raised as GINN-E-NETWORK; a signature match and stale metadata are not retried (tests/unit/test_packages_manager.py, tests/unit/test_ops_packages.py, tests/unit/test_distros_loader.py)"
+reason = "install and update network retry covered; broken gated with no production db check; rebuild open (T8.3)."
 [[deferred]]
 id = "FR-121"
 milestone = "M8"
 partial = true
-reason = "the create precheck (T4.4) refuses before any download when free space is below the base image estimate times 1.10. The estimate covers the base image only. The disk module, the --with estimate and the Kali size confirmation are T8.2 and T8.7"
+reason = "the create precheck refuses before any download when free space on the podman root and the Realm Home filesystems is below the estimate times 1.10, rounded up (ops/disk.py). The Kali everything set is checked the same way before its install (T8.7). The --with estimate is missing, and the apt-cache estimate has not run on a host"
 [[deferred]]
 id = "FR-122"
 milestone = "M8"
@@ -288,12 +294,14 @@ reason = "the choke point (T3.9) writes one audit entry per operation with user,
 [[deferred]]
 id = "NFR-001"
 milestone = "M10"
-reason = "not covered yet; the 1 MiB RSS bound for the resident runsvdir needs a host measurement in M10"
+partial = true
+reason = "unit tests run for tools/measure; the 1 MiB RSS bound for the resident runsvdir needs a host measurement in M10"
 
 [[deferred]]
 id = "NFR-002"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+partial = true
+reason = "unit tests run for tools/measure; the RSS budget for the helpers needs a host measurement in M10"
 
 [[deferred]]
 id = "NFR-003"
@@ -339,7 +347,8 @@ reason = "the sync costs a fixed number of podman calls, counted on 200 entries 
 [[deferred]]
 id = "NFR-010"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "unit tests run; the parity proof is deferred to M9"
 
 [[deferred]]
 id = "NFR-011"
@@ -362,7 +371,7 @@ reason = "not covered yet; the roadmap assigns its test to M8"
 id = "NFR-033"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested: it exits 1 when conmon dies, and runs one podman stop on SIGTERM (tests/unit/test_native_wait.py). The 10 s restart and the give-up after five crashes in 60 s (AS-028) need the runit finish logic (T7.4) and a host run (T7.7, test_services_real)"
+reason = "ginn-wait (T7.2) is unit-tested: it exits 1 when conmon dies, and runs one podman stop on SIGTERM (tests/unit/test_native_wait.py). The 5 s restart delay and the give-up after five crashes in 60 s (AS-028) are unit-tested in tests/unit/test_ops_service.py and test_services_supervisor.py. The 10 s restart on a host is T7.7 (test_services_real)"
 
 [[deferred]]
 id = "NFR-041"
@@ -441,7 +450,8 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 [[deferred]]
 id = "NFR-SEC-009"
 milestone = "M9"
-reason = "Control Plane to backend same-user channel is the GUI backend (T9.1)"
+partial = true
+reason = "Control Plane to backend same-user channel is the GUI backend (T9.1); unit tests run, the host proof is deferred to M9"
 
 [[deferred]]
 id = "NFR-SEC-010"

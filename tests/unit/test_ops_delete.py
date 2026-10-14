@@ -16,7 +16,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,14 +26,17 @@ import pytest
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.errors import GinnError, make
 from ginn.ops import delete as delete_module
-from ginn.ops._mutating import OpEnv
-from ginn.ops.delete import STEPS, DeleteHooks, delete_realm
+from ginn.ops._mutating import OpEnv, mutating
+from ginn.ops.delete import STEPS, DeleteHooks, check_purge, delete_realm
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.security_ops import agent_state_path, proxy_state_path, read_agent_record
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
+from ginn.services import supervisor
+from ginn.services.runit_user import service_dir, write_service_dir
+from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.journal import process_start_ticks
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
@@ -1162,21 +1165,144 @@ def test_another_users_realm_is_not_visible_to_delete(
     assert containers_of(fake, "lab") != []
 
 
+class SvStub:
+    """Stands in for sv in the delete tests: it records each argv and answers `sv -w down`.
+
+    `on_down` is the action of the supervised process (finish records `stopped`), and `reply`
+    replaces the answer, so a test can make sv fail or time out.
+    """
+
+    def __init__(self) -> None:
+        self.argvs: list[list[str]] = []
+        self.on_down: Callable[[], None] | None = None
+        self.reply: Result | None = None
+        self.lock_during_down: list[str] = []
+        self.ops_at_down: list[str] = []
+        self.fake: FakePodman | None = None
+        self.env: OpEnv | None = None
+
+    def run(self, argv: Sequence[str], timeout: float) -> Result:
+        self.argvs.append(list(argv))
+        if self.reply is not None:
+            return self.reply
+        if self.fake is not None:
+            self.ops_at_down = list(self.fake.ops())
+        if self.env is not None:
+            self.lock_during_down.append(_try_lock(self.env))
+        if self.on_down is not None:
+            self.on_down()
+        return Result(0, "ok: down: x: 0s, normally up\n", "")
+
+
+def _try_lock(env: OpEnv) -> str:
+    """Take the realm lock as a probe operation: "free" when no other operation holds it."""
+    try:
+        with mutating(env, "probe", RealmName("lab"), {}):
+            return "free"
+    except GinnError:
+        return "busy"
+
+
+def _supervised_services_realm(
+    env: OpEnv, fake: FakePodman, stub: SvStub, state: RealmState = RealmState.RUNNING
+) -> DeleteHooks:
+    """A services-on realm in `state` with its container running, its runit service, and runsv's
+    supervise/ok FIFO."""
+    previous = RealmState.RUNNING if state in (RealmState.UPDATING, RealmState.REBUILDING) else None
+    make_realm(env, fake, "lab", state, running=True, services=True, previous=previous)
+    write_service_dir(env.paths, RealmName("lab"), "/usr/bin/ginn")
+    supervise = service_dir(env.paths, RealmName("lab")) / "supervise"
+    supervise.mkdir(exist_ok=True)
+    os.mkfifo(supervise / "ok")
+    stub.fake = fake
+    stub.env = env
+    return DeleteHooks(
+        supervisor=SupervisorHooks(
+            sv="/usr/bin/sv", run=stub.run, clock=FakeClock(), sleep=lambda _s: None
+        )
+    )
+
+
 @pytest.mark.fr("FR-019")
 @pytest.mark.fr("FR-081")
-def test_a_running_services_on_realm_is_refused_before_any_write_until_t74(
+def test_a_running_services_on_realm_is_stopped_through_sv_before_its_removal(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    cid = containers_of(fake, "lab")[0]
+
+    def supervised_stop() -> None:
+        fake.stop(cid, 30)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.STOPPED)
+
+    stub.on_down = supervised_stop
+
+    result = delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert result.image == "removed"
+    assert_gone(env, fake, "lab")
+    assert stub.argvs == [
+        [
+            "/usr/bin/sv",
+            "-w",
+            str(supervisor.DOWN_WAIT_S),
+            "down",
+            str(service_dir(env.paths, RealmName("lab"))),
+        ]
+    ]
+    assert stub.lock_during_down == ["free"], "sv down runs before the delete takes the lock"
+    assert "rm" not in stub.ops_at_down, "runit is down before the container is removed"
+    assert not service_dir(env.paths, RealmName("lab")).exists()
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_delete_goes_on_with_podman_when_no_supervisor_answers(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    stub.reply = Result(1, "", "fail: x: runsv not running\n")
+
+    result = delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert result.image == "removed"
+    assert_gone(env, fake, "lab")
+    assert "stop" in fake.ops(), "podman stops the container when no runsv answers"
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_delete_whose_stop_times_out_writes_nothing(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    stub.reply = Result(1, "", "timeout: run: x: (pid 4) 60s, want down, got TERM\n")
+    before = (env.paths.realms / "lab.json").read_bytes()
+
+    with pytest.raises(GinnError) as caught:
+        delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-SERVICE-TIMEOUT"
+    assert (env.paths.realms / "lab.json").read_bytes() == before
+    assert fake.ops() == []
+    assert [entry.op for entry in env.audit.read() if entry.op != "integrity"] == []
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-081")
+def test_a_running_services_on_realm_is_not_refused_by_the_purge_check(
     env: OpEnv, fake: FakePodman
 ) -> None:
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
     before = (env.paths.realms / "lab.json").read_bytes()
 
-    with pytest.raises(GinnError, match="T7.4") as caught:
-        delete_realm(env, fake, RealmName("lab"))
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    check_purge(env, RealmName("lab"))
 
     assert (env.paths.realms / "lab.json").read_bytes() == before
     assert fake.ops() == []
-    assert list(env.audit.read()) == []
 
 
 @pytest.mark.fr("FR-019")
@@ -1231,3 +1357,63 @@ def test_a_host_change_during_a_delete_is_on_the_result_as_a_warning(
 def test_a_clean_delete_has_no_warnings(env: OpEnv, fake: FakePodman) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED)
     assert delete_realm(env, fake, RealmName("lab")).warnings == ()
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("DR-020")
+def test_a_services_on_delete_of_an_updating_realm_sends_no_sv_command_and_writes_nothing(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """An sv down would stop the container under an upgrade, so the state is refused first."""
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub, state=RealmState.UPDATING)
+    before = (env.paths.realms / "lab.json").read_bytes()
+
+    with pytest.raises(GinnError) as caught:
+        delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert stub.argvs == []
+    assert fake.ops() == []
+    assert (env.paths.realms / "lab.json").read_bytes() == before
+    assert containers_of(fake, "lab") != []
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_delete_whose_sv_control_fails_removes_nothing(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """runsv may still run the realm when its control FIFO cannot be opened, so the delete does not
+    go on with podman: runsv would restart the container it removes."""
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    stub.reply = Result(
+        1, "", "warning: x: unable to open supervise/control: file does not exist\n"
+    )
+    before = (env.paths.realms / "lab.json").read_bytes()
+
+    with pytest.raises(GinnError) as caught:
+        delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-SERVICE-CONTROL"
+    assert "rm" not in fake.ops()
+    assert "stop" not in fake.ops()
+    assert (env.paths.realms / "lab.json").read_bytes() == before
+    assert containers_of(fake, "lab") != []
+
+
+@pytest.mark.fr("FR-122")
+def test_a_services_on_delete_refused_by_an_unrecovered_journal_entry_stops_nothing(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    env.journal.begin("start", RealmName("lab"), {})
+
+    with pytest.raises(GinnError) as caught:
+        delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-RECOVERY-PENDING"
+    assert stub.argvs == []
+    assert fake.ops() == []
+    assert containers_of(fake, "lab") != []

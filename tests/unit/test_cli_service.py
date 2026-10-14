@@ -21,7 +21,7 @@ from ginn.domain import RealmName, RealmState
 from ginn.ops.service import ServiceHooks
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
-from ginn.services.runit_user import conmon_pidfile, crash_log
+from ginn.services.runit_user import conmon_pidfile, crash_log, service_dir, write_service_dir
 from ginn.store.records import RealmStore
 from tests.unit.realm_cli_support import DIGEST, World, record_of
 
@@ -83,6 +83,8 @@ def sleeps(world: World, helper: Path, monkeypatch: pytest.MonkeyPatch) -> list[
 
 
 def _services_realm(world: World, state: RealmState, *, running: bool) -> str:
+    if not service_dir(world.paths, REALM).exists():
+        write_service_dir(world.paths, REALM, "/usr/bin/ginn")
     labels = {LABEL_REALM: "lab", LABEL_DISTRO: "debian", LABEL_GENERATION: "1"}
     spec = CreateSpec(name="ginn-lab-g1", image_digest_ref=DIGEST, network="host", labels=labels)
     cid = world.fake.create(spec)

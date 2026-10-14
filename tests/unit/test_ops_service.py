@@ -10,7 +10,9 @@ window is exact.
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,14 @@ from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError
 from ginn.ops import delete as delete_ops
 from ginn.ops.lifecycle import HostUser, LifecycleHooks
-from ginn.ops.service import ServiceExit, ServiceHooks, finish_service, start_service
+from ginn.ops.service import (
+    ServiceExit,
+    ServiceHooks,
+    finish_service,
+    set_autostart,
+    set_services_mode,
+    start_service,
+)
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.services.runit_user import (
@@ -95,7 +104,13 @@ def hooks_for(helper: Path, sleeps: list[float]) -> ServiceHooks:
 
 
 def services_realm(world: World, state: RealmState, *, running: bool, services: bool = True):  # type: ignore[no-untyped-def]
-    """A stored realm with a fake container. `running` starts the container in the fake."""
+    """A stored realm with a fake container. `running` starts the container in the fake.
+
+    The realm's runit service directory exists, as a services-on create makes it. A test that
+    needs it made before the realm (the reader of the control FIFO) makes it first.
+    """
+    if not service_dir(world.paths, REALM).exists():
+        write_service_dir(world.paths, REALM, PROGRAM)
     labels = {LABEL_REALM: "lab", LABEL_DISTRO: "debian", LABEL_GENERATION: "1"}
     spec = CreateSpec(name="ginn-lab-g1", image_digest_ref=DIGEST, network="host", labels=labels)
     cid = world.fake.create(spec)
@@ -367,9 +382,170 @@ def test_a_give_up_of_a_stopped_realm_writes_down_and_leaves_the_state_stopped(
 @pytest.mark.fr("FR-019")
 def test_deleting_a_stopped_services_realm_removes_its_service_directory(world: World, env) -> None:  # type: ignore[no-untyped-def]
     services_realm(world, RealmState.STOPPED, running=False)
-    write_service_dir(world.paths, REALM, PROGRAM)
 
     delete_ops.delete_realm(env, world.fake, REALM)
 
     assert not service_dir(world.paths, REALM).exists()
     assert not conmon_pidfile(world.paths, REALM).exists()
+
+
+def _set_autostart_flag(world: World, flag: bool) -> None:
+    """Store the realm's autostart flag, as a `ginn autostart` would, without the operation."""
+    store = RealmStore(world.paths)
+    record = store.load(REALM)
+    store.save(replace(record, settings=replace(record.settings, autostart=flag)))
+
+
+@pytest.mark.fr("FR-084")
+@pytest.mark.fr("DR-012")
+def test_the_supervised_start_makes_the_down_file_match_autostart_under_the_lock(
+    world: World, env, helper: Path, sleeps: list[float], user: HostUser
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    _set_autostart_flag(world, True)
+    down = service_dir(world.paths, REALM) / DOWN
+    assert down.exists()
+
+    start_service(
+        env,
+        world.fake,
+        REALM,
+        global_argv=GLOBAL_ARGV,
+        session=user,
+        hooks=hooks_for(helper, sleeps),
+    )
+
+    assert not down.exists(), "autostart on removes the down file at the supervised start"
+    assert audit_ops(env) == ["start"]
+
+
+@pytest.mark.fr("AS-028")
+@pytest.mark.fr("FR-084")
+def test_a_give_up_leaves_down_and_the_next_supervised_start_undoes_it_for_autostart(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+    user: HostUser,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    _set_autostart_flag(world, True)
+    hooks = hooks_for(helper, sleeps)
+    for offset in (0.0, 5.0, 10.0, 15.0, 20.0):
+        clock.set(T0 + offset)
+        finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks)
+    down = service_dir(world.paths, REALM) / DOWN
+    assert down.exists(), "the give-up writes down, so runit stops restarting the realm"
+    assert stored(world).settings.autostart is True
+
+    start_service(
+        env,
+        world.fake,
+        REALM,
+        global_argv=GLOBAL_ARGV,
+        session=user,
+        hooks=hooks,
+    )
+
+    assert not down.exists()
+
+
+@pytest.mark.fr("FR-083")
+def test_the_same_services_mode_is_a_no_op_and_a_change_is_refused_until_t83(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    before = stored(world)
+    assert set_services_mode(env, REALM, on=True) == before
+    assert audit_ops(env) == []
+
+    with pytest.raises(GinnError) as caught:
+        set_services_mode(env, REALM, on=False)
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert "T8.3" in caught.value.message
+    assert stored(world) == before
+    assert audit_ops(env) == []
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-084")
+@pytest.mark.fr("DR-012")
+def test_autostart_on_writes_the_flag_and_removes_the_down_file_under_one_audit_entry(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    down = service_dir(world.paths, REALM) / DOWN
+
+    record = set_autostart(env, REALM, on=True)
+
+    assert record.settings.autostart is True
+    assert stored(world).settings.autostart is True
+    assert not down.exists()
+    assert audit_ops(env) == ["autostart"]
+    assert last_audit(env).outcome == "ok"
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-084")
+@pytest.mark.fr("DR-012")
+def test_autostart_off_creates_the_down_file_and_saves_the_flag(world: World, env) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    _set_autostart_flag(world, True)
+    set_autostart(env, REALM, on=True)
+    down = service_dir(world.paths, REALM) / DOWN
+    assert not down.exists()
+
+    set_autostart(env, REALM, on=False)
+
+    assert down.is_file()
+    assert stored(world).settings.autostart is False
+
+
+@pytest.mark.fr("DR-012")
+def test_autostart_on_a_services_off_realm_is_refused_before_any_write(world: World, env) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False, services=False)
+    before = stored(world)
+
+    with pytest.raises(GinnError) as caught:
+        set_autostart(env, REALM, on=True)
+
+    assert caught.value.code == "GINN-E-OPTION-INVALID"
+    assert "DR-012" in caught.value.details["rule"]
+    assert stored(world) == before
+    assert audit_ops(env) == []
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize("state", [RealmState.CREATING, RealmState.DELETING, RealmState.BROKEN])
+def test_autostart_of_a_realm_being_created_deleted_or_broken_is_refused_before_any_write(
+    world: World, env, state: RealmState
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, state, running=False)
+    record_file = world.paths.realms / "lab.json"
+    before = record_file.read_bytes()
+    down = service_dir(world.paths, REALM) / DOWN
+    existed = down.exists()
+
+    with pytest.raises(GinnError) as caught:
+        set_autostart(env, REALM, on=True)
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert record_file.read_bytes() == before
+    assert down.exists() == existed
+    assert audit_ops(env) == []
+
+
+@pytest.mark.fr("FR-084")
+def test_autostart_with_no_service_directory_is_service_missing_and_saves_no_flag(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    shutil.rmtree(service_dir(world.paths, REALM))
+
+    with pytest.raises(GinnError) as caught:
+        set_autostart(env, REALM, on=True)
+
+    assert caught.value.code == "GINN-E-SERVICE-MISSING"
+    assert stored(world).settings.autostart is False

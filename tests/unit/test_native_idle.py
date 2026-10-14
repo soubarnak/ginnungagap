@@ -404,7 +404,6 @@ def test_a_failed_podman_stop_exits_4_while_the_init_runs(
 
 
 @pytest.mark.fr("FR-018")
-@pytest.mark.fr("NFR-002")
 def test_the_helper_stays_under_2_mib_resident_while_it_waits(
     helper: Path, unshare: str, tmp_path: Path
 ) -> None:

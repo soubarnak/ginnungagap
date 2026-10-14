@@ -47,6 +47,30 @@ def record_text(record: RealmRecord) -> str:
     return "\n".join(lines)
 
 
+def services_json(record: RealmRecord) -> dict[str, object]:
+    """The services mode of a realm after `ginn services` (FR-083): its name and the mode."""
+    return {"name": record.settings.name.value, "services": record.settings.services}
+
+
+def services_text(record: RealmRecord) -> str:
+    mode = "on" if record.settings.services else "off"
+    return f"realm {record.settings.name.value} services are {mode}"
+
+
+def autostart_json(record: RealmRecord) -> dict[str, object]:
+    """The autostart of a realm after `ginn autostart` (FR-084): its name and the flag."""
+    return {
+        "name": record.settings.name.value,
+        "services": record.settings.services,
+        "autostart": record.settings.autostart,
+    }
+
+
+def autostart_text(record: RealmRecord) -> str:
+    mode = "on" if record.settings.autostart else "off"
+    return f"realm {record.settings.name.value} autostart is {mode}"
+
+
 def permissions_json(record: RealmRecord) -> dict[str, object]:
     """The tier and the permissions of a realm (FR-060, FR-063), with its restart flag.
 

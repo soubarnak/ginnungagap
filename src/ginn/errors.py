@@ -10,7 +10,9 @@ GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), 
 GINN-E-SETUP-BUSY (FR-001), GINN-E-UNDO-CGROUP-BUSY, GINN-E-UNDO-SERVICE-RUNNING and
 GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH-FAILED
 (ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
-GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069). `source` cites
+GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
+GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
+(FR-081, AS-028). `source` cites
 the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -478,6 +480,38 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-SUPERVISOR-DOWN",
+        exit_code=1,
+        summary="the runit supervisor of realm '{realm}' is not running: {detail}",
+        remedy="run 'ginn doctor' and follow its runtime-dir and runsvdir checks, which name the "
+        "fix; then run the command again",
+        source="FR-081, ADR-003 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SERVICE-TIMEOUT",
+        exit_code=1,
+        summary="the runit service of realm '{realm}' did not {action} in {seconds} s: {detail}",
+        remedy="run 'ginn status {realm}' for its runit state and 'ginn log {realm}' for the "
+        "reason; a realm that crashes five times in 60 s is given up (AS-028)",
+        source="FR-081, AS-028 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SERVICE-CONTROL",
+        exit_code=1,
+        summary="the runit service of realm '{realm}' did not take the {action} request: {detail}",
+        remedy="run 'ginn status {realm}' and 'ginn doctor'; the realm may still be running, so no "
+        "fallback stopped it. Run the command again once the runit checks pass",
+        source="FR-081 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SERVICE-MISSING",
+        exit_code=1,
+        summary="the runit service directory of realm '{realm}' is missing: {detail}",
+        remedy="run 'ginn doctor' to see the runit service of the realm; 'ginn delete {realm}' "
+        "removes a realm whose service directory is gone",
+        source="FR-081, DR-010 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-RECOVERED",
         exit_code=0,
         summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",
@@ -616,7 +650,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         1,
         "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, "
         "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
-        "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE",
+        "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, "
+        "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),

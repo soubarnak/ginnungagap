@@ -16,6 +16,7 @@ races the pre-check, and the share list rebuilt at enter.
 import json
 import os
 import signal
+import stat
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
@@ -44,6 +45,8 @@ from ginn.runtime.mounts import Skipped
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security._proc import Proc
+from ginn.services.runit_user import service_dir, write_service_dir
+from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.locks import realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -709,24 +712,53 @@ def test_enter_runs_a_command_in_a_running_services_on_realm_without_a_refusal(
     assert stored(env, "lab").state is RealmState.RUNNING
 
 
-@pytest.mark.fr("FR-080")
 @pytest.mark.fr("FR-081")
-def test_enter_never_starts_a_stopped_services_on_realm_with_podman(
+@pytest.mark.fr("FR-049")
+def test_enter_starts_a_stopped_services_on_realm_through_sv_then_attaches_the_session_grants(
     env: OpEnv,
     fake: EnterPodman,
     user: HostUser,
     lifecycle_hooks: LifecycleHooks,
 ) -> None:
+    """The supervised start runs under runit's sparse environment, so it attaches no display. The
+    enter that follows attaches it through the re-attach path (ADR-008 amendment, FR-081)."""
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
+    write_service_dir(env.paths, RealmName("lab"), "/usr/bin/ginn")
+    supervise = service_dir(env.paths, RealmName("lab")) / "supervise"
+    supervise.mkdir(exist_ok=True)
+    os.mkfifo(supervise / "ok")
+    runtime = Path(user.host_env["XDG_RUNTIME_DIR"])
+    os.mknod(runtime / "wayland-0", stat.S_IFSOCK | 0o600)
+    sparse = HostUser(uid=user.uid, host_home=user.host_home, host_env={})
+    argvs: list[list[str]] = []
 
-    with pytest.raises(GinnError) as info:
-        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+    def run(argv: Sequence[str], timeout: float) -> Result:
+        argvs.append(list(argv))
+        if argv[1] == "status":
+            return Result(0, "down: x: 0s, normally up\n", "")
+        # The supervised process: `ginn _service-run` starts the realm with runit's environment.
+        start_realm(
+            env, fake, RealmName("lab"), session=sparse, hooks=lifecycle_hooks, supervised=True
+        )
+        return Result(0, "ok: run: x: (pid 1) 0s\n", "")
 
-    assert info.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert "T7.4" in info.value.message
-    assert "start" not in fake.ops()
-    assert "exec_interactive" not in fake.ops()
-    assert stored(env, "lab").state is RealmState.STOPPED
+    supervised = replace(
+        lifecycle_hooks,
+        supervisor=SupervisorHooks(
+            sv="/usr/bin/sv", run=run, clock=FakeClock(), sleep=lambda _seconds: None
+        ),
+    )
+    with_display = replace(user, host_env={**user.host_env, "WAYLAND_DISPLAY": "wayland-0"})
+
+    status = enter(env, fake, "lab", with_display, make_hooks(supervised), argv=["true"])
+
+    assert status == 0
+    assert [argv[3] for argv in argvs if argv[1] != "status"] == ["up"]
+    assert fake.ops().count("start") == 1, "the supervised start made the one start"
+    assert stored(env, "lab").state is RealmState.RUNNING
+    (reattach,) = audit_of(env, "reattach")
+    assert reattach.outcome == "ok"
+    assert exec_call(fake).container_id == container_id(env, "lab")
 
 
 @pytest.mark.fr("FR-081")

@@ -18,7 +18,9 @@ The steps, in order:
    listing, with no record pid and no /proc read. ADR-010's amendment of 2026-10-13 (section "T4.6
    enter runs one listing per enter") decides this path, and NFR-004 measures it. A realm that does
    not run is started by `start_realm`, which records the grants and attaches them (FR-017,
-   FR-049). A start has its grants attached already, so no re-attach follows it.
+   FR-049). A services-off start has its grants attached already, so no re-attach follows it. A
+   services-on start is made by its runit service under a sparse environment, so `_settle` attaches
+   the session's grants after it (ADR-008 amendment).
 4. A running realm is pre-checked (ADR-008 amendment): `needs_reattach` reads the host sources and
    changes nothing. Most enters find nothing changed and go straight to exec. When a grant changed,
    `mutating("reattach")` takes the realm lock (FR-123, DR-033), reads the state again, re-attaches
@@ -405,6 +407,10 @@ def _settle(
     The lock is taken only for a change: a running realm with nothing pending returns at once. A
     realm that stopped after the look is started, which takes the lock itself. The FR-006 warnings
     of a re-attach or a start are appended to `notices`.
+
+    A services-on realm is started through its runit service (FR-081), and that start runs under
+    runit's sparse environment, so it attaches no session grant. The grants of this session are
+    attached here, lazily, through the same re-attach as a running realm (ADR-008 amendment).
     """
     if look.running and not look.pending:
         return look.record
@@ -412,7 +418,23 @@ def _settle(
         env, podman, name, look, session=session, hooks=hooks, notices=notices
     ):
         return look.record
-    return start_realm(env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices)
+    record = start_realm(
+        env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices
+    )
+    if not record.settings.services:
+        return record
+    after = _look_session(
+        env,
+        podman,
+        name,
+        _load(RealmStore(env.paths, env.clock), name),
+        session=session,
+        hooks=hooks,
+        app=look.app,
+    )
+    if after.running and after.pending:
+        _reattach_locked(env, podman, name, after, session=session, hooks=hooks, notices=notices)
+    return _load(RealmStore(env.paths, env.clock), name)
 
 
 def _await_holder(

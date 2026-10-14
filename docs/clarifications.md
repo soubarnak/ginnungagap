@@ -21,6 +21,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-13 | Doctor readiness: "all checks passing" and the disk thresholds | FR-001, FR-007 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-14 | ginn's own sockets as typed internal grants | DR-004, FR-067, FR-068, NFR-SEC-006, NFR-SEC-008 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-15 | An abstract-socket session bus with the host network (FR-026) | FR-068, FR-026, AS-012 | open, for SRS v1.1 |
+| CL-16 | The size of the Kali everything set is known only after the base image | FR-014, IR-002 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -150,4 +151,14 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Proposed wording: "FR-068 AC-1 holds when the host session bus is reachable as a path socket. A session address whose bus is an abstract socket is not filtered, and the realm gets no bus for it, with AS-012 as the reason."
 - How ginn works now: `runtime/realm_security.bus_plan` refuses an address with an `abstract=` member (AS-012). The realm gets no proxy and no bus bind, and the refusal is a `bus` skip, so `ginn status` lists it. `ginn doctor` reports the `session-bus` check as a WARN with the text "session bus uses an abstract socket; realms on the host network can reach it unfiltered; FR-068 filtering is not in effect". The refusal stops ginn's own bus only. It does not stop a realm from reaching an abstract socket that the host runs.
 - Evidence: unit tests only (`tests/unit/test_runtime_realm_security.py`, `tests/unit/test_doctor_checks.py`). Not measured on a host.
+- Status: open, for SRS v1.1; the plan proceeds under the proposed wording.
+
+
+## CL-16: the Kali everything set is estimated only inside a realm
+
+- Requirement IDs: FR-014, IR-002.
+- Issue: the size of the Kali `everything` set can only be estimated from inside a realm, with apt-cache. So the base image pull, the refresh and the Integration Package Set all happen before the confirmation, and the confirmation comes after them. A user who reads FR-014 AC-1 as "nothing is downloaded before the confirmation" finds that the base image is already on disk when the question is asked.
+- Proposed wording for AC-1: "nothing of the everything set is downloaded until the user confirms". The base image, the refresh and the Integration Package Set are not part of the everything set, so they may be fetched before the confirmation.
+- How ginn works now: `ops/create.py` runs the everything step after the integrated steps. `resolve` lists the closure, `estimate` reads the package sizes in chunks of 200 names, and the disk check runs on the podman root and the Realm Home at estimate times 1.10. Then the prompt, or `--yes`, comes before the install, which is recorded in the Install Manifest. A no is GINN-E-INTERRUPTED and rolls back. Without a TTY, or with `--json`, a run without `--yes` is GINN-E-USAGE before any write. The GUI wizard shows its own confirmation and passes `--yes`; the estimate it shows comes from the CLI progress output.
+- Evidence: unit tests only. No Kali realm has been built with the everything set on a host.
 - Status: open, for SRS v1.1; the plan proceeds under the proposed wording.

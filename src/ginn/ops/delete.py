@@ -66,11 +66,17 @@ again at the first step, and every step is idempotent, so the same delete finish
 rest in place. A re-run without a purge keeps what is left, and the result reports it.
 
 Refusals. A record that DR-020 does not allow to delete (`creating`, `updating`, `rebuilding`) is
-refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A running
-services-on realm is refused with GINN-E-NOT-SUPPORTED-YET before any write, until T7.4. Its
-container is kept running by its runit entry (FR-081), so this module must not stop it with podman
-before that entry is down (ADR-003). A stopped services-on realm has no container running, and it is
-deleted like any other. An unknown name raises GINN-E-NO-SUCH-REALM before any write (FR-025).
+refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A services-on realm
+has its runit service stopped first (`sv down`, `_stop_service_first`), before the locks are taken
+and before any write, so the container is not kept running by runit while the delete stops it
+(ADR-003, FR-081). That `sv down` does not hold the realm lock, because the supervised process
+needs the lock to record `stopped`. When no runsv supervises the realm, nothing restarts it, and
+the delete goes on with podman. A runsv that is proven gone is also passed over, because the delete
+stops the container with podman and nothing restarts it. Any other `sv` failure, and a timeout, are
+errors before any write. The state, the host acknowledgement, the journal and the realm lock are
+checked before the `sv` call, so a refused delete does not stop the container. An unknown name
+raises GINN-E-NO-SUCH-REALM before any
+write (FR-025).
 
 Running realms. The body stops the container with podman itself. It does not call
 ops/lifecycle.stop_realm, because that takes the realm lock, which this body already holds, and it
@@ -96,7 +102,7 @@ import os
 import re
 import stat
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
 
@@ -105,14 +111,16 @@ from ginn.errors import GinnError, make
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import unexport_all
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.ops.lifecycle import STOP_TIMEOUT_S
+from ginn.ops.lifecycle import STOP_TIMEOUT_S, refuse_before_supervisor
 from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_REALM
+from ginn.services import supervisor
 from ginn.services.runit_user import remove_service
+from ginn.services.supervisor import SupervisorHooks
 from ginn.store.locks import image_lock
-from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.records import RealmStore
 
 STEPS: Final[tuple[str, ...]] = (
     "deleting",
@@ -197,7 +205,8 @@ class DeleteHooks:
     `on_step` runs after each journal step is recorded, so a test can stop the operation at any
     step. `stop_timeout_s` is the wait before podman kills a running container. `mountinfo` is the
     mount table a purge reads. `mount_id` reads the mount id of an open directory. `max_depth`
-    bounds how deep a purge walks.
+    bounds how deep a purge walks. `supervisor` is the sv control that stops a services-on realm's
+    runit service before the delete (ADR-003).
     """
 
     on_step: Callable[[str], None] | None = None
@@ -205,6 +214,7 @@ class DeleteHooks:
     mountinfo: Path = _MOUNTINFO
     mount_id: Callable[[int], int] = mount_id_of_fd
     max_depth: int = MAX_TREE_DEPTH
+    supervisor: SupervisorHooks = field(default_factory=SupervisorHooks)
 
 
 @dataclass(frozen=True)
@@ -244,7 +254,6 @@ def delete_realm(
     """
     hooks = DeleteHooks() if hooks is None else hooks
     current = RealmStore(env.paths, env.clock).load(name)  # GINN-E-NO-SUCH-REALM, before any write
-    _refuse_running_services(current)
     home = env.paths.homes / name.value
     purge = False
     if purge_home and confirm is not None:
@@ -258,6 +267,8 @@ def delete_realm(
         "purge_declined": declined,
     }
     distro = current.settings.distro.value
+    if current.settings.services:
+        _stop_service_first(env, name, hooks)
     with image_lock(env.paths, distro, "delete"), mutating(env, "delete", name, params) as mutation:
         result = _delete(env, podman, name, purge, declined, hooks, mutation)
     return replace(result, warnings=tuple(mutation.warnings))
@@ -268,28 +279,33 @@ def check_purge(env: OpEnv, name: RealmName, *, hooks: DeleteHooks | None = None
 
     The CLI calls this before its prompt, because `delete_realm` runs `confirm` before any check.
     It is read-only: no lock, no journal, no audit entry, no write. It raises GINN-E-NO-SUCH-REALM
-    for an unknown realm, GINN-E-NOT-SUPPORTED-YET for a running services-on realm (until T7.4), and
-    the Realm Home refusals of a purge. `delete_realm` checks again under the locks, so an answer
-    given here can still be refused there.
+    for an unknown realm, and the Realm Home refusals of a purge. It stops nothing: a services-on
+    realm is stopped by `delete_realm`, after the caller has confirmed. `delete_realm` checks again
+    under the locks, so an answer given here can still be refused there.
     """
-    current = RealmStore(env.paths, env.clock).load(name)
-    _refuse_running_services(current)
+    RealmStore(env.paths, env.clock).load(name)
     _check_home(env, name, DeleteHooks() if hooks is None else hooks)
 
 
-def _refuse_running_services(record: RealmRecord) -> None:
-    """Refuse to delete a running services-on realm, before any write (ADR-003, FR-081, T7.4).
+def _stop_service_first(env: OpEnv, name: RealmName, hooks: DeleteHooks) -> None:
+    """Stop the realm's runit service before the locks are taken (ADR-003, FR-081).
 
-    Stopping it with podman would leave its runit entry running, and runit would restart the
-    container (FR-081 AC-2). Its sv service must stop it first, which T7.4 adds.
+    `sv down` makes runsv stop run and do not restart it, so runit does not restart the container
+    that the delete removes (FR-081 AC-2). The supervised process records `stopped` under the lock,
+    so this runs before `mutating("delete")` and holds no lock. A realm that no runsv supervises is
+    left to podman. A runsv that is proven gone (GINN-E-SUPERVISOR-DOWN) is passed over too, and the
+    delete stops the container with podman. Any other sv failure, and a timeout, raise before any
+    write. The state, the host acknowledgement, the journal and the realm lock are checked first
+    (refuse_before_supervisor), so a refused delete does not stop the container.
     """
-    if record.settings.services and record.state is RealmState.RUNNING:
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=record.name.value,
-            feature="delete of a running services-on realm",
-            milestone="M7 (T7.4)",
-        )
+    refuse_before_supervisor(env, name, _DELETE_FROM, "delete")
+    if not supervisor.is_supervised(env.paths, name):
+        return
+    try:
+        supervisor.down(env.paths, name, hooks=hooks.supervisor)
+    except GinnError as err:
+        if err.code != "GINN-E-SUPERVISOR-DOWN":
+            raise
 
 
 def _delete(

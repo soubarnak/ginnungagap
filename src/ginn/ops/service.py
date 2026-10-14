@@ -36,6 +36,7 @@ from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
 from ginn.ops.security_ops import leave_agent, reconcile_proxy
 from ginn.podman.adapter import Podman
+from ginn.services import autostart
 from ginn.services.runit_user import (
     WAIT_HELPER,
     conmon_pidfile,
@@ -52,8 +53,9 @@ from ginn.services.supervise import (
     signal_runsv_down,
     write_crashes,
 )
+from ginn.store._time import utc_from_epoch
 from ginn.store.paths import OWNED_DIR_MODE, OwnedPaths
-from ginn.store.records import RealmStore
+from ginn.store.records import RealmRecord, RealmStore
 
 WAIT_ARG_SEPARATOR: Final = "--"
 """The separator between the global podman flags and the container in the ginn-wait argv."""
@@ -153,6 +155,70 @@ def finish_service(
     log.unlink(missing_ok=True)
     _record_failed(env, name, exit_code, signal_no)
     return ServiceExit.GAVE_UP
+
+
+def set_services_mode(env: OpEnv, name: RealmName, *, on: bool) -> RealmRecord:
+    """`ginn services <realm> on|off`: set the services mode (FR-083, ADR-003). Return the record.
+
+    The mode is fixed in the container, and a container's options cannot change after its create
+    (ADR-003, ADR-006). So a change needs the next container generation, which T8.3 makes, and it is
+    refused with GINN-E-NOT-SUPPORTED-YET naming T8.3, before any write. Setting the mode the realm
+    already has is a no-op: the record is returned and nothing is written.
+    """
+    record = RealmStore(env.paths, env.clock).load(name)
+    if record.settings.services == on:
+        return record
+    raise make(
+        "GINN-E-NOT-SUPPORTED-YET",
+        realm=name.value,
+        feature="a change of services mode",
+        milestone="M8 (T8.3)",
+    )
+
+
+_AUTOSTART_REFUSED: Final = frozenset({RealmState.CREATING, RealmState.DELETING, RealmState.BROKEN})
+"""The states whose record is not settled enough to change autostart (DR-020)."""
+
+
+def _refuse_autostart_state(record: RealmRecord) -> None:
+    """Refuse autostart of a realm that is being created, deleted or is broken (DR-020)."""
+    if record.state in _AUTOSTART_REFUSED:
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=record.name.value,
+            state=record.state.value,
+            action="autostart",
+            allowed="stopped, running, failed, updating or rebuilding",
+        )
+
+
+def set_autostart(env: OpEnv, name: RealmName, *, on: bool) -> RealmRecord:
+    """`ginn autostart <realm> on|off`: set autostart of a services-on realm (FR-084, DR-012).
+
+    The rule is the settings rule (DR-012, domain/realm.py): autostart needs services on, so a
+    services-off realm is refused before any write. A realm being created, deleted or broken is
+    refused with GINN-E-REALM-STATE before any write too, and a missing service directory is
+    GINN-E-SERVICE-MISSING. Under the realm lock, the `down` file of the runit service is made to
+    match the flag first (services/autostart.py), then the record is saved, so a failure to write
+    the
+    file saves nothing. The next supervised start makes the file match again, so a give-up that
+    wrote
+    `down` does not keep an autostart realm from starting.
+    """
+    store = RealmStore(env.paths, env.clock)
+    current = store.load(name)
+    _refuse_autostart_state(current)  # before any write
+    replace(current.settings, autostart=on)  # DR-012, before any write
+    with mutating(env, "autostart", name, {"autostart": on}) as mutation:
+        record = store.load(name)
+        _refuse_autostart_state(record)
+        settings = replace(record.settings, autostart=on)
+        autostart.apply(env.paths, name, on)
+        mutation.step("down-file")
+        saved = replace(record, settings=settings, updated_at=utc_from_epoch(env.clock()))
+        store.save(saved)
+        mutation.step("saved")
+    return saved
 
 
 def _fresh_pidfile(paths: OwnedPaths, name: RealmName) -> None:

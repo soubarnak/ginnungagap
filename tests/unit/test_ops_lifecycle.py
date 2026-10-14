@@ -16,7 +16,7 @@ live session under /run/user/1000 (a PipeWire socket), and a real socket would a
 import json
 import os
 import stat
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +29,7 @@ from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make
 from ginn.errors import Warning as GinnWarning
 from ginn.ops import lifecycle
-from ginn.ops._mutating import OpEnv
+from ginn.ops._mutating import OpEnv, mutating
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
@@ -47,6 +47,10 @@ from ginn.runtime import attach
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security.agent import AgentRecord
+from ginn.services import supervisor
+from ginn.services.runit_user import service_dir, write_service_dir
+from ginn.services.supervisor import Result, SupervisorHooks
+from ginn.store.locks import realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from tests.fakes.clock import FakeClock
@@ -67,9 +71,11 @@ STATUS_KEYS = (
     "state",
     "container_state",
     "state_mismatch",
+    "supervision",
     "distro",
     "tier",
     "services",
+    "autostart",
     "generation",
     "image_digest",
     "created_at",
@@ -643,23 +649,278 @@ def test_stop_from_a_state_dr020_does_not_allow_is_refused_and_audited(
     assert (entry.outcome, entry.error_code) == ("error", "GINN-E-REALM-STATE")
 
 
+SV = "/usr/bin/sv"
+"""The sv path the hooks name. No test runs a real sv: RunitFake answers in its place."""
+
+
+class RunitFake:
+    """Stands in for sv in the lifecycle tests. It records each argv, answers `sv status` from
+    `state`, and runs the action of the supervised process on `up` and `down` (`on_up`, `on_down`).
+    `on_sleep` runs once, at the first wait of the start's poll, so a test can take the realm lock
+    there to prove that the wait holds none."""
+
+    def __init__(self, service: Path, clock: FakeClock) -> None:
+        self.service = service
+        self.clock = clock
+        self.argvs: list[list[str]] = []
+        self.state = "down"
+        self.on_up: Callable[[], None] | None = None
+        self.on_down: Callable[[], None] | None = None
+        self.on_sleep: Callable[[], None] | None = None
+        self.status_reply: Result | None = None
+        self.down_reply: Result | None = None
+        self.want_up = False
+
+    def run(self, argv: Sequence[str], timeout: float) -> Result:
+        self.argvs.append(list(argv))
+        if argv[1] == "status":
+            if self.status_reply is not None:
+                return self.status_reply
+            return Result(0, self._status_line() + "\n", "")
+        if argv[3] == "up":
+            self.state = "run"
+            if self.on_up is not None:
+                self.on_up()
+            return Result(0, f"ok: run: {self.service}: (pid 4321) 0s\n", "")
+        if self.down_reply is not None:
+            return self.down_reply
+        self.state = "down"
+        if self.on_down is not None:
+            self.on_down()
+        return Result(0, f"ok: down: {self.service}: 0s, normally up\n", "")
+
+    def sleep(self, seconds: float) -> None:
+        self.clock.advance(seconds)
+        if self.on_sleep is not None:
+            hook, self.on_sleep = self.on_sleep, None
+            hook()
+
+    def _status_line(self) -> str:
+        if self.state == "run":
+            return f"run: {self.service}: (pid 4321) 0s"
+        want = ", want up" if self.want_up else ""
+        return f"down: {self.service}: 0s, normally up{want}"
+
+
+def _services_hooks(
+    hooks: LifecycleHooks, runit: RunitFake, clock: FakeClock, **overrides: float
+) -> LifecycleHooks:
+    """The hooks with the fake sv and a short start wait, so no wait is real."""
+    supervisor_hooks = SupervisorHooks(sv=SV, run=runit.run, clock=clock, sleep=runit.sleep)
+    return replace(
+        hooks,
+        supervisor=supervisor_hooks,
+        start_wait_s=float(overrides.get("start_wait_s", 60.0)),
+        start_poll_s=1.0,
+    )
+
+
+@pytest.fixture
+def clock() -> FakeClock:
+    """The clock of the supervisor's waits. The record and the audit use the env clock."""
+    return FakeClock(1_800_000_000.0)
+
+
+def _supervised_realm(
+    env: OpEnv, fake: LifecyclePodman, name: str, *, state: RealmState, running: bool
+) -> RealmRecord:
+    """A services-on realm with its runit service, and the supervise/ok FIFO that runsv creates.
+    An updating or rebuilding realm records the state it moved from, as DR-020 needs."""
+    previous = RealmState.RUNNING if state in (RealmState.UPDATING, RealmState.REBUILDING) else None
+    record = make_realm(env, fake, name, state, running=running, services=True, previous=previous)
+    write_service_dir(env.paths, RealmName(name), "/usr/bin/ginn")
+    supervise = service_dir(env.paths, RealmName(name)) / "supervise"
+    supervise.mkdir(exist_ok=True)
+    os.mkfifo(supervise / "ok")
+    return record
+
+
+def audited_ops(env: OpEnv) -> list[str]:
+    """The operations of the audit log, without the host integrity baseline entries."""
+    return [entry.op for entry in env.audit.read() if entry.op != "integrity"]
+
+
+def _try_lock(env: OpEnv) -> str:
+    """Take the realm lock as an operation of its own, the way a supervised start does (DR-032).
+
+    Returns "free" when the lock was taken, and "busy" when another operation holds it.
+    """
+    try:
+        with mutating(env, "probe", RealmName("lab"), {}):
+            return "free"
+    except GinnError:
+        return "busy"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_start_goes_through_its_runit_service_and_writes_nothing_itself(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    cid = container_id(env, "lab")
+
+    def supervised_start() -> None:
+        fake.start(cid)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.RUNNING)
+
+    runit.on_up = supervised_start
+    record = start_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_services_hooks(hooks, runit, clock),
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert runit.argvs == [[SV, "-w", str(supervisor.UP_WAIT_S), "up", str(runit.service)]]
+    assert audited_ops(env) == [], "the CLI process writes no operation entry for the start"
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-081")
+def test_the_wait_for_a_services_on_start_holds_no_realm_lock(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """The supervised start needs the lock to record `running`, so the wait must not hold it."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    cid = container_id(env, "lab")
+    probed: list[str] = []
+
+    def first_poll_then_start() -> None:
+        # The first poll finds the realm stopped. The lock is free then, and the supervised start
+        # records running after it.
+        probed.append(_try_lock(env))
+        fake.start(cid)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.RUNNING)
+
+    runit.on_sleep = first_poll_then_start
+    start_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_services_hooks(hooks, runit, clock),
+    )
+
+    assert probed == ["free"], "the realm lock is free during the wait (DR-032)"
+    assert audited_ops(env) == ["probe"]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_start_times_out_when_the_realm_never_runs(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    started_at = clock()
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=_services_hooks(hooks, runit, clock, start_wait_s=5.0),
+        )
+
+    assert caught.value.code == "GINN-E-SERVICE-TIMEOUT"
+    assert caught.value.details["action"] == "start"
+    assert clock() - started_at >= 5.0
+    assert stored(env, "lab").state is RealmState.STOPPED
+
+
+@pytest.mark.fr("AS-028")
+def test_a_services_on_start_stops_waiting_when_runit_has_given_the_realm_up(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.FAILED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.on_up = lambda: setattr(runit, "state", "down")
+    started_at = clock()
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=_services_hooks(hooks, runit, clock, start_wait_s=60.0),
+        )
+
+    assert caught.value.code == "GINN-E-SERVICE-TIMEOUT"
+    assert "AS-028" in caught.value.details["detail"]
+    assert clock() - started_at < 60.0, "the wait ends at once, not at the time limit"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_start_of_a_running_realm_runs_no_sv(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_services_hooks(hooks, runit, clock)
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert runit.argvs == []
+
+
 @pytest.mark.fr("FR-016")
 @pytest.mark.fr("FR-081")
-def test_services_on_start_and_stop_are_refused_until_t74(
-    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+def test_stop_of_a_services_on_realm_sends_sv_down_and_leaves_the_record_to_the_supervised_stop(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
 ) -> None:
-    make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.state = "run"
+    cid = container_id(env, "lab")
 
-    with pytest.raises(GinnError, match="T7.4") as started:
-        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
-    assert started.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    with pytest.raises(GinnError, match="T7.4") as stopped:
-        stop_realm(env, fake, RealmName("lab"), hooks=hooks)
-    assert stopped.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    def supervised_stop() -> None:
+        fake.stop(cid, 30)  # ginn-wait stops the container, and finish records the stop
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.STOPPED)
 
-    assert fake.calls == []
-    assert list(env.audit.read()) == []
-    assert env.journal.pending() == []
+    runit.on_down = supervised_stop
+    record = stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert record.state is RealmState.STOPPED
+    assert runit.argvs == [[SV, "-w", str(supervisor.DOWN_WAIT_S), "down", str(runit.service)]]
+    assert audited_ops(env) == [], "the stop is audited by the supervised process"
+
+
+@pytest.mark.fr("FR-016")
+@pytest.mark.fr("AS-028")
+def test_stop_of_a_failed_services_on_realm_stops_it_here_because_no_finish_will(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.FAILED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.state = "down"
+
+    record = stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert record.state is RealmState.STOPPED
+    assert [argv[3] for argv in runit.argvs] == ["down"]
+    assert audited_ops(env) == ["stop"]
+
+
+@pytest.mark.fr("FR-016")
+@pytest.mark.fr("FR-081")
+def test_stop_of_an_unsupervised_services_on_realm_stops_it_with_podman(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    record = stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert record.state is RealmState.STOPPED
+    assert runit.argvs == [], "no runsv watches the directory, so no sv runs"
+    assert "stop" in fake.ops()
 
 
 @pytest.mark.fr("FR-016")
@@ -1714,3 +1975,272 @@ def test_an_abstract_session_bus_is_listed_among_the_share_skips_of_the_start(
         line.startswith("bus skipped: D-Bus session bus (") and "AS-012" in line
         for line in record.share_skipped
     )
+
+
+@pytest.mark.fr("FR-081")
+def test_status_shows_the_runit_state_of_a_services_on_realm_beside_its_record(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.state = "run"
+
+    status = realm_status(
+        env,
+        fake,
+        RealmName("lab"),
+        hooks=_services_hooks(hooks, runit, clock),
+        disk=False,
+    )
+
+    assert status.services is True
+    assert status.autostart is False
+    assert status.supervision == "run, pid 4321, 0 s"
+    assert "supervision: run, pid 4321, 0 s" in render_status_text(status)
+
+
+@pytest.mark.fr("FR-081")
+def test_a_realm_given_up_after_crashes_shows_failed_and_runit_down(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.FAILED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.state = "down"
+
+    status = realm_status(
+        env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock), disk=False
+    )
+
+    assert status.state == "failed"
+    assert status.supervision == "down, 0 s"
+
+
+@pytest.mark.fr("FR-081")
+def test_status_shows_the_record_when_runit_does_not_answer(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.status_reply = Result(
+        1, "", "warning: x: unable to open supervise/ok: file does not exist\n"
+    )
+
+    status = realm_status(
+        env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock), disk=False
+    )
+
+    assert status.state == "stopped"
+    assert status.supervision is not None
+    assert status.supervision.startswith("unavailable (GINN-E-SUPERVISOR-DOWN)")
+
+
+@pytest.mark.fr("DR-012")
+def test_a_services_off_realm_shows_no_runit_state_and_runs_no_sv(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    status = realm_status(
+        env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock), disk=False
+    )
+
+    assert status.supervision is None
+    assert status.autostart is False
+    assert runit.argvs == []
+
+
+@pytest.mark.fr("FR-016")
+@pytest.mark.fr("FR-081")
+def test_stop_of_a_services_on_realm_whose_runsv_is_gone_stops_it_with_podman(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """A supervised directory whose runsv no longer answers has nothing to restart the realm, so
+    the stop goes to podman, as delete does (GINN-E-SUPERVISOR-DOWN is passed over)."""
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.down_reply = Result(1, "", "fail: x: runsv not running\n")
+
+    record = stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert record.state is RealmState.STOPPED
+    assert [argv[3] for argv in runit.argvs] == ["down"]
+    assert "stop" in fake.ops()
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(
+    "state",
+    [RealmState.UPDATING, RealmState.REBUILDING, RealmState.CREATING, RealmState.BROKEN],
+)
+def test_a_services_on_stop_of_a_realm_in_a_state_it_does_not_allow_sends_no_sv_command(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock, state: RealmState
+) -> None:
+    """An sv down would stop the container under an upgrade, so the state is refused first."""
+    _supervised_realm(env, fake, "lab", state=state, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    before = (env.paths.realms / "lab.json").read_bytes()
+
+    with pytest.raises(GinnError) as caught:
+        stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert runit.argvs == []
+    assert fake.ops() == []
+    assert (env.paths.realms / "lab.json").read_bytes() == before
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("DR-020")
+@pytest.mark.parametrize(
+    "state",
+    [RealmState.UPDATING, RealmState.REBUILDING, RealmState.CREATING, RealmState.BROKEN],
+)
+def test_a_services_on_start_of_a_realm_in_a_state_it_does_not_allow_sends_no_sv_command(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    state: RealmState,
+) -> None:
+    _supervised_realm(env, fake, "lab", state=state, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env, fake, RealmName("lab"), session=user, hooks=_services_hooks(hooks, runit, clock)
+        )
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert runit.argvs == []
+    assert stored(env, "lab").state is state
+
+
+@pytest.mark.fr("FR-122")
+def test_a_services_on_stop_refused_by_an_unrecovered_journal_entry_stops_nothing(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    env.journal.begin("start", RealmName("lab"), {})
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    with pytest.raises(GinnError) as caught:
+        stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert caught.value.code == "GINN-E-RECOVERY-PENDING"
+    assert runit.argvs == []
+    assert "stop" not in fake.ops()
+    assert stored(env, "lab").state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-006")
+def test_a_services_on_stop_refused_by_a_host_change_stops_nothing(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock, host: Path
+) -> None:
+    """The host check is made before sv runs. A change that is not acknowledged refuses the stop,
+    and the container keeps running (the locked check would otherwise refuse after the stop)."""
+    (host / "etc").mkdir(exist_ok=True)
+    (host / "etc" / "hosts").write_text("10.0.0.1 before\n", encoding="utf-8")
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    env.integrity.before_op(env.audit, env.user)  # the baseline, as the first operation makes it
+    (host / "etc" / "hosts").write_text("10.0.0.9 changed\n", encoding="utf-8")
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    with pytest.raises(GinnError) as caught:
+        stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert caught.value.code == "GINN-E-HOST-UNACKED"
+    assert runit.argvs == []
+    assert "stop" not in fake.ops()
+    assert stored(env, "lab").state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_stop_while_another_operation_holds_the_lock_sends_no_sv_command(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    with realm_lock(env.paths, RealmName("lab"), "rebuild"):
+        with pytest.raises(GinnError) as caught:
+            stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert caught.value.code == "GINN-E-REALM-BUSY"
+    assert runit.argvs == []
+
+
+@pytest.mark.fr("AS-028")
+def test_a_crash_restart_that_reads_down_with_want_up_is_not_a_give_up(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """runsv shows `down` while it waits to restart run after a crash, and it says `want up`. That
+    is not runsv giving the realm up, so the wait goes on and the realm starts."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    cid = container_id(env, "lab")
+
+    def restarting() -> None:
+        runit.state = "down"
+        runit.want_up = True
+
+    def recovered() -> None:
+        fake.start(cid)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.RUNNING)
+        runit.state = "run"
+        runit.want_up = False
+
+    runit.on_up = restarting
+    runit.on_sleep = recovered
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_services_hooks(hooks, runit, clock)
+    )
+
+    assert record.state is RealmState.RUNNING
+    verbs = [argv[3] for argv in runit.argvs if argv[1] != "status"]
+    assert verbs == ["up"], "no second sv command during the restart"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_failed_status_read_during_the_start_wait_counts_as_unknown_and_the_wait_goes_on(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.status_reply = Result(1, "", "fail: x: unable to read supervise/status\n")
+    cid = container_id(env, "lab")
+
+    def recovered() -> None:
+        runit.status_reply = None
+        fake.start(cid)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.RUNNING)
+
+    runit.on_sleep = recovered
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_services_hooks(hooks, runit, clock)
+    )
+
+    assert record.state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-016")
+def test_a_stop_whose_sv_control_fails_stops_nothing_and_names_the_control_error(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """runsv may still be alive when its control FIFO cannot be opened, so no podman stop follows:
+    runsv would restart the container after it."""
+    _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.down_reply = Result(
+        1, "", "warning: x: unable to open supervise/control: file does not exist\n"
+    )
+
+    with pytest.raises(GinnError) as caught:
+        stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
+
+    assert caught.value.code == "GINN-E-SERVICE-CONTROL"
+    assert "stop" not in fake.ops()
+    assert stored(env, "lab").state is RealmState.RUNNING
