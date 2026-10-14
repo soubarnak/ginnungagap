@@ -24,6 +24,11 @@ Removal pre-check (ADR-011). On Debian, Kali and Fedora the removal dry run runs
 `removal_dependents` reads its output. The line shapes it reads are not verified on a host until
 M4, and `parse_removals` lists them. A requested name that the parser does not find makes the check
 fail, so an unread plan never lets a removal go ahead.
+
+Check output and the db-check result are read by the rules the distribution data names
+(`check_updates_count`, `check_updates_exit_for_updates`, `db_check_ok_exit` and the stdout flag).
+No distribution is named in this module. `database_inconsistent` is the update's db check (FR-120
+AC-2).
 """
 
 import re
@@ -34,7 +39,13 @@ from types import MappingProxyType
 from typing import Final
 
 from ginn.distros import DistroDef, Verb
-from ginn.distros.loader import UpdateStatus, arch_check_status
+from ginn.distros.loader import (
+    CountRule,
+    DbStatus,
+    UpdateStatus,
+    arch_check_status,
+    db_check_status,
+)
 from ginn.errors import GinnError, make
 from ginn.ops.retry import is_network
 from ginn.podman.adapter import Podman, RetryHook, with_network_retry
@@ -344,18 +355,8 @@ def removal_dependents(
     return frozenset(listed - set(names))
 
 
-CHECK_UPDATES_EXIT: Final = 100
-"""The status of dnf5 `check-upgrade` when updates exist. It exits 0 when none (ADR-011, FR-024).
-
-Only dnf uses it. apt exits 100 on an error, so for apt distros 100 is a failure (see `_single`).
-"""
 SCRATCH_PREFIX: Final = "/tmp/ginn-check-"  # noqa: S108 - a path inside the realm, not the host
 """The start of an Arch check's scratch directory in the realm (ADR-011). A uuid4 hex follows it."""
-_ARCH: Final = "arch"
-_DEBIAN_LIKE: Final = frozenset({"debian", "kali"})
-_DNF_LIKE: Final = frozenset({"fedora"})
-_APT_UPGRADABLE: Final = re.compile(r"\[upgradable from: ")
-"""The mark apt puts on each upgradable package of `apt list --upgradable`."""
 
 
 @dataclass(frozen=True)
@@ -397,18 +398,19 @@ def _exec(
 
 
 def _listed(definition: DistroDef, stdout: str, *, realm: str, step: str) -> int | None:
-    """How many packages a check's output lists, or None when this module does not read it.
+    """How many packages a check's output lists, or None when the data does not count them.
 
-    The output is bounded first (`_bounded`). Arch lists one non-blank line per upgradable package
-    (ADR-011). Debian and Kali mark each upgradable package with `[upgradable from:`, and their
-    header and warnings do not carry the mark. Fedora's rows are not read until M4, so its count is
-    None. The rule is code, keyed by the distribution id, because the TOML has no key for it yet.
+    The output is bounded first (`_bounded`). The rule is the data's `check_updates_count` (FR-024):
+    `nonblank-lines` counts each non-blank line, which is Arch's one line per upgradable package
+    (ADR-011). `lines-matching` counts the lines that `check_updates_count_regex` finds, which is
+    how Debian and Kali mark each upgradable package. `unread` gives None, which is Fedora until M4.
     """
     _bounded(stdout, realm=realm, step=step)
-    if definition.id == _ARCH:
+    if definition.check_count is CountRule.NONBLANK_LINES:
         return sum(1 for line in stdout.splitlines() if line.strip())
-    if definition.id in _DEBIAN_LIKE:
-        return sum(1 for line in stdout.splitlines() if _APT_UPGRADABLE.search(line))
+    pattern = definition.check_count_regex
+    if definition.check_count is CountRule.LINES_MATCHING and pattern is not None:
+        return sum(1 for line in stdout.splitlines() if pattern.search(line))
     return None
 
 
@@ -430,14 +432,19 @@ def _single(
     realm: str,
     retry_hook: RetryHook | None,
 ) -> CheckResult:
-    """A one-step check: Debian, Kali and Fedora. Exit 0 is none, or updates if rows are listed."""
+    """A one-step check: Debian, Kali and Fedora. Exit 0 is none, or updates if rows are listed.
+
+    The data may name one more exit status that means updates (`check_exit_for_updates`, dnf5's
+    100). Any other non-zero status is a failure, so apt's 100 on an error stays one.
+    """
     result = _exec(
         podman, container_id, definition, argv, realm=realm, step="check", retry_hook=retry_hook
     )
     listed = _listed(definition, result.stdout, realm=realm, step="check")
     if _fatal(definition, result.stderr):
         raise failure(definition, result, realm=realm, step="check")
-    if result.exit_code == CHECK_UPDATES_EXIT and definition.id in _DNF_LIKE:
+    updates_exit = definition.check_exit_for_updates
+    if updates_exit is not None and result.exit_code == updates_exit:
         return CheckResult(UpdateStatus.UPDATES, listed)
     if result.exit_code != 0:
         raise failure(definition, result, realm=realm, step="check")
@@ -583,13 +590,49 @@ def run_check(
     return result
 
 
+def database_inconsistent(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    *,
+    realm: str,
+) -> bool:
+    """True when the db-check verb reports an inconsistent package database (FR-120 AC-2, ADR-011).
+
+    The verb runs as container root under the locale, and it changes nothing. The data reads its
+    result (`db_check_status`). A distribution with no db-check verb is never inconsistent. A
+    result that says nothing about the database raises GINN-E-PKG-MANAGER: podman could not run the
+    command, or its output is over the caps. The caller then keeps the realm's prior state and notes
+    the failure, so an unknown result never marks a realm broken.
+    """
+    if not definition.has_db_check:
+        return False
+    result = podman.exec(container_id, definition.argv(Verb.DB_CHECK), user=ROOT_USER, env=LOCALE)
+    check_output(result.stdout, realm=realm, step="db-check")
+    status = db_check_status(
+        result.exit_code,
+        result.stdout,
+        ok_exit=definition.db_check_ok_exit,
+        stdout_inconsistent=definition.db_check_stdout_inconsistent,
+    )
+    if status is DbStatus.UNKNOWN:
+        err = refused(
+            realm,
+            "db-check",
+            f"the check did not run (exit {result.exit_code}): {decisive_line(result)}",
+        )
+        err.details["exit"] = result.exit_code
+        raise err
+    return status is DbStatus.INCONSISTENT
+
+
 __all__ = [
-    "CHECK_UPDATES_EXIT",
     "LOCALE",
     "MAX_NAMES",
     "ROOT_USER",
     "SCRATCH_PREFIX",
     "CheckResult",
+    "database_inconsistent",
     "explicit_packages",
     "failure",
     "network_failure",

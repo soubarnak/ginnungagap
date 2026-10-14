@@ -30,6 +30,15 @@ network_error_regex = "Curl error \\(|Couldn't resolve host|Timeout was reached|
 # ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
 # check-updates and upgrade force a refresh, so no verb needs one first.
 refresh_before = []
+# FR-024: dnf5 check-upgrade exits 100 when updates exist, and 0 when none (dnf5 check-upgrade(8)).
+# Its rows are not counted until M4, so the count is left unread (the default).
+check_updates_exit_for_updates = 100
+# FR-120 AC-2, ADR-011: rpm --verifydb checks the rpm database. Exit 0 is consistent. Any other
+# status is inconsistent, except the statuses podman uses when it cannot run the command (loader.py).
+# The rpm command is not checked in the image: if it is missing, the verb exits 127 and is unknown,
+# not broken. Not verified until M4.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = false
 
 [integration]
 packages = ["glibc-langpack-{lang}"]
@@ -53,8 +62,12 @@ remove-check = ["dnf", "--assumeno", "--no-autoremove", "remove", "{packages}"]
 # the mirror's current metadata and not from metadata up to 48 hours old (dnf5.conf(5), ADR-011).
 upgrade = ["dnf", "--refresh", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
 # --refresh forces fresh metadata, so the check the Control Plane runs reflects the mirror (FR-024).
-# check-upgrade exits 100 when updates exist and 0 when none. A one-step list (see arch.toml).
+# check-upgrade exits 100 when updates exist and 0 when none, read by check_updates_exit_for_updates
+# above. A one-step list (see arch.toml).
 check-updates = [["dnf", "--refresh", "check-upgrade"]]
+# db-check reads the rpm database (FR-120 AC-2). It names no package and no placeholder. The result
+# is read by the db_check_* keys above. Not verified until M4.
+db-check = ["rpm", "--verifydb"]
 # repoquery --userinstalled: names of packages installed by hand (DR-007). Format is rpm's %{name}.
 list-explicit = ["dnf", "repoquery", "--userinstalled", "--queryformat", '%{{name}}\n']
 # --assumeno: print the transaction and make no change. dnf exits 1 after the no answer.

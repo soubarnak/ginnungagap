@@ -19,10 +19,11 @@ braces. Four names are defined, each valid in one place only:
 - `{tmpdir}` in the `check-updates` steps, as a whole element or inside one. It is the scratch
   directory the caller passes to `check_updates()`: an absolute path that does not exist yet.
 
-Every distribution defines every verb in `Verb` except two. `check-updates` is a list of steps, run
-in order, and `check_updates()` returns them. `remove-check` is optional: a distribution that omits
-it has no removal pre-check, and `DistroDef.has_remove_check` says whether it defines one (ADR-011).
-A caller that asks for it anyway gets GINN-E-INTERNAL: callers check `has_remove_check` first.
+Every distribution defines every verb in `Verb` except three. `check-updates` is a list of steps,
+run in order, and `check_updates()` returns them. `remove-check` and `db-check` are optional: a
+distribution that omits one has no such check. `DistroDef.has_remove_check` and `has_db_check` say
+whether it defines one (ADR-011). A caller that asks for an undefined one anyway gets
+GINN-E-INTERNAL: callers check the flag first. `db-check` takes no packages, and no placeholder.
 Every other verb is one argv. `refresh`
 loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
 lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
@@ -51,6 +52,17 @@ mirror (ADR-011). The ops layer maps a match to the remedy.
 `check_fatal_warning_regex` is optional and defaults to an empty list. It lists warnings that make
 the Arch check-updates fail closed: `arch_check_status()` returns error when a stderr line matches
 one, so a missing sync database is never read as "no updates" (ADR-011).
+
+How the check output is counted is data too (FR-024). `check_updates_count` is `unread` (the
+default: the count is None), `nonblank-lines` (one line per upgradable package) or `lines-matching`,
+which counts the lines that `check_updates_count_regex` finds. `check_updates_exit_for_updates`
+is an optional exit status that means updates exist, for a one-step check (dnf5's 100). Each key
+is read by ginn.packages.manager.
+
+The db-check verb (FR-120 AC-2) is read by `db_check_status()`. `db_check_ok_exit` names the exit
+statuses that mean consistent, and `db_check_stdout_inconsistent` says whether any stdout then
+means inconsistent. Any other status is inconsistent, except the statuses podman uses when it
+cannot run the command (`CANNOT_RUN_EXIT`), which say nothing about the database.
 
 `everything` is optional and defaults to an empty list. It names the packages of the everything
 option (FR-014, Kali only), and each one is matched with `package_name_regex`.
@@ -81,6 +93,8 @@ TEST_SWITCH_ENV: Final = "GINN_TEST_DISTROS"
 PACKAGES_ELEMENT: Final = "{packages}"
 TMPDIR_FIELD: Final = "tmpdir"
 C_UTF8: Final = "C.UTF-8"
+_MAX_EXIT: Final = 255
+"""The largest exit status a process returns. The data's exit statuses are checked against it."""
 
 _ID_RE: Final = re.compile(r"_?[a-z][a-z0-9-]{0,31}")
 _LOCALE_RE: Final = re.compile(r"(?P<lang>[a-z]{2,3})_(?P<territory>[A-Z]{2})\.(?i:utf-?8)")
@@ -102,12 +116,24 @@ _TOP_KEYS: Final = frozenset(
     }
 )
 # Optional top-level keys. A file may omit them, and the loader then uses the default.
-_OPTIONAL_TOP_KEYS: Final = frozenset({"check_fatal_warning_regex", "everything"})
+_OPTIONAL_TOP_KEYS: Final = frozenset(
+    {
+        "check_fatal_warning_regex",
+        "everything",
+        "check_updates_count",
+        "check_updates_count_regex",
+        "check_updates_exit_for_updates",
+        "db_check_ok_exit",
+        "db_check_stdout_inconsistent",
+    }
+)
+# The keys that read the db-check result. A file that defines the db-check verb must define them.
+_DB_CHECK_KEYS: Final = frozenset({"db_check_ok_exit", "db_check_stdout_inconsistent"})
 
 
 class Verb(StrEnum):
     """The package-manager verbs (FR-040, FR-041). Every distribution defines each one except
-    check-updates (a list of steps) and remove-check (optional, ADR-011)."""
+    check-updates (a list of steps), remove-check and db-check (optional, ADR-011)."""
 
     REFRESH = "refresh"
     INSTALL = "install"
@@ -115,13 +141,14 @@ class Verb(StrEnum):
     REMOVE_CHECK = "remove-check"
     UPGRADE = "upgrade"
     CHECK_UPDATES = "check-updates"
+    DB_CHECK = "db-check"
     LIST_EXPLICIT = "list-explicit"
     RESOLVE = "resolve"
     ESTIMATE = "estimate"
 
 
-# The verb keys a distribution file must define, and the one it may omit (see the Verb docstring).
-_OPTIONAL_VERB_KEYS: Final = frozenset({Verb.REMOVE_CHECK.value})
+# The verb keys a distribution file must define, and the ones it may omit (see the Verb docstring).
+_OPTIONAL_VERB_KEYS: Final = frozenset({Verb.REMOVE_CHECK.value, Verb.DB_CHECK.value})
 _REQUIRED_VERB_KEYS: Final = frozenset(verb.value for verb in Verb) - _OPTIONAL_VERB_KEYS
 
 
@@ -131,6 +158,32 @@ class UpdateStatus(StrEnum):
     UPDATES = "updates"
     NONE = "none"
     ERROR = "error"
+
+
+class CountRule(StrEnum):
+    """How the check output counts the upgradable packages it lists (FR-024, NFR-060).
+
+    `UNREAD` leaves the count None. `NONBLANK_LINES` counts each non-blank line. `LINES_MATCHING`
+    counts the lines that `check_updates_count_regex` finds.
+    """
+
+    UNREAD = "unread"
+    NONBLANK_LINES = "nonblank-lines"
+    LINES_MATCHING = "lines-matching"
+
+
+class DbStatus(StrEnum):
+    """What the db-check verb found (FR-120 AC-2). UNKNOWN is a result that says nothing."""
+
+    CONSISTENT = "consistent"
+    INCONSISTENT = "inconsistent"
+    UNKNOWN = "unknown"
+
+
+CANNOT_RUN_EXIT: Final = frozenset({125, 126, 127})
+"""The statuses podman reports when it cannot run the command: podman failed (125), the command
+cannot be invoked (126), or it is not found (127). They say nothing about the package database, so
+`db_check_status()` reads them as UNKNOWN, not as inconsistent."""
 
 
 @dataclass(frozen=True)
@@ -199,15 +252,26 @@ class DistroDef:
     everything: tuple[str, ...] = ()
     """The packages of the everything option (FR-014), such as kali-linux-everything. Empty when
     the distribution has none. Only Kali has one (DR-013)."""
+    check_count: CountRule = CountRule.UNREAD
+    """How the check output counts the packages it lists (FR-024). See `CountRule`."""
+    check_count_regex: re.Pattern[str] | None = None
+    """The line pattern of `CountRule.LINES_MATCHING`, and None for the other rules."""
+    check_exit_for_updates: int | None = None
+    """The exit status of a one-step check that means updates exist (dnf5's 100), or None."""
+    db_check_ok_exit: frozenset[int] = frozenset()
+    """The exit statuses of the db-check verb that mean the database is consistent (FR-120 AC-2).
+    Empty when the distribution defines no db-check verb."""
+    db_check_stdout_inconsistent: bool = False
+    """True when, with an ok exit status, any stdout of the db-check verb means inconsistent."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
 
         Raises GINN-E-USAGE when the verb takes packages and none are given, and when packages are
         given to a verb that takes none. Raises GINN-E-INTERNAL when the data does not define the
-        verb. Only remove-check can be missing, on a distribution without it, and callers check
-        `has_remove_check` first, so this is a ginn bug. Every package name must fullmatch
-        `name_pattern` (DR-003),
+        verb. Only remove-check and db-check can be missing, on a distribution without them, and
+        callers check `has_remove_check` and `has_db_check` first, so this is a ginn bug. Every
+        package name must fullmatch `name_pattern` (DR-003),
         or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
         a leading `-`, so a name that passes can never be read as an option. domain.packages checks
         AS-027 first; this check is the second line of defence. check-updates is not one argv, so
@@ -241,6 +305,11 @@ class DistroDef:
     def has_remove_check(self) -> bool:
         """True when the data defines remove-check, the removal dry run (ADR-011)."""
         return Verb.REMOVE_CHECK in self.verbs
+
+    @property
+    def has_db_check(self) -> bool:
+        """True when the data defines db-check, the package database check (FR-120 AC-2)."""
+        return Verb.DB_CHECK in self.verbs
 
     @property
     def check_updates_needs_tmpdir(self) -> bool:
@@ -354,6 +423,30 @@ def _only_warnings(stderr: str) -> bool:
 def _has_fatal_line(patterns: Sequence[re.Pattern[str]], stderr: str) -> bool:
     """True when any pattern matches any line of `stderr`."""
     return any(pattern.search(line) for line in stderr.splitlines() for pattern in patterns)
+
+
+def db_check_status(
+    exit_code: int,
+    stdout: str,
+    *,
+    ok_exit: frozenset[int],
+    stdout_inconsistent: bool,
+) -> DbStatus:
+    """Return what the db-check verb found, from its result (FR-120 AC-2, ADR-011). Nothing is run.
+
+    - An exit status in `ok_exit` is consistent, unless `stdout_inconsistent` is set and stdout has
+      text: then it is inconsistent;
+    - an exit status in `CANNOT_RUN_EXIT` is unknown: podman did not run the check;
+    - any other exit status is inconsistent. A failed check of the database is the signal the
+      data names, and the caller marks the realm broken on it.
+    """
+    if exit_code in ok_exit:
+        if stdout_inconsistent and stdout.strip():
+            return DbStatus.INCONSISTENT
+        return DbStatus.CONSISTENT
+    if exit_code in CANNOT_RUN_EXIT:
+        return DbStatus.UNKNOWN
+    return DbStatus.INCONSISTENT
 
 
 _CACHE: dict[tuple[str, str], DistroDef] = {}
@@ -479,6 +572,9 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs, check_steps = _verbs(reader, raw["verbs"])
+    count, count_regex = _check_count(reader, raw)
+    exit_for_updates = _exit_for_updates(reader, raw, len(check_steps))
+    ok_exit, stdout_inconsistent = _db_check(reader, raw, Verb.DB_CHECK in verbs)
     return DistroDef(
         id=distro_id,
         source=source,
@@ -494,6 +590,11 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         check_steps=check_steps,
         check_fatal_warnings=fatal_warnings,
         everything=everything,
+        check_count=count,
+        check_count_regex=count_regex,
+        check_exit_for_updates=exit_for_updates,
+        db_check_ok_exit=ok_exit,
+        db_check_stdout_inconsistent=stdout_inconsistent,
     )
 
 
@@ -503,6 +604,82 @@ def _fatal_warnings(reader: "_Reader", value: object) -> tuple[re.Pattern[str], 
     if not isinstance(value, list):
         raise reader.fail(field, "must be a list of regular expressions")
     return tuple(reader.regex(item, field) for item in value)
+
+
+def _check_count(
+    reader: "_Reader", raw: Mapping[str, object]
+) -> tuple[CountRule, re.Pattern[str] | None]:
+    """The optional count rule of check-updates (FR-024). The default is `unread`.
+
+    `check_updates_count_regex` is required with `lines-matching` and refused otherwise, so a
+    pattern is never read without the rule that uses it.
+    """
+    field = "check_updates_count"
+    value = raw.get(field, CountRule.UNREAD.value)
+    rules = {rule.value for rule in CountRule}
+    if not isinstance(value, str) or value not in rules:
+        raise reader.fail(field, f"must be one of {', '.join(sorted(rules))}")
+    rule = CountRule(value)
+    pattern_field = "check_updates_count_regex"
+    if rule is not CountRule.LINES_MATCHING:
+        if pattern_field in raw:
+            raise reader.fail(pattern_field, f"is read only with {field} = lines-matching")
+        return rule, None
+    if pattern_field not in raw:
+        raise reader.fail(pattern_field, f"is required with {field} = lines-matching")
+    return rule, reader.regex(raw[pattern_field], pattern_field)
+
+
+def _exit_for_updates(reader: "_Reader", raw: Mapping[str, object], steps: int) -> int | None:
+    """The optional exit status of check-updates that means updates exist (dnf5's 100, ADR-011).
+
+    Zero is refused, because it already means no updates. The status is read only by a one-step
+    check, so a multi-step check (Arch) refuses it rather than ignore it.
+    """
+    field = "check_updates_exit_for_updates"
+    if field not in raw:
+        return None
+    value = raw[field]
+    if type(value) is not int or not 0 < value <= _MAX_EXIT:
+        raise reader.fail(field, f"must be an exit status from 1 to {_MAX_EXIT}")
+    if steps != 1:
+        raise reader.fail(field, "is read only by a one-step check-updates")
+    return value
+
+
+def _db_check(
+    reader: "_Reader", raw: Mapping[str, object], has_verb: bool
+) -> tuple[frozenset[int], bool]:
+    """The result keys of the db-check verb (FR-120 AC-2), required exactly when the verb is.
+
+    Returns (`db_check_ok_exit`, `db_check_stdout_inconsistent`), empty and False without the verb.
+    """
+    present = _DB_CHECK_KEYS & set(raw)
+    if not has_verb:
+        if present:
+            raise reader.fail(sorted(present)[0], "is read only with verbs.db-check")
+        return frozenset(), False
+    missing = sorted(_DB_CHECK_KEYS - present)
+    if missing:
+        raise reader.fail(missing[0], "is required with verbs.db-check")
+    ok_exit = _exit_statuses(reader, raw["db_check_ok_exit"], "db_check_ok_exit")
+    if not ok_exit:
+        raise reader.fail("db_check_ok_exit", "must name at least one exit status")
+    flag = raw["db_check_stdout_inconsistent"]
+    if type(flag) is not bool:
+        raise reader.fail("db_check_stdout_inconsistent", "must be true or false")
+    return ok_exit, flag
+
+
+def _exit_statuses(reader: "_Reader", value: object, field: str) -> frozenset[int]:
+    """A list of exit statuses from 0 to `_MAX_EXIT`, with no repeats."""
+    if not isinstance(value, list) or not all(
+        type(item) is int and 0 <= item <= _MAX_EXIT for item in value
+    ):
+        raise reader.fail(field, f"must be a list of exit statuses from 0 to {_MAX_EXIT}")
+    if len(set(value)) != len(value):
+        raise reader.fail(field, "must not repeat a status")
+    return frozenset(value)
 
 
 def _everything(reader: "_Reader", value: object, name_pattern: re.Pattern[str]) -> tuple[str, ...]:
@@ -558,6 +735,10 @@ def _verbs(
     verbs: dict[Verb, tuple[str, ...]] = {}
     for key in table:
         if key == Verb.CHECK_UPDATES.value:
+            continue
+        if key == Verb.DB_CHECK.value:
+            # db-check names no package, so no placeholder is allowed in it at all.
+            verbs[Verb.DB_CHECK] = reader.argv(table[key], f"verbs.{key}", frozenset(), frozenset())
             continue
         argv = reader.argv(table[key], f"verbs.{key}", allowed, allowed)
         if key == Verb.REMOVE_CHECK.value and PACKAGES_ELEMENT not in argv:
@@ -716,12 +897,15 @@ def _data_error(source: str, field: str, rule: str) -> GinnError:
 
 __all__ = [
     "C_UTF8",
+    "CANNOT_RUN_EXIT",
     "DATA_DIR",
     "DATA_PACKAGE",
     "PACKAGES_ELEMENT",
     "SCHEMA",
     "TEST_SWITCH_ENV",
     "TMPDIR_FIELD",
+    "CountRule",
+    "DbStatus",
     "DistroDef",
     "HostLocale",
     "Integration",
@@ -731,6 +915,7 @@ __all__ = [
     "arch_check_status",
     "available",
     "clear_cache",
+    "db_check_status",
     "distro_fixtures_enabled",
     "from_mapping",
     "host_locale",

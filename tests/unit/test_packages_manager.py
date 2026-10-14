@@ -7,11 +7,15 @@ Every test runs on FakePodman. No test runs a package manager, and none reaches 
 from __future__ import annotations
 
 import time
+import tomllib
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ginn.distros import DistroDef, Verb, load
+from ginn.distros.loader import UpdateStatus, from_mapping
 from ginn.errors import GinnError
 from ginn.packages.aur import (
     BUILD_ROOT,
@@ -33,6 +37,8 @@ from ginn.packages.manager import (
     MAX_OUTPUT_CHARS,
     MAX_SHOWN,
     ROOT_USER,
+    CheckResult,
+    database_inconsistent,
     decisive_line,
     explicit_packages,
     failure,
@@ -41,6 +47,7 @@ from ginn.packages.manager import (
     parse_removals,
     printable,
     removal_dependents,
+    run_check,
     run_step,
     shown,
 )
@@ -107,6 +114,8 @@ def _argvs(name: str) -> list[tuple[str, list[str]]]:
         if verb is Verb.CHECK_UPDATES:
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
+            continue
+        if verb is Verb.DB_CHECK and not definition.has_db_check:
             continue
         packages = ["gimp"] if verb in PACKAGE_VERBS else []
         out.append((verb.value, definition.argv(verb, packages)))
@@ -613,3 +622,133 @@ def test_the_decisive_line_of_a_failure_is_escaped() -> None:
     line = decisive_line(ExecResult(1, "", "bad\x1b[2J line"))
     assert "\x1b" not in line
     assert "bad" in line
+
+
+# ---- check output and the db-check, read from the data: FR-024, FR-120 AC-2, NFR-060 ----------
+
+DATA = Path(__file__).resolve().parents[2] / "src" / "ginn" / "distros" / "data"
+DEB_LISTING = "gimp 2.10-1 -> 2.10-2\nzlib 1.3-1 -> 1.3-2\n"
+DNF_LISTING = "bash.x86_64    5.2    updates\n"
+
+
+def _edited(name: str, *, drop: Sequence[str] = (), **keys: Any) -> DistroDef:
+    """The shipped `name` definition with some top-level keys replaced or dropped, validated."""
+    raw: dict[str, Any] = tomllib.loads((DATA / f"{name}.toml").read_text(encoding="utf-8"))
+    for key in drop:
+        del raw[key]
+    raw.update(keys)
+    return from_mapping(raw, source=f"{name}-edited.toml")
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_the_count_rule_is_the_data_and_not_the_distribution_id() -> None:
+    fake = FakePodman()
+    cid = _running(fake, "deb")
+    _canned(fake, ("apt", "list", "--upgradable"), 0, DEB_LISTING)
+    # Without a `[upgradable from:` mark, Debian's own rule counts nothing. The same listing,
+    # counted line by line by the data, is two updates. The id plays no part in either count.
+    shipped = run_check(fake, cid, load("debian"), realm="deb")
+    assert shipped == CheckResult(UpdateStatus.NONE, 0)
+    renamed = _edited(
+        "debian", drop=("check_updates_count_regex",), check_updates_count="nonblank-lines"
+    )
+    assert run_check(fake, cid, renamed, realm="deb") == CheckResult(UpdateStatus.UPDATES, 2)
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_the_exit_status_that_means_updates_is_read_from_the_data_only() -> None:
+    fake = FakePodman()
+    cid = _running(fake, "fed")
+    _canned(fake, ("dnf", "--refresh", "check-upgrade"), 100, DNF_LISTING)
+    assert run_check(fake, cid, load("fedora"), realm="fed") == CheckResult(
+        UpdateStatus.UPDATES, None
+    )
+    # Without the key, exit 100 is a failure, as it is for apt (FR-040).
+    without = _edited("fedora", drop=("check_updates_exit_for_updates",))
+    with pytest.raises(GinnError) as caught:
+        run_check(fake, cid, without, realm="fed")
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-120")
+def test_a_consistent_database_is_not_inconsistent_and_runs_as_root_under_the_locale() -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    definition = _definition("arch")
+    _canned(fake, definition.argv(Verb.DB_CHECK), 0, "")
+    assert database_inconsistent(fake, cid, definition, realm=REALM) is False
+    call = fake.exec_calls[-1]
+    assert call.argv == tuple(definition.argv(Verb.DB_CHECK))
+    assert call.user == "0:0"
+    assert call.env == {"LC_ALL": "C.UTF-8"}
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.parametrize(
+    ("name", "exit_code", "stdout"),
+    [
+        ("arch", 1, ""),
+        ("fedora", 1, ""),
+        ("debian", 0, "gimp: broken\n"),
+        ("kali", 0, "gimp: broken\n"),
+    ],
+)
+def test_an_inconsistent_database_is_read_as_the_data_names_it(
+    name: str, exit_code: int, stdout: str
+) -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    definition = _definition(name)
+    _canned(fake, definition.argv(Verb.DB_CHECK), exit_code, stdout)
+    assert database_inconsistent(fake, cid, definition, realm=REALM) is True
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.parametrize(
+    ("name", "stdout", "expected"), [("arch", "text\n", False), ("debian", "text\n", True)]
+)
+def test_stdout_counts_only_where_the_data_says_it_does(
+    name: str, stdout: str, expected: bool
+) -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    definition = _definition(name)
+    _canned(fake, definition.argv(Verb.DB_CHECK), 0, stdout)
+    assert database_inconsistent(fake, cid, definition, realm=REALM) is expected
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.parametrize("exit_code", [125, 126, 127])
+def test_a_check_that_podman_could_not_run_raises_and_never_reads_as_broken(
+    exit_code: int,
+) -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    definition = _definition("arch")
+    _canned(fake, definition.argv(Verb.DB_CHECK), exit_code, "", "OCI runtime error\n")
+    with pytest.raises(GinnError) as caught:
+        database_inconsistent(fake, cid, definition, realm=REALM)
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert caught.value.details["step"] == "db-check"
+    assert caught.value.details["exit"] == exit_code
+
+
+@pytest.mark.fr("FR-120")
+def test_a_distribution_without_a_db_check_verb_is_never_inconsistent_and_runs_nothing() -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    assert database_inconsistent(fake, cid, load("_test"), realm=REALM) is False
+    assert fake.exec_calls == []
+
+
+@pytest.mark.fr("FR-120")
+def test_db_check_output_over_the_cap_is_refused_and_not_read() -> None:
+    fake = FakePodman()
+    cid = _running(fake, REALM)
+    definition = _definition("debian")
+    _canned(fake, definition.argv(Verb.DB_CHECK), 0, "x" * (MAX_OUTPUT_CHARS + 1))
+    with pytest.raises(GinnError) as caught:
+        database_inconsistent(fake, cid, definition, realm=REALM)
+    assert caught.value.code == "GINN-E-PKG-MANAGER"

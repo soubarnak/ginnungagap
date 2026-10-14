@@ -9,8 +9,8 @@
 # S-10b (spikes/results/S-10.md section 7): pacman 137 packages; ca-certificates present; en_US.UTF-8
 # absent, with its sources present under /usr/share/i18n. S-10b did not record the sync database or
 # /var/lib/pacman/local; M4 checks both in a fresh realm. Not verified on a host (M4): every verb, the
-# locale step, the check-updates steps and their exit statuses (ADR-011), the stale metadata text and
-# the missing-database warning text.
+# locale step, the check-updates steps and their exit statuses (ADR-011), the db-check verb and its
+# exit statuses, the stale metadata text and the missing-database warning text.
 schema = 1
 id = "arch"
 trust_key = "arch"
@@ -33,9 +33,18 @@ network_error_regex = 'Could not resolve host|Failed to connect to|Connection ti
 # is not in pacman(8), and it is not yet observed on a host. M4 confirms it in a realm. Add a
 # pattern here, not in Python, when another pacman warning means a repository was skipped.
 check_fatal_warning_regex = ['database file for .* does not exist']
+# FR-024: the check-updates query prints one non-blank line per upgradable package, so the count is
+# the number of non-blank lines of its stdout (ADR-011).
+check_updates_count = "nonblank-lines"
 # ADR-011: no verb refreshes first. The sync database moves only with a full upgrade (`upgrade`),
 # because Arch does not support partial upgrades (Arch Wiki, System maintenance).
 refresh_before = []
+# FR-120 AC-2, ADR-011: the db-check verb below reads the local package database. Exit 0 is
+# consistent. Any other status is inconsistent and marks the realm broken, except the statuses that
+# podman reports when it cannot run the command, which are unknown (loader.py). stdout is not read.
+# Not verified until M4: pacman(8) documents no exit statuses for -D.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = false
 
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
@@ -83,6 +92,9 @@ check-updates = [
     ["pacman", "--sync", "--refresh", "--dbpath", "{tmpdir}", "--logfile", "/dev/null"],
     ["pacman", "--query", "--upgrades", "--dbpath", "{tmpdir}"],
 ]
+# db-check reads the local package database (FR-120 AC-2). It names no package and no placeholder.
+# The result is read by the db_check_* keys above. Not verified until M4.
+db-check = ["pacman", "--database", "--check"]
 # --query --explicit --quiet is -Qeq: explicitly installed package names only (DR-007).
 list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 # --print with --print-format %n: names of the packages a sync would fetch. Changes nothing.

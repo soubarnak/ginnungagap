@@ -23,6 +23,8 @@ import pytest
 from ginn.distros import loader
 from ginn.distros.loader import (
     TEST_SWITCH_ENV,
+    CountRule,
+    DbStatus,
     DistroDef,
     HostLocale,
     UpdateStatus,
@@ -30,6 +32,7 @@ from ginn.distros.loader import (
     arch_check_status,
     available,
     clear_cache,
+    db_check_status,
     distro_fixtures_enabled,
     from_mapping,
     host_locale,
@@ -55,7 +58,10 @@ PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.RESOLVE, Verb.ESTIMATE)
 # Distributions whose data defines remove-check (ADR-011). Arch refuses dependents natively, and the
 # fixture omits the verb to keep the optional path tested.
 REMOVE_CHECK_DISTROS = ("debian", "fedora", "kali")
-PKG_MANAGERS = frozenset({"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf"})
+# dpkg and rpm are the database tools of the db-check verb (FR-120 AC-2), not package managers.
+PKG_MANAGERS = frozenset(
+    {"pacman", "apt-get", "apt", "apt-mark", "apt-cache", "dnf", "dpkg", "rpm"}
+)
 # Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
 # mkdir and links the installed-package database into it with ln (arch.toml).
 SCRATCH_TOOLS = frozenset({"mkdir", "ln"})
@@ -134,6 +140,8 @@ def _every_argv(name: str) -> list[tuple[str, list[str]]]:
         if verb is Verb.CHECK_UPDATES:
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
+            continue
+        if verb is Verb.DB_CHECK and not definition.has_db_check:
             continue
         packages = ["gimp"] if verb in (*PACKAGE_VERBS, Verb.REMOVE_CHECK) else []
         out.append((verb.value, definition.argv(verb, packages)))
@@ -1309,3 +1317,273 @@ def test_a_fedora_name_ending_in_rpm_is_refused_and_a_suffix_form_is_read_as_typ
     # the name as typed (FR-040 reason), so both pass the pattern.
     assert fedora.name_pattern.fullmatch("gimp-2.10.38") is not None
     assert fedora.name_pattern.fullmatch("foo.x86_64") is not None
+
+
+# ---- db-check and the check-updates rules: FR-120 AC-2, FR-024, NFR-060 ----------------------
+
+DB_CHECK_ARGV = {
+    "arch": ["pacman", "--database", "--check"],
+    "debian": ["dpkg", "--audit"],
+    "fedora": ["rpm", "--verifydb"],
+    "kali": ["dpkg", "--audit"],
+}
+_ABSENT = object()
+"""Marks a key a test leaves out of the table."""
+
+
+def _with_db_check() -> dict[str, Any]:
+    """The fixture table with a db-check verb and both of its result keys."""
+    raw = _base()
+    raw["verbs"]["db-check"] = ["fake-pm", "check"]
+    raw["db_check_ok_exit"] = [0]
+    raw["db_check_stdout_inconsistent"] = False
+    return raw
+
+
+def _shipped_raw(name: str) -> dict[str, Any]:
+    raw: dict[str, Any] = tomllib.loads(_shipped_text(name))
+    return raw
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_every_shipped_distribution_defines_db_check_as_one_plain_argv(name: str) -> None:
+    definition = load(name)
+    assert definition.has_db_check is True
+    assert list(definition.argv(Verb.DB_CHECK)) == DB_CHECK_ARGV[name]
+    assert definition.db_check_ok_exit == frozenset({0})
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+def test_the_fixture_omits_db_check_so_the_optional_path_stays_tested() -> None:
+    fixture = load("_test")
+    assert fixture.has_db_check is False
+    assert fixture.db_check_ok_exit == frozenset()
+    assert fixture.db_check_stdout_inconsistent is False
+    with pytest.raises(GinnError) as info:
+        fixture.argv(Verb.DB_CHECK)
+    _expect("GINN-E-INTERNAL", 70)(info.value)
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_db_check_takes_no_package(name: str) -> None:
+    with pytest.raises(GinnError) as info:
+        load(name).argv(Verb.DB_CHECK, ["gimp"])
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == "verb db-check takes no packages"
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("element", ["{packages}", "{lang}", "{tmpdir}"])
+def test_a_placeholder_in_db_check_is_refused_as_distro_data(element: str) -> None:
+    raw = _with_db_check()
+    raw["verbs"]["db-check"] = ["fake-pm", "check", element]
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.code == "GINN-E-DISTRO-DATA"
+    assert info.value.details["field"] == "verbs.db-check"
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+def test_a_fixture_with_db_check_and_its_keys_loads_and_reports_the_verb() -> None:
+    definition = from_mapping(_with_db_check(), source="fixture.toml")
+    assert definition.has_db_check is True
+    assert definition.db_check_ok_exit == frozenset({0})
+    assert definition.db_check_stdout_inconsistent is False
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize(
+    ("ok", "flag", "field"),
+    [
+        (_ABSENT, _ABSENT, "db_check_ok_exit"),
+        ([0], _ABSENT, "db_check_stdout_inconsistent"),
+        ([], False, "db_check_ok_exit"),
+        ([0, 0], False, "db_check_ok_exit"),
+        ([256], False, "db_check_ok_exit"),
+        ([True], False, "db_check_ok_exit"),
+        ("0", False, "db_check_ok_exit"),
+        ([0], "yes", "db_check_stdout_inconsistent"),
+    ],
+)
+def test_db_check_keys_are_required_with_the_verb_and_must_be_well_formed(
+    ok: object, flag: object, field: str
+) -> None:
+    raw = _with_db_check()
+    for key, value in (("db_check_ok_exit", ok), ("db_check_stdout_inconsistent", flag)):
+        if value is _ABSENT:
+            del raw[key]
+        else:
+            raw[key] = value
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.code == "GINN-E-DISTRO-DATA"
+    assert info.value.details["field"] == field
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+def test_db_check_keys_are_refused_without_the_verb() -> None:
+    raw = _base()
+    raw["db_check_stdout_inconsistent"] = False
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.details["field"] == "db_check_stdout_inconsistent"
+    assert info.value.details["rule"] == "is read only with verbs.db-check"
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize(
+    ("exit_code", "stdout", "ok_exit", "stdout_inconsistent", "expected"),
+    [
+        (0, "", frozenset({0}), False, DbStatus.CONSISTENT),
+        (0, "anything\n", frozenset({0}), False, DbStatus.CONSISTENT),
+        (0, "", frozenset({0}), True, DbStatus.CONSISTENT),
+        (0, "  \n", frozenset({0}), True, DbStatus.CONSISTENT),
+        (0, "gimp: broken\n", frozenset({0}), True, DbStatus.INCONSISTENT),
+        (0, "", frozenset({0, 3}), False, DbStatus.CONSISTENT),
+        (3, "", frozenset({0, 3}), False, DbStatus.CONSISTENT),
+        (1, "", frozenset({0}), False, DbStatus.INCONSISTENT),
+        (2, "", frozenset({0}), True, DbStatus.INCONSISTENT),
+        # podman could not run the command: the database is not read, so the result is unknown.
+        (125, "", frozenset({0}), False, DbStatus.UNKNOWN),
+        (126, "", frozenset({0}), False, DbStatus.UNKNOWN),
+        (127, "", frozenset({0}), True, DbStatus.UNKNOWN),
+    ],
+)
+def test_db_check_status_reads_the_result_by_the_data(
+    exit_code: int,
+    stdout: str,
+    ok_exit: frozenset[int],
+    stdout_inconsistent: bool,
+    expected: DbStatus,
+) -> None:
+    status = db_check_status(
+        exit_code, stdout, ok_exit=ok_exit, stdout_inconsistent=stdout_inconsistent
+    )
+    assert status is expected
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.parametrize(
+    ("name", "exit_code", "stdout", "expected"),
+    [
+        ("arch", 0, "", DbStatus.CONSISTENT),
+        ("arch", 1, "", DbStatus.INCONSISTENT),
+        ("debian", 0, "", DbStatus.CONSISTENT),
+        ("debian", 0, "gimp: broken\n", DbStatus.INCONSISTENT),
+        ("kali", 0, "gimp: broken\n", DbStatus.INCONSISTENT),
+        ("fedora", 0, "", DbStatus.CONSISTENT),
+        ("fedora", 1, "", DbStatus.INCONSISTENT),
+        ("fedora", 127, "", DbStatus.UNKNOWN),
+    ],
+)
+def test_the_shipped_data_reads_the_db_check_result(
+    name: str, exit_code: int, stdout: str, expected: DbStatus
+) -> None:
+    definition = load(name)
+    status = db_check_status(
+        exit_code,
+        stdout,
+        ok_exit=definition.db_check_ok_exit,
+        stdout_inconsistent=definition.db_check_stdout_inconsistent,
+    )
+    assert status is expected
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_the_check_count_and_exit_rules_are_data_per_shipped_distribution() -> None:
+    assert load("arch").check_count is CountRule.NONBLANK_LINES
+    assert load("arch").check_count_regex is None
+    for name in ("debian", "kali"):
+        definition = load(name)
+        assert definition.check_count is CountRule.LINES_MATCHING
+        assert definition.check_count_regex is not None
+        assert definition.check_count_regex.pattern == r"\[upgradable from: "
+    fedora = load("fedora")
+    assert fedora.check_count is CountRule.UNREAD
+    assert fedora.check_exit_for_updates == 100
+    for name in ("arch", "debian", "kali"):
+        assert load(name).check_exit_for_updates is None
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_the_check_count_and_exit_default_to_unread_and_none_when_omitted() -> None:
+    fixture = from_mapping(_base(), source="fixture.toml")
+    assert fixture.check_count is CountRule.UNREAD
+    assert fixture.check_count_regex is None
+    assert fixture.check_exit_for_updates is None
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize(
+    ("count", "regex", "field"),
+    [
+        ("lines", _ABSENT, "check_updates_count"),
+        ("LINES-MATCHING", "x", "check_updates_count"),
+        (["lines-matching"], _ABSENT, "check_updates_count"),
+        ("lines-matching", _ABSENT, "check_updates_count_regex"),
+        ("lines-matching", "(", "check_updates_count_regex"),
+        ("nonblank-lines", "x", "check_updates_count_regex"),
+        ("unread", "x", "check_updates_count_regex"),
+    ],
+)
+def test_a_check_count_rule_is_refused_unless_its_regex_is_well_formed(
+    count: object, regex: object, field: str
+) -> None:
+    raw = _base()
+    raw["check_updates_count"] = count
+    if regex is not _ABSENT:
+        raw["check_updates_count_regex"] = regex
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.code == "GINN-E-DISTRO-DATA"
+    assert info.value.details["field"] == field
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("value", [0, 256, -1, True, "100", 100.0])
+def test_exit_for_updates_is_an_exit_status_from_1_to_255(value: object) -> None:
+    raw = _base()
+    raw["check_updates_exit_for_updates"] = value
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.details["field"] == "check_updates_exit_for_updates"
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_exit_for_updates_is_refused_for_a_multi_step_check_it_would_not_read() -> None:
+    # Arch's check is four steps, and only a one-step check reads the exit status (ADR-011).
+    raw = _shipped_raw("arch")
+    raw["check_updates_exit_for_updates"] = 100
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="arch.toml")
+    assert info.value.details["field"] == "check_updates_exit_for_updates"
+    assert info.value.details["rule"] == "is read only by a one-step check-updates"
+
+
+@pytest.mark.fr("FR-024")
+@pytest.mark.fr("NFR-060")
+def test_a_count_rule_of_each_shape_loads_from_the_data() -> None:
+    raw = _base()
+    raw["check_updates_count"] = "lines-matching"
+    raw["check_updates_count_regex"] = r"^pkg "
+    definition = from_mapping(raw, source="fixture.toml")
+    assert definition.check_count is CountRule.LINES_MATCHING
+    assert definition.check_count_regex is not None
+    assert definition.check_count_regex.search("pkg 1.0")
+    raw["check_updates_count"] = "nonblank-lines"
+    del raw["check_updates_count_regex"]
+    assert from_mapping(raw, source="fixture.toml").check_count is CountRule.NONBLANK_LINES

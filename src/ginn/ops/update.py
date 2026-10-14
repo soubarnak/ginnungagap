@@ -18,9 +18,10 @@ Order of an update of one realm:
 4. On success the record returns to the state it had (DR-020) and the host menu is synced (FR-044),
    still under the lock.
 5. On failure the record returns to the state it had, so the realm stays usable (FR-120 AC-2).
-   It is marked `broken` only when `db_check` reports an inconsistent package database. No
-   distribution defines that check yet (see the report of T8.4), so production passes None and never
-   marks broken.
+   It is marked `broken` only when the db check reports an inconsistent package database. The check
+   is the caller's `db_check` when it gives one, else the distribution's db-check verb (FR-120 AC-2,
+   ADR-011). A distribution with no db-check verb is never marked broken. A check that cannot run
+   leaves the realm in its prior state, with a note on the error.
 6. A realm that was stopped before the update stops again, through `stop_realm`, which takes its own
    lock. A realm that was failed stays running, as install leaves it (ADR-008).
 
@@ -36,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Final
 
 from ginn.distros import DistroDef, Verb
@@ -48,7 +50,7 @@ from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import HostUser, start_realm, stop_realm
 from ginn.ops.packages import PackageHooks
 from ginn.ops.retry import network_retry_hook
-from ginn.packages.manager import CheckResult, run_check, run_step
+from ginn.packages.manager import CheckResult, database_inconsistent, run_check, run_step
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.spec import KALI, LABEL_REALM
@@ -69,7 +71,8 @@ DbCheck = Callable[[Podman, str, DistroDef], bool]
 """Reports whether the package database of a realm is inconsistent (FR-120 AC-2).
 
 True marks the realm `broken`. A check that fails is not a finding: the realm is restored, and the
-failure is a note on the update's error.
+failure is a note on the update's error. The default is the db-check verb of the data, bound to the
+realm's name (`_db_check_for`).
 """
 
 
@@ -191,6 +194,20 @@ def _inconsistent(
         return False
 
 
+def _db_check_for(
+    name: RealmName, definition: DistroDef, db_check: DbCheck | None
+) -> DbCheck | None:
+    """The check an update uses after a failure (FR-120 AC-2, ADR-011).
+
+    The caller's `db_check` when it gives one. Otherwise the db-check verb of the data, bound to the
+    realm's name for its errors. None when the data defines no such verb, so no realm is marked
+    broken.
+    """
+    if db_check is not None or not definition.has_db_check:
+        return db_check
+    return partial(database_inconsistent, realm=name.value)
+
+
 def _sync_menu(
     env: OpEnv,
     podman: Podman,
@@ -282,7 +299,8 @@ def update_realm(
     """Run the native full upgrade of realm `name` and return its record (FR-023, FR-120).
 
     The FR-006 warnings and the warnings of the start and the stop are appended to `warnings` when
-    it is given, after the operation has finished, also when it failed.
+    it is given, after the operation has finished, also when it failed. `db_check` is None for the
+    db-check verb of the distribution (see `_db_check_for`).
     """
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
@@ -297,14 +315,13 @@ def update_realm(
             allowed="stopped, failed or running",
         )
     definition = load_distro(record.settings.distro.value)
+    check = _db_check_for(name, definition, db_check)
     notices: list[GinnWarning] = []
     was_stopped = record.state is RealmState.STOPPED
     try:
         if not _running(podman, record):
             start_realm(env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices)
-        _update_locked(
-            env, podman, name, definition, hooks=hooks, db_check=db_check, notices=notices
-        )
+        _update_locked(env, podman, name, definition, hooks=hooks, db_check=check, notices=notices)
     except GinnError as err:
         _stop_after(
             env,

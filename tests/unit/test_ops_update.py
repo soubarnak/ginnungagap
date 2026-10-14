@@ -519,3 +519,116 @@ def test_check_of_an_unknown_realm_is_an_error_row(world: World) -> None:
 @pytest.mark.fr("FR-121")
 def test_the_disk_precheck_note_says_no_estimate_sizes_an_upgrade() -> None:
     assert DISK_PRECHECK_SKIPPED.startswith("skipped:")
+
+
+# ---- FR-120 AC-2: the db-check verb of the data marks `broken`; an unknown result never does ----
+
+
+@pytest.mark.fr("FR-120")
+def test_a_failed_arch_upgrade_is_broken_when_the_db_check_verb_reports_inconsistent(
+    world: World,
+) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    _upgrade_fails(world, "arch", ExecResult(1, "", "error: failed to commit transaction\n"))
+    world.fake.exec_results[_argv("arch", Verb.DB_CHECK)] = ExecResult(1, "", "error: corrupt\n")
+    env = _env(world)
+    with pytest.raises(GinnError) as caught:
+        update_realm(env, world.fake, RealmName(ARCH), session=_session(world), hooks=_hooks(world))
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert stored(world, ARCH).state is RealmState.BROKEN
+    (entry,) = _audit(env, "update")
+    assert entry.outcome == "error"
+
+
+@pytest.mark.fr("FR-120")
+def test_a_failed_debian_upgrade_is_broken_when_the_db_check_lists_a_broken_package(
+    world: World,
+) -> None:
+    make_realm(world, DEB, RealmState.RUNNING, running=True, distro="debian")
+    _upgrade_fails(world, "debian", ExecResult(100, "", "E: dpkg was interrupted\n"))
+    world.fake.exec_results[_argv("debian", Verb.DB_CHECK)] = ExecResult(0, "gimp: broken\n", "")
+    with pytest.raises(GinnError):
+        update_realm(
+            _env(world), world.fake, RealmName(DEB), session=_session(world), hooks=_hooks(world)
+        )
+    assert stored(world, DEB).state is RealmState.BROKEN
+
+
+@pytest.mark.fr("FR-120")
+def test_a_consistent_db_check_after_a_failed_upgrade_restores_and_runs_as_root_once(
+    world: World,
+) -> None:
+    make_realm(world, DEB, RealmState.RUNNING, running=True, distro="debian")
+    _upgrade_fails(world, "debian", ExecResult(100, "", "E: a transient mirror problem\n"))
+    with pytest.raises(GinnError):
+        update_realm(
+            _env(world), world.fake, RealmName(DEB), session=_session(world), hooks=_hooks(world)
+        )
+    assert stored(world, DEB).state is RealmState.RUNNING
+    checks = [c for c in world.fake.exec_calls if tuple(c.argv) == _argv("debian", Verb.DB_CHECK)]
+    assert len(checks) == 1
+    assert checks[0].user == "0:0"
+    assert checks[0].env == {"LC_ALL": "C.UTF-8"}
+
+
+@pytest.mark.fr("FR-120")
+def test_a_successful_update_runs_no_db_check(world: World) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    update_realm(
+        _env(world), world.fake, RealmName(ARCH), session=_session(world), hooks=_hooks(world)
+    )
+    assert _argv("arch", Verb.DB_CHECK) not in _execs(world)
+
+
+@pytest.mark.fr("FR-120")
+def test_a_db_check_that_cannot_run_keeps_the_prior_state_and_notes_why(world: World) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    _upgrade_fails(world, "arch", ExecResult(1, "", "error: failed to commit transaction\n"))
+    world.fake.exec_results[_argv("arch", Verb.DB_CHECK)] = ExecResult(
+        127, "", "exec: pacman: not found\n"
+    )
+    with pytest.raises(GinnError) as caught:
+        update_realm(
+            _env(world), world.fake, RealmName(ARCH), session=_session(world), hooks=_hooks(world)
+        )
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert any(
+        "package database check failed" in note and "GINN-E-PKG-MANAGER" in note
+        for note in caught.value.__notes__
+    )
+    assert stored(world, ARCH).state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-120")
+def test_a_caller_check_replaces_the_db_check_verb(world: World) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    _upgrade_fails(world, "arch", ExecResult(1, "", "error: failed to commit transaction\n"))
+    # The verb would say inconsistent. The caller's check says otherwise, so the verb never runs.
+    world.fake.exec_results[_argv("arch", Verb.DB_CHECK)] = ExecResult(1, "", "error\n")
+    with pytest.raises(GinnError):
+        update_realm(
+            _env(world),
+            world.fake,
+            RealmName(ARCH),
+            session=_session(world),
+            hooks=_hooks(world),
+            db_check=lambda _p, _c, _d: False,
+        )
+    assert stored(world, ARCH).state is RealmState.RUNNING
+    assert _argv("arch", Verb.DB_CHECK) not in _execs(world)
+
+
+@pytest.mark.fr("FR-120")
+def test_a_distribution_with_no_db_check_verb_is_never_marked_broken(world: World) -> None:
+    make_realm(world, "fixture", RealmState.RUNNING, running=True, distro="_test")
+    _upgrade_fails(world, "_test", ExecResult(1, "", "boom\n"))
+    with pytest.raises(GinnError):
+        update_realm(
+            _env(world),
+            world.fake,
+            RealmName("fixture"),
+            session=_session(world),
+            hooks=_hooks(world),
+        )
+    assert stored(world, "fixture").state is RealmState.RUNNING
+    assert _execs(world) == [_argv("_test", Verb.UPGRADE)]

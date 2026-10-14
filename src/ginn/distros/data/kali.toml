@@ -33,6 +33,15 @@ refresh_before = ["install", "upgrade", "check-updates", "resolve", "estimate"]
 # installed size that `ginn create kali --everything` estimates (resolve, then estimate, inside the
 # realm after the refresh). Not verified on a host (M4), and only Kali has one (DR-013).
 everything = ["kali-linux-everything"]
+# FR-024: apt marks each upgradable package with `[upgradable from:`. The header and the warnings do
+# not carry the mark, so the count is the number of lines that carry it.
+check_updates_count = "lines-matching"
+check_updates_count_regex = '\[upgradable from: '
+# FR-120 AC-2, ADR-011: dpkg --audit lists each broken or partially installed package on stdout
+# (dpkg(1)). With exit 0, any stdout means inconsistent. A non-zero status is also read as
+# inconsistent (loader.py). Not verified until M4.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = true
 
 [integration]
 packages = ["ca-certificates", "locales"]
@@ -62,6 +71,10 @@ upgrade = ["apt-get", "--yes", "--no-install-recommends", "dist-upgrade"]
 # A one-step list: check-updates is a list of steps (see arch.toml). apt list --upgradable reads the
 # lists as last refreshed. apt warns on stderr that its CLI is unstable.
 check-updates = [["apt", "list", "--upgradable"]]
+# db-check reads the package database for broken or half-installed packages (FR-120 AC-2). It names
+# no package and no placeholder. The result is read by the db_check_* keys above. Not verified until
+# M4.
+db-check = ["dpkg", "--audit"]
 # apt-mark showmanual: names of packages installed by hand (DR-007).
 list-explicit = ["apt-mark", "showmanual"]
 # apt-cache depends --recurse: the dependency closure, without recommends or suggests. Changes
