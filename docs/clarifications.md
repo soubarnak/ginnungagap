@@ -28,6 +28,10 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-20 | The records keep schema 1 when a change adds fields, so downgrade across T8.3 is unsupported while a change is pending | DR-035, FR-122, FR-066, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-22 | The Kali everything estimate is read-only for ginn's state, but it pulls the base image and refreshes the lists in a throwaway container | FR-014 AC-1, DR-032, FR-123, FR-124, FR-121, IR-002 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-23 | The S-05s idle band is read as a ceiling: a median below 37.63 MiB minus 1 MiB passes when the masks and the journald cap are proven | NFR-003, ADR-007 | decided by the orchestrator 2026-10-14; the build proceeds under this reading |
+| CL-24 | DR-020 gains `stopped` to `failed`, legal only on the supervisor's give-up (F10) | DR-020, FR-081, NFR-033 | decided by the user 2026-10-14; the build proceeds under this reading (ADR-014) |
+| CL-25 | FR-081 AC-3 "failed" includes a realm that crash-loops at boot, with no user command | FR-081, FR-084, NFR-033 | open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014) |
+| CL-26 | DR-010's `$XDG_RUNTIME_DIR/ginn` is satisfied by `/run/ginn/<uid>`, which outlives logout | DR-010, FR-081, FR-084, DEP-3 | open, for SRS v1.1; satisfied by ADR-004 (CL-1); real logout pending T7.8 |
+| CL-27 | Signal forwarding to in-realm processes (SIGINT, SIGTERM, SIGWINCH) on both routes is part of enter and launch behaviour | FR-048, FR-049 | open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014) |
 | CL-28 | A services-on realm gets a per-realm machine-id copied into /etc/machine-id before its first start, and systemd-logind.service is masked by default (eleven units); the create checks /sbin/init first, and delete removes the empty realm cgroup directory | ADR-007, FR-080, NFR-003, FR-019, FR-122 | decided by the user 2026-10-14 (machine-id and logind); the init check and the cgroup removal follow the brief of 2026-10-14; the build proceeds under this behaviour |
 | CL-29 | `supervisor` is a reserved realm name, because it is the name of Host Setup's cgroup leaf; delete never removes that leaf | DR-002, FR-001, FR-019, ADR-003 | decided by the reviewer 2026-10-15 (review of the void branch); the build proceeds under this reading |
 | CL-30 | A services-on create installs systemd and the init set through a provisioning stage, with one derived image per realm | FR-010, FR-013, FR-066, FR-080, FR-082, FR-083, CR-007, CL-18, ADR-003 | decided by the user 2026-10-14 (systemd at create, not a repin; one derived image per realm and on-to-off keeps the init set, both user decisions of 2026-10-14); open, for SRS v1.1; ADR-015 (proposed) builds under this behaviour |
@@ -240,6 +244,41 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Consequence: S-05s passes, and T7.3 keeps shipping the a+b+d create-time forms. NFR-003 is still measured per distribution at T7.7 with the ADR-003 argv.
 - Status: decided by the orchestrator 2026-10-14; the user may overrule it.
 
+## CL-24: DR-020 gains stopped to failed, on the supervisor's give-up only
+
+- Requirement IDs: DR-020, FR-081, NFR-033.
+- Issue: the DR-020 transition table has no edge from `stopped` to `failed`. FR-081 AC-3 requires that 5 crashes within 60 s end with `ginn status` showing `failed`. A crash during a start leaves the realm `stopped`, and the table does not allow the move (T7.7, F10: `spikes/results/T7.7-services-real.md:21`, `:162`).
+- Reading: DR-020 gains one edge, `stopped` to `failed`. It is legal only when the supervisor gives up: 5 counted crashes within 60 s, with no user stop in progress. No user command, and no other path, moves a stopped realm to `failed`. This is the user's decision of 2026-10-14 (F10).
+- Proposed wording: add `stopped` to `failed` (supervisor give-up only) to the DR-020 table.
+- How ginn works now: the give-up path does not set `failed` from `stopped`. The change lands with T7.12 and ADR-014 Decision 2. It adds a `give_up` flag to the transition check, so no other caller can make the edge.
+- Status: decided by the user 2026-10-14. The build proceeds under this reading. The SRS wording is open for v1.1.
+
+## CL-25: FR-081 AC-3 "failed" includes a realm that crash-loops at boot
+
+- Requirement IDs: FR-081, FR-084, NFR-033.
+- Issue: FR-081 AC-3 says the realm is "left stopped" and `ginn status` shows `failed`. It does not say whether a crash loop started at boot by the autostart path (FR-084, with no login session and no user command) also ends `failed`.
+- Reading: a give-up reached during an autostart at boot ends the same way as one reached during a user start. The process stays down, and the record reads `failed`. `ginn status` shows `failed` until the user runs `ginn start`.
+- Proposed wording: in FR-081 AC-3, "failed" applies to any give-up, including one reached during the autostart at boot.
+- How ginn works now: the give-up rule of ADR-014 Decision 2 (rules 1 to 5) does not depend on how the start was triggered. T7.12 tests a crash loop that the supervisor starts without a user command.
+- Status: open, for SRS v1.1. The build proceeds under this reading (2026-10-14).
+
+## CL-26: DR-010's $XDG_RUNTIME_DIR/ginn is satisfied by /run/ginn/uid
+
+- Requirement IDs: DR-010, FR-081, FR-084, DEP-3.
+- Issue: DR-010 names `$XDG_RUNTIME_DIR/ginn` as an Owned Path. The code uses `/run/ginn/<uid>` (ADR-004). ADR-004 records that `/run/ginn/<uid>` survives logout (its line 33), but it does not state why. The reason is the logind behaviour described in CL-1: `$XDG_RUNTIME_DIR` belongs to the login session and is removed at logout unless lingering is enabled. `/run/ginn/<uid>` lies outside the session directory, so it outlives logout.
+- Reading: the DR-010 runtime path is satisfied by `/run/ginn/<uid>` (or `GINN_RUNTIME_DIR`), which is an Owned Path. The relay (ADR-014) runs in the user's supervisor, which is started at boot without a login session (FR-084). The relay therefore survives logout as well, and so do autostarted realms.
+- Proposed wording: DR-010 names `/run/ginn/<uid>` (or `GINN_RUNTIME_DIR`) in place of `$XDG_RUNTIME_DIR/ginn`.
+- Evidence: the logout behaviour is simulated (S-04s, CL-1). The real logout run is pending T7.8, which must also confirm that the relay and an autostarted realm survive it.
+- How ginn works now: ginn uses `/run/ginn/<uid>` (ADR-004, CL-1). ADR-014 places the exec socket and the exec lock under that root.
+- Status: satisfied by ADR-004 (CL-1). The real logout run is pending T7.8. The SRS wording is open for v1.1.
+
+## CL-27: signal forwarding to in-realm processes is part of enter and launch behaviour
+
+- Requirement IDs: FR-048, FR-049.
+- Issue: FR-048 (enter opens a shell in the realm) and FR-049 (exec runs a command and returns its exit code) say nothing about signals. A user who presses Ctrl-C, or sends SIGTERM or SIGWINCH to `ginn enter` or `ginn exec`, expects the in-realm process to receive it. The direct route forwards these signals through the podman client (`src/ginn/runtime/enter.py:285`, and the SIGINT hold at `src/ginn/podman/cli.py:732`). The relay route must do the same (ADR-014). No SRS requirement names it.
+- Proposed wording: FR-048 and FR-049 include forwarding of SIGINT, SIGTERM and SIGWINCH from the caller to the in-realm process, on every route. A tty session receives Ctrl-C as input. For a non-tty caller, SIGINT reaches the in-realm process as far as podman exec passes it on.
+- How ginn works now: the direct route holds SIGINT in the parent and forwards signals to the podman client. The relay route forwards them as SIG messages (ADR-014, Terminal handling). Whether podman exec passes a non-tty SIGINT on into the container command is open (gate G13).
+- Status: open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014). The on_spawn and on_exit tests cite FR-048 and FR-049 for this behaviour.
 ## CL-28: the machine-id, the logind mask, the init check and the realm cgroup directory
 
 - Requirement IDs: ADR-007, FR-080, NFR-003, FR-019, FR-122. CL-24 to CL-27 are reserved by another branch.
