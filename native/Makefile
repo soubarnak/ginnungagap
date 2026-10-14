@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Builds the native helpers: ginn-wait (FR-081, NFR-033), ginn-rebind (ADR-008), ginn-watch
-# (FR-044, NFR-009) and ginn-agent-filter (FR-067, NFR-SEC-007). `make check` compiles each with
+# (FR-044, NFR-009), ginn-agent-filter (FR-067, NFR-SEC-007) and ginn-idle (FR-018). `make check` compiles each with
 # gcc and clang with warnings as errors, and checks the 200-line limit (AGENTS.md). `make` builds
 # into build/ only; `make install` copies the helpers to $(DESTDIR)$(LIBEXECDIR), and no target
 # installs by default.
@@ -13,7 +13,7 @@ WARN := -std=c11 -Wall -Wextra -Werror -O2
 PREFIX ?= /usr
 LIBEXECDIR ?= $(PREFIX)/libexec/ginn
 BUILD := build
-HELPERS := ginn-wait ginn-rebind ginn-watch ginn-agent-filter
+HELPERS := ginn-wait ginn-rebind ginn-watch ginn-agent-filter ginn-idle
 LINE_LIMIT := 200
 
 all: $(addprefix $(BUILD)/,$(HELPERS))
