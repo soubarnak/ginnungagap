@@ -690,6 +690,45 @@ def test_a_failed_reattach_fails_this_enter_and_leaves_the_realm_running(
     assert env.journal.pending() == []
 
 
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-081")
+def test_enter_runs_a_command_in_a_running_services_on_realm_without_a_refusal(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+
+    status = enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    assert status == 0
+    assert "start" not in fake.ops()
+    assert "stop" not in fake.ops()
+    assert exec_call(fake).container_id == container_id(env, "lab")
+    assert stored(env, "lab").state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-081")
+def test_enter_never_starts_a_stopped_services_on_realm_with_podman(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
+
+    with pytest.raises(GinnError) as info:
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    assert info.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert "T7.4" in info.value.message
+    assert "start" not in fake.ops()
+    assert "exec_interactive" not in fake.ops()
+    assert stored(env, "lab").state is RealmState.STOPPED
+
+
 @pytest.mark.fr("FR-081")
 @pytest.mark.fr("FR-066")
 def test_enter_never_stops_a_services_on_realm_when_its_reattach_fails(

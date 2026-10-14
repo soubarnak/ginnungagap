@@ -64,10 +64,11 @@ again at the first step, and every step is idempotent, so the same delete finish
 rest in place. A re-run without a purge keeps what is left, and the result reports it.
 
 Refusals. A record that DR-020 does not allow to delete (`creating`, `updating`, `rebuilding`) is
-refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A services-on realm
-is refused with GINN-E-NOT-SUPPORTED-YET before any write, until M7. ADR-003 and FR-081 say such a
-realm is stopped only by its `sv` service, and this module never stops a container with podman for
-it. An unknown name raises GINN-E-NO-SUCH-REALM before any write (FR-025).
+refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A running
+services-on realm is refused with GINN-E-NOT-SUPPORTED-YET before any write, until T7.4. Its
+container is kept running by its runit entry (FR-081), so this module must not stop it with podman
+before that entry is down (ADR-003). A stopped services-on realm has no container running, and it is
+deleted like any other. An unknown name raises GINN-E-NO-SUCH-REALM before any write (FR-025).
 
 Running realms. The body stops the container with podman itself. It does not call
 ops/lifecycle.stop_realm, because that takes the realm lock, which this body already holds, and it
@@ -108,7 +109,7 @@ from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_REALM
 from ginn.store.locks import image_lock
-from ginn.store.records import RealmStore
+from ginn.store.records import RealmRecord, RealmStore
 
 STEPS: Final[tuple[str, ...]] = (
     "deleting",
@@ -239,13 +240,7 @@ def delete_realm(
     """
     hooks = DeleteHooks() if hooks is None else hooks
     current = RealmStore(env.paths, env.clock).load(name)  # GINN-E-NO-SUCH-REALM, before any write
-    if current.settings.services:
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=name.value,
-            feature="delete of a services-on realm",
-            milestone="M7",
-        )
+    _refuse_running_services(current)
     home = env.paths.homes / name.value
     purge = False
     if purge_home and confirm is not None:
@@ -269,19 +264,28 @@ def check_purge(env: OpEnv, name: RealmName, *, hooks: DeleteHooks | None = None
 
     The CLI calls this before its prompt, because `delete_realm` runs `confirm` before any check.
     It is read-only: no lock, no journal, no audit entry, no write. It raises GINN-E-NO-SUCH-REALM
-    for an unknown realm, GINN-E-NOT-SUPPORTED-YET for a services-on realm (until M7), and the
-    Realm Home refusals of a purge. `delete_realm` checks again under the locks, so an answer
+    for an unknown realm, GINN-E-NOT-SUPPORTED-YET for a running services-on realm (until T7.4), and
+    the Realm Home refusals of a purge. `delete_realm` checks again under the locks, so an answer
     given here can still be refused there.
     """
     current = RealmStore(env.paths, env.clock).load(name)
-    if current.settings.services:
+    _refuse_running_services(current)
+    _check_home(env, name, DeleteHooks() if hooks is None else hooks)
+
+
+def _refuse_running_services(record: RealmRecord) -> None:
+    """Refuse to delete a running services-on realm, before any write (ADR-003, FR-081, T7.4).
+
+    Stopping it with podman would leave its runit entry running, and runit would restart the
+    container (FR-081 AC-2). Its sv service must stop it first, which T7.4 adds.
+    """
+    if record.settings.services and record.state is RealmState.RUNNING:
         raise make(
             "GINN-E-NOT-SUPPORTED-YET",
-            realm=name.value,
-            feature="delete of a services-on realm",
-            milestone="M7",
+            realm=record.name.value,
+            feature="delete of a running services-on realm",
+            milestone="M7 (T7.4)",
         )
-    _check_home(env, name, DeleteHooks() if hooks is None else hooks)
 
 
 def _delete(

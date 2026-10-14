@@ -597,6 +597,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="the host menu shows the entry without this icon",
         source="FR-044 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-W-SERVICES-PENDING",
+        exit_code=0,
+        summary="realm '{realm}' is created stopped with services on: its container is made, and "
+        "nothing is started or installed in it",
+        remedy="a services-on realm starts only through its runit entry, which arrives in T7.3 and "
+        "T7.4; until then ginn does not start it, and its Integration Package Set is not installed",
+        source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}

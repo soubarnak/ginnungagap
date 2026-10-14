@@ -645,15 +645,15 @@ def test_stop_from_a_state_dr020_does_not_allow_is_refused_and_audited(
 
 @pytest.mark.fr("FR-016")
 @pytest.mark.fr("FR-081")
-def test_services_on_start_and_stop_are_refused_until_m7(
+def test_services_on_start_and_stop_are_refused_until_t74(
     env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
 ) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
 
-    with pytest.raises(GinnError, match="M7") as started:
+    with pytest.raises(GinnError, match="T7.4") as started:
         start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
     assert started.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    with pytest.raises(GinnError, match="M7") as stopped:
+    with pytest.raises(GinnError, match="T7.4") as stopped:
         stop_realm(env, fake, RealmName("lab"), hooks=hooks)
     assert stopped.value.code == "GINN-E-NOT-SUPPORTED-YET"
 

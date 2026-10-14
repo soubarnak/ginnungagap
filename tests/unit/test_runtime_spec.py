@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The Basic, services-off realm spec renders a fixed, never-privileged `podman create` argv.
+"""The Basic realm spec renders a fixed, never-privileged `podman create` argv, services off or on.
 
-Covers runtime/spec.py. The golden argv uses a synthetic digest and a fake view of the filesystem,
-so a Trust Manifest refresh does not move it. The image test reads the packaged manifest, and it
+Covers runtime/spec.py. The golden argvs use a synthetic digest and a fake view of the filesystem,
+so a Trust Manifest refresh does not move them. The image test reads the packaged manifest, and it
 checks the form of the reference, not its value. Nothing here runs podman.
 """
 
@@ -21,7 +21,14 @@ from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime._enter_plan import login_argv
 from ginn.runtime.mounts import Skipped, create_binds
-from ginn.runtime.spec import RealmSpec, create_argv, create_spec, realm_passwd_entry, realm_spec
+from ginn.runtime.spec import (
+    RealmSpec,
+    create_argv,
+    create_spec,
+    realm_passwd_entry,
+    realm_spec,
+    services_cgroup_parent,
+)
 from ginn.trust import pull_reference
 
 HOME = Path("/home/alice")
@@ -101,6 +108,51 @@ GOLDEN_ARCH = [
     '["sleep"]',
     DIGEST,
     "infinity",
+]
+
+
+GOLDEN_ARCH_SERVICES_ON = [
+    "create",
+    "--name",
+    "ginn-arch-g1",
+    "--user",
+    "0:0",
+    "--userns",
+    "keep-id",
+    "--passwd-entry",
+    "alice:*:1000:1000:alice:/home/alice:/bin/bash",
+    "--network",
+    "host",
+    "--http-proxy=false",
+    "--cgroupns",
+    "private",
+    "--cgroup-parent",
+    "/ginn/1000/arch",
+    "--systemd=always",
+    "--stop-signal",
+    "SIGRTMIN+3",
+    "--stop-timeout",
+    "30",
+    "--env",
+    "SYSTEMD_LOG_LEVEL=warning",
+    "--label",
+    "io.ginn.distro=arch",
+    "--label",
+    "io.ginn.generation=1",
+    "--label",
+    "io.ginn.realm=arch",
+    "--mount",
+    "type=bind,source=/home/alice/.local/share/ginn/homes/arch,target=/home/alice",
+    "--mount",
+    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
+    "--mount",
+    "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
+    "--tmpfs",
+    "/run/user/1000:mode=0700,U",
+    "--device",
+    "/dev/dri",
+    DIGEST,
+    "/sbin/init",
 ]
 
 
@@ -386,10 +438,77 @@ def test_kali_is_refused_until_its_network_and_capability_overlay_exist() -> Non
         make_spec("kali")
 
 
+def assert_services_on_argv(argv: list[str], *, distro: str = "arch") -> None:
+    """The invariants every services-on argv holds, whatever its distribution (ADR-003, FR-080)."""
+    assert all(isinstance(arg, str) for arg in argv)
+    assert argv[0] == "create"
+    assert not any(arg == "--privileged" or arg.startswith("--privileged=") for arg in argv)
+    assert "--cap-add" not in argv
+    assert "--security-opt" not in argv
+    assert "--init" not in argv
+    assert "--init-path" not in argv
+    assert "--entrypoint" not in argv
+    assert not any(arg.startswith("--cgroups") for arg in argv)
+    assert "--systemd=always" in argv
+    assert option_values(argv, "--user") == ["0:0"]
+    assert option_values(argv, "--userns") == ["keep-id"]
+    assert option_values(argv, "--network") == ["host"]
+    assert "--http-proxy=false" in argv
+    assert option_values(argv, "--cgroupns") == ["private"]
+    assert option_values(argv, "--cgroup-parent") == [f"/ginn/{UID}/arch"]
+    assert option_values(argv, "--stop-signal") == ["SIGRTMIN+3"]
+    assert option_values(argv, "--stop-timeout") == ["30"]
+    assert option_values(argv, "--env") == ["SYSTEMD_LOG_LEVEL=warning"]
+    entry = argv[argv.index("--passwd-entry") + 1]
+    assert entry.endswith(f":alice:/home/alice:{load_distro(distro).shell}")
+    assert argv[-2:] == [DIGEST, "/sbin/init"]
+
+
+@pytest.mark.fr("FR-080")
+def test_services_on_golden_argv_for_arch() -> None:
+    """The ADR-003 flag set on the S-01 crun row, after the realm's own options, command last."""
+    assert create_argv(make_spec(services=True)) == GOLDEN_ARCH_SERVICES_ON
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("NFR-SEC-001")
+@pytest.mark.parametrize("distro", NON_KALI)
+def test_services_on_argv_for_every_non_kali_distro(distro: str) -> None:
+    argv = create_argv(make_spec(distro, services=True))
+    assert_services_on_argv(argv, distro=distro)
+    golden_flags = [arg for arg in GOLDEN_ARCH_SERVICES_ON if arg.startswith("--")]
+    assert [arg for arg in argv if arg.startswith("--")] == golden_flags
+
+
+@pytest.mark.fr("FR-080")
+def test_the_services_on_cgroup_parent_is_under_the_host_users_ginn_subtree() -> None:
+    argv = create_argv(make_spec(services=True, uid=1001, gid=1001))
+    assert option_values(argv, "--cgroup-parent") == ["/ginn/1001/arch"]
+    assert services_cgroup_parent(1001, RealmName("arch")) == "/ginn/1001/arch"
+
+
+@pytest.mark.fr("FR-080")
+def test_the_services_on_runtime_is_the_podman_cli_global_flag_not_a_create_option() -> None:
+    """`--runtime crun` is passed before every subcommand by PodmanCli (test_podman_cli.py)."""
+    assert "--runtime" not in create_argv(make_spec(services=True))
+
+
+@pytest.mark.fr("FR-082")
+@pytest.mark.fr("FR-080")
+def test_services_off_has_catatonit_and_no_systemd_and_services_on_is_the_reverse() -> None:
+    off = create_argv(make_spec())
+    on = create_argv(make_spec(services=True))
+    assert "--init" in off
+    assert not any(arg.startswith("--systemd") for arg in off)
+    assert "--init" not in on
+    assert "--systemd=always" in on
+
+
 @pytest.mark.fr("FR-010")
-def test_services_on_is_refused_until_m7() -> None:
-    with pytest.raises(NotImplementedError, match="M7"):
-        make_spec(services=True)
+@pytest.mark.fr("FR-080")
+def test_kali_services_on_is_still_refused_by_the_kali_rule() -> None:
+    with pytest.raises(NotImplementedError, match="M10"):
+        make_spec("kali", services=True)
 
 
 @pytest.mark.fr("NFR-SEC-001")

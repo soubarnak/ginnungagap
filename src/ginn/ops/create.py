@@ -14,8 +14,14 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   config in the Realm Home (ADR-006, security/seccomp.py, security/nested.py).
 - pulled: the image is pulled by digest, with the FR-120 retries. Its digest must equal the pin
   (FR-011). A mismatch removes the image, and nothing is kept.
-- created: `podman create` runs from the Basic, services-off spec (FR-010 AC-1, runtime/spec.py).
-  The record is saved again with the container ID, so a crash cannot leave an unnamed container.
+- created: `podman create` runs from the realm's spec, Basic with services off (FR-010 AC-1), or
+  with services on (ADR-003, runtime/spec.py). The record is saved again with the container ID, so a
+  crash cannot leave an unnamed container.
+- services on: the create stops after `created`. Its container is made and never started: a
+  services-on realm starts only through its runit entry (FR-081, ADR-003), which arrives in T7.3
+  and T7.4. So this create runs no `podman start`, `exec` or `stop`, attaches no grant, and runs no
+  user check, integration step or package step. The final record is saved as `stopped`, and
+  GINN-W-SERVICES-PENDING says what this create left out (FR-010).
 - started: the container starts, and its init process is read.
 - attached: the variable grants are attached (ADR-008 amendment). A failed attach fails the create.
 - user: the realm user is the passwd entry that podman wrote at create from `--passwd-entry`. No
@@ -74,7 +80,7 @@ from ginn.domain import (
     transition,
 )
 from ginn.domain.permissions import Toggle
-from ginn.errors import GinnError, make
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._create_plan import (
     CreateHooks,
@@ -186,6 +192,8 @@ class _Create:
         self._make_home()
         self._pull()
         self._create_container()
+        if self._plan.spec.services:
+            return self._finish_services()
         self._start()
         self._attach()
         self._check_user()
@@ -406,6 +414,21 @@ class _Create:
             argv = self._plan.definition.argv(Verb.INSTALL, packages)
             self._exec(argv, step="with")
         self._step("packages")
+
+    def _finish_services(self) -> RealmRecord:
+        """Finish a services-on create with no start (ADR-003, FR-081).
+
+        The container is made and left stopped. Its start goes through the runit entry, so nothing
+        runs in it here. The Install Manifest is left as it is, because no package is installed.
+        The notice names what this create did not do.
+        """
+        notice = warn("GINN-W-SERVICES-PENDING", realm=self._request.name.value)
+        self._mutation.warnings.append(notice)
+        self._step("stopped")
+        record = self._current()
+        transition(record.state, RealmState.STOPPED, record.previous_state)
+        self._update(state=RealmState.STOPPED)
+        return self._current()
 
     def _finish(self) -> RealmRecord:
         self._podman.stop(self._container_id(), STOP_TIMEOUT_S)

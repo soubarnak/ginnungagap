@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Services-off realm spec and its `podman create` argv (FR-010, FR-061, FR-062, FR-082).
+"""Realm spec and its `podman create` argv, services off (FR-010, FR-061, FR-062, FR-082) or on
+(FR-080, ADR-003).
 
 `RealmSpec` is the data for one realm's container: the realm name, the distribution, the image
 pinned by digest in the Trust Manifest (FR-011), the host identity, the stable create-time binds
@@ -26,6 +27,7 @@ Basic table, unless a row says otherwise):
   names reach an exec or a launch as `--env NAME` (ADR-004 amendment, T4.6).
 - `--init`, with no `--init-path`. Services-off realms run catatonit as PID 1 (FR-082, ADR-004).
   `/usr/bin/catatonit` is absent on the reference host, so the path is left to podman's lookup.
+  A services-on realm has no `--init`: systemd is its init (ADR-003).
 - `--label io.ginn.realm`, `io.ginn.distro` and `io.ginn.generation`. ginn touches only containers
   that carry these labels, so the callers (T4.4, T4.5) filter with `ps` on these keys. The keys
   are fixed in roadmap.md and capabilities.md (Base argv).
@@ -33,6 +35,12 @@ Basic table, unless a row says otherwise):
   the S-02 spike (ADR-010). Without it the image's shell exits at once with no terminal, and
   `podman start` would leave the realm stopped. Both are given explicitly, so the image's CMD is
   not used, whichever way podman treats it. The T4.9 host gate confirms the running process.
+  A services-on realm has no entrypoint. Its command is `/sbin/init`, after the image.
+- The services-on options of ADR-003, added to the same argv when `services` is set:
+  `--systemd=always`, `--cgroupns private`, `--cgroup-parent /ginn/<uid>/<realm>`, `--user 0:0`,
+  `--stop-signal SIGRTMIN+3`, `--stop-timeout 30` and `--env SYSTEMD_LOG_LEVEL=warning` (ADR-007
+  mitigation d). The realm's own options stay. The adapter sorts them in its fixed order. The
+  runtime is not repeated here: `PodmanCli` passes `--runtime crun` before every subcommand.
 - The Realm Home at the host home path, the fonts and the localtime read-only, `--device /dev/dri`
   and `--tmpfs /run/user/<uid>:mode=0700,U`. These are the stable binds (FR-048, FR-061, AS-009,
   ADR-012, ADR-008 amendment). The fonts and localtime need the `fonts_timezone` toggle and the
@@ -41,6 +49,7 @@ Basic table, unless a row says otherwise):
 
 What the argv does not carry:
 - No `--privileged` and no `--cap-add`. Basic adds no capability (NFR-SEC-001, NFR-SEC-002).
+- No `--cgroups=split`. Podman 5.8.8 refuses it with `--cgroup-parent` (ADR-003).
 - No `--env`. The session environment is set at exec and launch, not at create (capabilities.md,
   Session environment row, T4.3).
 - No variable grant. Tier folders, mount roots and session paths are attached after `podman start`
@@ -71,12 +80,20 @@ KEEP_ALIVE_ENTRYPOINT: Final[tuple[str, ...]] = ("sleep",)
 KEEP_ALIVE_COMMAND: Final[tuple[str, ...]] = ("infinity",)
 """The services-off realm's keep-alive, `sleep infinity`, under `--init`. Entrypoint and command
 are both given, so the container keeps running whatever podman does with the image's CMD."""
+SERVICES_COMMAND: Final[tuple[str, ...]] = ("/sbin/init",)
+"""The services-on realm's command: systemd as PID 1 (ADR-003). It follows the image."""
+SERVICES_STOP_SIGNAL: Final = "SIGRTMIN+3"
+"""The services-on stop signal, which systemd treats as poweroff (ADR-003)."""
+SERVICES_STOP_TIMEOUT_S: Final = 30
+"""Seconds podman waits for a services-on realm to stop before it kills it (ADR-003)."""
+SERVICES_ENV: Final[tuple[tuple[str, str], ...]] = (("SYSTEMD_LOG_LEVEL", "warning"),)
+"""The services-on environment: systemd logs warnings only (ADR-007 mitigation d)."""
 KALI: Final = "kali"
 
 
 @dataclass(frozen=True)
 class RealmSpec:
-    """One realm's container, Basic tier with services off. Valid once constructed.
+    """One realm's container, Basic tier, services off or on (ADR-003). Valid once constructed.
 
     `image` is `repository@sha256:<hex>`, never a tag (FR-011). `home` is the host home path,
     which the Realm Home is mounted at (FR-048). `binds` holds only the stable create-time binds,
@@ -102,6 +119,7 @@ class RealmSpec:
     binds: CreateBinds
     tier: Tier = Tier.BASIC
     services: bool = False
+    """Services on: systemd is the realm's init, and only its runit entry starts it (ADR-003)."""
     generation: int = 1
     options: CreateOptions = field(default_factory=CreateOptions)
     """The tier's create-time options, beyond the Basic binds (security/caps.py, ADR-006)."""
@@ -120,8 +138,6 @@ class RealmSpec:
             raise ValueError(
                 "a Basic realm adds no create-time option but its GPU grant (NFR-SEC-002)"
             )
-        if self.services:
-            raise NotImplementedError("services on arrives in M7 (T7.1, ADR-003)")
         if self.distro.value == KALI:
             raise NotImplementedError("kali needs pasta and NET_RAW, arriving in M10 (T10.1)")
         if self.uid == 0:
@@ -194,7 +210,9 @@ def realm_spec(
     seccomp_profile: Path | None = None,
     extras: TierExtras | None = None,
 ) -> RealmSpec:
-    """The services-off spec for a new realm of `tier`, Basic by default.
+    """The spec for a new realm of `tier`, Basic by default, with services off.
+
+    The caller sets `services` on the result (ops/_create_plan.py), so the flag is not an argument.
 
     The image is the digest that the Trust Manifest pins for `distro` (FR-011, NFR-SEC-004). The
     binds come from `mounts.create_binds`, which checks the Realm Home against Owned Paths
@@ -239,9 +257,24 @@ def realm_spec(
     )
 
 
+def services_cgroup_parent(uid: int, name: RealmName) -> str:
+    """The services-on cgroup parent, `/ginn/<uid>/<realm>`, relative to `/sys/fs/cgroup` (ADR-003).
+
+    `uid` is the host user's. The realm's cgroup sits under the user's ginn subtree, which the
+    supervisor's run script delegates (ADR-003, FR-001). Podman creates the container's cgroup below
+    it, so the services run inside that subtree.
+    """
+    return f"/ginn/{uid}/{name.value}"
+
+
 def create_spec(spec: RealmSpec) -> CreateSpec:
-    """The adapter's `CreateSpec` for `spec`. Pure: the spec is read and nothing else happens."""
-    return CreateSpec(
+    """The adapter's `CreateSpec` for `spec`. Pure: the spec is read and nothing else happens.
+
+    Services off is the base spec: catatonit as init and the keep-alive command. Services on
+    replaces the init, the command, the user, the cgroup and the stop options, and adds the
+    environment, as ADR-003 and ADR-007 set them. Every other field is the same in both.
+    """
+    base = CreateSpec(
         name=spec.container_name,
         image_digest_ref=spec.image,
         network="host",
@@ -260,6 +293,21 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         security_opts=list(spec.options.security_opts),
         group_add=list(spec.options.group_add),
         tmpfs=list(spec.binds.tmpfs),
+    )
+    if not spec.services:
+        return base
+    return replace(
+        base,
+        user="0:0",
+        init=False,
+        entrypoint_argv=[],
+        command=list(SERVICES_COMMAND),
+        systemd="always",
+        cgroupns="private",
+        cgroup_parent=services_cgroup_parent(spec.uid, spec.name),
+        stop_signal=SERVICES_STOP_SIGNAL,
+        stop_timeout=SERVICES_STOP_TIMEOUT_S,
+        env=dict(SERVICES_ENV),
     )
 
 

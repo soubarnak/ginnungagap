@@ -208,7 +208,8 @@ reason = "T6.8: the realm wiring is unit-tested (the CDI grant at create, the sp
 [[deferred]]
 id = "FR-080"
 milestone = "M7"
-reason = "not covered yet; the roadmap assigns its test to M7"
+partial = true
+reason = "the services-on argv is unit-tested (T7.1, tests/unit/test_runtime_spec.py): the golden argv for arch, every non-Kali distribution with the same flags, no --privileged, no --init, no --cgroups=split, /sbin/init last. The create leaves the container stopped with GINN-W-SERVICES-PENDING and runs no start (tests/unit/test_ops_create.py, test_cli_create.py). Not yet proven: systemd as PID 1 with zero failed units, and FR-080 AC-1 and AC-2 under this argv on crun, on glibc and on musl, which run in T7.7 (test_services_real). A services-on realm cannot start until its runit entry (T7.3, T7.4) exists"
 
 [[deferred]]
 id = "FR-081"
@@ -297,7 +298,8 @@ reason = "not covered yet; the roadmap assigns its test to M10"
 [[deferred]]
 id = "NFR-003"
 milestone = "M7"
-reason = "not covered yet; the roadmap assigns its test to M7"
+partial = true
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard: it stays under 2 MiB resident (about 1.5 MiB on the dynamic glibc build, tests/unit/test_native_wait.py). The NFR-003 proof is the services-on RSS table of a real realm under the ADR-003 argv, on glibc and musl, which runs in T7.7 (test_services_real)"
 
 [[deferred]]
 id = "NFR-004"
@@ -359,7 +361,8 @@ reason = "not covered yet; the roadmap assigns its test to M8"
 [[deferred]]
 id = "NFR-033"
 milestone = "M7"
-reason = "not covered yet; the roadmap assigns its test to M7"
+partial = true
+reason = "ginn-wait (T7.2) is unit-tested: it exits 1 when conmon dies, and runs one podman stop on SIGTERM (tests/unit/test_native_wait.py). The 10 s restart and the give-up after five crashes in 60 s (AS-028) need the runit finish logic (T7.4) and a host run (T7.7, test_services_real)"
 
 [[deferred]]
 id = "NFR-041"

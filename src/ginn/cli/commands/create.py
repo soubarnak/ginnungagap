@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """`ginn create <distro> [--name REALM] [--tier ...] [--services on|off] [--with PKG ...]`.
 
-Create a stopped realm with services off (FR-010), Basic by default. `--tier` takes basic,
-development or custom (FR-060), and each tier's options are in security/caps.py (NFR-SEC-002). The
-options that the build does not have yet are refused before anything is written, with
-GINN-E-NOT-SUPPORTED-YET and the milestone that adds them: services on (M7), `--everything` (M8,
+Create a stopped realm, services off by default (FR-010), Basic by default. `--tier` takes basic,
+development or custom (FR-060), and each tier's options are in security/caps.py (NFR-SEC-002).
+`--services on` creates the container and leaves it stopped (ADR-003, GINN-W-SERVICES-PENDING):
+its start goes through its runit entry, which arrives in T7.3 and T7.4. The options that the build
+does not have yet are refused before anything is written, with GINN-E-NOT-SUPPORTED-YET and the
+milestone that adds them: `--with` on a services-on realm (T7.4), `--everything` (M8,
 T8.7, Kali only: other distributions get GINN-E-OPTION-INVALID, FR-014 AC-3), `--resume` (M8,
 T8.5) and Kali itself (M10). A failure that ops/create.py reports is raised
-as it is. A real create runs its package steps. Only the tests and the host gate set
-`Seams.integrate` to False, which skips them (CreateHooks.integrate, T4.9 Gate 3).
+as it is. A real services-off create runs its package steps; a services-on create runs none, since
+it starts nothing. Only the tests and the host gate set `Seams.integrate` to False, which skips them
+(CreateHooks.integrate, T4.9 Gate 3).
 """
 
 from __future__ import annotations
@@ -46,7 +49,7 @@ def _configure(parser: argparse.ArgumentParser) -> None:
         "--services",
         choices=("on", "off"),
         default="off",
-        help="run systemd inside the realm (default: off; on arrives in M7)",
+        help="run systemd inside the realm (default: off; on creates the realm stopped, see T7.4)",
     )
     parser.add_argument(
         "--with",
@@ -82,8 +85,6 @@ def _refuse_unbuilt(args: argparse.Namespace, name: RealmName, distro: str) -> N
         raise _not_yet(name, "create --everything", "M8")
     if distro == KALI:
         raise _not_yet(name, "create of a kali realm", "M10")
-    if args.services == "on":
-        raise _not_yet(name, "create of a services-on realm", "M7")
 
 
 def _text(result: CreateResult) -> str:
@@ -110,7 +111,7 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         host_home=realms.host.host_home,
         host_env=realms.host.host_env,
         tier=Tier.parse(str(args.tier)),
-        services=False,
+        services=args.services == "on",
         everything=False,
         with_packages=tuple(args.with_packages or ()),
     )

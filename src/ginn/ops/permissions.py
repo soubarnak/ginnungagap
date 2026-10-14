@@ -26,7 +26,7 @@ share is checked with `SharedPath.parse` (DR-004, FR-063 AC-2) and stored as the
 resolved, with its mode. Removing a share needs a path that the realm shares, given as named or
 resolved.
 
-Services-on realms are refused until M7 (ADR-003). A record that is neither stopped nor running is
+Services-on realms are refused until T7.4 (ADR-003). A record that is neither stopped nor running is
 refused with GINN-E-REALM-STATE (DR-020). The record is loaded before the operation, so a missing
 realm writes no audit entry.
 """
@@ -84,7 +84,7 @@ def _refuse_services(record: RealmRecord, verb: str) -> None:
             "GINN-E-NOT-SUPPORTED-YET",
             realm=record.name.value,
             feature=f"{verb} of a services-on realm",
-            milestone="M7",
+            milestone="M7 (T7.4)",
         )
 
 

@@ -32,7 +32,7 @@ the same rule (DR-020 allows running to stopped). Any other state, such as pause
 running.
 
 Refusals. A realm whose settings are services-on is started and stopped only by its `sv` service
-(ADR-003, FR-081). Until M7 both raise GINN-E-NOT-SUPPORTED-YET (exit 2) before any write. A start
+(ADR-003, FR-081). Until T7.4 both raise GINN-E-NOT-SUPPORTED-YET (exit 2) before any write. A start
 whose record names container options that its container was not made with raises the same code,
 naming T8.3, before any write (ADR-006; a tier change needs a new container). A state that DR-020
 does not allow for the verb raises GINN-E-REALM-STATE (exit 4). An unknown name raises
@@ -395,7 +395,7 @@ def _refuse_unsupported(record: RealmRecord, verb: str) -> None:
             "GINN-E-NOT-SUPPORTED-YET",
             realm=record.name.value,
             feature=f"{verb} of a services-on realm",
-            milestone="M7",
+            milestone="M7 (T7.4)",
         )
 
 

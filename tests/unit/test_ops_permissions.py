@@ -195,9 +195,9 @@ def test_a_tier_that_is_already_set_writes_nothing(env: OpEnv) -> None:
 
 
 @pytest.mark.fr("FR-060")
-def test_services_on_is_refused_until_m7_with_no_record_write(env: OpEnv) -> None:
+def test_services_on_is_refused_until_t74_with_no_record_write(env: OpEnv) -> None:
     _store(env, _realm(Tier.BASIC, services=True))
-    with pytest.raises(GinnError, match="M7") as caught:
+    with pytest.raises(GinnError, match="T7.4") as caught:
         set_tier(env, NAME, Tier.CUSTOM)
     assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
     assert _stored(env).settings.tier is Tier.BASIC

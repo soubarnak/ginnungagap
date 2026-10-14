@@ -88,6 +88,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-EXPORT-SKIPPED": 0,
     "GINN-W-EXPORT-SYNC": 0,
     "GINN-W-ICON-SKIPPED": 0,
+    "GINN-W-SERVICES-PENDING": 0,
 }
 
 

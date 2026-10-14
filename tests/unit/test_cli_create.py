@@ -19,6 +19,7 @@ from ginn.cli.commands import create as create_cmd
 from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
 from ginn.ops.create import CreateRequest, CreateResult
+from ginn.podman.models import ContainerState
 from ginn.store.records import RealmStore
 from tests.unit.realm_cli_support import World, record_of
 
@@ -93,7 +94,6 @@ def test_a_bad_realm_name_is_an_argument_error_before_anything_runs(
 @pytest.mark.parametrize(
     ("argv", "feature", "milestone"),
     [
-        (["create", "arch", "--services", "on"], "create of a services-on realm", "M7"),
         (["create", "arch", "--resume"], "create --resume", "M8"),
         (["create", "kali", "--everything"], "create --everything", "M8"),
         (["create", "kali"], "create of a kali realm", "M10"),
@@ -183,6 +183,37 @@ def test_a_locale_fallback_is_printed_as_a_note(
     monkeypatch.setattr(create_cmd, "create_realm", with_note)
     assert main(["create", "debian"]) == 0
     assert "note: LANG unusable, using C.UTF-8" in capsys.readouterr().out
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_services_on_is_accepted_and_leaves_the_realm_stopped_with_the_pending_notice(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["create", "debian", "--services", "on", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "stopped"
+    assert payload["services"] is True
+    (notice,) = payload["warnings"]
+    assert notice["code"] == "GINN-W-SERVICES-PENDING"
+    record = RealmStore(world.paths).load(RealmName("debian"))
+    assert record.state is RealmState.STOPPED
+    assert record.settings.services is True
+    assert [c.state for c in world.fake.containers.values()] == [ContainerState.CREATED]
+    assert "start" not in world.fake.ops()
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_services_on_with_packages_is_refused_by_the_create_before_any_write(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["create", "debian", "--services", "on", "--with", "htop"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("GINN-E-NOT-SUPPORTED-YET: ")
+    assert "--with packages on a services-on realm arrives in T7.4" in err
+    assert world.fake.containers == {}
+    assert RealmStore(world.paths).list_names() == []
 
 
 @pytest.mark.fr("FR-010")

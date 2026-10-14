@@ -81,6 +81,8 @@ STEPS = (
     "packages",
     "stopped",
 )
+SERVICES_STEPS = ("checked", "space-checked", "recorded", "homed", "pulled", "created", "stopped")
+"""A services-on create makes the container and stops there: nothing runs in it (ADR-003)."""
 FORBIDDEN_TOKENS = frozenset(
     {
         "--privileged",
@@ -348,6 +350,62 @@ def test_a_clean_create_leaves_a_stopped_basic_realm_with_services_off(
 
 
 @pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    steps: list[str] = []
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append)
+    result = create_realm(env, fake, request(home, services=True), hooks=hooks)
+    record = result.record
+    assert record.state is RealmState.STOPPED
+    assert record.settings.services is True
+    assert record.container_id in fake.containers
+    assert [c.state for c in fake.containers.values()] == [ContainerState.CREATED]
+    assert record.grants == []
+    assert record.manifest == []
+    assert steps == list(SERVICES_STEPS)
+    assert {"start", "exec", "stop", "unshare"}.isdisjoint(ops_of(fake))
+    assert [w.code for w in result.warnings] == ["GINN-W-SERVICES-PENDING"]
+    (spec,) = fake.created_specs
+    argv = spec.to_argv()
+    assert "--systemd=always" in argv
+    assert "--init" not in argv
+    assert argv[-1] == "/sbin/init"
+    assert RealmStore(env.paths).load(RealmName("debian")) == record
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_a_services_on_create_with_packages_is_refused_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            request(home, services=True, with_packages=("htop",)),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert "--with packages on a services-on realm arrives in T7.4" in caught.value.message
+    assert fake.calls == []
+    assert not (env.paths.homes / "debian").exists()
+    assert create_entries(env) == []
+
+
+@pytest.mark.fr("FR-010")
 @pytest.mark.fr("FR-011")
 @pytest.mark.fr("FR-013")
 def test_pull_then_create_then_start_then_root_steps_then_stop_in_that_order(
@@ -577,7 +635,6 @@ def test_an_invalid_package_name_is_refused_before_any_podman_call(
     ("name", "distro", "kwargs", "expected"),
     [
         ("kali", "kali", {}, NotImplementedError),
-        ("debian", "debian", {"services": True}, NotImplementedError),
         ("debian", "debian", {"everything": True}, GinnError),
         ("nosuch", "nosuch", {}, GinnError),
     ],

@@ -3,10 +3,11 @@
 
 `CreateRequest` is the user's request and `CreateHooks` the seams for the host and the clock.
 `_validate` turns the request into a `_Plan`: the settings, the distribution definition, the
-RealmSpec (the tier's options, services off, pinned by digest), the trust entry, the validated
-`--with` names, the host session, the permissions of the tier, and the seccomp profile of a realm
-with nested containers. It runs no podman and writes nothing (NFR-SEC-005). It reads the profile
-source, so a missing source is refused before any write (ADR-006). ops/create.py runs the plan.
+RealmSpec (the tier's options, services as requested, pinned by digest), the trust entry, the
+validated `--with` names, the host session, the permissions of the tier, and the seccomp profile of
+a realm with nested containers. It runs no podman and writes nothing (NFR-SEC-005). It reads the
+profile source, so a missing source is refused before any write (ADR-006). ops/create.py runs the
+plan.
 FR-121's space estimate is here too, so ops/disk.py (T8.2) can replace it in one place.
 """
 
@@ -169,8 +170,10 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
 
     Raises GINN-E-USAGE for an unknown distribution, GINN-E-OPTION-INVALID for a bad setting and
     GINN-E-PKG-NAME-INVALID for a bad package name. A host home or user name that the passwd entry
-    cannot carry is refused with GINN-E-REALM-USER (T4.9b). A services mode or distribution that the
-    code does not support yet (M7, T10.1) is refused by RealmSpec, as NotImplementedError.
+    cannot carry is refused with GINN-E-REALM-USER (T4.9b). A services-on create with `--with`
+    packages is refused with GINN-E-NOT-SUPPORTED-YET (T7.4), since their install needs a running
+    container. A distribution that the code does not support yet (T10.1) is refused by RealmSpec,
+    as NotImplementedError.
     """
     distro = DistroId(request.distro)
     definition = load_distro(distro.value)
@@ -191,6 +194,15 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
     except ValueError as exc:
         raise make("GINN-E-REALM-USER", realm=request.name.value, detail=str(exc)) from exc
     packages = tuple(PackageName(raw, distro).value for raw in request.with_packages)
+    if request.services and packages:
+        # The packages install through exec in a running container, and a services-on realm starts
+        # only through its runit entry (ADR-003), which arrives in T7.4.
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=request.name.value,
+            feature="--with packages on a services-on realm",
+            milestone="T7.4",
+        )
     owned = env.paths.all_owned_roots()
     permissions = initial_permissions(request.tier)
     toggles = effective_toggles(request.tier, permissions.toggles)
@@ -227,8 +239,8 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
         seccomp_profile=None if profile is None else profile.path,
         extras=extras_for_spec,
     )
-    # realm_spec takes the tier. Replaying only the services flag re-runs RealmSpec's own refusal
-    # for services on (M7) and the Kali refusal (M10).
+    # realm_spec takes the tier. Replaying only the services flag sets it on the spec, and RealmSpec
+    # checks the result (the Kali refusal, M10).
     spec = replace(spec, services=request.services)
     manifest = trust.load() if hooks.manifest is None else hooks.manifest
     session = session_env(

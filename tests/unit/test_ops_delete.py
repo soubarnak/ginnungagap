@@ -1162,19 +1162,36 @@ def test_another_users_realm_is_not_visible_to_delete(
 
 
 @pytest.mark.fr("FR-019")
-def test_a_services_on_realm_is_refused_before_any_write_until_m7(
+@pytest.mark.fr("FR-081")
+def test_a_running_services_on_realm_is_refused_before_any_write_until_t74(
     env: OpEnv, fake: FakePodman
 ) -> None:
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
     before = (env.paths.realms / "lab.json").read_bytes()
 
-    with pytest.raises(GinnError, match="M7") as caught:
+    with pytest.raises(GinnError, match="T7.4") as caught:
         delete_realm(env, fake, RealmName("lab"))
     assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
 
     assert (env.paths.realms / "lab.json").read_bytes() == before
     assert fake.ops() == []
     assert list(env.audit.read()) == []
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-080")
+def test_a_stopped_services_on_realm_is_deleted_like_any_other(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """A services-on create leaves its container stopped, so nothing is supervised (ADR-003)."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False, services=True)
+
+    result = delete_realm(env, fake, RealmName("lab"))
+
+    assert result.image == "removed"
+    assert_gone(env, fake, "lab")
+    assert "stop" not in fake.ops()
+    assert "rm" in fake.ops()
 
 
 @pytest.mark.fr("FR-019")
