@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-12
 - Amended: 2026-10-12 (D6). Adds the locale rule: every package-manager subprocess whose output ginn parses runs with `LC_ALL=C.UTF-8`. Corrects the consequence about the no-sync-database warning, which the fatal-warning patterns now handle. The decision stands.
+- Amended: 2026-10-14. Adds a `db-check` verb to the distribution data (FR-120 AC-2), and moves the dnf exit status for updates and the check-updates count rule into data. See Amendment 2026-10-14.
 
 ## Context
 
@@ -69,6 +70,16 @@ The `upgrade` verb is the native full upgrade that FR-023 AC-2 names. Its argv, 
 
 `dist-upgrade`, not `upgrade`: apt's plain upgrade leaves a package at its installed version when the new version needs a dependency that is not installed, so it is not a full upgrade (apt-get(8)).
 
+The `db-check` verb is the database check that FR-120 AC-2 uses after a failed update. It changes nothing, and a distribution without it is never marked broken. Per distribution:
+
+| Distribution | `db-check` | Inconsistent when |
+|---|---|---|
+| arch | `pacman --database --check` | the exit status is not 0 (stdout is not read) |
+| debian, kali | `dpkg --audit` | the exit status is not 0, or stdout is not blank (dpkg lists each broken package on stdout) |
+| fedora | `rpm --verifydb` | the exit status is not 0 (stdout is not read) |
+
+A status of 125, 126 or 127 means podman did not run the check (`CANNOT_RUN_EXIT` in loader.py). The result is unknown, not inconsistent, so the realm keeps its prior state and the error is noted. The statuses and stdout rules are not verified until M4.
+
 The Arch check-updates is a list of four steps. The loader runs none of them. The caller runs them in order, and stops at the first failure:
 
 1. `mkdir <tmpdir>`, without `-p`. The caller chooses a path whose parent exists and whose last element does not. A leftover path fails this step, so the check stops and never writes into an old directory.
@@ -115,11 +126,11 @@ Removal. `remove` never removes a package the user did not name. The only except
 | debian, kali | `apt-get --yes remove` | removed by apt-get | left in place (no `--auto-remove`) | run `remove-check` (`apt-get --simulate remove <names>`); refuse if it lists any name not requested |
 | fedora | `dnf --assumeyes remove` | removed by dnf5 | removed by dnf5 (`clean_requirements_on_remove`) | run `remove-check` (`dnf --assumeno --no-autoremove remove <names>`); refuse if it lists any name not requested |
 
-The pre-check for dnf adds `--no-autoremove`, so its list holds only the named packages and their dependents. The real run keeps dnf's default cleaning, which the rule permits. The pre-check is a dry run, so a refusal changes nothing. `--no-remove` is not used: it aborts on the named removal too (apt-get(8)). `remove-check` is a `Verb` member that the data may omit. Arch and the test fixture omit it, and Debian, Kali and Fedora define it. When the data defines it, the loader requires `{packages}` as one element. Every other verb stays required, so a new distribution still defines each of them. T5.3 owns the ops-side use of the dry run and the parsing of its output.
+The pre-check for dnf adds `--no-autoremove`, so its list holds only the named packages and their dependents. The real run keeps dnf's default cleaning, which the rule permits. The pre-check is a dry run, so a refusal changes nothing. `--no-remove` is not used: it aborts on the named removal too (apt-get(8)). `remove-check` is a `Verb` member that the data may omit. Arch and the test fixture omit it, and Debian, Kali and Fedora define it. When the data defines it, the loader requires `{packages}` as one element. `db-check` is optional too (Amendment 2026-10-14). Every other verb stays required, so a new distribution still defines each of the others. T5.3 owns the ops-side use of the dry run and the parsing of its output.
 
 The `upgrade` verb is not `remove`, and FR-041 does not cover it. A Debian or Kali full upgrade can remove a package to resolve a dependency (apt-get(8)). That is the native full upgrade FR-023 AC-2 names. The Control Plane should show such removals before the update runs. That is an ops-layer item for M8, not decided here.
 
-Data and code. The distribution definitions carry `stale_metadata_regex` and `refresh_before` as required keys. The check-updates steps are a required key too, a list of argv lists. `verbs` holds every other verb, and `check_updates(tmpdir)` returns the steps with `{tmpdir}` filled in. The loader refuses a file that lacks a required key, lists `refresh` in `refresh_before`, repeats a verb, or puts `{tmpdir}` in any verb other than check-updates. `remove-check` is the one optional verb key, and `DistroDef.has_remove_check` reports whether the data defines it. The creation rule is not in the data: it is the same for every distribution, so the docstring and this ADR carry it. `SCHEMA` stays 1: the data ships with the code, so the keys change together, and an older file fails loudly with "missing key(s)". The loader caches a successful load per data directory, and `clear_cache()` empties the cache. The test switch `GINN_TEST_DISTROS=1` is the only way to load a fixture (a name that starts with `_`).
+Data and code. The distribution definitions carry `stale_metadata_regex` and `refresh_before` as required keys. The check-updates steps are a required key too, a list of argv lists. `verbs` holds every other verb, and `check_updates(tmpdir)` returns the steps with `{tmpdir}` filled in. The loader refuses a file that lacks a required key, lists `refresh` in `refresh_before`, repeats a verb, or puts `{tmpdir}` in any verb other than check-updates. `remove-check` and `db-check` are the optional verb keys, and `DistroDef.has_remove_check` and `DistroDef.has_db_check` report whether the data defines them. The creation rule is not in the data: it is the same for every distribution, so the docstring and this ADR carry it. `SCHEMA` stays 1: the data ships with the code, so the keys change together, and an older file fails loudly with "missing key(s)". The loader caches a successful load per data directory, and `clear_cache()` empties the cache. The test switch `GINN_TEST_DISTROS=1` is the only way to load a fixture (a name that starts with `_`).
 
 ## Alternatives considered
 
@@ -137,7 +148,7 @@ Data and code. The distribution definitions carry `stale_metadata_regex` and `re
 - Fedora check-updates after `dnf makecache`. Rejected: makecache does not download when the metadata has not expired (dnf5 makecache(8)), so it does not force a fresh view. The global `--refresh` does.
 - Fedora refresh before install. Rejected: dnf5 refreshes expired metadata itself (dnf5.conf(5)). An extra refresh adds network use and changes nothing.
 - A required `Verb` member for the removal pre-check. Rejected: it would add a required argv to every distribution file and every test that iterates the verbs. Revised: `remove-check` is a `Verb` member that the data may omit, so Arch and the fixture do not change (see the Decision).
-- A schema key for exit statuses. Rejected: the statuses are observed on one host, and a field would encode values that are not verified. The rule is one pure function, `arch_check_status()`, not a key. M4 confirms it before the Control Plane uses it.
+- A schema key for exit statuses. Rejected: the statuses are observed on one host, and a field would encode values that are not verified. The rule is one pure function, `arch_check_status()`, not a key. M4 confirms it before the Control Plane uses it. Partly reversed on 2026-10-14 for the documented and per-distribution statuses; see Amendment 2026-10-14.
 - Bumping `SCHEMA` for the new keys. Rejected: see the Decision.
 
 ## Consequences
@@ -179,5 +190,20 @@ M4 must confirm, in a realm, before the Control Plane relies on the check:
 | FR-024 | Check-updates changes nothing in the realm's package database on any distribution. Arch runs a scratch-database check, and `arch_check_status()` maps its results (M4 confirms the realm's files are unchanged). Debian and Kali read the lists only. Fedora forces a metadata refresh only. The parsed output is read under `LC_ALL=C.UTF-8`, so the `warning:` prefix is in English (Locale rule). |
 | FR-040 | Install never upgrades installed packages, and Arch install uses the sync database as the last full upgrade left it. A stale Arch database fails install with a 404; the remedy is `ginn update`. |
 | FR-041 | Remove names only the requested packages. Arch refuses dependents natively. Debian, Kali and Fedora define `remove-check`, the dry run that ops reads before remove (T5.3). |
-| NFR-060 | Refresh rules, check-updates steps, stale-metadata patterns, removal mechanisms and the optional `remove-check` verb are data per distribution. A new distribution needs a file, not code. |
+| FR-120 | `broken` is set only when the `db-check` verb reports an inconsistent database (AC-2). The verb and its exit and stdout rules are data, and a check that cannot run leaves the realm as it was (Amendment 2026-10-14). |
+| NFR-060 | Refresh rules, check-updates steps, stale-metadata patterns, removal mechanisms, the optional `remove-check` and `db-check` verbs, and the result rules of both checks are data per distribution. A new distribution needs a file, not code. |
 | CR-007 | The creation rule keeps realm contents to the official image's packages, the Integration Package Set and the requested packages. The full upgrade at creation changes their versions, not their sources. Wording is open under CL-9. |
+
+## Amendment 2026-10-14
+
+The rejection of "A schema key for exit statuses" in Alternatives is partly reversed. FR-120 AC-2 marks a realm `broken` only on an inconsistent package database. That check is per distribution, and NFR-060 keeps per-distribution facts in data. Three kinds of value are now keys:
+
+- dnf's documented exit status for "updates available", 100 (dnf5 check-upgrade(8)), is `check_updates_exit_for_updates`. Only fedora sets it. The fedora count is left unread until M4.
+- The check-updates count rule is `check_updates_count`. It is `nonblank-lines` on arch, and `lines-matching` with `check_updates_count_regex` on debian and kali. `ginn.packages.manager` reads both keys.
+- The `db-check` verb carries `db_check_ok_exit` and `db_check_stdout_inconsistent`. The Decision table above gives its rule for each distribution. `ops/update.py` binds the check to the verb by default.
+
+The rejection still holds for the Arch check-updates statuses. Those were observed on one host and are not documented, so they stay in `arch_check_status()` and in TOML comments, not in keys. The db-check statuses are also unverified until M4.
+
+The `db-check` verb is optional, like `remove-check`. `DistroDef.has_db_check` reports whether the data defines it. `SCHEMA` stays 1, because the data ships with the code.
+
+Requirements: FR-120 AC-2 (`broken` only on an inconsistent database), FR-023 (the update command runs the db-check after a failed upgrade), FR-024 (the check-updates count and exit rules are data), NFR-060 (per-distribution facts in data).

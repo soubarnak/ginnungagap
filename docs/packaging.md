@@ -2,13 +2,14 @@
 
 ginn ships as Void Linux xbps packages (AS-003). The packages declare Podman and its helpers as dependencies (DEP-1), so ginn never calls the host package manager itself. The package template lives in `packaging/void/srcpkgs/ginn/template`. It declares `crun` as the OCI runtime (ADR-004; corrected in R8, 0d7e52e). The package installs `README.md` as documentation and `NOTICE` as a license file (`vlicense`, Apache-2.0 §4(d)). It does not install `LICENSE`: Void ships the Apache-2.0 text under `/usr/share/licenses/Apache-2.0`, which covers §4(a), and xlint rejects a `vlicense` of that license.
 
-One package is built from that template for now:
+Two packages are built from that template:
 
 - `ginn`: the CLI, with the Python package and the `ginn` command.
+- `ginn-gui`: the Control Plane GUI, with GTK4 and libadwaita. It depends on `ginn` at the same version, `python3-gobject`, `gtk4` and `libadwaita`. It moves the GUI module, the `ginn-gui` command, the desktop entry and the icon out of `ginn`. `packaging/void/srcpkgs/ginn-gui` is a link to `ginn`.
 
 The package is built for `x86_64` (glibc) and `x86_64-musl` (NFR-062).
 
-The `ginn-gui` subpackage (the Control Plane GUI, GTK4 and libadwaita) is deferred to M9 (FR-100..107). xbps-src rejects an empty subpackage, so it is added with the Control Plane, once `src/ginn/gui` exists.
+The `ginn-gui` subpackage (the Control Plane GUI, FR-100..107) is defined in the same template. It packages the GUI module in `src/ginn/gui`, with the desktop entry and the icon. xbps-src rejects an empty subpackage, so it needed `src/ginn/gui` to exist first.
 
 ## Install from the release repository
 
@@ -30,7 +31,7 @@ The packages are published as assets of each GitHub release, with signed reposit
    sudo xbps-install -S ginn
    ```
 
-   `ginn-gui` is not published yet. It arrives with the Control Plane (M9).
+   The Control Plane GUI is a second package in the same repository. Install it with `sudo xbps-install -S ginn-gui`.
 
 3. Prepare the host once. This is a root step and it is idempotent:
 
