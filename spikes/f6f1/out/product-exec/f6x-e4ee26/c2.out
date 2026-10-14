@@ -1,0 +1,5 @@
+     --audit            Enable audit support
+--audit
+../dbus-broker-37/src/util/audit.c
+libaudit.so.1
+util_audit_drop_permissions

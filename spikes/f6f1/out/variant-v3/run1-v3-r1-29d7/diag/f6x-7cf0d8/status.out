@@ -1,0 +1,27 @@
+● dbus-broker.service - D-Bus System Message Bus
+     Loaded: loaded (/usr/lib/systemd/system/dbus-broker.service; disabled; preset: disabled)
+     Active: active (running) since Wed 2026-10-14 17:06:23 UTC; 6s ago
+ Invocation: 907e07cf75934c91adc65f10ca489d0d
+TriggeredBy: ● dbus.socket
+       Docs: man:dbus-broker-launch(1)
+   Main PID: 49 (dbus-broker-lau)
+      Tasks: 2 (limit: 18054)
+     Memory: 1.7M (peak: 2.5M)
+        CPU: 16ms
+     CGroup: /system.slice/dbus-broker.service
+             ├─49 /usr/bin/dbus-broker-launch --scope system --audit
+             └─50 dbus-broker --log 10 --controller 9 --machine-id adbd4f0914bbf78b66168e5b5197d1a6 --max-bytes 536870912 --max-fds 4096 --max-matches 16384 --audit
+
+Oct 14 17:06:23 xserve dbus-broker-launch[49]: Ready
+
+○ systemd-firstboot.service
+     Loaded: masked (Reason: Unit systemd-firstboot.service is masked.)
+     Active: inactive (dead)
+
+○ systemd-homed.service
+     Loaded: masked (Reason: Unit systemd-homed.service is masked.)
+     Active: inactive (dead)
+
+○ systemd-resolved.service
+     Loaded: masked (Reason: Unit systemd-resolved.service is masked.)
+     Active: inactive (dead)

@@ -1,0 +1,34 @@
+× dbus-broker.service - D-Bus System Message Bus
+     Loaded: loaded (/usr/lib/systemd/system/dbus-broker.service; disabled; preset: disabled)
+     Active: failed (Result: start-limit-hit) since Wed 2026-10-14 17:06:11 UTC; 6s ago
+   Duration: 1ms
+ Invocation: 4b2a5451c46945c5b85f46eb6a131229
+TriggeredBy: × dbus.socket
+       Docs: man:dbus-broker-launch(1)
+    Process: 75 ExecStart=/usr/bin/dbus-broker-launch --scope system --audit (code=exited, status=1/FAILURE)
+   Main PID: 75 (code=exited, status=1/FAILURE)
+   Mem peak: 2.2M
+        CPU: 8ms
+
+Oct 14 17:06:11 xserve dbus-broker-launch[75]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[75]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Start request repeated too quickly.
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'start-limit-hit'.
+Oct 14 17:06:11 xserve systemd[1]: Failed to start D-Bus System Message Bus.
+
+○ systemd-firstboot.service
+     Loaded: masked (Reason: Unit systemd-firstboot.service is masked.)
+     Active: inactive (dead)
+
+○ systemd-homed.service
+     Loaded: masked (Reason: Unit systemd-homed.service is masked.)
+     Active: inactive (dead)
+
+○ systemd-resolved.service
+     Loaded: masked (Reason: Unit systemd-resolved.service is masked.)
+     Active: inactive (dead)

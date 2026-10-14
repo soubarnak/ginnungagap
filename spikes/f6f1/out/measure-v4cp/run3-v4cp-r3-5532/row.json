@@ -1,0 +1,44 @@
+{
+  "boot_state": "ok",
+  "container_proc_names": [
+    "9862:systemd",
+    "9884:systemd-journal",
+    "9916:dbus-broker-lau",
+    "9917:dbus-broker"
+  ],
+  "container_procs": 4,
+  "helpers": {
+    "conmon": [
+      9859
+    ],
+    "ginn-wait": [
+      9765
+    ],
+    "pause": [
+      16718
+    ],
+    "runsv": [
+      9764
+    ]
+  },
+  "host": {
+    "MemAvailable_kib": 6983328,
+    "psi": "some avg10=0.72 avg60=0.15 avg300=0.03 total=81270610"
+  },
+  "kib": {
+    "Pss": 19764,
+    "RssAnon": 5624,
+    "RssFile": 28584,
+    "VmRSS": 34288
+  },
+  "name": "f6v-v4cp-r3-5532",
+  "pss_mib_readable": 19.3,
+  "pss_unreadable": 0,
+  "run": 3,
+  "settle": [
+    "running",
+    "running"
+  ],
+  "variant": "v4cp",
+  "vmrss_mib": 33.48
+}

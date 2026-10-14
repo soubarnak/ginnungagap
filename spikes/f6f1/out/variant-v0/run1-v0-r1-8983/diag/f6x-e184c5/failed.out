@@ -1,0 +1,14 @@
+  UNIT                            LOAD   ACTIVE SUB    DESCRIPTION
+● dbus-broker.service             loaded failed failed D-Bus System Message Bus
+● systemd-firstboot.service       loaded failed failed Initial Setup
+● systemd-homed.service           loaded failed failed Home Area Manager
+● systemd-resolved.service        loaded failed failed Network Name Resolution
+● dbus.socket                     loaded failed failed D-Bus System Message Bus Socket
+● systemd-resolved-monitor.socket loaded failed failed Resolve Monitor Varlink Socket
+● systemd-resolved-varlink.socket loaded failed failed Resolve Service Varlink Socket
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+7 loaded units listed.

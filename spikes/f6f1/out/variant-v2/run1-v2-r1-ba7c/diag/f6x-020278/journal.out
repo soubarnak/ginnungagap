@@ -1,0 +1,44 @@
+Oct 14 17:06:11 xserve dbus-broker-launch[51]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 17:06:11 xserve dbus-broker-launch[50]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[50]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[50]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[50]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[50]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[50]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve dbus-broker-launch[64]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 17:06:11 xserve dbus-broker-launch[57]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[57]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[57]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[57]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[57]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[57]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve dbus-broker-launch[68]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 17:06:11 xserve dbus-broker-launch[67]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[67]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[67]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[67]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[67]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[67]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve dbus-broker-launch[72]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 17:06:11 xserve dbus-broker-launch[71]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[71]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[71]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[71]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[71]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[71]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve dbus-broker-launch[76]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 17:06:11 xserve dbus-broker-launch[75]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 17:06:11 xserve dbus-broker-launch[75]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 17:06:11 xserve dbus-broker-launch[75]: Exiting due to fatal error: -107
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Start request repeated too quickly.
+Oct 14 17:06:11 xserve systemd[1]: dbus-broker.service: Failed with result 'start-limit-hit'.
+Oct 14 17:06:11 xserve systemd[1]: Failed to start D-Bus System Message Bus.
+Oct 14 17:06:11 xserve systemd[1]: dbus.socket: Failed with result 'service-start-limit-hit'.

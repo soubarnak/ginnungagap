@@ -1,0 +1,10 @@
+{
+  "boot_state": "ok",
+  "name": "f6v-v1rw-r1-8bee",
+  "run": 1,
+  "settle": [
+    "degraded",
+    "degraded"
+  ],
+  "variant": "v1rw"
+}

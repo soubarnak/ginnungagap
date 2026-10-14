@@ -1,0 +1,264 @@
+{
+  "env": {
+    "HOME": "/home/soubarna",
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
+    "XDG_RUNTIME_DIR": "/run/user/1000/f6f1/xdg"
+  },
+  "out": "/home/soubarna/Documents/bongbetic-wip/ginnungagap/spikes/f6f1/out/variant-v1mask/run1-v1mask-r1-6099/diag/f6x-5bc042",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "systemctl --failed --no-pager"
+      ],
+      "name": "failed",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "systemctl is-system-running; true"
+      ],
+      "name": "is-system-running",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "cat /etc/machine-id; echo; ls -l /etc/machine-id; grep machine-id /proc/1/mountinfo"
+      ],
+      "name": "machine-id",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "journalctl -b --no-pager -u dbus-broker -u dbus.socket -u systemd-firstboot -u systemd-resolved -u systemd-homed -u systemd-resolved-monitor.socket -u systemd-resolved-varlink.socket"
+      ],
+      "name": "journal",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "systemctl status dbus-broker.service systemd-firstboot.service systemd-homed.service systemd-resolved.service --no-pager -l"
+      ],
+      "name": "status",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "systemctl list-units --type=service --state=running --no-pager"
+      ],
+      "name": "running-services",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "ps -eo pid,rss,comm"
+      ],
+      "name": "ps",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "busctl --no-pager list; echo busctl-rc=$?"
+      ],
+      "name": "busctl",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "pacman -Q systemd dbus-broker 2>&1; true"
+      ],
+      "name": "packages",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "systemctl status systemd-machine-id-commit.service --no-pager -l; journalctl -b --no-pager -u systemd-machine-id-commit.service"
+      ],
+      "name": "commit",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "timeout 8 dbus-broker-launch --scope system --audit 2>&1 | tail -4; echo rc=$?"
+      ],
+      "name": "probe-audit",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v1mask-r1-6099",
+        "sh",
+        "-c",
+        "timeout 8 dbus-broker-launch --scope system 2>&1 | tail -4; echo rc=$?"
+      ],
+      "name": "probe-noaudit",
+      "timeout": 600.0
+    }
+  ],
+  "tail": null
+}

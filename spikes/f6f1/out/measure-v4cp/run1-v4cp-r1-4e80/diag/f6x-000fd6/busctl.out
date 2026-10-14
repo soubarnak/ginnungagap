@@ -1,0 +1,20 @@
+NAME                       PID PROCESS         USER CONNECTION    UNIT                SESSION DESCRIPTION
+:1.0                         1 systemd         root :1.0          init.scope          -       -
+:1.1                        47 dbus-broker-lau root :1.1          dbus-broker.service -       -
+:1.2                        65 busctl          root :1.2          init.scope          -       -
+org.freedesktop.DBus         1 systemd         root -             init.scope          -       -
+org.freedesktop.home1        - -               -    (activatable) -                   -       -
+org.freedesktop.hostname1    - -               -    (activatable) -                   -       -
+org.freedesktop.import1      - -               -    (activatable) -                   -       -
+org.freedesktop.locale1      - -               -    (activatable) -                   -       -
+org.freedesktop.login1       - -               -    (activatable) -                   -       -
+org.freedesktop.machine1     - -               -    (activatable) -                   -       -
+org.freedesktop.network1     - -               -    (activatable) -                   -       -
+org.freedesktop.oom1         - -               -    (activatable) -                   -       -
+org.freedesktop.portable1    - -               -    (activatable) -                   -       -
+org.freedesktop.resolve1     - -               -    (activatable) -                   -       -
+org.freedesktop.systemd1     1 systemd         root :1.0          init.scope          -       -
+org.freedesktop.sysupdate1   - -               -    (activatable) -                   -       -
+org.freedesktop.timedate1    - -               -    (activatable) -                   -       -
+org.freedesktop.timesync1    - -               -    (activatable) -                   -       -
+busctl-rc=0

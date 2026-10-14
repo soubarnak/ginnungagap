@@ -1,0 +1,33 @@
+{
+  "env": {
+    "HOME": "/home/soubarna",
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
+    "XDG_RUNTIME_DIR": "/run/user/1000/f6f1/xdg"
+  },
+  "out": "/home/soubarna/Documents/bongbetic-wip/ginnungagap/spikes/f6f1/out/measure-v3cp/run2-v3cp-r2-9aa1/settle/f6x-e45524",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.cache/ginn-f6f1/root",
+        "--runroot",
+        "/run/user/1000/f6f1/rr",
+        "--tmpdir",
+        "/run/user/1000/f6f1/xdg/podman-tmp",
+        "--runtime",
+        "crun",
+        "exec",
+        "f6v-v3cp-r2-9aa1",
+        "sh",
+        "-c",
+        "systemctl is-system-running --wait; systemctl is-system-running; true"
+      ],
+      "name": "settle",
+      "timeout": 600.0
+    }
+  ],
+  "tail": null
+}

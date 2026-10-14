@@ -1,0 +1,7 @@
+○ systemd-machine-id-commit.service - Save Transient machine-id to Disk
+     Loaded: loaded (/usr/lib/systemd/system/systemd-machine-id-commit.service; static)
+     Active: inactive (dead)
+  Condition: start condition unmet at Wed 2026-10-14 17:14:45 UTC; 7s ago
+             └─ ConditionPathIsMountPoint=/etc/machine-id was not met
+       Docs: man:systemd-machine-id-commit.service(8)
+-- No entries --

@@ -1,0 +1,38 @@
+● dbus-broker.service - D-Bus System Message Bus
+     Loaded: loaded (/usr/lib/systemd/system/dbus-broker.service; disabled; preset: disabled)
+     Active: active (running) since Wed 2026-10-14 17:42:56 UTC; 7s ago
+ Invocation: d178e96c2c2547e49a3d81df7a52f4ea
+TriggeredBy: ● dbus.socket
+       Docs: man:dbus-broker-launch(1)
+   Main PID: 47 (dbus-broker-lau)
+      Tasks: 2 (limit: 18054)
+     Memory: 2.2M (peak: 2.7M)
+        CPU: 17ms
+     CGroup: /system.slice/dbus-broker.service
+             ├─47 /usr/bin/dbus-broker-launch --scope system --audit
+             └─48 dbus-broker --log 10 --controller 9 --machine-id 6c5c5856d185437af3d5d953c7e85344 --max-bytes 536870912 --max-fds 4096 --max-matches 16384 --audit
+
+Oct 14 17:42:56 xserve dbus-broker-launch[47]: Ready
+
+○ systemd-firstboot.service - Initial Setup
+     Loaded: loaded (/usr/lib/systemd/system/systemd-firstboot.service; static)
+     Active: inactive (dead)
+  Condition: start condition unmet at Wed 2026-10-14 17:42:56 UTC; 7s ago
+             └─ ConditionFirstBoot=yes was not met
+       Docs: man:systemd-firstboot(1)
+
+○ systemd-homed.service - Home Area Manager
+     Loaded: loaded (/usr/lib/systemd/system/systemd-homed.service; disabled; preset: enabled)
+     Active: inactive (dead)
+       Docs: man:systemd-homed.service(8)
+             man:org.freedesktop.home1(5)
+
+○ systemd-resolved.service - Network Name Resolution
+     Loaded: loaded (/usr/lib/systemd/system/systemd-resolved.service; disabled; preset: enabled)
+     Active: inactive (dead)
+TriggeredBy: ○ systemd-resolved-varlink.socket
+             ○ systemd-resolved-monitor.socket
+       Docs: man:systemd-resolved.service(8)
+             man:org.freedesktop.resolve1(5)
+             https://systemd.io/WRITING_NETWORK_CONFIGURATION_MANAGERS
+             https://systemd.io/WRITING_RESOLVER_CLIENTS

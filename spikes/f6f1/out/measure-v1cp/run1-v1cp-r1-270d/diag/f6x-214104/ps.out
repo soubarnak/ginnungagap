@@ -1,0 +1,7 @@
+    PID   RSS COMMAND
+      1 14520 systemd
+     22  6564 systemd-journal
+     47  4228 dbus-broker-lau
+     48  3324 dbus-broker
+     49  6976 systemd-logind
+     70  4076 ps

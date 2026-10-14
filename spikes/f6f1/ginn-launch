@@ -1,0 +1,22 @@
+#!/home/soubarna/Documents/bongbetic-wip/ginnungagap/.venv/bin/python
+# SPDX-License-Identifier: Apache-2.0
+"""The product CLI with the native helper paths of native/build (F6/F1 spike, Part A).
+
+Same as the T7.7 gate's launcher (tests/integration/test_services_real.py, launcher): the helper
+constants point at native/build because /usr/libexec/ginn is not installed on this host. Nothing
+else of the product is changed. Usage: spikes/f6f1/ginn-launch <ginn args>.
+"""
+
+import sys
+from pathlib import Path
+
+from ginn.__main__ import main
+from ginn.cli import _context
+from ginn.runtime import attach
+
+NATIVE = str(Path(__file__).resolve().parents[2] / "native" / "build")
+_context.WAIT_HELPER = NATIVE + "/ginn-wait"
+attach.DEFAULT_HELPER = NATIVE + "/ginn-rebind"
+
+if __name__ == "__main__":
+    sys.exit(main())

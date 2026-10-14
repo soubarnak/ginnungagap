@@ -1,0 +1,4 @@
+○ systemd-machine-id-commit.service
+     Loaded: masked (Reason: Unit systemd-machine-id-commit.service is masked.)
+     Active: inactive (dead)
+-- No entries --

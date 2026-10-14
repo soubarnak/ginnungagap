@@ -1,0 +1,227 @@
+[
+  {
+    "boot_state": "ok",
+    "container_proc_names": [
+      "2266:systemd",
+      "2291:systemd-journal",
+      "2326:dbus-broker-lau",
+      "2327:dbus-broker",
+      "2328:systemd-logind"
+    ],
+    "container_procs": 5,
+    "helpers": {
+      "conmon": [
+        2263
+      ],
+      "ginn-wait": [
+        2161
+      ],
+      "pause": [
+        16718
+      ],
+      "runsv": [
+        2160
+      ]
+    },
+    "host": {
+      "MemAvailable_kib": 5299660,
+      "psi": "some avg10=0.00 avg60=0.00 avg300=0.00 total=81054691"
+    },
+    "kib": {
+      "Pss": 20580,
+      "RssAnon": 6356,
+      "RssFile": 34524,
+      "VmRSS": 40960
+    },
+    "name": "f6v-v3cp-r1-e76c",
+    "pss_mib_readable": 20.1,
+    "pss_unreadable": 0,
+    "run": 1,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v3cp",
+    "vmrss_mib": 40.0
+  },
+  {
+    "boot_state": "ok",
+    "container_proc_names": [
+      "3848:systemd",
+      "3870:systemd-journal",
+      "3895:dbus-broker-lau",
+      "3896:dbus-broker",
+      "3897:systemd-logind"
+    ],
+    "container_procs": 5,
+    "helpers": {
+      "conmon": [
+        3845
+      ],
+      "ginn-wait": [
+        3744
+      ],
+      "pause": [
+        16718
+      ],
+      "runsv": [
+        3743
+      ]
+    },
+    "host": {
+      "MemAvailable_kib": 5324348,
+      "psi": "some avg10=0.00 avg60=0.00 avg300=0.00 total=81057970"
+    },
+    "kib": {
+      "Pss": 20948,
+      "RssAnon": 6348,
+      "RssFile": 35244,
+      "VmRSS": 41672
+    },
+    "name": "f6v-v3cp-r2-9aa1",
+    "pss_mib_readable": 20.46,
+    "pss_unreadable": 0,
+    "run": 2,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v3cp",
+    "vmrss_mib": 40.7
+  },
+  {
+    "boot_state": "ok",
+    "container_proc_names": [
+      "4376:systemd",
+      "4402:systemd-journal",
+      "4429:dbus-broker-lau",
+      "4430:dbus-broker",
+      "4431:systemd-logind"
+    ],
+    "container_procs": 5,
+    "helpers": {
+      "conmon": [
+        4373
+      ],
+      "ginn-wait": [
+        4275
+      ],
+      "pause": [
+        16718
+      ],
+      "runsv": [
+        4274
+      ]
+    },
+    "host": {
+      "MemAvailable_kib": 7316848,
+      "psi": "some avg10=0.00 avg60=0.02 avg300=0.00 total=81122063"
+    },
+    "kib": {
+      "Pss": 20112,
+      "RssAnon": 6312,
+      "RssFile": 32840,
+      "VmRSS": 39232
+    },
+    "name": "f6v-v3cp-r3-0b2d",
+    "pss_mib_readable": 19.64,
+    "pss_unreadable": 0,
+    "run": 3,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v3cp",
+    "vmrss_mib": 38.31
+  },
+  {
+    "boot_state": "ok",
+    "container_proc_names": [
+      "5221:systemd",
+      "5245:systemd-journal",
+      "5272:dbus-broker-lau",
+      "5273:dbus-broker",
+      "5274:systemd-logind"
+    ],
+    "container_procs": 5,
+    "helpers": {
+      "conmon": [
+        5218
+      ],
+      "ginn-wait": [
+        5117
+      ],
+      "pause": [
+        16718
+      ],
+      "runsv": [
+        5116
+      ]
+    },
+    "host": {
+      "MemAvailable_kib": 7268592,
+      "psi": "some avg10=0.00 avg60=0.00 avg300=0.00 total=81122615"
+    },
+    "kib": {
+      "Pss": 20453,
+      "RssAnon": 6296,
+      "RssFile": 34596,
+      "VmRSS": 40972
+    },
+    "name": "f6v-v3cp-r4-525b",
+    "pss_mib_readable": 19.97,
+    "pss_unreadable": 0,
+    "run": 4,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v3cp",
+    "vmrss_mib": 40.01
+  },
+  {
+    "boot_state": "ok",
+    "container_proc_names": [
+      "5879:systemd",
+      "5902:systemd-journal",
+      "5941:dbus-broker-lau",
+      "5942:dbus-broker",
+      "5943:systemd-logind"
+    ],
+    "container_procs": 5,
+    "helpers": {
+      "conmon": [
+        5876
+      ],
+      "ginn-wait": [
+        5776
+      ],
+      "pause": [
+        16718
+      ],
+      "runsv": [
+        5775
+      ]
+    },
+    "host": {
+      "MemAvailable_kib": 7256916,
+      "psi": "some avg10=0.00 avg60=0.00 avg300=0.00 total=81125047"
+    },
+    "kib": {
+      "Pss": 20752,
+      "RssAnon": 6344,
+      "RssFile": 35044,
+      "VmRSS": 41468
+    },
+    "name": "f6v-v3cp-r5-8ac0",
+    "pss_mib_readable": 20.27,
+    "pss_unreadable": 0,
+    "run": 5,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v3cp",
+    "vmrss_mib": 40.5
+  }
+]
