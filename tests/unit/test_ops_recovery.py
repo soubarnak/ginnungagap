@@ -1101,6 +1101,173 @@ def test_a_broken_record_with_a_dead_update_is_settled_as_broken_with_no_state_w
     assert (entry.op, entry.outcome, entry.error_code) == ("update", "broken", None)
 
 
+class _StateAtStop(_Podman):
+    """_Podman that records the stored state of the realm at each stop (NFR-030 order)."""
+
+    def __init__(self, paths: OwnedPaths, container: ContainerState | None) -> None:
+        super().__init__(container)
+        self.paths = paths
+        self.states_at_stop: list[RealmState] = []
+
+    def stop(self, container_id: str, timeout_s: int) -> None:
+        self.states_at_stop.append(_state(self.paths))
+        super().stop(container_id, timeout_s)
+
+
+class _StopFails(_Podman):
+    """_Podman whose stop fails, as `podman stop` does when it exits non-zero."""
+
+    def stop(self, container_id: str, timeout_s: int) -> None:
+        self.stops.append(container_id)
+        raise make("GINN-E-INTERNAL")
+
+
+def _services_on_control(paths: OwnedPaths, *, is_fifo: bool) -> Path:
+    """The runsv control path of the realm `arch`, a FIFO or a directory (runsv(8))."""
+    service = service_dir(paths, RealmName("arch"))
+    (service / "supervise").mkdir(parents=True)
+    control = service / "supervise" / "control"
+    if is_fifo:
+        os.mkfifo(control)
+    else:
+        control.mkdir()
+    return control
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize(
+    ("op", "state", "previous"),
+    [
+        ("create", RealmState.CREATING, None),
+        ("create", RealmState.BROKEN, None),
+        ("update", RealmState.UPDATING, RealmState.RUNNING),
+        ("update", RealmState.BROKEN, None),
+    ],
+)
+def test_a_dead_create_or_update_stops_its_running_container_before_the_record_reads_broken(
+    paths: OwnedPaths,
+    env: OpEnv,
+    op: str,
+    state: RealmState,
+    previous: RealmState | None,
+) -> None:
+    _save(paths, _record(state=state, previous_state=previous))
+    _write_journal(paths, _dead(op=op, step="pulled"))
+    podman = _StateAtStop(paths, ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BROKEN
+    assert podman.stops == [CID]
+    assert podman.states_at_stop == [state]
+    assert podman.container is ContainerState.EXITED
+    assert _state(paths) is RealmState.BROKEN
+    [entry] = _audit(paths)
+    assert (entry.op, entry.outcome, entry.error_code) == (op, "broken", None)
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize("container", [ContainerState.EXITED, None])
+def test_a_dead_update_whose_container_does_not_run_is_marked_broken_with_no_stop(
+    paths: OwnedPaths, env: OpEnv, container: ContainerState | None
+) -> None:
+    _save(paths, _record(state=RealmState.UPDATING, previous_state=RealmState.RUNNING))
+    _write_journal(paths, _dead(op="update", step="pulled"))
+    podman = _Podman(container)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BROKEN
+    assert podman.stops == []
+    assert _state(paths) is RealmState.BROKEN
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-081")
+def test_a_dead_services_on_update_tells_runsv_down_before_it_stops_the_container(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """runsv restarts a container that exits while it wants the service up, so `d` comes first."""
+    base = _record(state=RealmState.UPDATING, previous_state=RealmState.RUNNING)
+    record = replace(base, settings=replace(base.settings, services=True), services_at_create=True)
+    _save(paths, record)
+    _write_journal(paths, _dead(op="update", step="pulled"))
+    control = _services_on_control(paths, is_fifo=True)
+    reader = os.open(control, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        podman = _StateAtStop(paths, ContainerState.RUNNING)
+        outcome = _only(recover(env, podman))
+        assert os.read(reader, 8) == b"d"
+    finally:
+        os.close(reader)
+
+    assert outcome.outcome == OUTCOME_BROKEN
+    assert podman.stops == [CID]
+    assert _state(paths) is RealmState.BROKEN
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_update_whose_runsv_cannot_be_told_down_is_blocked_and_stops_nothing(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    base = _record(state=RealmState.UPDATING, previous_state=RealmState.RUNNING)
+    record = replace(base, settings=replace(base.settings, services=True), services_at_create=True)
+    _save(paths, record)
+    journal = _write_journal(paths, _dead(op="update", step="pulled"))
+    _services_on_control(paths, is_fifo=False)
+    podman = _StateAtStop(paths, ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "could not be told to stop" in outcome.reason
+    assert podman.stops == []
+    assert _state(paths) is RealmState.UPDATING
+    assert journal.exists()
+    assert _audit(paths) == []
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-122")
+def test_a_failed_stop_before_a_dead_create_is_blocked_and_keeps_the_record_and_journal(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.CREATING))
+    journal = _write_journal(paths, _dead(op="create", step="pulled"))
+    podman = _StopFails(ContainerState.RUNNING)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert outcome.reason.startswith("GINN-E-INTERNAL")
+    assert podman.stops == [CID]
+    assert _state(paths) is RealmState.CREATING
+    assert journal.exists()
+    assert _audit(paths) == []
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-122")
+def test_a_dead_create_whose_container_cannot_be_probed_is_blocked_and_nothing_is_stopped(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """Neither inspect nor the listing answers, so the container is not known to be stopped."""
+    _save(paths, _record(state=RealmState.CREATING))
+    journal = _write_journal(paths, _dead(op="create", step="pulled"))
+    podman = _Podman(ContainerState.RUNNING, inspect_fails=True, ps_fails=True)
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert podman.stops == []
+    assert _state(paths) is RealmState.CREATING
+    assert journal.exists()
+    assert _audit(paths) == []
+
+
 def _write_audit_after_the_pre_lock_read(
     env: OpEnv, monkeypatch: pytest.MonkeyPatch, entry: AuditEntry
 ) -> None:

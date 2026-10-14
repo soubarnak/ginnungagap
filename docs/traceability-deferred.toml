@@ -362,9 +362,9 @@ reason = "the 5000-file before and after pair is unit-tested under temporary roo
 
 [[deferred]]
 id = "NFR-030"
-milestone = "M8"
+milestone = "M10"
 partial = true
-reason = "NFR-030 is SIGKILL crash safety (kill at 50 random points per operation). Unit tests inject faults in-process at each undo step (test_hostsetup_undo.py), which is not a kill. G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran one clean setup and undo on a Void host with no kill. Undo left on the host only /run/lock/ginn-host-setup.lock, which ADR-013 Decision 11 documents. The user's ~/.local/state/ginn/log tree also stayed: it is an Owned Path (DR-010) that the user-run log service creates at run time, not a host change. That is not a crash proof. The kill-point test is still open for M8. Recovery (T2.8) is unit-tested in-process, with a fault between the audit append and the journal removal, which is not a kill (test_ops_recovery.py)"
+reason = "NFR-030 is SIGKILL crash safety. tests/unit/test_crash_safety.py (T8.6) kills every mutating op at every durable-effect point in-process, with per-op counts asserted at 50 or more, and at one point per op with a real SIGKILL, then runs recovery and checks the result (test_hostsetup_undo.py injects faults at each undo step, which is not a kill). Not gated there: autostart, idle-stop, service-exit, reattach, sync/export, a services-on running realm, and a development-tier create. G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran one clean setup and undo on a Void host with no kill, and undo left only /run/lock/ginn-host-setup.lock, which ADR-013 Decision 11 documents; that is not a crash proof. The host SIGKILL runs, on a Void host with rootless Podman, remain for M10"
 
 [[deferred]]
 id = "NFR-031"

@@ -46,10 +46,11 @@ the original op_id is never written twice:
 
 Revert rules, by the operation the journal names. They follow DR-020, the ADRs, FR-122 and FR-120:
 
-- create: `creating` becomes `broken`, with no error code. Partial artifacts stay, for
-  `ginn create --resume` or `ginn delete` (FR-122). A record already `stopped` is a complete create,
-  because `stopped` is the last record write of a create, so it is recovered without a change. A
-  record already `broken` is settled as broken, with no state write.
+- create: `creating` becomes `broken`, with no error code. A container that podman runs is stopped
+  first, as `_broken_verdict` describes. Partial artifacts stay, for `ginn create --resume` or
+  `ginn delete` (FR-122). A record already `stopped` is a complete create, because `stopped` is the
+  last record write of a create, so it is recovered without a change. A record already `broken` is
+  settled as broken, with no state write, and a container that runs is stopped too.
 - start: a record that already reads `running` is a completed start, because the record is saved
   running only after the attach. So is a journal step of `running`. Both are matched to podman. Any
   other step means the start did not finish: a container that podman runs is stopped, and the
@@ -77,8 +78,9 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
   its runit service, so runsv is told to stop it first (ADR-003). After the swap the record names
   gN+1, so the settled state comes from podman, and gN is removed by its label, best effort.
   Other records are matched to podman, as above.
-- update: `updating` becomes `broken` (DR-020, FR-120). A record already `broken` is settled as
-  broken, with no state write. Other records are matched to podman, as above.
+- update: `updating` becomes `broken` (DR-020, FR-120), with a running container stopped first as
+  for create. A record already `broken` is settled as broken, with no state write, and a container
+  that runs is stopped too. Other records are matched to podman, as above.
 - delete: a `deleting` record is left deleting, and so is a `broken` record. Both states are
   starting states for `ginn delete` (T4.7). Other records are matched to podman.
 - Any other pair, such as an install on a `creating` record, is impossible. It is reported as
@@ -699,13 +701,13 @@ def _decide(
         return _Decision(OUTCOME_RECOVERED, None, reason)
     record = store.load(name)
     if entry.op == OP_CREATE:
-        return _decide_create(record)
+        return _decide_create(paths, podman, record)
     if entry.op == OP_DELETE:
         return _decide_delete(podman, record)
     if entry.op == OP_REBUILD:
         return _decide_rebuild(paths, podman, record, entry)
     if entry.op == OP_UPDATE:
-        return _decide_update(podman, record)
+        return _decide_update(paths, podman, record)
     if entry.op == OP_START:
         return _decide_start(podman, record, entry)
     if entry.op in (OP_INSTALL, OP_REMOVE):
@@ -718,7 +720,7 @@ def _impossible(record: RealmRecord, op: str) -> _Decision:
     return _Decision(OUTCOME_BLOCKED, None, f"{reason}; left as it is")
 
 
-def _decide_create(record: RealmRecord) -> _Decision:
+def _decide_create(paths: OwnedPaths, podman: Podman, record: RealmRecord) -> _Decision:
     if record.state is RealmState.STOPPED:
         reason = "the record already reads stopped, the last record write of a create"
         return _Decision(OUTCOME_RECOVERED, None, reason)
@@ -727,21 +729,51 @@ def _decide_create(record: RealmRecord) -> _Decision:
             "interrupted create: marked broken; partial artifacts are left for "
             "'ginn create --resume' or 'ginn delete' (FR-122)"
         )
-        return _move(record, RealmState.BROKEN, OUTCOME_BROKEN, reason)
+        return _broken_verdict(paths, podman, record, reason)
     return _impossible(record, OP_CREATE)
 
 
-def _decide_update(podman: Podman, record: RealmRecord) -> _Decision:
+def _decide_update(paths: OwnedPaths, podman: Podman, record: RealmRecord) -> _Decision:
     if record.state is RealmState.UPDATING:
         reason = "interrupted update: marked broken (FR-120, DR-020)"
-        return _move(record, RealmState.BROKEN, OUTCOME_BROKEN, reason)
+        return _broken_verdict(paths, podman, record, reason)
     if record.state is RealmState.BROKEN:
         # A crash between the record write and the audit append: already settled.
         reason = "interrupted update: the record already reads broken, so nothing is moved"
-        return _Decision(OUTCOME_BROKEN, None, reason)
+        return _broken_verdict(paths, podman, record, reason)
     if record.state in _BY_PODMAN_FROM:
         return _decide_by_podman(podman, record, OP_UPDATE)
     return _impossible(record, OP_UPDATE)
+
+
+def _broken_verdict(
+    paths: OwnedPaths,
+    podman: Podman,
+    record: RealmRecord,
+    reason: str,
+) -> _Decision:
+    """The verdict for a record that reads broken, with its realm stopped first (DR-020).
+
+    A broken realm runs no container, and DR-020 has no move from broken to running. So a container
+    that podman runs is stopped before the record is written, as an interrupted start is
+    (`_decide_start`). A services-on realm runs under runit, which restarts a container that exits
+    while runsv wants it up. So runsv is told `d` first, even when no container runs, as a rebuild
+    does (ADR-003). A runsv that cannot be told blocks the entry, and nothing is stopped. A probe
+    that fails blocks it as well. A failed stop, raised by `_settle_locked`, blocks it too, so the
+    record stays as it was in every blocked case.
+    """
+    decision = _move(record, RealmState.BROKEN, OUTCOME_BROKEN, reason)
+    if decision.outcome == OUTCOME_BLOCKED:
+        return decision
+    if record.services_at_create:
+        try:
+            signal_runsv_down(service_dir(paths, record.name))
+        except OSError as exc:
+            detail = f"the runit service could not be told to stop ({exc})"
+            return _Decision(OUTCOME_BLOCKED, None, f"{detail}; the entry is kept")
+    if _podman_state(podman, record) is not ContainerState.RUNNING:
+        return decision
+    return replace(decision, stop_container=record.container_id)
 
 
 def _decide_rebuild(
