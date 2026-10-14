@@ -132,7 +132,7 @@ class CreateWizard:
         )
 
     def create_args(self) -> tuple[str, ...]:
-        """The argv after `ginn`, for example `--json create arch --name arch --tier basic ...`.
+        """The argv of `ginn --json create`, for example `--json create arch --name arch ...`.
 
         Raises ValueError when `can_create` is false. The Create button stays disabled then.
         """
@@ -152,7 +152,9 @@ class CreateWizard:
         if self._packages:
             args.extend(["--with", *self._packages])
         if self._everything:
-            args.append("--everything")
+            # The wizard's confirmation has no size estimate, because the CLI computes it inside
+            # create. --yes skips the CLI's prompt, which would have shown that size (FR-014 AC-1).
+            args.extend(["--everything", "--yes"])
         return tuple(args)
 
 

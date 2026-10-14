@@ -44,6 +44,8 @@ class IntegrityBanner:
 ACKNOWLEDGE_ARGS: tuple[str, ...] = ("--json", "integrity", "--ack")
 BANNER_TITLE = "Host files changed since the baseline"
 BANNER_REMEDY = "Review the listed paths, then acknowledge the change."
+BLOCKED_TEXT = "Acknowledge the host change in Host health first (FR-104)"
+"""The tooltip of an action that waits until the host change is acknowledged."""
 
 
 class HealthViewModel:
@@ -96,6 +98,11 @@ class HealthViewModel:
             return None
         paths = state.changed or state.pending or ()
         return IntegrityBanner(title=BANNER_TITLE, paths=paths, remedy=BANNER_REMEDY)
+
+    @property
+    def blocks_mutations(self) -> bool:
+        """True while the banner shows. The actions that change the host or the realms are off."""
+        return self.banner is not None
 
     @property
     def acknowledge_args(self) -> tuple[str, ...]:

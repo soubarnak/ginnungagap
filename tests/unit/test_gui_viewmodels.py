@@ -263,12 +263,13 @@ def test_the_everything_option_is_offered_only_for_kali() -> None:
     wizard.set_everything(True)
     assert wizard.everything is False
     assert "--everything" not in wizard.create_args()
+    assert "--yes" not in wizard.create_args()
 
     wizard.choose_distro("kali")
     assert wizard.show_everything is True
     wizard.set_everything(True)
     assert wizard.everything is True
-    assert "--everything" in wizard.create_args()
+    assert wizard.create_args()[-2:] == ("--everything", "--yes")
 
     wizard.choose_distro("debian")
     assert wizard.everything is False
@@ -512,3 +513,19 @@ def test_the_doctor_badge_follows_the_worst_check() -> None:
     )
     assert vm.badge is HealthBadge.FAIL
     assert vm.checks[0].fixes == ("ginn host-setup --user tester",)
+
+
+@pytest.mark.fr("FR-104")
+def test_the_changing_actions_stay_blocked_until_the_host_change_is_acknowledged() -> None:
+    vm = HealthViewModel()
+    assert vm.blocks_mutations is False
+
+    vm.apply_integrity(
+        IntegrityState(
+            status="changed", changed=("/etc/hosts",), pending=("/etc/hosts",), warnings=()
+        )
+    )
+    assert vm.blocks_mutations is True
+
+    vm.apply_integrity(IntegrityState(status="acknowledged", changed=(), pending=None, warnings=()))
+    assert vm.blocks_mutations is False

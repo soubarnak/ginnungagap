@@ -11,6 +11,8 @@ Owned Paths. No other user can connect to a channel that does not exist. This pr
 channel satisfies IR-031 and FR-105. ADR-009, which should record this decision, is not written
 yet.
 
-The package keeps GTK out of the logic. `backend.py` and `viewmodels/` import no gi module.
-`watch.py` defines the change-source interface, and `_gio.py` is the only file that imports gi.
+The package keeps GTK out of the logic. `backend.py`, `control.py`, `jobs.py`, `actions.py` and
+`viewmodels/` import no gi module, so they load without GTK. `watch.py` defines the change-source
+interface. Only `_gio.py` (the change source) and `views/_gtk.py` (the GTK names) import gi, and
+`app.py` and `views/` need GTK to run.
 """

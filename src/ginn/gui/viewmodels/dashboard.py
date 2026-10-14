@@ -87,6 +87,7 @@ class DashboardViewModel:
     def __init__(self) -> None:
         self._applied_request = 0
         self._rows: tuple[RealmRow, ...] = ()
+        self._realms: tuple[RealmView, ...] = ()
         self._loaded = False
         self._failure: Failure | None = None
 
@@ -120,13 +121,28 @@ class DashboardViewModel:
         if listing.realms is None:
             self._failure = failure_of(listing.result)
             return True
+        self._realms = listing.realms
         self._rows = tuple(row_for(realm) for realm in listing.realms)
         self._loaded = True
         self._failure = None
         return True
 
+    def fail(self, failure: Failure) -> None:
+        """Show a read that failed before the CLI answered, such as a missing ginn program.
+
+        The rows of the last good read stay on screen, as they do for a failed listing.
+        """
+        self._failure = failure
+
     def row(self, name: str) -> RealmRow | None:
         for row in self._rows:
             if row.name == name:
                 return row
+        return None
+
+    def realm(self, name: str) -> RealmView | None:
+        """The realm as the last applied listing read it. The detail view starts from it."""
+        for realm in self._realms:
+            if realm.name == name:
+                return realm
         return None

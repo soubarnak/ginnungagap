@@ -88,7 +88,8 @@ reason = "unit tests on the fake podman cover status and list (T4.5, ops/lifecyc
 [[deferred]]
 id = "FR-021"
 milestone = "M8"
-reason = "not covered yet; the roadmap assigns its test to M8"
+partial = true
+reason = "the GUI rebuild control is unit-tested (tests/unit/test_gui_detail.py): its button stays off and its confirmation is built, and its parity row is a strict xfail until `ginn rebuild` exists (T8.3, tests/unit/test_gui_parity.py). A rebuild is not run on a host, and the CLI command itself is T8.3's proof"
 
 [[deferred]]
 id = "FR-022"
@@ -240,12 +241,13 @@ reason = "unit tests run; the view and host proofs are deferred to M9"
 id = "FR-101"
 milestone = "M9"
 partial = true
-reason = "unit tests run; the view and host proofs are deferred to M9"
+reason = "unit tests run (tests/unit/test_gui_viewmodels.py, test_gui_parity.py) and the Xvfb smoke test runs the wizard; the view and host proofs are deferred to M9. FR-014 AC-1 is not met in the Control Plane: the Kali everything confirmation (views/wizard.py) shows no size estimate, because the CLI computes it inside create (T8.7) and --yes skips its prompt. FR-014 is Should, so it has no entry here; this note is its record. Fix: a two-step --json flow that prints the estimate and then confirms"
 
 [[deferred]]
 id = "FR-102"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "the detail confirmations, the delete purge box that is unchecked by default, and each action's argv are unit-tested (tests/unit/test_gui_detail.py, test_gui_parity.py) and smoke-tested under Xvfb (tests/gui/test_views_smoke.py, which skips without GTK 4 and Xvfb). Rebuild stays off until T8.3, and the host run of the views is M9"
 
 [[deferred]]
 id = "FR-103"
@@ -262,7 +264,8 @@ reason = "unit tests run; the view and host proofs are deferred to M9"
 [[deferred]]
 id = "FR-106"
 milestone = "M9"
-reason = "not covered yet; the roadmap assigns its test to M9"
+partial = true
+reason = "the parity test (tests/unit/test_gui_parity.py) maps every IR-001..IR-006 control to its CLI verb and parses each argv with the real parser. The rebuild control is a strict xfail until T8.3, and the view-to-CLI run on a host is M9"
 
 [[deferred]]
 id = "FR-120"

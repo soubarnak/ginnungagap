@@ -23,8 +23,8 @@ from ginn.store.paths import OwnedPaths
 from tests.unit.gui_support import FakeGinn, make_fake_ginn
 
 GUI_DIR = Path(backend.__file__).resolve().parent
-GI_MODULES = frozenset({"_gio.py"})
-"""The only gui module that may import gi: the change source of the Control Plane."""
+GI_MODULES = frozenset({"_gio.py", "views/_gtk.py"})
+"""The only gui modules that may import gi: the change source and the views' GTK import point."""
 
 
 @pytest.fixture

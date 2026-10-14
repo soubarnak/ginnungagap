@@ -10,10 +10,9 @@ The CLI JSON contract is in src/ginn/cli/output.py. In JSON mode:
 - stdout holds one JSON object, the result. It is empty on failure, except for `doctor`, which
   prints its report before it fails.
 - stderr holds JSON lines. `{"progress": {"step", "message"}}` lines come after each finished step
-  of a long operation, and the runner passes their message to `on_progress`. `{"verbose": ...}`
-  lines appear only when the caller passes `--verbose`, and they reach `on_progress` too.
-  `{"warning": {...}}` lines come before a failure. The last line is `{"error": {...}}` on
-  failure, and it carries the GINN-E-* code, the remedy and exit_code.
+  of a long operation. The CLI writes them without any flag, and the runner passes their message
+  to `on_progress`. `{"warning": {...}}` lines come before a failure. The last line is
+  `{"error": {...}}` on failure, and it carries the GINN-E-* code, the remedy and exit_code.
 
 The GUI never starts a server. Nothing here listens on a socket, so no peer from another user
 can connect (NFR-SEC-009). The runner's `on_progress` callback runs on a stderr reader thread of
@@ -95,15 +94,12 @@ class CliResult:
 def _progress_text(line: str) -> str | None:
     """The text of a progress line on stderr, or None for any other line.
 
-    `{"progress": {"step", "message"}}` is written by the CLI after each step of a create or a
-    delete (FR-107). `{"verbose": text}` is written only when the caller asks for --verbose.
+    `{"progress": {"step", "message"}}` is written by the CLI after each finished step of a long
+    operation (FR-107). The Control Plane never passes --verbose, so no verbose line is read here.
     """
     obj = _json_object(line)
     if obj is None:
         return None
-    verbose = obj.get("verbose")
-    if isinstance(verbose, str):
-        return verbose
     progress = obj.get("progress")
     if isinstance(progress, dict):
         message = progress.get("message")
@@ -243,14 +239,19 @@ class CliRunner:
                     start_new_session=True,
                 )
             except OSError as exc:
+                self._cancel_requested = False
                 raise CliLaunchError(f"cannot start {self._program[0]}: {exc}") from exc
             self._child = child
-            self._cancel_requested = False
+            # A cancel that came before the child existed is kept for this run (FR-107). It is
+            # sent here, under the lock, so the child cannot miss it.
+            if self._cancel_requested:
+                self._interrupt(child)
         if child.stdout is None or child.stderr is None:
             child.kill()
             child.wait()
             with self._lock:
                 self._child = None
+                self._cancel_requested = False
             raise CliLaunchError("ginn was started without its output pipes")
         stderr_lines: list[str] = []
         failures: list[BaseException] = []
@@ -291,18 +292,31 @@ class CliRunner:
 
         A cancel that lands while a helper runs can surface as that step's error code, not as
         GINN-E-INTERRUPTED. `CliResult.cancelled` is the authoritative flag for the cancel.
+
+        A cancel before the child starts is kept: `run` sends the signal right after it starts the
+        child, and the result is cancelled. The flag is cleared at the end of `run`. A runner runs
+        one command (Operation makes one per call), so a flag that a late cancel leaves behind is
+        never read.
         """
         with self._lock:
             child = self._child
-            if child is None or child.poll() is not None:
+            if child is None:
+                self._cancel_requested = True
+                return False
+            if not self._interrupt(child):
                 return False
             self._cancel_requested = True
-            try:
-                os.killpg(child.pid, signal.SIGINT)
-            except ProcessLookupError:
-                self._cancel_requested = False
-                return False
             return True
+
+    def _interrupt(self, child: subprocess.Popen[str]) -> bool:
+        """Send SIGINT to the child's group. The caller holds the lock. False when it has exited."""
+        if child.poll() is not None:
+            return False
+        try:
+            os.killpg(child.pid, signal.SIGINT)
+        except ProcessLookupError:
+            return False
+        return True
 
 
 @dataclass(frozen=True)
