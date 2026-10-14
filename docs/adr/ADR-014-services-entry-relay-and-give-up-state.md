@@ -2,7 +2,7 @@
 
 - Status: Proposed (Decision 2 accepted by the user on 2026-10-14)
 - Date: 2026-10-14
-- Amended: 2026-10-15 (T7.9 review: four helpers, the worker-to-run contract, the relay root argument, the undo step, and the env-name, flag and LOCKED rules; T7.13 review: the orphan marker). See "Amendment (2026-10-15): T7.9 review" and "Amendment (2026-10-15): T7.13 review, the orphan marker" at the end.
+- Amended: 2026-10-15 (T7.9 review: four helpers, the worker-to-run contract, the relay root argument, the undo step, and the env-name, flag and LOCKED rules; T7.12 review: the stop rule of Decision 2; T7.13 review: the orphan marker). See "Amendment (2026-10-15): T7.9 review", "Amendment (2026-10-15): T7.12 give-up rule" and "Amendment (2026-10-15): T7.13 review, the orphan marker" at the end.
 
 ## Context
 
@@ -157,7 +157,7 @@ Every caller of `exec`, `exec_interactive` or `run_step` in `src/ginn` (rg, chec
 Exact rule:
 
 1. A give-up is the supervisor's decision. It is reached when `note_crash` returns give-up (5 non-zero exits within 60 s, `src/ginn/services/supervise.py:34`) for a service that is not wanted down.
-2. The stop mark is checked before the crash is counted. `finish_service` reads the runsv status and looks for `want down`, the mark that `sv down` sets. `parse_status` (`src/ginn/services/supervisor.py:156-169`) currently checks only `want up`, so it gains `want_down`. A finish with `want down` is a user stop. It counts no crash and gives no give-up. This replaces the current inference that exit 0 means a stop (`src/ginn/ops/service.py:198`) for user stops. Exit 0 still clears the crash log. Gate G12 checks the rule with real runsv.
+2. The stop mark is checked before the crash is counted. `finish_service` reads the runsv status and looks for `want down`, the mark that `sv down` sets. `parse_status` (`src/ginn/services/supervisor.py:156-169`) currently checks only `want up`, so it gains `want_down`. A finish with `want down` is a user stop. It counts no crash and gives no give-up. This replaces the current inference that exit 0 means a stop (`src/ginn/ops/service.py:198`) for user stops. Exit 0 still clears the crash log. Gate G12 checks the rule with real runsv. Amended 2026-10-15 (T7.12 amendment, item 1): exit 0 still means a stop, and the mark adds a stop signal; exit 1 under the mark is a stop; any other exit under the mark keeps the state. Gate G12 also checks the order of runsv's writes (T7.12 amendment, item 2).
 3. On give-up the record moves to `failed`, from `running` or from `stopped`. From `rebuilding` the rebuild path owns the state, and the existing `state_kept` audit stays. From `failed` nothing changes.
 4. A crash counts in any phase. A start that fails before the container reaches `running` counts the same as a crash of a running realm. A failed start makes `_service-run` exit non-zero (`src/ginn/cli/commands/service_run.py:34-48`), and the test covers this.
 5. After a give-up the process stays down: the `down` file is kept (`service.py:212`). `ginn start` moves `failed` to `running` (DR-020) and removes the `down` file through the start path.
@@ -325,6 +325,22 @@ This amendment records the design changes that the review of the T7.9 helpers ma
 14. Undo. The Undo paragraph of the body is replaced. Host Setup undo runs one fixed exec step after its wait step. That step does not run `sv down`, and it runs no process as root. It removes `<state>/ginn/sv/_exec` and the exec runtime files with fd-anchored removal that never follows a symlink. A runsv that still holds `_exec` is found by a non-blocking write-only probe of `supervise/ok`, which writes nothing. In that case undo keeps the directory and reports it. That is a known residual. Relay syncs are serialised by an flock on `<SV_DIR>/.exec-relay.lock`, and the `_exec` service is built in a `mkdtemp` directory prefixed `._exec.` and renamed in.
 
 What did not change: the relay-or-direct routing of Decision 1, the give-up rules of Decision 2, the wire frame types and field layout, the SCM_RIGHTS order, the peer checks, the exec lock semantics and the error catalogue.
+
+## Amendment (2026-10-15): T7.12 give-up rule
+
+This amendment records the stop rule that T7.12 built, and what its review settled. The give-up rules of Decision 2 (rules 1, 3, 4 and 5) and the table amendment stand as written.
+
+1. The stop rule, which amends Decision 2 rule 2. `finish_service` (`src/ginn/ops/service.py`) decides by the exit code of run and by the `want down` mark that `sv down` sets.
+   - Exit 0 is a stop request, with or without the mark. The realm reads `stopped`, the crash count is cleared, and the relay is synced.
+   - With `want down`, exit 1 is a stop request too. It is ginn-wait's own 1, which means conmon exited on its own, so the container is gone. The realm reads `stopped`. A `_service-run` refusal that exits 1 has the same code and takes the same path. That is correct when the refusal comes before podman starts the container. If `_service-run` exits 1 after podman has started the container, with `want down` set, the record would read `stopped` while the container runs. This is recorded as a residual.
+   - With `want down`, any other exit (-1, ginn-wait 2 to 5, or a ginn exit from `_service-run` other than 1) keeps the realm's state and clears the crash count. It reports GINN-W-STOP-UNSETTLED, a warning with exit 0, on the runit log or in the CLI's warnings. The container may still run, for example after ginn-wait 4, where `podman stop` failed while conmon runs.
+   - Without the mark, a non-zero end is a crash. A status that cannot be read is no proof of a stop, so it is a crash too.
+
+   No stop request and no kept state counts a crash or gives a give-up. Rule 2 said that the mark "replaces" exit 0 for user stops. That sentence is amended: exit 0 still means a stop, and the mark adds a stop signal.
+
+2. Gate G12 must check the order of runsv's writes. When `finish` runs, runsv must already have recorded the finish pid, so that `sv status` reports the finish state and the `want down` mark. If the mark is not visible, a user stop that exits non-zero is counted as a crash. That is the safe side: a crash can lead to a give-up, but no stop is recorded that did not happen. Exit 0 is unaffected, because it does not read the status.
+
+3. The warning is GINN-W-STOP-UNSETTLED (`src/ginn/errors.py`; FR-081, CL-24). Its placeholder is `exit_code`, not `code`, because `warn()` and `make()` take `code` as their first parameter, so a keyword `code` would collide.
 
 ## Amendment (2026-10-15): T7.13 review, the orphan marker
 

@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from ginn.domain import RealmName, RealmState
+from ginn.domain.states import IllegalTransition
 from ginn.errors import GinnError
 from ginn.errors import Warning as GinnWarning
 from ginn.ops import delete as delete_ops
@@ -40,6 +41,7 @@ from ginn.services.runit_user import (
     service_dir,
     write_service_dir,
 )
+from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.journal import Journal
 from ginn.store.locks import realm_lock
 from ginn.store.records import RealmStore
@@ -62,6 +64,11 @@ GLOBAL_ARGV = [
 ]
 PROGRAM = "/usr/bin/ginn"
 T0 = 1_800_000_000.0
+
+UP_STATUS = "run: /x/lab: (pid 4321) 2s\n"
+"""The `sv status` of a realm that runs, or that a crash has restarted: no `want down`."""
+DOWN_STATUS = "run: /x/lab: (pid 4321) 2s, want down\n"
+"""The `sv status` after `sv down`: runsv carries the `want down` mark (CL-24)."""
 
 pytestmark = [pytest.mark.fr("FR-081"), pytest.mark.fr("AS-028")]
 
@@ -102,10 +109,27 @@ def user(world: World) -> HostUser:
     return HostUser(uid=os.getuid(), host_home=world.home, host_env={})
 
 
-def hooks_for(helper: Path, sleeps: list[float]) -> ServiceHooks:
-    """Hooks where no host path exists, so the Basic grants all skip and no helper runs."""
+def supervisor_saying(line: str) -> SupervisorHooks:
+    """The sv control, with `sv status` answering `line` and no sv process run (FR-081)."""
+
+    def run(argv: Sequence[str], timeout: float) -> Result:
+        return Result(0, line, "")
+
+    return SupervisorHooks(sv="/usr/bin/sv", run=run)
+
+
+def hooks_for(helper: Path, sleeps: list[float], status: str = UP_STATUS) -> ServiceHooks:
+    """Hooks where no host path exists, so the Basic grants all skip and no helper runs.
+
+    `status` is what `sv status` says about the realm's runsv: UP_STATUS or DOWN_STATUS.
+    """
     lifecycle = LifecycleHooks(exists=lambda _path: False)
-    return ServiceHooks(lifecycle=lifecycle, wait_helper=str(helper), sleep=sleeps.append)
+    return ServiceHooks(
+        lifecycle=lifecycle,
+        wait_helper=str(helper),
+        sleep=sleeps.append,
+        supervisor=supervisor_saying(status),
+    )
 
 
 def services_realm(world: World, state: RealmState, *, running: bool, services: bool = True):  # type: ignore[no-untyped-def]
@@ -315,6 +339,7 @@ def test_a_crash_waits_the_restart_delay_and_leaves_the_realm_running(
 
 
 @pytest.mark.fr("AS-028")
+@pytest.mark.fr("NFR-033")
 def test_five_crashes_within_sixty_seconds_give_the_realm_up(
     world: World,
     env,
@@ -339,6 +364,7 @@ def test_five_crashes_within_sixty_seconds_give_the_realm_up(
     last = last_audit(env)
     assert (last.op, last.outcome) == ("service-exit", "ok")
     assert last.params["outcome"] == "gave-up"
+    assert last.params["state"] == "failed (was running)"
 
 
 @pytest.mark.fr("AS-028")
@@ -365,7 +391,9 @@ def test_five_crashes_spanning_more_than_sixty_seconds_do_not_give_up(
 
 
 @pytest.mark.fr("AS-028")
-def test_a_give_up_of_a_stopped_realm_writes_down_and_leaves_the_state_stopped(
+@pytest.mark.fr("DR-020")
+@pytest.mark.fr("FR-124")
+def test_a_give_up_of_a_stopped_realm_writes_down_and_sets_failed(
     world: World,
     env,
     helper: Path,
@@ -380,8 +408,303 @@ def test_a_give_up_of_a_stopped_realm_writes_down_and_leaves_the_state_stopped(
         last = finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks)
     assert last is ServiceExit.GAVE_UP
     assert (service_dir(world.paths, REALM) / DOWN).is_file()
-    assert stored(world).state is RealmState.STOPPED, "DR-020 has no stopped-to-failed move"
-    assert last_audit(env).params["state_kept"] == "stopped"
+    assert os.read(reader_of_control, 8) == b"d"
+    assert stored(world).state is RealmState.FAILED, "CL-24: the give-up moves stopped to failed"
+    assert last_audit(env).params["state"] == "failed (was stopped)"
+
+
+@pytest.mark.fr("FR-081")
+def test_four_start_phase_crashes_within_sixty_seconds_do_not_give_up(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    hooks = hooks_for(helper, sleeps)
+    outcomes = []
+    for offset in (0.0, 10.0, 20.0, 30.0):
+        clock.set(T0 + offset)
+        outcomes.append(finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks))
+
+    assert outcomes == [ServiceExit.RESTART] * 4
+    assert sleeps == [5.0] * 4
+    assert stored(world).state is RealmState.STOPPED
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
+    assert os.read(reader_of_control, 8) == b""
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("NFR-033")
+def test_five_start_phase_crashes_spread_past_sixty_seconds_do_not_give_up(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    hooks = hooks_for(helper, sleeps)
+    outcomes = []
+    for offset in (0.0, 15.0, 30.0, 45.0, 61.0):
+        clock.set(T0 + offset)
+        outcomes.append(finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks))
+
+    assert outcomes == [ServiceExit.RESTART] * 5
+    assert stored(world).state is RealmState.STOPPED
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
+    assert os.read(reader_of_control, 8) == b""
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("DR-020")
+def test_a_crash_loop_the_supervisor_starts_without_a_user_command_gives_failed(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    hooks = hooks_for(helper, sleeps)
+    outcomes = []
+    for offset in (0.0, 1.0, 2.0, 3.0, 4.0):
+        clock.set(T0 + offset)
+        outcomes.append(finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks))
+
+    assert outcomes == [ServiceExit.RESTART] * 4 + [ServiceExit.GAVE_UP]
+    assert stored(world).state is RealmState.FAILED
+    assert os.read(reader_of_control, 8) == b"d"
+    assert "start" not in ops_of(world), "no user command started the realm"
+    assert audit_ops(env) == ["service-exit"], "only the give-up is audited"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_give_up_from_failed_keeps_the_state_and_says_so(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.FAILED, running=False)
+    hooks = hooks_for(helper, sleeps)
+    for offset in (0.0, 1.0, 2.0, 3.0, 4.0):
+        clock.set(T0 + offset)
+        last = finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks)
+
+    assert last is ServiceExit.GAVE_UP
+    assert stored(world).state is RealmState.FAILED
+    assert last_audit(env).params["state_kept"] == "failed"
+    assert "state" not in last_audit(env).params
+
+
+@pytest.mark.fr("FR-081")
+def test_a_want_down_stop_with_exit_zero_records_the_realm_stopped_and_counts_no_crash(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+    log = crash_log(world.paths, REALM)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("[1.0, 2.0, 3.0, 4.0]", encoding="utf-8")
+    hooks = hooks_for(helper, sleeps, DOWN_STATUS)
+    clock.set(T0 + 5.0)
+
+    outcome = finish_service(env, REALM, exit_code=0, signal_no=0, hooks=hooks)
+
+    assert outcome is ServiceExit.STOPPED
+    assert stored(world).state is RealmState.STOPPED
+    assert not log.exists(), "a stop request clears the crash history"
+    assert sleeps == [], "a user stop does not wait the restart delay"
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
+    assert os.read(reader_of_control, 8) == b""
+    assert audit_ops(env) == ["stop"]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_want_down_end_with_exit_one_is_conmon_gone_and_records_the_realm_stopped(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    # ginn-wait 1: conmon exited on its own during a stop request, so the container is gone.
+    services_realm(world, RealmState.RUNNING, running=True)
+    log = crash_log(world.paths, REALM)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("[1.0, 2.0, 3.0, 4.0]", encoding="utf-8")
+    hooks = hooks_for(helper, sleeps, DOWN_STATUS)
+    outcomes = []
+    for offset in (5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
+        clock.set(T0 + offset)
+        outcomes.append(finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks))
+
+    assert outcomes == [ServiceExit.STOPPED] * 6, "six stop requests never give up"
+    assert stored(world).state is RealmState.STOPPED
+    assert not log.exists(), "a stop request clears the crash history"
+    assert sleeps == [], "a user stop does not wait the restart delay"
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
+    assert os.read(reader_of_control, 8) == b""
+    assert "service-exit" not in audit_ops(env)
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.parametrize("code", [-1, 2, 3, 4, 5])
+def test_a_want_down_stop_with_another_code_keeps_the_state_counts_no_crash_and_logs(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+) -> None:  # type: ignore[no-untyped-def]
+    # ginn-wait 4 means `podman stop` failed while conmon still runs, so the record must not move.
+    services_realm(world, RealmState.RUNNING, running=True)
+    log = crash_log(world.paths, REALM)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("[1.0, 2.0, 3.0, 4.0]", encoding="utf-8")
+    hooks = hooks_for(helper, sleeps, DOWN_STATUS)
+    outcomes = []
+    for offset in (5.0, 6.0, 7.0, 8.0, 9.0, 10.0):
+        clock.set(T0 + offset)
+        outcomes.append(
+            finish_service(
+                env, REALM, exit_code=code, signal_no=9 if code == -1 else 0, hooks=hooks
+            )
+        )
+
+    assert outcomes == [ServiceExit.STOPPED] * 6, "six want-down ends never give up"
+    assert stored(world).state is RealmState.RUNNING, "the record keeps its state"
+    assert not log.exists(), "a stop request clears the crash history"
+    assert sleeps == [], "a user stop does not wait the restart delay"
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
+    assert os.read(reader_of_control, 8) == b""
+    err = capsys.readouterr().err
+    assert "GINN-W-STOP-UNSETTLED" in err, "the runit log carries the kept state"
+    assert f"exit {code}" in err, "the warning names the exit code"
+    assert "service-exit" not in audit_ops(env)
+    assert "stop" not in audit_ops(env), "no stop was recorded"
+
+
+@pytest.mark.fr("FR-081")
+def test_the_kept_state_is_a_warning_on_the_callers_list_and_not_on_stderr(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+    hooks = hooks_for(helper, sleeps, DOWN_STATUS)
+    notices: list[GinnWarning] = []
+
+    outcome = finish_service(env, REALM, exit_code=4, signal_no=0, hooks=hooks, warnings=notices)
+
+    assert outcome is ServiceExit.STOPPED
+    assert [notice.code for notice in notices] == ["GINN-W-STOP-UNSETTLED"]
+    assert "exit 4" in notices[0].message
+    assert "ginn stop lab" in notices[0].remedy
+    assert capsys.readouterr().err == "", "the CLI prints the list, so stderr stays quiet"
+
+
+@pytest.mark.fr("DR-020")
+def test_the_store_refuses_stopped_to_failed_without_give_up_and_writes_nothing(
+    world: World,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False)
+    store = RealmStore(world.paths)
+    before = store.load(REALM)
+
+    with pytest.raises(IllegalTransition):
+        store.set_state(REALM, RealmState.FAILED)
+    assert store.load(REALM) == before, "a refused move writes nothing"
+
+    moved = store.set_state(REALM, RealmState.FAILED, give_up=True)
+    assert moved.state is RealmState.FAILED
+    assert store.load(REALM).state is RealmState.FAILED
+
+
+@pytest.mark.fr("FR-081")
+def test_a_status_that_cannot_be_read_counts_the_end_as_a_crash(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+
+    def unreadable(argv: Sequence[str], timeout: float) -> Result:
+        return Result(1, "", "warning: /x/lab: unable to open supervise/ok: file does not exist\n")
+
+    hooks = replace(
+        hooks_for(helper, sleeps),
+        supervisor=SupervisorHooks(sv="/usr/bin/sv", run=unreadable),
+    )
+    outcome = finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks)
+
+    assert outcome is ServiceExit.RESTART, "no proof of a stop: the crash is counted"
+    assert sleeps == [5.0]
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-124")
+def test_a_crash_while_running_gives_failed_and_the_audit_names_the_move(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+    hooks = hooks_for(helper, sleeps)
+    for offset in (0.0, 1.0, 2.0, 3.0, 4.0):
+        clock.set(T0 + offset)
+        finish_service(env, REALM, exit_code=-1, signal_no=9, hooks=hooks)
+
+    assert stored(world).state is RealmState.FAILED
+    assert last_audit(env).params["state"] == "failed (was running)"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_stop_request_during_the_crash_window_restarts_the_count(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+    hooks = hooks_for(helper, sleeps)
+    for offset in (0.0, 1.0, 2.0, 3.0):
+        clock.set(T0 + offset)
+        finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks)
+    clock.set(T0 + 4.0)
+    finish_service(env, REALM, exit_code=0, signal_no=0, hooks=hooks)
+    assert not crash_log(world.paths, REALM).exists()
+
+    clock.set(T0 + 5.0)
+    outcomes = [finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks) for _ in range(4)]
+
+    assert outcomes == [ServiceExit.RESTART] * 4
+    assert stored(world).state is RealmState.STOPPED
+    assert not (service_dir(world.paths, REALM) / DOWN).exists()
 
 
 @pytest.mark.fr("FR-019")

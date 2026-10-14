@@ -595,6 +595,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-084, ADR-014 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-W-STOP-UNSETTLED",
+        exit_code=0,
+        summary="a stop of realm '{realm}' ended with exit {exit_code}; the container may still "
+        "run, so its state was kept",
+        remedy="run 'ginn stop {realm}' again, or check 'ginn status {realm}'",
+        source="FR-081, ADR-014, CL-24 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-RECOVERED",
         exit_code=0,
         summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",

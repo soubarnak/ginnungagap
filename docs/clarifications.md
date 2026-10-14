@@ -250,8 +250,8 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Issue: the DR-020 transition table has no edge from `stopped` to `failed`. FR-081 AC-3 requires that 5 crashes within 60 s end with `ginn status` showing `failed`. A crash during a start leaves the realm `stopped`, and the table does not allow the move (T7.7, F10: `spikes/results/T7.7-services-real.md:21`, `:162`).
 - Reading: DR-020 gains one edge, `stopped` to `failed`. It is legal only when the supervisor gives up: 5 counted crashes within 60 s, with no user stop in progress. No user command, and no other path, moves a stopped realm to `failed`. This is the user's decision of 2026-10-14 (F10).
 - Proposed wording: add `stopped` to `failed` (supervisor give-up only) to the DR-020 table.
-- How ginn works now: the give-up path does not set `failed` from `stopped`. The change lands with T7.12 and ADR-014 Decision 2. It adds a `give_up` flag to the transition check, so no other caller can make the edge.
-- Status: decided by the user 2026-10-14. The build proceeds under this reading. The SRS wording is open for v1.1.
+- How ginn works now (landed in T7.12, 2026-10-15): `finish_service` sets `failed` from `stopped` or `running` on give-up, through the `give_up` flag of the transition check, so no other caller can make the edge. The stop rule that a give-up depends on is ADR-014 Decision 2 rule 2 as amended by the T7.12 amendment. Exit 0, or exit 1 with `want down`, records `stopped`. Any other exit with `want down` keeps the state and reports GINN-W-STOP-UNSETTLED. Neither counts a crash.
+- Status: decided by the user 2026-10-14. The build proceeds under this reading. The SRS wording is open for v1.1. Landed in T7.12 (2026-10-15). The G12 host check, which confirms runsv's write order, is pending.
 
 ## CL-25: FR-081 AC-3 "failed" includes a realm that crash-loops at boot
 

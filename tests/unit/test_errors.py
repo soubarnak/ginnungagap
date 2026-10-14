@@ -106,6 +106,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-RELAY-ORPHAN": 0,
     "GINN-W-ORPHAN-UNSETTLED": 0,
     "GINN-W-RELAY-SYNC": 0,
+    "GINN-W-STOP-UNSETTLED": 0,
 }
 
 

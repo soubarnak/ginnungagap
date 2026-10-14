@@ -10,6 +10,7 @@ runs.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from ginn.ops.service import ServiceHooks
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.services.runit_user import conmon_pidfile, crash_log, service_dir, write_service_dir
+from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.records import RealmStore
 from tests.unit.realm_cli_support import DIGEST, World, record_of
 
@@ -38,8 +40,15 @@ GLOBAL_ARGV = [
     "crun",
 ]
 REALM = RealmName("lab")
+UP_STATUS = "run: /x/lab: (pid 4321) 2s\n"
+"""What `sv status` says of a realm that runs or that a crash restarted: no `want down` (CL-24)."""
 
 pytestmark = [pytest.mark.fr("FR-081"), pytest.mark.fr("AS-028")]
+
+
+def _sv_says_up(argv: Sequence[str], timeout: float) -> Result:
+    """The sv control of the finish: `sv status` answers UP_STATUS, and no sv process runs."""
+    return Result(0, UP_STATUS, "")
 
 
 @pytest.fixture
@@ -75,7 +84,10 @@ def sleeps(world: World, helper: Path, monkeypatch: pytest.MonkeyPatch) -> list[
         _context,
         "service_hooks",
         lambda: ServiceHooks(
-            lifecycle=_context.lifecycle_hooks(), wait_helper=str(helper), sleep=recorded.append
+            lifecycle=_context.lifecycle_hooks(),
+            wait_helper=str(helper),
+            sleep=recorded.append,
+            supervisor=SupervisorHooks(sv="/usr/bin/sv", run=_sv_says_up),
         ),
     )
 
@@ -134,6 +146,39 @@ def test_service_finish_with_exit_zero_records_the_realm_stopped(
 
     assert sleeps == []
     assert RealmStore(world.paths).load(REALM).state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-081")
+def test_a_failed_start_makes_service_run_exit_non_zero_and_execs_nothing(
+    world: World, sleeps: list[float], execs: list[list[str]]
+) -> None:
+    _services_realm(world, RealmState.STOPPED, running=False)
+    world.fake.fail_ops = {"start": "GINN-E-INTERNAL"}
+
+    assert main(["_service-run", "lab"]) != 0
+
+    assert execs == [], "ginn-wait is not run for a start that failed"
+    assert RealmStore(world.paths).load(REALM).state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("NFR-033")
+def test_five_failed_starts_within_sixty_seconds_give_the_realm_up_through_the_cli(
+    world: World, sleeps: list[float], execs: list[list[str]]
+) -> None:
+    _services_realm(world, RealmState.STOPPED, running=False)
+
+    codes = []
+    for _ in range(5):
+        world.fake.fail_ops = {"start": "GINN-E-INTERNAL"}  # a fault is taken once
+        assert main(["_service-run", "lab"]) != 0
+        codes.append(main(["_service-finish", "lab", "1", "0"]))
+
+    assert codes == [0] * 5
+    assert sleeps == [5.0] * 4, "the fifth crash does not wait: runsv is told to stop"
+    assert RealmStore(world.paths).load(REALM).state is RealmState.FAILED
+    assert not crash_log(world.paths, REALM).exists()
+    assert (service_dir(world.paths, REALM) / "down").is_file()
 
 
 def test_the_service_commands_are_hidden_from_the_top_level_help(

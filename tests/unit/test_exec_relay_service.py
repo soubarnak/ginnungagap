@@ -866,6 +866,7 @@ def test_a_failed_relay_sync_does_not_replace_a_give_up(
     world: World,
     monkeypatch: pytest.MonkeyPatch,
     clock: FakeClock,
+    sv: SvRecorder,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     write_service_dir(world.paths, REALM, PROGRAM)
@@ -874,7 +875,12 @@ def test_a_failed_relay_sync_does_not_replace_a_give_up(
     write_crashes(crash_log(world.paths, REALM), [now - 40.0, now - 30.0, now - 20.0, now - 10.0])
     monkeypatch.setattr(service_ops, "sync_exec_service", _refusing_sync)
     env = OpEnv.for_paths(world.paths, "alice", root_dir=world.host, clock=clock)
-    hooks = ServiceHooks(lifecycle=LifecycleHooks(exists=lambda _p: False), wait_helper=PROGRAM)
+    # The fake sv answers no state line, so the end is a crash and no real sv runs (FR-081).
+    hooks = ServiceHooks(
+        lifecycle=LifecycleHooks(exists=lambda _p: False),
+        wait_helper=PROGRAM,
+        supervisor=hooks_of(sv),
+    )
     assert finish_service(env, REALM, exit_code=1, signal_no=0, hooks=hooks) is ServiceExit.GAVE_UP
     assert "GINN-W-RELAY-SYNC: " in capsys.readouterr().err
 
