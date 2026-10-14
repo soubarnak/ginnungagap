@@ -59,6 +59,16 @@ These options are added to every Development realm, beyond the base argv.
 
 The base argv also carries `--runtime crun`, `--userns keep-id`, `--passwd-entry <entry>`, `--network host` and `--init`. Dated 2026-10-13 (T4.9b): `--passwd-entry` carries the realm user, which is the entry podman writes for the keep-id user. `--passwd=false` is never sent, because podman 5.8.8 refuses it on `podman create` (ADR-006 amendment, T4.9b). The argv form is in `CreateSpec.to_argv`. The S-07e and S-07f runs used the same options, with `--init-path` pointing at a spike copy of catatonit. The product argv has no `--init-path`. ginn adds no `--cap-add`, and nothing in this table grants a capability.
 
+### Attach rows (start-time)
+
+Development adds these variable grants to the Basic ones. Each one is attached after `podman start`, under the ADR-008 amendment, as the Basic table says. A missing source is skipped and recorded (FR-064). The T6.1 test compares the attach plan of a Development realm with this table. The start path plans these rows from the record each time, and `ginn tier` and `ginn perms` (T6.2) change the record.
+
+| Item | Applied | Option | Grant | Evidence | Status |
+|---|---|---|---|---|---|
+| `~/Projects` | start (attach) | Attach `<home>/Projects` read-write at the same path. The realm mountpoint is an empty directory in the Realm Home. | FR-062 | none | design-only (T6.2) |
+| `~/.bashrc`, `~/.zshrc` | start (attach) | Attach each file read-only at the same path. The file is optional: a missing one is no grant and no skip, and the next start tries it again. The AS-011 rule admits a read-only share of these files. | FR-062 AC-2, AS-010 | none | design-only (T6.2) |
+| SSH and GPG agent | start (attach) | Agent Proxy sockets. Owned by `security/agent.py` (T6.4), not in this table, and it adds no option to `security/caps.py`. | FR-062, FR-067 | none | pending T6.4 |
+
 ### Realm contents and create-time steps
 
 These steps run inside the realm or in the Realm Home. They do not change the host.
@@ -122,7 +132,31 @@ CL-8 is withdrawn for the setcap and libcap steps. See `docs/clarifications.md`.
 
 ## Custom (FR-063)
 
-The SRS does not define a Custom capability set. Each Custom toggle for a permission in FR-062 adds only the options in the Development table above. No toggle adds a capability. Which option each toggle adds is set in T6.1 and T6.2. A toggle that would add any option not listed here requires this document to change first (NFR-SEC-002). The D-Bus filter widening (AS-012) is not a podman option and is not in this table.
+The SRS does not define a Custom capability set. Each Custom toggle for a permission in FR-061 or FR-062 adds only the options in the Development table above, or one of the grants named in its row. No toggle adds a capability. Which option each toggle adds is set in T6.1 and T6.2. A toggle that would add any option not listed here requires this document to change first (NFR-SEC-002). The D-Bus filter widening (AS-012) is not a podman option and is not in this table.
+
+### Custom toggles
+
+Toggle names (`ginn perms --enable` and `--disable`, domain/permissions.py) and what each one adds:
+
+| Toggle | FR | Adds at create | Adds at start (attach) |
+|---|---|---|---|
+| `downloads` | FR-061 | nothing | `~/Downloads`, read-write |
+| `mount_roots` | FR-061 | nothing | `/run/media/<user>`, `/media` and `/mnt`, read-write |
+| `display` | FR-061 | nothing | the Wayland socket, read-write, and the X11 socket directory and the X11 authority file, read-only, with `WAYLAND_DISPLAY`, `DISPLAY` and `XAUTHORITY` |
+| `audio` | FR-061 | nothing | the PipeWire and PulseAudio sockets, read-write |
+| `gpu` | FR-061, FR-069 | the `/dev/dri` device and, when the host has the NVIDIA driver, the NVIDIA CDI grant (see the note below) | nothing |
+| `fonts_timezone` | FR-061, AS-009 | the host fonts and the host localtime, read-only, when the host has them (see the note below) | `TZ`, when the host sets it |
+| `projects` | FR-062 | nothing | `~/Projects`, read-write |
+| `shell_rc` | FR-062 | nothing | `~/.bashrc` and `~/.zshrc`, read-only |
+| `agent` | FR-062, FR-067 | nothing: the Agent Proxy adds no create-time option (`security/agent.py`, T6.4) | the Agent Proxy sockets (T6.4) |
+| `nested` | FR-062 AC-3 | `--device /dev/fuse`, `--device /dev/net/tun`, `--security-opt unmask=/proc/*`, `--security-opt seccomp=<generated profile>`, and the Realm Home config files | nothing |
+| `kvm` | FR-062 AC-4 | `--device /dev/kvm` and `--group-add keep-groups`, only when the host has `/dev/kvm` at create | nothing |
+
+Basic is `downloads`, `mount_roots`, `display`, `audio`, `gpu` and `fonts_timezone`. Development is every toggle. A Custom realm starts from Basic's toggles, and it keeps the toggles of the tier it came from when it is switched to Custom. A toggle that is off plans no bind, device or variable for its grant.
+
+The `gpu` and `fonts_timezone` grants are create-time. Their binds and the `/dev/dri` device are fixed at `podman create`, so they are not in the option names of `option_keys`. The record keeps the state of each toggle at create (`gpu_at_create` and `fonts_at_create`), and a change of either toggle is refused with GINN-E-NOT-SUPPORTED-YET until T8.3. The NVIDIA CDI grant is made only when `gpu` is on and the host driver is ready (`gpu_cdi`). A create-time option (`nested`, `kvm`) is refused the same way. `display` and `audio` change attach-time grants only: `ginn perms` flags the realm restart-required, and the change applies at the next start.
+
+A stored Custom part without a `format` key (format 1) keeps the grants that format 1 always attached: `display`, `audio`, `gpu` and `fonts_timezone` are on for it, so an upgrade changes no realm's grants.
 
 ## Kali (a distro overlay, on any tier)
 

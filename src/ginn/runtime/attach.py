@@ -187,7 +187,9 @@ def share_skipped(plan: AttachPlan, session: SessionEnv, result: AttachResult) -
     return list(dict.fromkeys(s.message() for s in [*decided, *later]))
 
 
-def admission(*, home: Path, owned_paths: Sequence[Path], env: Mapping[str, str]) -> Admit:
+def admission(
+    *, home: Path, owned_paths: Sequence[Path], runtime_root: Path, env: Mapping[str, str]
+) -> Admit:
     """The `admit` for a realm: the DR-004 rules of `mounts.recheck`, applied to each grant."""
 
     def admit(grant: GrantRecord) -> str | None:
@@ -198,6 +200,7 @@ def admission(*, home: Path, owned_paths: Sequence[Path], env: Mapping[str, str]
             grant.mode,
             home=home,
             owned_paths=owned_paths,
+            runtime_root=runtime_root,
             env=env,
         )
 
@@ -341,6 +344,38 @@ def rebind_argv(helper: str, pid: int, ops: Sequence[tuple[GrantRecord, Op]]) ->
     return argv
 
 
+_RUNTIME_SUBDIR: Final = re.compile(r"/run/user/([0-9]+)/[^/]+(?:/[^/]+)*")
+"""A directory strictly below a user's runtime directory, such as `gnupg` or `pulse`."""
+
+
+def _runtime_subdir(podman: Podman, container: str, parent: str) -> None:
+    """Make a runtime subdirectory, such as `/run/user/<uid>/gnupg`, as the realm user at mode 0700.
+
+    The realm user owns `/run/user/<uid>` (its tmpfs is chowned to it), so the directory is made
+    with that uid and no root command runs on it. A root `mkdir` would leave the directory
+    root-owned, which gpg refuses, and a root `chown` or `chmod` would follow a link that the realm
+    planted. Only a directory strictly below `/run/user/<uid>` is handled, and only for that uid. A
+    `.` or `..` part is refused, and a symbolic link is refused before the directory is made. Every
+    argument is one argv element (NFR-SEC-005).
+    """
+    match = _RUNTIME_SUBDIR.fullmatch(parent)
+    if match is None:
+        return
+    if any(part in (".", "..") for part in parent.split("/")):
+        raise _failed(f"a runtime subdirectory may not hold '.' or '..': {parent}")
+    user = match.group(1)
+    if _in_container_result(podman, container, ["test", "-L", parent], user=user) == 0:
+        raise _failed(f"a runtime subdirectory is a symbolic link, refused: {parent}")
+    _in_container(podman, container, ["mkdir", "-p", "-m", "0700", "--", parent], user=user)
+
+
+def _in_container_result(
+    podman: Podman, container: str, argv: Sequence[str], *, user: str = "0:0"
+) -> int:
+    """The exit status of one command in the realm, with no failure raised."""
+    return podman.exec(container, argv, user=user).exit_code
+
+
 def make_mountpoints(
     podman: Podman,
     container: str,
@@ -352,8 +387,9 @@ def make_mountpoints(
     """Make the directories that the placeholders of `grants` sit in. The helper makes the rest.
 
     A realm path under `host_home` is a placeholder in `realm_home` on the host, so it is made here
-    and the user keeps the directory. Any other realm path gets its parent made in the container, as
-    root, by `mkdir -p`. The helper then makes the placeholder itself, a directory or an empty file.
+    and the user keeps the directory. A parent under `/run/user/<uid>` is made as the realm user at
+    mode 0700 (`_runtime_subdir`, FR-061). Any other parent is made in the container, as root, by
+    `mkdir -p`. The helper then makes the placeholder itself, a directory or an empty file.
     """
     parents: dict[str, None] = {}
     for grant in grants:
@@ -362,8 +398,11 @@ def make_mountpoints(
             _make_home_point(realm_home, realm.relative_to(host_home), is_dir=grant.is_dir)
         else:
             parents[str(realm.parent)] = None
-    if parents:
-        _in_container(podman, container, ["mkdir", "-p", "--", *parents])
+    roots = [parent for parent in parents if _RUNTIME_SUBDIR.fullmatch(parent) is None]
+    if roots:
+        _in_container(podman, container, ["mkdir", "-p", "--", *roots])
+    for parent in parents:
+        _runtime_subdir(podman, container, parent)
 
 
 def _make_home_point(realm_home: Path, rel: Path, *, is_dir: bool) -> None:
@@ -397,9 +436,11 @@ def _lstat_mode(path: Path) -> int | None:
         return None
 
 
-def _in_container(podman: Podman, container: str, argv: Sequence[str]) -> None:
-    """Run one command in the realm as container root (ADR-008, T4.10 notes)."""
-    result = podman.exec(container, argv, user="0:0")
+def _in_container(
+    podman: Podman, container: str, argv: Sequence[str], *, user: str = "0:0"
+) -> None:
+    """Run one command in the realm, as container root unless `user` says otherwise (ADR-008)."""
+    result = podman.exec(container, argv, user=user)
     if result.exit_code != 0:
         err = _failed(_decisive(result.stderr))
         err.details["exit"] = result.exit_code

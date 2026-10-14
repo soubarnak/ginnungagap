@@ -29,6 +29,7 @@ from ginn.domain import (
     transition,
 )
 from ginn.domain.grants import GrantRecord
+from ginn.domain.permissions import Permissions, Toggle
 from ginn.errors import GinnError, make
 from ginn.store._time import parse_utc, utc_from_epoch, utc_iso
 from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
@@ -105,6 +106,16 @@ def _manifest(value: object) -> list[ManifestEntry]:
     return [ManifestEntry.from_dict(item) for item in value]
 
 
+def _permissions(value: object, tier: Tier) -> Permissions:
+    """The Custom part of a record. A key that is absent is format 1 with no toggles listed, so a
+    Custom realm reads the grants that format 1 always attached (domain/permissions.py)."""
+    if value is None:
+        return Permissions.from_dict({"toggles": [], "shares": []}, tier=tier)
+    if not isinstance(value, Mapping):
+        raise TypeError(f"expected a permissions object, got {type(value).__name__}")
+    return Permissions.from_dict(value, tier=tier)
+
+
 def _grants(value: object) -> list[GrantRecord]:
     """The grant list of a record: each item is a JSON object read as a `GrantRecord` (FR-066).
 
@@ -142,6 +153,44 @@ class RealmRecord:
     # The Install Manifest (DR-007). Added without a schema bump, like `grants`: a record written
     # before it existed has no key and reads as an empty manifest. Deleting the record removes it.
     manifest: list[ManifestEntry] = field(default_factory=list)
+    # The Custom toggles and shares (FR-063). Added without a schema bump, like `grants`: a record
+    # written before it has no key reads as format 1 (domain/permissions.py), so a Custom realm
+    # keeps the grants it always had. Only a Custom realm may hold any toggles or shares.
+    permissions: Permissions = field(default_factory=Permissions)
+    # The toggle-driven create options that the container was made with, as the names that
+    # security/caps.py `option_keys` gives (ADR-006). Empty is the Basic set, and a record written
+    # before this field has no key, so it reads as Basic. A change of the names needs a new
+    # container.
+    created_options: list[str] = field(default_factory=list)
+    # Whether the host had /dev/kvm when the container was made (ADR-006). `created_options` shows
+    # only the kvm option that was on, so a later change of the kvm toggle needs this probe.
+    # Added without a schema bump: a record without the key reads as False.
+    kvm_at_create: bool = False
+    # Whether the realm was created with the NVIDIA CDI grant (FR-069, ADR-012). The exec
+    # environment names the ginn libraries only then. Added without a schema bump.
+    gpu_cdi: bool = False
+    # The state of the GPU toggle (`/dev/dri`, and the CDI grant with `gpu_cdi`) and of the fonts
+    # and timezone toggle at create (FR-061, FR-063). Both are fixed at `podman create`, so a change
+    # of either toggle needs a new container (T8.3). A record without a key was made before these
+    # toggles existed, when every realm had both grants, so each reads as True.
+    gpu_at_create: bool = True
+    fonts_at_create: bool = True
+    # The host gpg-agent extra socket, resolved at the last start of an Agent Proxy realm (NFR-004).
+    # `gpg_extra_known` is False until a start stores it, and then enter resolves it instead. When
+    # True, `gpg_extra` is the socket, or None when the host has none. Added without a schema bump:
+    # a record without the key reads as unknown.
+    gpg_extra: str | None = None
+    gpg_extra_known: bool = False
+
+    def create_grants_match(self, toggles: frozenset[Toggle]) -> bool:
+        """True when `toggles` asks for the GPU and fonts and timezone grants this container has.
+
+        `created_options` covers the options of ADR-006. These two grants are binds and devices
+        fixed at create too, so a toggle that differs from its stored flag is a create-time change.
+        """
+        return (Toggle.GPU in toggles) == self.gpu_at_create and (
+            Toggle.FONTS_TIMEZONE in toggles
+        ) == self.fonts_at_create
 
     def __post_init__(self) -> None:
         """Refuse a `previous_state` that DR-020 does not allow for this state.
@@ -155,6 +204,8 @@ class RealmRecord:
                 raise ValueError(f"{self.state.value} needs previous_state stopped or running")
         elif self.previous_state is not None:
             raise ValueError(f"{self.state.value} must not record previous_state")
+        if self.settings.tier is not Tier.CUSTOM and self.permissions != Permissions():
+            raise ValueError("only a Custom realm keeps toggles or shares (FR-063)")
 
     @property
     def name(self) -> RealmName:
@@ -162,7 +213,7 @@ class RealmRecord:
 
     def to_json(self) -> dict[str, Any]:
         settings = self.settings
-        return {
+        data: dict[str, Any] = {
             "schema_version": self.schema_version,
             "settings": {
                 "name": settings.name.value,
@@ -184,7 +235,16 @@ class RealmRecord:
             "share_skipped": list(self.share_skipped),
             "grants": [grant.to_dict() for grant in self.grants],
             "manifest": [entry.to_dict() for entry in self.manifest],
+            "permissions": self.permissions.to_dict(),
+            "created_options": list(self.created_options),
+            "kvm_at_create": self.kvm_at_create,
+            "gpu_cdi": self.gpu_cdi,
+            "gpu_at_create": self.gpu_at_create,
+            "fonts_at_create": self.fonts_at_create,
         }
+        if self.gpg_extra_known:
+            data["gpg_extra"] = self.gpg_extra
+        return data
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any], source: str = "realm record") -> "RealmRecord":
@@ -217,6 +277,14 @@ class RealmRecord:
                 share_skipped=_str_list(data["share_skipped"]),
                 grants=_grants(data.get("grants", [])),
                 manifest=_manifest(data.get("manifest", [])),
+                permissions=_permissions(data.get("permissions"), settings.tier),
+                created_options=_str_list(data.get("created_options", [])),
+                kvm_at_create=_bool(data.get("kvm_at_create", False)),
+                gpu_cdi=_bool(data.get("gpu_cdi", False)),
+                gpu_at_create=_bool(data.get("gpu_at_create", True)),
+                fonts_at_create=_bool(data.get("fonts_at_create", True)),
+                gpg_extra=_opt_str(data.get("gpg_extra")),
+                gpg_extra_known="gpg_extra" in data,
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

@@ -4,7 +4,10 @@
 Every call runs one `podman` process with an argv list (NFR-SEC-005). Every call carries the
 global flags --remote=false, --root, --runroot, --tmpdir and --runtime, so ginn's storage, tmpdir
 and OCI runtime never fall back to the user's own Podman (DR-010, ADR-004). --remote=false is a
-guard of its own: podman(1) makes --remote default to true when CONTAINER_HOST is set.
+guard of its own: podman(1) makes --remote default to true when CONTAINER_HOST is set. The CLI
+adapter also carries --cdi-spec-dir, the owned CDI directory, on every call, so `start` resolves a
+CDI device as `create` does (FR-069, ADR-012). A create that names its own directory passes that
+one instead, once.
 
 The subprocess environment is an allowlist (CR-006, DR-010), not a copy of the parent's: PATH,
 HOME, TERM, USER, LOGNAME, LANG, LC_*, the proxy variables, plus ginn's pins. XDG_RUNTIME_DIR is
@@ -22,6 +25,7 @@ Failures map to catalogue codes here and nowhere else (NFR-040):
 - a digest pull that the registry rejects: GINN-E-IMAGE-UNVERIFIED (FR-011);
 - a runtime root that is missing or unsafe: GINN-E-HOST-NOT-SET-UP or GINN-E-RUNTIME-DIR-UNSAFE,
   from the shared check in `ginn.store.paths` (DR-010, ADR-004);
+- a GPU's CDI devices that podman cannot resolve: GINN-E-NVIDIA-CDI (FR-069);
 - anything else: GINN-E-INTERNAL, with the decisive stderr line in details.
 Exit 125 from `exec` is podman's own failure and is never returned as the command's status.
 """
@@ -70,6 +74,7 @@ _DIGEST_PATTERNS: Final = (
     re.compile(r"image not known", re.IGNORECASE),
 )
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CDI_PATTERNS: Final = (re.compile(r"unresolvable CDI devices", re.IGNORECASE),)
 _NETWORK_EXIT: Final = 125
 STDERR_TAIL_BYTES: Final = 65536
 """The most stderr a bounded exec keeps, from its end: the error line of a failed command."""
@@ -267,6 +272,9 @@ class PodmanCli:
         then makes the owned directories and ginn's config files with `OwnedPaths.ensure()` and
         `OwnedPaths.ensure_config()`. Both are idempotent, so a fresh tree needs no prior setup
         and no caller has to call them. The runtime root itself is never created here (ADR-004).
+
+        `cdi_spec_dir` defaults to the owned CDI directory, `paths.cdi`, which every call names
+        (FR-069, S-06). A caller passes another directory only to override it.
         """
         return cls(
             paths.podman_root,
@@ -278,7 +286,7 @@ class PodmanCli:
             runtime_root=paths.runtime,
             binary=binary,
             oci_runtime=oci_runtime,
-            cdi_spec_dir=cdi_spec_dir,
+            cdi_spec_dir=paths.cdi if cdi_spec_dir is None else cdi_spec_dir,
             verbose=verbose,
             owned_paths=paths,
         )
@@ -328,8 +336,12 @@ class PodmanCli:
         self.history: list[list[str]] = []
         self.tightened: list[str] = []
 
-    def _global_flags(self) -> list[str]:
-        """Global flags come before the subcommand. --cdi-spec-dir is global (S-06)."""
+    def _global_flags(self, per_call: Sequence[str] = ()) -> list[str]:
+        """Global flags come before the subcommand. --cdi-spec-dir is global (S-06).
+
+        `per_call` are the flags of one create (CreateSpec.global_flags, ADR-012). They replace the
+        adapter's own --cdi-spec-dir for that call, so a realm's spec directory is the one it names.
+        """
         flags = [
             self.binary,
             "--remote=false",
@@ -342,7 +354,9 @@ class PodmanCli:
             "--runtime",
             self.oci_runtime,
         ]
-        if self.cdi_spec_dir is not None:
+        if per_call:
+            flags += list(per_call)
+        elif self.cdi_spec_dir is not None:
             flags += ["--cdi-spec-dir", str(self.cdi_spec_dir)]
         return flags
 
@@ -398,7 +412,7 @@ class PodmanCli:
                 "OwnedPaths.ensure() creates it"
             )
 
-    def _prepare(self, args: Sequence[str]) -> list[str]:
+    def _prepare(self, args: Sequence[str], per_call: Sequence[str] = ()) -> list[str]:
         """Build the full argv, record it, and echo it to `verbose` before it runs (NFR-042).
 
         An adapter from `from_paths` first checks the runtime root, then makes the owned
@@ -419,14 +433,16 @@ class PodmanCli:
             except OSError as exc:
                 raise _internal(f"cannot prepare Owned Paths for podman: {exc}") from exc
         self._require_config()
-        argv = [*self._global_flags(), *args]
+        argv = [*self._global_flags(per_call), *args]
         self.history.append(argv)
         if self.verbose is not None:
             self.verbose(shlex.join(argv))
         return argv
 
-    def _run(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
-        argv = self._prepare(args)
+    def _run(
+        self, args: Sequence[str], per_call: Sequence[str] = ()
+    ) -> subprocess.CompletedProcess[str]:
+        argv = self._prepare(args, per_call)
         try:
             # Fixed argv list, no shell. The binary is resolved from PATH by design.
             return subprocess.run(  # noqa: S603
@@ -461,6 +477,8 @@ class PodmanCli:
         stderr = result.stderr or ""
         if pull_ref is not None and _matches(_DIGEST_PATTERNS, stderr):
             err = make("GINN-E-IMAGE-UNVERIFIED", distro=pull_ref.partition("@")[0])
+        elif _matches(_CDI_PATTERNS, stderr):
+            err = make("GINN-E-NVIDIA-CDI", detail=_decisive_line(stderr))
         elif result.returncode == _NETWORK_EXIT and _matches(_NETWORK_PATTERNS, stderr):
             err = make("GINN-E-NETWORK")
         else:
@@ -511,7 +529,7 @@ class PodmanCli:
         self._expect("rmi", result)
 
     def create(self, spec: CreateSpec) -> str:
-        result = self._run(spec.to_argv())
+        result = self._run(spec.to_argv(), spec.global_flags())
         self._expect("create", result)
         container_id = result.stdout.strip()
         if not container_id:
@@ -691,7 +709,18 @@ class PodmanCli:
         tty: bool = False,
         interactive: bool = False,
         pass_env: Sequence[str] = (),
+        on_spawn: Callable[[int], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
     ) -> int:
+        """Run podman exec with the caller's stdio and return the command's status (IR-011).
+
+        The client is started with Popen, so `on_spawn` gets its pid before the wait, and the caller
+        can signal it (FR-068). The wait returns when the client exits, whatever the caller did in
+        `on_spawn` or in a signal handler. `on_exit` runs as soon as the client is reaped, so the
+        caller can stop signalling its pid before the pid can be reused. If the wait is interrupted,
+        the client is killed and reaped before the interruption propagates, as subprocess.run does,
+        and `on_exit` runs after that too.
+        """
         args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
         full = self._prepare(args)
         # Without a TTY, a Ctrl-C reaches ginn too: a do-nothing handler holds it while podman runs.
@@ -699,10 +728,22 @@ class PodmanCli:
         try:
             # Fixed argv list, no shell. stdio is inherited so the user's terminal is used.
             with guard:
-                completed = subprocess.run(full, check=False, env=self._env())  # noqa: S603
+                client = subprocess.Popen(full, env=self._env())  # noqa: S603
+                try:
+                    if on_spawn is not None:
+                        on_spawn(client.pid)
+                    returncode = client.wait()
+                    if on_exit is not None:
+                        on_exit()
+                except BaseException:
+                    client.kill()
+                    client.wait()
+                    if on_exit is not None:
+                        on_exit()
+                    raise
         except OSError as exc:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
-        return _exit_status(completed.returncode)
+        return _exit_status(returncode)
 
     @staticmethod
     def _exec_args(

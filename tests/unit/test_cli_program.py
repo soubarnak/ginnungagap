@@ -124,3 +124,19 @@ def test_the_podman_adapter_runs_the_resolved_binary(
     monkeypatch.setenv("PATH", str(tmp_path / "usr-bin"))
     cli = _context.podman(paths, Output(json_mode=False, verbose=False))
     assert cli.binary == os.path.realpath(real)
+
+
+@pytest.mark.fr("FR-069")
+def test_every_podman_call_names_the_owned_cdi_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI adapter passes `--cdi-spec-dir <owned cdi dir>` on every call, so `podman start`
+    resolves `nvidia.com/gpu=all` as `podman create` does (ADR-012)."""
+    paths = host_paths(tmp_path)
+    paths.ensure()
+    _executable(tmp_path / "usr-bin" / "podman")
+    monkeypatch.setenv("PATH", str(tmp_path / "usr-bin"))
+    cli = _context.podman(paths, Output(json_mode=False, verbose=False))
+    flags = cli._global_flags()
+    assert flags[-2:] == ["--cdi-spec-dir", str(paths.cdi)]
+    assert flags.count("--cdi-spec-dir") == 1

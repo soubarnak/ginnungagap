@@ -32,11 +32,13 @@ the same rule (DR-020 allows running to stopped). Any other state, such as pause
 running.
 
 Refusals. A realm whose settings are services-on is started and stopped only by its `sv` service
-(ADR-003, FR-081). Until M7 both raise GINN-E-NOT-SUPPORTED-YET (exit 2) before any write. A tier
-other than Basic raises the same code, until M6. A state that DR-020 does not allow for
-the verb raises GINN-E-REALM-STATE (exit 4). An unknown name raises GINN-E-NO-SUCH-REALM before any
-write (FR-025). A container that podman does not list is not running. A podman error while listing
-or inspecting a container is not read as "not running": it propagates, and nothing is written.
+(ADR-003, FR-081). Until M7 both raise GINN-E-NOT-SUPPORTED-YET (exit 2) before any write. A start
+whose record names container options that its container was not made with raises the same code,
+naming T8.3, before any write (ADR-006; a tier change needs a new container). A state that DR-020
+does not allow for the verb raises GINN-E-REALM-STATE (exit 4). An unknown name raises
+GINN-E-NO-SUCH-REALM before any write (FR-025). A container that podman does not list is not
+running. A podman error while listing or inspecting a container is not read as "not running": it
+propagates, and nothing is written.
 
 Idempotence. Start of a realm that podman runs already returns the record and writes nothing. It
 keeps `restart_required` as stored, so the caller can report a pending restart (FR-066; M6 sets
@@ -79,6 +81,7 @@ image_digest, created_at, updated_at, restart_required, share_skipped, disk, exp
 Requirements not covered here. The CLI wiring is a later task. The grant list is not diffed
 against the previous one at start, so a grant that is removed from the host is only skipped, not
 reported as removed (FR-066, M6). The forced-stop log (FR-016 AC-2) is for services-on only.
+The grants of a start follow the record's tier and Custom permissions (FR-061..063, runtime/mounts).
 """
 
 import os
@@ -88,10 +91,18 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Final
 
-from ginn.domain import RealmName, RealmState, Tier, transition
-from ginn.errors import GinnError, make
+from ginn.domain import RealmName, RealmState, transition
+from ginn.domain.permissions import effective_toggles
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
+from ginn.ops.security_ops import (
+    leave_agent,
+    nvidia_plan,
+    reconcile_proxy,
+    sync_agent,
+    write_nvidia,
+)
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.attach import (
@@ -104,7 +115,15 @@ from ginn.runtime.attach import (
 )
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.mounts import AttachPlan, Exists, attach_plan
+from ginn.runtime.realm_security import (
+    SecurityHooks,
+    agent_enabled,
+    session_extras,
+    stored_gpg_extra,
+)
 from ginn.runtime.spec import LABEL_REALM
+from ginn.security import agent
+from ginn.security.caps import option_keys
 from ginn.store._time import utc_from_epoch, utc_iso
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -236,6 +255,8 @@ class LifecycleHooks:
     helper: str | None = None
     stop_timeout_s: int = STOP_TIMEOUT_S
     tree_usage: Callable[[Path], tuple[int, bool]] = _tree_usage
+    security: SecurityHooks = field(default_factory=SecurityHooks)
+    """The seams of the security helpers: the filter, the proxy, gpg and the NVIDIA probe."""
 
 
 @dataclass(frozen=True)
@@ -376,12 +397,67 @@ def _refuse_unsupported(record: RealmRecord, verb: str) -> None:
             feature=f"{verb} of a services-on realm",
             milestone="M7",
         )
-    if record.settings.tier is not Tier.BASIC:
+
+
+def _refuse_stale_options(record: RealmRecord) -> None:
+    """Refuse a start whose tier options differ from the ones the container was made with.
+
+    A create-time option (a device, a security option or a group) is fixed at `podman create`.
+    `created_options` keeps the names of the toggle-driven options of the container (ADR-006), and
+    a tier or permission change that would change them is refused by `ginn tier` and `ginn perms`.
+    This check covers a record that was changed another way. A new container is made by T8.3, which
+    keeps the Install Manifest's packages, so the start is refused until then, before any write.
+    """
+    kvm_present = record.kvm_at_create
+    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
+    wanted = option_keys(toggles, kvm_present=kvm_present)
+    if wanted != record.created_options or not record.create_grants_match(toggles):
         raise make(
             "GINN-E-NOT-SUPPORTED-YET",
             realm=record.name.value,
-            feature=f"{verb} of a {record.settings.tier.value} realm",
-            milestone="M6",
+            feature="a start with tier options that the container was not made with",
+            milestone="M8 (T8.3)",
+        )
+
+
+def nvidia_plan_write(env: OpEnv, hooks: LifecycleHooks) -> None:
+    """Refresh the CDI spec of a GPU realm from the host (FR-069, R-005). A stale driver raises."""
+    write_nvidia(env.paths, nvidia_plan(env.paths, hooks.security))
+
+
+_LEFT_DETAIL: Final = "a listener at the filter socket is not this filter; the SSH grant is left"
+
+
+def _agent_warning(name: RealmName, detail: str) -> GinnWarning:
+    return warn("GINN-W-AGENT-FILTER", realm=name.value, detail=detail)
+
+
+def _detail(err: BaseException) -> str:
+    return err.message if isinstance(err, GinnError) else str(err)
+
+
+def _leave_agent_quietly(env: OpEnv, name: RealmName, err: GinnError) -> None:
+    """After a failed start, leave the filter. A failure here is a note on the start's error."""
+    try:
+        leave_agent(env, name)
+    except (GinnError, OSError) as leave_err:
+        err.add_note(f"agent filter after failed start: {_detail(leave_err)}")
+
+
+def _release_after_stop(env: OpEnv, name: RealmName, mutation: Mutation) -> None:
+    """After a stop: leave the filter, and stop a proxy with no app left (FR-067, ADR-007).
+
+    The stop has happened, so a failure here is a warning and never an error (F).
+    """
+    try:
+        leave_agent(env, name)
+    except (GinnError, OSError) as err:
+        mutation.warnings.append(_agent_warning(name, _detail(err)))
+    try:
+        reconcile_proxy(env, name)
+    except (GinnError, OSError) as err:
+        mutation.warnings.append(
+            warn("GINN-W-PROXY-RELEASE", realm=name.value, detail=_detail(err))
         )
 
 
@@ -424,18 +500,50 @@ class _Grants:
     owned: list[Path]
 
 
+def _resolve_gpg(record: RealmRecord, hooks: LifecycleHooks) -> RealmRecord:
+    """Resolve the gpg extra socket of an Agent Proxy realm once, at its start (NFR-004).
+
+    The record keeps the value, so each enter and launch reads it instead of running `gpgconf`.
+    A realm without the agent toggle needs no socket, so its record is returned as it is.
+    """
+    if not agent_enabled(record.settings.tier, record.permissions.toggles):
+        return record
+    return replace(record, gpg_extra=hooks.security.gpg_extra(), gpg_extra_known=True)
+
+
 def _plan_grants(env: OpEnv, record: RealmRecord, user: HostUser, hooks: LifecycleHooks) -> _Grants:
     owned = env.paths.all_owned_roots()
-    session = session_env(user.host_env, home=user.host_home, uid=user.uid, owned_paths=owned)
+    extras = session_extras(
+        user.host_env,
+        agent_on=agent_enabled(record.settings.tier, record.permissions.toggles),
+        uid=user.uid,
+        realm=record.name.value,
+        runtime=env.paths.runtime,
+        hooks=hooks.security,
+        gpu=record.gpu_cdi,
+        gpg_extra=stored_gpg_extra(
+            hooks.security, known=record.gpg_extra_known, stored=record.gpg_extra
+        ),
+    )
+    session = session_env(
+        user.host_env,
+        home=user.host_home,
+        uid=user.uid,
+        owned_paths=owned,
+        extras=extras,
+        toggles=effective_toggles(record.settings.tier, record.permissions.toggles),
+    )
     plan = attach_plan(
         record.settings.tier,
         host_home=user.host_home,
         uid=user.uid,
         user=env.user,
         owned_paths=owned,
+        runtime_root=env.paths.runtime,
         session_binds=session.binds,
         env=user.host_env,
         exists=hooks.exists,
+        permissions=record.permissions,
     )
     return _Grants(plan=plan, session=session, owned=owned)
 
@@ -464,6 +572,7 @@ def start_realm(
         raise ValueError(f"host home must be absolute, not {user.host_home}")
     if current.state is RealmState.RUNNING and _running(podman, name, current.container_id):
         return current
+    _refuse_stale_options(current)
     params = {"generation": current.generation}
     with mutating(env, "start", name, params) as mutation:
         record = _start(env, podman, name, user, hooks, mutation)
@@ -502,20 +611,38 @@ def _start(
     cid = record.container_id
     if cid is None:
         raise _internal("the realm has no container to start", realm=name.value)
+    record = _resolve_gpg(record, hooks)
     grants = _plan_grants(env, record, user, hooks)
     # Written before the container starts: the identities of the last start are cleared, so a
     # crash after this point cannot leave a grant that looks attached with a stale identity (T4.6).
     record = _save(env, store, record, grants=records_from_plan(grants.plan, grants.session))
     mutation.step("grants-reset")
+    if record.gpu_cdi:
+        # The CDI spec is written before the container starts, so podman finds the device (ADR-012).
+        nvidia_plan_write(env, hooks)
     try:
         podman.start(cid)
         info = podman.inspect(cid)
         if info.state is not ContainerState.RUNNING or info.pid < 2:
             raise _internal("the realm is not running after start", state=info.state.value)
         mutation.step("started")
+        if agent_enabled(record.settings.tier, record.permissions.toggles):
+            # A missing helper is a skip: the start has no SSH grant, and it warns (ADR-008).
+            if any(skip.reason == agent.HELPER_MISSING for skip in grants.session.skipped):
+                helper = hooks.security.agent_helper
+                detail = f"{helper} is not installed; the SSH grant is skipped"
+                mutation.warnings.append(_agent_warning(name, detail))
+            # The filter listens before the grants attach, or its socket is skipped (FR-067).
+            action = sync_agent(
+                env, name=name, host_env=user.host_env, uid=user.uid, hooks=hooks.security
+            )
+            if action is agent.Action.LEFT:
+                mutation.warnings.append(_agent_warning(name, _LEFT_DETAIL))
+        grants = _plan_grants(env, record, user, hooks)
         result, skips = _attach(env, podman, record, cid, info.pid, user, hooks, grants)
     except GinnError as err:
         _back_to_stopped(env, podman, name, cid, err)
+        _leave_agent_quietly(env, name, err)
         raise
     mutation.step("attached")
     running = _save(
@@ -551,7 +678,12 @@ def _attach(
         session=grants.session,
         realm_home=env.paths.homes / record.name.value,
         host_home=user.host_home,
-        admit=admission(home=user.host_home, owned_paths=grants.owned, env=user.host_env),
+        admit=admission(
+            home=user.host_home,
+            owned_paths=grants.owned,
+            runtime_root=env.paths.runtime,
+            env=user.host_env,
+        ),
         helper=hooks.helper,
         mountinfo=hooks.mountinfo,
     )
@@ -642,7 +774,9 @@ def _stop(
         if not _confirmed_not_running(podman, name, cid):
             raise
     mutation.step("stopped")
-    return store.set_state(name, RealmState.STOPPED)
+    stopped = store.set_state(name, RealmState.STOPPED)
+    _release_after_stop(env, name, mutation)
+    return stopped
 
 
 def _probe(

@@ -43,10 +43,21 @@ A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm ke
 enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
 service (FR-081).
 
+Launched apps. An enter or an exec as the user registers its own process in the realm's proxy
+state, so the session bus proxy runs while the app does (FR-068, ADR-007). That registration takes
+only the short lock of the proxy state, never the realm lock, so a launch is not refused while an
+install, a sync or a permission change holds the realm (ADR-010). The release at the end is a
+warning on failure: it never replaces the command's exit status or its error (IR-011). SIGTERM and
+SIGHUP reach the command. Before its podman client starts, a signal ends the command through this
+exit path. While the client runs, the signal is forwarded to the client, and its wait returns with
+the command's status (128 plus the signal when the client died of it). The app is released after
+that, so it is still released (FR-068). SIGINT and SIGQUIT keep their behaviour from T4.6.
+
 Budgets. `PRECHECK_BUDGET_S` is the share of NFR-004's 300 ms p95 that the stat pre-check may use.
 It is documented, not enforced: enter reports `listing`, `precheck` and `exec` through
 `EnterHooks.observe`, and T4.9 measures the p95 over 100 launches with them included.
-`BUSY_WAIT_S` bounds the wait for a lock holder.
+`BUSY_WAIT_S` bounds the wait for a lock holder (a re-attach or a start), not the proxy
+registration.
 
 Decisions and open items (see the report): a user exec's workdir is the host home, not the host
 working directory; `--root` uses `/root` for HOME and the workdir, since a root write into the bound
@@ -56,23 +67,30 @@ amendment of 2026-10-13 decides.
 """
 
 import os
+import signal
+import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Final
 
 from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState
-from ginn.errors import GinnError, make
+from ginn.domain.permissions import effective_toggles
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
+from ginn.ops.security_ops import finish_app, start_app
 from ginn.podman.adapter import PODMAN_ERROR_EXIT, Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime._enter_plan import exec_home, exec_user, login_argv, share_after
 from ginn.runtime.attach import Admit, admission, needs_reattach, reattach
 from ginn.runtime.env import SessionEnv, session_env
+from ginn.runtime.realm_security import agent_enabled, session_extras, stored_gpg_extra
 from ginn.runtime.spec import KALI, LABEL_REALM
+from ginn.security._proc import Proc
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -102,6 +120,14 @@ def _stdio_is_tty() -> bool:
     return os.isatty(0) and os.isatty(1)
 
 
+def _signal_pid(pid: int, signum: int) -> None:
+    """Send `signum` to process `pid`. A process that has already exited is no error (FR-068)."""
+    try:
+        os.kill(pid, signum)
+    except ProcessLookupError:
+        return
+
+
 RootSession = Callable[[RealmRecord, str, Callable[[], int]], int]
 """Wraps the exec of a `--root` session: (record, container id, run) -> the exec's status."""
 
@@ -118,7 +144,8 @@ class EnterHooks:
     runs, so the caller can show it first (the command's own output comes after). `root_session`
     wraps the exec of a `--root` session: it is called with the record, the container id and a
     callable that runs the exec, and it returns that exec's status. It is never called without
-    `--root`, so the non-root path costs nothing (NFR-004).
+    `--root`, so the non-root path costs nothing (NFR-004). `kill` sends a signal to the command's
+    client while it runs (FR-068); a test replaces it to see what is forwarded.
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
@@ -128,6 +155,7 @@ class EnterHooks:
     observe: Callable[[str, float], None] | None = None
     notify: Callable[[GinnWarning], None] | None = None
     root_session: RootSession | None = None
+    kill: Callable[[int, int], None] = _signal_pid
 
 
 @dataclass(frozen=True)
@@ -139,6 +167,8 @@ class _Look:
     admit: Admit
     running: bool
     pending: bool
+    app: Proc | None = None
+    """The process this command registered as a launched app, whose proxy `finish_app` releases."""
 
 
 def _internal(detail: str) -> GinnError:
@@ -190,11 +220,15 @@ def _look(
     *,
     session: HostUser,
     hooks: EnterHooks,
+    root: bool = False,
+    register: bool = True,
 ) -> _Look:
     """Read the record and the host without the realm lock: the hot path of enter (ADR-010).
 
     Refusals come first, so a refused realm causes no podman call. The session read and the
-    admission are the stat pre-check, and the listing is timed apart from them.
+    admission are the stat pre-check, and the listing is timed apart from them. `register` is False
+    for a look that only reads: it registers no app and tries no proxy, because the first look of
+    the command has done both, and the app is released once, by that first look's owner.
     """
     record = _load(RealmStore(env.paths, env.clock), name)
     if record.settings.distro.value == KALI:
@@ -212,10 +246,124 @@ def _look(
             action="enter",
             allowed="stopped, failed or running",
         )
+    # A command that runs as the user is a launched app: it registers, and starts the session bus
+    # proxy when none runs, before the session is read, so the bus socket is there to re-attach
+    # (FR-068, ADR-007). A refused realm has returned above, so it starts no proxy.
+    app = (
+        None
+        if root or not register
+        else start_app(
+            env,
+            name,
+            host_env=session.host_env,
+            uid=session.uid,
+            hooks=hooks.lifecycle.security,
+            notify=hooks.notify,
+        )
+    )
+    try:
+        return _look_session(env, podman, name, record, session=session, hooks=hooks, app=app)
+    except BaseException:
+        if app is not None:
+            _release_app(env, name, app, hooks)
+        raise
+
+
+def _release_app(env: OpEnv, name: RealmName, app: Proc, hooks: EnterHooks) -> None:
+    """Release the launched app. A failure is a warning, and never replaces the command's result."""
+    try:
+        finish_app(env, name, app)
+    except (GinnError, OSError) as err:
+        if hooks.notify is not None:
+            detail = err.message if isinstance(err, GinnError) else str(err)
+            hooks.notify(warn("GINN-W-PROXY-RELEASE", realm=name.value, detail=detail))
+
+
+class _CommandClient:
+    """The podman client of the command, from its start until its exit (FR-068).
+
+    `pid` is None before the client starts and after it exits. Then a signal ends the command
+    through its exit path, and while the client runs the signal is forwarded to it.
+    """
+
+    def __init__(self) -> None:
+        self.pid: int | None = None
+
+    def started(self, pid: int) -> None:
+        self.pid = pid
+
+    def exited(self) -> None:
+        self.pid = None
+
+
+@contextmanager
+def _orderly_signals(kill: Callable[[int, int], None]) -> Iterator[_CommandClient]:
+    """SIGTERM and SIGHUP leave the command through its exit path, so its app is released (L).
+
+    Before the command's client starts, a signal raises SystemExit with the usual status for a
+    signal (128 plus the number). While the client runs, the signal goes to the client through
+    `kill`, and the handler returns. The client's wait then returns normally, so the command's own
+    status comes back, and the release runs once the client is gone (FR-068). Nothing raises inside
+    that wait, so the client is never killed without being signalled. The previous handlers are
+    restored when the command ends. Only the main thread may set a handler, so any other thread
+    runs without this.
+    """
+    client = _CommandClient()
+    if threading.current_thread() is not threading.main_thread():
+        yield client
+        return
+
+    def leave(signum: int, _frame: object) -> None:
+        if client.pid is not None:
+            kill(client.pid, signum)
+            return
+        raise SystemExit(128 + signum)
+
+    saved = {sig: signal.getsignal(sig) for sig in _ORDERLY_SIGNALS}
+    for sig in _ORDERLY_SIGNALS:
+        signal.signal(sig, leave)
+    try:
+        yield client
+    finally:
+        for sig, handler in saved.items():
+            signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+
+
+_ORDERLY_SIGNALS: Final = (signal.SIGTERM, signal.SIGHUP)
+
+
+def _look_session(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    record: RealmRecord,
+    *,
+    session: HostUser,
+    hooks: EnterHooks,
+    app: Proc | None,
+) -> _Look:
+    """The session read, the admission and the pre-check of `_look`, after the refusals."""
     owned = env.paths.all_owned_roots()
     read_started = hooks.clock()
+    extras = session_extras(
+        session.host_env,
+        agent_on=agent_enabled(record.settings.tier, record.permissions.toggles),
+        uid=session.uid,
+        realm=name.value,
+        runtime=env.paths.runtime,
+        hooks=hooks.lifecycle.security,
+        gpu=record.gpu_cdi,
+        gpg_extra=stored_gpg_extra(
+            hooks.lifecycle.security, known=record.gpg_extra_known, stored=record.gpg_extra
+        ),
+    )
     realm_session = session_env(
-        session.host_env, home=session.host_home, uid=session.uid, owned_paths=owned
+        session.host_env,
+        home=session.host_home,
+        uid=session.uid,
+        owned_paths=owned,
+        extras=extras,
+        toggles=effective_toggles(record.settings.tier, record.permissions.toggles),
     )
     read_seconds = hooks.clock() - read_started
     listing_started = hooks.clock()
@@ -223,9 +371,14 @@ def _look(
         _listed(podman, name, record.container_id) if record.state is RealmState.RUNNING else None
     )
     _observe(hooks, "listing", hooks.clock() - listing_started)
-    admit = admission(home=session.host_home, owned_paths=owned, env=session.host_env)
+    admit = admission(
+        home=session.host_home,
+        owned_paths=owned,
+        runtime_root=env.paths.runtime,
+        env=session.host_env,
+    )
     if not _running(info):
-        return _Look(record, realm_session, admit, running=False, pending=False)
+        return _Look(record, realm_session, admit, running=False, pending=False, app=app)
     check_started = hooks.clock()
     pending = needs_reattach(
         record.grants,
@@ -234,7 +387,7 @@ def _look(
         mountinfo=hooks.lifecycle.mountinfo,
     )
     _observe(hooks, "precheck", read_seconds + hooks.clock() - check_started)
-    return _Look(record, realm_session, admit, running=True, pending=pending)
+    return _Look(record, realm_session, admit, running=True, pending=pending, app=app)
 
 
 def _settle(
@@ -271,19 +424,21 @@ def _await_holder(
     session: HostUser,
     hooks: EnterHooks,
     notices: list[GinnWarning],
+    root: bool,
 ) -> RealmRecord:
     """Wait a bounded time for the re-attach or the start that holds the realm lock (FR-123).
 
     Each step sleeps, then repeats the lock-free look. The command runs as soon as the realm runs
     with nothing pending. Otherwise the lock is tried again. A refusal that is not a wait case, and
-    the refusal of the deadline, are raised as they come.
+    the refusal of the deadline, are raised as they come. The looks here do not register an app:
+    the command's first look did, once, and `enter_realm` releases that app when the command ends.
     """
     deadline = hooks.clock() + BUSY_WAIT_S
     while True:
         if hooks.clock() >= deadline:
             raise busy
         hooks.sleep(BUSY_STEP_S)
-        look = _look(env, podman, name, session=session, hooks=hooks)
+        look = _look(env, podman, name, session=session, hooks=hooks, root=root, register=False)
         if look.running and not look.pending:
             return look.record
         try:
@@ -314,7 +469,42 @@ def enter_realm(
     hooks = EnterHooks() if hooks is None else hooks
     if argv is not None and not argv:
         raise make("GINN-E-USAGE", detail="exec needs a command after '--'")
-    look = _look(env, podman, name, session=session, hooks=hooks)
+    # The signals are orderly from the look on, so an app registered there is released too.
+    with _orderly_signals(hooks.kill) as client:
+        look = _look(env, podman, name, session=session, hooks=hooks, root=root)
+        try:
+            return _enter_look(
+                env,
+                podman,
+                name,
+                look,
+                session=session,
+                gid=gid,
+                argv=argv,
+                root=root,
+                hooks=hooks,
+                client=client,
+            )
+        finally:
+            app = look.app
+            if app is not None:
+                _release_app(env, name, app, hooks)
+
+
+def _enter_look(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    look: _Look,
+    *,
+    session: HostUser,
+    gid: int,
+    argv: Sequence[str] | None,
+    root: bool,
+    hooks: EnterHooks,
+    client: _CommandClient,
+) -> int:
+    """The enter after the look: settle the realm, then run the command (module docstring)."""
     notices: list[GinnWarning] = []
     try:
         record = _settle(env, podman, name, look, session=session, hooks=hooks, notices=notices)
@@ -322,7 +512,7 @@ def enter_realm(
         if not _waits_for_holder(err):
             raise
         record = _await_holder(
-            env, podman, name, err, session=session, hooks=hooks, notices=notices
+            env, podman, name, err, session=session, hooks=hooks, notices=notices, root=root
         )
     if hooks.notify is not None:
         for notice in notices:
@@ -340,16 +530,21 @@ def enter_realm(
 
     def run() -> int:
         exec_started = hooks.clock()
-        status = podman.exec_interactive(
-            cid,
-            command,
-            user=exec_user(session.uid, gid, root=root),
-            env={**look.session.env, "HOME": home},
-            workdir=home,
-            tty=hooks.isatty(),
-            interactive=True,
-            pass_env=tuple(look.session.pass_through),
-        )
+        try:
+            status = podman.exec_interactive(
+                cid,
+                command,
+                user=exec_user(session.uid, gid, root=root),
+                env={**look.session.env, "HOME": home},
+                workdir=home,
+                tty=hooks.isatty(),
+                interactive=True,
+                pass_env=tuple(look.session.pass_through),
+                on_spawn=client.started,
+                on_exit=client.exited,
+            )
+        finally:
+            client.exited()
         _observe(hooks, "exec", hooks.clock() - exec_started)
         return status
 

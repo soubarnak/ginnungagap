@@ -29,12 +29,14 @@ from ginn.ops import delete as delete_module
 from ginn.ops._mutating import OpEnv
 from ginn.ops.delete import STEPS, DeleteHooks, delete_realm
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
+from ginn.ops.security_ops import agent_state_path, proxy_state_path, read_agent_record
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
+from ginn.security import agent
 from ginn.store.journal import process_start_ticks
 from ginn.store.paths import OwnedPaths
-from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
 from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import FakePodman
 
@@ -240,6 +242,49 @@ def test_delete_a_running_realm_stops_its_container_before_removing_it(
     assert fake.ops().index("stop") < fake.ops().index("rm")
     assert ("stop", (cid, 7)) in fake.calls
     assert ("rm", (cid, True)) in fake.calls
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-067")
+@pytest.mark.fr("FR-019")
+def test_deleting_a_running_development_realm_leaves_the_filter_and_forgets_its_proxy(
+    env: OpEnv, fake: FakePodman, paths: OwnedPaths
+) -> None:
+    """A delete is the last word for a realm: its filter member goes, and its proxy files too."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    write_json_atomic(agent_state_path(paths), agent.AgentRecord(members=("lab",)).to_dict())
+    proxy = proxy_state_path(paths, RealmName("lab"))
+    proxy.parent.mkdir(parents=True, exist_ok=True)
+    proxy.write_text(json.dumps({"realm": "lab", "apps": [], "proxy": None}), encoding="utf-8")
+
+    delete_realm(env, fake, RealmName("lab"))
+
+    assert read_agent_record(paths).members == ()
+    assert not proxy.exists()
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-019")
+def test_a_failed_proxy_release_keeps_the_realm_deleting_until_the_next_delete(
+    env: OpEnv, fake: FakePodman, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    real = delete_module.forget_proxy
+    calls: list[str] = []
+
+    def flaky(op_env: OpEnv, name: RealmName) -> None:
+        calls.append(name.value)
+        if len(calls) == 1:
+            raise make("GINN-E-DBUS-PROXY", realm=name.value, detail="held by another command")
+        real(op_env, name)
+
+    monkeypatch.setattr(delete_module, "forget_proxy", flaky)
+    with pytest.raises(GinnError):
+        delete_realm(env, fake, RealmName("lab"))
+    assert RealmStore(env.paths, env.clock).load(RealmName("lab")).state is RealmState.DELETING
+
+    delete_realm(env, fake, RealmName("lab"))
+    assert calls == ["lab", "lab"]
     assert_gone(env, fake, "lab")
 
 

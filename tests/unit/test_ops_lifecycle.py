@@ -15,6 +15,7 @@ live session under /run/user/1000 (a PipeWire socket), and a real socket would a
 
 import json
 import os
+import stat
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,7 +25,9 @@ from typing import Any
 import pytest
 
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
+from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make
+from ginn.errors import Warning as GinnWarning
 from ginn.ops import lifecycle
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import (
@@ -37,10 +40,13 @@ from ginn.ops.lifecycle import (
     stop_realm,
 )
 from ginn.ops.lifecycle import _tree_usage as tree_usage
+from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime import attach
+from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
+from ginn.security.agent import AgentRecord
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from tests.fakes.clock import FakeClock
@@ -197,10 +203,12 @@ def host_identity_is_read_only_under_tmp(tmp_path: Path, monkeypatch: pytest.Mon
 
 @pytest.fixture
 def hooks(tmp_path: Path, mountinfo: Path) -> LifecycleHooks:
-    """The probes answer only for paths under tmp_path that exist, as in test_ops_create."""
+    """The probes answer only for paths under tmp_path that exist, as in test_ops_create. The gpg
+    hook is pinned, so no start runs the host's gpgconf (NFR-SEC-007)."""
     return LifecycleHooks(
         exists=lambda p: p.startswith(str(tmp_path)) and os.path.exists(p),
         mountinfo=mountinfo,
+        security=SecurityHooks(gpg_extra=lambda: None),
     )
 
 
@@ -214,6 +222,11 @@ def _record(
     tier: Tier = Tier.BASIC,
     restart: bool = False,
     share: list[str] | None = None,
+    permissions: Permissions | None = None,
+    created_options: list[str] | None = None,
+    kvm_at_create: bool = False,
+    gpu_at_create: bool = True,
+    fonts_at_create: bool = True,
 ) -> RealmRecord:
     settings = RealmSettings(
         name=RealmName(name),
@@ -235,6 +248,11 @@ def _record(
         updated_at=T0,
         restart_required=restart,
         share_skipped=list(share or []),
+        permissions=Permissions() if permissions is None else permissions,
+        created_options=list(created_options or []),
+        kvm_at_create=kvm_at_create,
+        gpu_at_create=gpu_at_create,
+        fonts_at_create=fonts_at_create,
     )
 
 
@@ -645,16 +663,53 @@ def test_services_on_start_and_stop_are_refused_until_m7(
 
 
 @pytest.mark.fr("FR-016")
-def test_a_tier_other_than_basic_is_refused_until_m6(
+@pytest.mark.fr("FR-062")
+def test_a_development_realm_starts_with_the_container_it_was_made_with(
     env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
 ) -> None:
-    make_realm(env, fake, "lab", RealmState.STOPPED, running=False, tier=Tier.DEVELOPMENT)
+    made = [
+        "device=/dev/fuse",
+        "device=/dev/net/tun",
+        "security-opt=seccomp",
+        "security-opt=unmask",
+    ]
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.DEVELOPMENT,
+        created_options=made,
+    )
 
-    with pytest.raises(GinnError, match="M6") as caught:
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert record.state is RealmState.RUNNING
+    assert record.settings.tier is Tier.DEVELOPMENT
+
+
+@pytest.mark.fr("FR-066")
+def test_a_start_whose_options_differ_from_the_container_is_refused_before_any_write(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """A Basic record that names nested options is not started: its container lacks them (T8.3)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        created_options=["device=/dev/fuse"],
+    )
+
+    with pytest.raises(GinnError, match="T8.3") as caught:
         start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
 
     assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
     assert fake.calls == []
+    assert list(env.audit.read()) == []
+    assert env.journal.pending() == []
 
 
 @pytest.mark.fr("FR-016")
@@ -1362,3 +1417,300 @@ def test_a_host_change_during_a_stop_is_handed_to_the_caller_after_the_stop(
 
     assert record.state is RealmState.STOPPED
     assert [notice.code for notice in notices] == ["GINN-W-HOST-CHANGED"]
+
+
+@pytest.mark.fr("NFR-SEC-002")
+def test_a_start_refuses_a_kvm_toggle_the_container_was_made_without(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The stored probe decides: the host had /dev/kvm, and the container has no kvm option."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.CUSTOM,
+        permissions=Permissions(
+            toggles=frozenset({Toggle.KVM, Toggle.DOWNLOADS, Toggle.MOUNT_ROOTS})
+        ),
+        created_options=[],
+        kvm_at_create=True,
+    )
+    with pytest.raises(GinnError, match="T8.3") as caught:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert fake.calls == []
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_start_refuses_a_gpu_toggle_the_container_was_made_without(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The GPU device is fixed at create, so a stored toggle that differs from the flag is refused
+    at start, before any write or podman call (T8.3)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.CUSTOM,
+        permissions=Permissions(toggles=BASIC_TOGGLES - {Toggle.GPU}),
+        gpu_at_create=True,
+    )
+    with pytest.raises(GinnError, match="T8.3") as caught:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert fake.calls == []
+
+
+@pytest.mark.fr("FR-067")
+def test_a_development_realm_starts_one_filter_before_its_grants_and_stop_ends_it(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    home: Path,
+    tmp_path: Path,
+    hooks: LifecycleHooks,
+) -> None:
+    from tests.unit.test_ops_security import _Launches
+
+    launches = _Launches()
+    runtime = tmp_path / "hostrun"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    session = HostUser(
+        uid=UID,
+        host_home=home,
+        host_env={"XDG_RUNTIME_DIR": str(runtime), "SSH_AUTH_SOCK": str(runtime / "ssh")},
+    )
+    security = SecurityHooks(
+        agent_launch=launches,
+        gpg_extra=lambda: None,
+        file_type=lambda _path: stat.S_IFSOCK,
+    )
+    hooks_s = replace(hooks, security=security)
+    made = [
+        "device=/dev/fuse",
+        "device=/dev/net/tun",
+        "security-opt=seccomp",
+        "security-opt=unmask",
+    ]
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.DEVELOPMENT,
+        created_options=made,
+    )
+
+    try:
+        record = start_realm(env, fake, RealmName("lab"), session=session, hooks=hooks_s)
+        assert record.state is RealmState.RUNNING
+        assert len(launches.argvs) == 1
+        assert read_agent_record(env.paths).proc == launches.children[0].proc
+        stop_realm(env, fake, RealmName("lab"), hooks=hooks_s)
+        assert not launches.children[0].running()
+        assert read_agent_record(env.paths) == AgentRecord()
+    finally:
+        for child in launches.children:
+            if child.running():
+                child.stop()
+
+
+@pytest.mark.fr("NFR-004")
+def test_a_development_start_resolves_the_gpg_socket_once_and_stores_it(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    home: Path,
+    tmp_path: Path,
+    hooks: LifecycleHooks,
+) -> None:
+    """gpgconf runs once per start, and the enter that follows reads the stored socket (NFR-004)."""
+    from tests.unit.test_ops_security import _Launches
+
+    launches = _Launches()
+    runtime = tmp_path / "hostrun"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    session = HostUser(
+        uid=UID,
+        host_home=home,
+        host_env={"XDG_RUNTIME_DIR": str(runtime), "SSH_AUTH_SOCK": str(runtime / "ssh")},
+    )
+    lookups: list[str] = []
+    socket = "/run/user/1000/gnupg/S.gpg-agent.extra"
+
+    def gpg_extra() -> str:
+        lookups.append(socket)
+        return socket
+
+    security = SecurityHooks(
+        agent_launch=launches,
+        gpg_extra=gpg_extra,
+        file_type=lambda _path: stat.S_IFSOCK,
+    )
+    hooks_s = replace(hooks, security=security)
+    made = [
+        "device=/dev/fuse",
+        "device=/dev/net/tun",
+        "security-opt=seccomp",
+        "security-opt=unmask",
+    ]
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.DEVELOPMENT,
+        created_options=made,
+    )
+    try:
+        start_realm(env, fake, RealmName("lab"), session=session, hooks=hooks_s)
+        stored = RealmStore(env.paths, env.clock).load(RealmName("lab"))
+        assert (stored.gpg_extra, stored.gpg_extra_known) == (socket, True)
+        assert lookups == [socket]
+        stop_realm(env, fake, RealmName("lab"), hooks=hooks_s)
+        start_realm(env, fake, RealmName("lab"), session=session, hooks=hooks_s)
+        assert lookups == [socket, socket]
+    finally:
+        for child in launches.children:
+            if child.running():
+                child.stop()
+
+
+@pytest.mark.fr("FR-067")
+def test_a_basic_realm_start_never_touches_the_filter_state(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+    assert not agent_state_path(env.paths).exists()
+
+
+@pytest.mark.fr("FR-067")
+def test_a_missing_filter_helper_starts_the_development_realm_without_ssh_and_warns(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    home: Path,
+    tmp_path: Path,
+    hooks: LifecycleHooks,
+) -> None:
+    """A missing helper is a skip: the start goes on with no SSH grant, and it warns (ADR-008)."""
+    from tests.unit.test_ops_security import _Launches
+
+    launches = _Launches()
+    runtime = tmp_path / "hostrun"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    session = HostUser(
+        uid=UID,
+        host_home=home,
+        host_env={"XDG_RUNTIME_DIR": str(runtime), "SSH_AUTH_SOCK": str(runtime / "ssh")},
+    )
+    helper = str(tmp_path / "no-such-ginn-agent-filter")
+    security = SecurityHooks(
+        agent_helper=helper,
+        agent_launch=launches,
+        gpg_extra=lambda: None,
+        file_type=lambda path: None if path == helper else stat.S_IFSOCK,
+    )
+    hooks_s = replace(hooks, security=security)
+    made = [
+        "device=/dev/fuse",
+        "device=/dev/net/tun",
+        "security-opt=seccomp",
+        "security-opt=unmask",
+    ]
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.DEVELOPMENT,
+        created_options=made,
+    )
+    notices: list[GinnWarning] = []
+    record = start_realm(
+        env, fake, RealmName("lab"), session=session, hooks=hooks_s, warnings=notices
+    )
+    assert record.state is RealmState.RUNNING
+    assert [notice.code for notice in notices] == ["GINN-W-AGENT-FILTER"]
+    assert launches.argvs == []
+    assert any(
+        line == "agent skipped: SSH agent (the filter helper is not installed)"
+        for line in record.share_skipped
+    )
+    stored = read_agent_record(env.paths)
+    assert stored.members == ("lab",) and stored.proc is None
+
+
+@pytest.mark.fr("FR-067")
+def test_an_os_error_in_the_filter_record_rolls_a_development_start_back(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    home: Path,
+    tmp_path: Path,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain OSError while the filter record is read is a GinnError, so the start rolls back."""
+    from ginn.ops import security_ops
+
+    runtime = tmp_path / "hostrun"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    session = HostUser(
+        uid=UID,
+        host_home=home,
+        host_env={"XDG_RUNTIME_DIR": str(runtime), "SSH_AUTH_SOCK": str(runtime / "ssh")},
+    )
+
+    def unreadable(paths: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(security_ops, "read_agent_record", unreadable)
+    made = [
+        "device=/dev/fuse",
+        "device=/dev/net/tun",
+        "security-opt=seccomp",
+        "security-opt=unmask",
+    ]
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.DEVELOPMENT,
+        created_options=made,
+    )
+    with pytest.raises(GinnError) as caught:
+        start_realm(env, fake, RealmName("lab"), session=session, hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert RealmStore(env.paths, env.clock).load(RealmName("lab")).state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-068")
+def test_an_abstract_session_bus_is_listed_among_the_share_skips_of_the_start(
+    env: OpEnv, fake: LifecyclePodman, home: Path, tmp_path: Path, hooks: LifecycleHooks
+) -> None:
+    """AS-012: the refused bus is recorded like a skipped grant, so `ginn status` lists it."""
+    runtime = tmp_path / "hostrun"
+    runtime.mkdir(mode=0o700, exist_ok=True)
+    session = HostUser(
+        uid=UID,
+        host_home=home,
+        host_env={
+            "XDG_RUNTIME_DIR": str(runtime),
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus,abstract=/tmp/dbus-x",
+        },
+    )
+    hooks_s = replace(hooks, security=SecurityHooks(dbus_binary="/usr/bin/xdg-dbus-proxy"))
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    record = start_realm(env, fake, RealmName("lab"), session=session, hooks=hooks_s)
+    assert any(
+        line.startswith("bus skipped: D-Bus session bus (") and "AS-012" in line
+        for line in record.share_skipped
+    )

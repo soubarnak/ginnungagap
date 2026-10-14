@@ -7,6 +7,7 @@ never raised, so each case asserts the skip message and that nothing was bound.
 """
 
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,7 @@ class Layout:
     home: Path
     realm_home: Path
     owned: tuple[Path, ...]
+    runtime: Path
 
 
 @pytest.fixture
@@ -82,6 +84,7 @@ def layout(tmp_path: Path) -> Layout:
         home=home,
         realm_home=data / "homes" / "arch",
         owned=(data, config, state, runtime),
+        runtime=runtime,
     )
 
 
@@ -136,6 +139,7 @@ def attach(
         uid=UID,
         user=USER,
         owned_paths=layout.owned,
+        runtime_root=layout.runtime,
         session_binds=binds,
         env={} if env is None else env,
         exists=fake_fs(paths),
@@ -511,21 +515,30 @@ def test_home_under_mnt_skips_mnt_and_keeps_the_rest_of_the_plan(layout: Layout)
     ]
 
 
-def test_development_and_custom_tiers_are_not_built_yet(layout: Layout) -> None:
-    """Development and Custom add grants in M6 (T6.2). Until then both plans raise."""
+@pytest.mark.fr("FR-062")
+def test_every_tier_gets_the_same_stable_create_binds(layout: Layout) -> None:
+    """The create-time binds do not depend on the tier. The tier options come from caps.py."""
+    basic = create_binds(
+        Tier.BASIC,
+        host_home=layout.home,
+        uid=UID,
+        realm_home=layout.realm_home,
+        owned_paths=layout.owned,
+        env={},
+        exists=fake_fs([]),
+    )
     for tier in (Tier.DEVELOPMENT, Tier.CUSTOM):
-        with pytest.raises(NotImplementedError):
-            create_binds(
-                tier,
-                host_home=layout.home,
-                uid=UID,
-                realm_home=layout.realm_home,
-                owned_paths=layout.owned,
-                env={},
-                exists=fake_fs([]),
-            )
-        with pytest.raises(NotImplementedError):
-            attach(layout, tier=tier)
+        binds = create_binds(
+            tier,
+            host_home=layout.home,
+            uid=UID,
+            realm_home=layout.realm_home,
+            owned_paths=layout.owned,
+            env={},
+            exists=fake_fs([]),
+        )
+        assert binds == basic
+        attach(layout, tier=tier)
 
 
 @pytest.mark.fr("DR-021")
@@ -568,6 +581,7 @@ def test_user_name_must_be_one_path_component(layout: Layout, user: str) -> None
             uid=UID,
             user=user,
             owned_paths=layout.owned,
+            runtime_root=layout.runtime,
             session_binds=[],
             env={},
             exists=fake_fs([]),
@@ -627,7 +641,12 @@ def test_refused_grant_is_not_marked_missing_so_it_is_never_retried(layout: Layo
 def test_recheck_admits_a_folder_under_home_and_refuses_one_outside(layout: Layout) -> None:
     folder = str(layout.home / "Downloads")
     realm = f"{layout.home}/Downloads"
-    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    kwargs = {
+        "home": layout.home,
+        "owned_paths": layout.owned,
+        "runtime_root": layout.runtime,
+        "env": {},
+    }
     assert recheck("share", folder, realm, "rw", **kwargs) is None
     assert recheck("share", "/etc", realm, "rw", **kwargs) is not None
 
@@ -635,7 +654,12 @@ def test_recheck_admits_a_folder_under_home_and_refuses_one_outside(layout: Layo
 @pytest.mark.fr("DR-004")
 def test_recheck_refuses_a_session_path_under_ssh(layout: Layout) -> None:
     host = str(layout.home / ".ssh" / "agent.sock")
-    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    kwargs = {
+        "home": layout.home,
+        "owned_paths": layout.owned,
+        "runtime_root": layout.runtime,
+        "env": {},
+    }
     assert recheck("session", host, "/run/user/1000/agent", "rw", **kwargs) is not None
 
 
@@ -645,6 +669,69 @@ def test_recheck_refuses_a_mount_root_that_is_now_a_link(layout: Layout, tmp_pat
     target.mkdir()
     link = tmp_path / "media-link"
     link.symlink_to(target, target_is_directory=True)
-    kwargs = {"home": layout.home, "owned_paths": layout.owned, "env": {}}
+    kwargs = {
+        "home": layout.home,
+        "owned_paths": layout.owned,
+        "runtime_root": layout.runtime,
+        "env": {},
+    }
     reason = recheck("share", str(link), "/media", "rw", **kwargs)
     assert reason == SYMLINK_ROOT_REASON
+
+
+def _ginn_socket(path: Path) -> str:
+    """A socket node, made without binding it, so the path stays short (AF_UNIX limit)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mknod(path, 0o600 | stat.S_IFSOCK)
+    return str(path)
+
+
+@pytest.mark.fr("DR-004")
+def test_an_internal_socket_outside_the_runtime_root_is_refused(layout: Layout) -> None:
+    """An internal grant names ginn's own socket under the runtime root (ADR-008, CL-14). A socket
+    under another Owned root, such as the state root, is refused, even though it is Owned."""
+    state_socket = _ginn_socket(layout.owned[2] / "agent" / "ssh.sock")
+    bind = SessionBind(host=state_socket, realm="/run/user/1000/ssh", internal=True)
+    plan = attach(layout, present=[state_socket], binds=[bind])
+    assert not any(entry.host == state_socket for entry in plan.attach)
+    (refused,) = [skip for skip in plan.skipped if skip.name == state_socket]
+    assert refused.kind == "internal"
+    assert "runtime root" in refused.reason
+
+
+@pytest.mark.fr("DR-004")
+def test_an_internal_source_under_the_runtime_root_that_is_not_a_socket_is_refused(
+    layout: Layout,
+) -> None:
+    plain = layout.runtime / "agent" / "ssh.sock"
+    plain.parent.mkdir(parents=True)
+    plain.write_text("", encoding="utf-8")
+    bind = SessionBind(host=str(plain), realm="/run/user/1000/ssh", internal=True)
+    plan = attach(layout, present=[str(plain)], binds=[bind])
+    assert not any(entry.host == str(plain) for entry in plan.attach)
+    (refused,) = [skip for skip in plan.skipped if skip.name == str(plain)]
+    assert "socket" in refused.reason
+
+
+@pytest.mark.fr("DR-004")
+def test_an_internal_socket_under_the_runtime_root_is_admitted(layout: Layout) -> None:
+    sock = _ginn_socket(layout.runtime / "agent" / "ssh.sock")
+    bind = SessionBind(host=sock, realm="/run/user/1000/ssh", internal=True)
+    plan = attach(layout, present=[sock], binds=[bind])
+    assert [entry.host for entry in plan.attach if entry.kind == "internal"] == [
+        os.path.realpath(sock)
+    ]
+
+
+@pytest.mark.fr("DR-004")
+def test_recheck_refuses_an_internal_socket_outside_the_runtime_root(layout: Layout) -> None:
+    state_socket = _ginn_socket(layout.owned[2] / "dbus.sock")
+    kwargs = {
+        "home": layout.home,
+        "owned_paths": layout.owned,
+        "runtime_root": layout.runtime,
+        "env": {},
+    }
+    assert recheck("internal", state_socket, "/run/user/1000/bus", "rw", **kwargs) is not None
+    under = _ginn_socket(layout.runtime / "proxy" / "bus.sock")
+    assert recheck("internal", under, "/run/user/1000/bus", "rw", **kwargs) is None

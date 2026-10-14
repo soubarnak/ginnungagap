@@ -546,3 +546,25 @@ def test_a_session_slot_with_an_empty_host_is_a_valid_grant(tmp_path: Path) -> N
     restored = RealmRecord.from_json(data, source=str(tmp_path / "x.json"))
     assert restored.grants[0].host == ""
     assert restored.grants[0].realm == "/run/user/1000/wayland-0"
+
+
+@pytest.mark.fr("NFR-004")
+@pytest.mark.parametrize("socket", ["/run/user/1000/gnupg/S.gpg-agent.extra", None])
+def test_the_gpg_socket_resolved_at_start_round_trips_even_when_the_host_has_none(
+    socket: str | None,
+) -> None:
+    """A known value is stored, so enter does not run gpgconf again (NFR-004). None is a value."""
+    record = dataclasses.replace(_record(), gpg_extra=socket, gpg_extra_known=True)
+    data = json.loads(json.dumps(record.to_json()))
+    assert data["gpg_extra"] == socket
+    assert RealmRecord.from_json(data) == record
+
+
+@pytest.mark.fr("NFR-004")
+def test_a_record_that_predates_the_gpg_socket_reads_as_unknown() -> None:
+    """No key means unknown, so enter resolves the socket once. The key is written when known."""
+    assert "gpg_extra" not in _record().to_json()
+    older = _record().to_json()
+    restored = RealmRecord.from_json(older)
+    assert restored.gpg_extra_known is False
+    assert restored.gpg_extra is None

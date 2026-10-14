@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """`ginn create <distro> [--name REALM] [--tier ...] [--services on|off] [--with PKG ...]`.
 
-Create a stopped Basic realm with services off (FR-010), the default of every option. The options
-that the build does not have yet are refused before anything is written, with
-GINN-E-NOT-SUPPORTED-YET and the milestone that adds them: a non-Basic tier (M6), services on
-(M7), `--everything` (M8, T8.7, Kali only: other distributions get GINN-E-OPTION-INVALID, FR-014
-AC-3), `--resume` (M8, T8.5) and Kali itself (M10). A failure that ops/create.py reports is raised
+Create a stopped realm with services off (FR-010), Basic by default. `--tier` takes basic,
+development or custom (FR-060), and each tier's options are in security/caps.py (NFR-SEC-002). The
+options that the build does not have yet are refused before anything is written, with
+GINN-E-NOT-SUPPORTED-YET and the milestone that adds them: services on (M7), `--everything` (M8,
+T8.7, Kali only: other distributions get GINN-E-OPTION-INVALID, FR-014 AC-3), `--resume` (M8,
+T8.5) and Kali itself (M10). A failure that ops/create.py reports is raised
 as it is. A real create runs its package steps. Only the tests and the host gate set
 `Seams.integrate` to False, which skips them (CreateHooks.integrate, T4.9 Gate 3).
 """
@@ -39,7 +40,7 @@ def _configure(parser: argparse.ArgumentParser) -> None:
         "--tier",
         choices=TIERS,
         default=Tier.BASIC.value,
-        help="permission tier (default: basic; development and custom arrive in M6)",
+        help="permission tier: basic, development or custom (default: basic, FR-060)",
     )
     parser.add_argument(
         "--services",
@@ -81,8 +82,6 @@ def _refuse_unbuilt(args: argparse.Namespace, name: RealmName, distro: str) -> N
         raise _not_yet(name, "create --everything", "M8")
     if distro == KALI:
         raise _not_yet(name, "create of a kali realm", "M10")
-    if args.tier != Tier.BASIC.value:
-        raise _not_yet(name, f"create of a {args.tier} realm", "M6")
     if args.services == "on":
         raise _not_yet(name, "create of a services-on realm", "M7")
 
@@ -92,6 +91,8 @@ def _text(result: CreateResult) -> str:
     lines = [f"realm {record.settings.name.value} created: state {record.state.value}"]
     if result.locale_note is not None:
         lines.append(f"note: {result.locale_note}")
+    if result.gpu_note is not None:
+        lines.append(f"note: {result.gpu_note}")
     return "\n".join(lines)
 
 
@@ -108,7 +109,7 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         gid=realms.gid,
         host_home=realms.host.host_home,
         host_env=realms.host.host_env,
-        tier=Tier.BASIC,
+        tier=Tier.parse(str(args.tier)),
         services=False,
         everything=False,
         with_packages=tuple(args.with_packages or ()),
@@ -138,6 +139,7 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         "generation": record.generation,
         "image_digest": record.image_digest,
         "locale_note": result.locale_note,
+        "gpu_note": result.gpu_note,
     }
     ctx.output.emit(payload, render=lambda: _text(result))
     return 0

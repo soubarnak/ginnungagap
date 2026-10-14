@@ -27,6 +27,7 @@ from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import HostUser, LifecycleHooks
 from ginn.ops.packages import PackageHooks, install_packages, remove_packages
 from ginn.podman.models import ExecResult
+from ginn.runtime.realm_security import SecurityHooks
 from ginn.store.journal import Journal, JournalEntry
 from ginn.store.locks import realm_lock
 from ginn.store.records import RealmRecord, RealmStore
@@ -54,6 +55,7 @@ def _hooks(world: World, sleeps: list[float] | None = None) -> PackageHooks:
     lifecycle = LifecycleHooks(
         exists=lambda p: p.startswith(str(world.tmp)) and os.path.exists(p),
         mountinfo=mountinfo,
+        security=SecurityHooks(gpg_extra=lambda: None),
     )
     collected: list[float] = [] if sleeps is None else sleeps
     return PackageHooks(lifecycle=lifecycle, sleep=collected.append)

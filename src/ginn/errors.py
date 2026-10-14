@@ -9,8 +9,9 @@ GINN-E-RUNTIME-DIR-UNSAFE (DR-010, ADR-004), GINN-E-SUBID-LOCK-UNSAFE (FR-001), 
 (FR-001), GINN-E-SUBID-CONFLICT (FR-001, FR-002), GINN-E-SETUP-PATH-UNSAFE (FR-001, DR-009),
 GINN-E-SETUP-BUSY (FR-001), GINN-E-UNDO-CGROUP-BUSY, GINN-E-UNDO-SERVICE-RUNNING and
 GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH-FAILED
-(ADR-008) and GINN-E-REALM-USER (FR-048, ADR-006). `source` cites the requirement that defines the
-failure.
+(ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
+GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069). `source` cites
+the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -396,6 +397,64 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-048, ADR-006 amendment of 2026-10-13 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-AGENT-FILTER",
+        exit_code=1,
+        summary="the SSH agent filter did not start: {detail}",
+        remedy="check that SSH_AUTH_SOCK names a running agent socket and that the ginn runtime "
+        "directory is writable, then retry the start, enter or launch",
+        source="FR-067 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-DBUS-PROXY",
+        exit_code=1,
+        summary="the session bus filter for '{realm}' did not start: {detail}",
+        remedy="check that the host session bus is running and that xdg-dbus-proxy is installed, "
+        "then retry the launch",
+        source="FR-068, AS-012 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-NVIDIA-STALE",
+        exit_code=1,
+        summary="the NVIDIA libraries do not match the kernel driver: {detail}",
+        remedy="retry the GPU start, which regenerates the spec from the installed driver; if it "
+        "repeats, reinstall the NVIDIA driver so that its libraries and kernel module match",
+        source="FR-069, R-005 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-NVIDIA-CDI",
+        exit_code=1,
+        summary="podman cannot resolve the GPU's CDI devices: {detail}",
+        remedy="re-run 'ginn doctor'; if the NVIDIA CDI spec under ginn's cdi directory is "
+        "missing, start the GPU realm again so the spec is written, then retry",
+        source="FR-069, ADR-012 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-HOST-DEVICE",
+        exit_code=1,
+        summary="the host has no {device}, which {feature} needs",
+        remedy="load the kernel module that provides the device, then retry the create; ginn does "
+        "not make a nested-container realm without it",
+        source="FR-062 AC-3, ADR-006 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-SECCOMP-SOURCE",
+        exit_code=1,
+        summary="the seccomp profile of a nested-container realm cannot be made from {source}: "
+        "{detail}",
+        remedy="install the package that provides the host's default seccomp profile "
+        "(containers-common on Void), then retry the create; ginn never runs such a realm without "
+        "the profile",
+        source="ADR-006 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-TIER-NOT-CUSTOM",
+        exit_code=4,
+        summary="realm '{realm}' is {tier}, so its shares and toggles cannot change",
+        remedy="run 'ginn tier {realm} custom' first; the shares and toggles belong to a Custom "
+        "realm, and a Basic or Development realm has its permissions from its tier",
+        source="FR-063 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-REALM-STATE",
         exit_code=4,
         summary="realm '{realm}' is {state}; {action} needs it {allowed}",
@@ -484,6 +543,39 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-044; FR-045 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-W-AGENT-FILTER",
+        exit_code=0,
+        summary="the SSH agent filter is not in line for realm '{realm}': {detail}",
+        remedy="the realm's SSH grant may be missing or stale; start the realm again from a "
+        "session with a running SSH agent, or run 'ginn doctor' to see the filter",
+        source="FR-067 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-NVIDIA-STALE",
+        exit_code=0,
+        summary="the NVIDIA libraries do not match the kernel driver, so realm '{realm}' gets no "
+        "GPU grant: {detail}",
+        remedy="reinstall the NVIDIA driver so that its libraries and kernel module match, then "
+        "create the realm again to get the GPU grant",
+        source="FR-069, R-005 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-PROXY-RELEASE",
+        exit_code=0,
+        summary="the D-Bus proxy of realm '{realm}' was not released: {detail}",
+        remedy="the command finished; run the realm again, or stop it, so the proxy is stopped",
+        source="FR-068, ADR-007 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-DBUS-PROXY",
+        exit_code=0,
+        summary="the session bus filter for '{realm}' did not start, so the app has no session "
+        "bus: {detail}",
+        remedy="the app runs without a session bus; check that the host session bus is running "
+        "and that xdg-dbus-proxy is installed, then launch the app again",
+        source="FR-068, ADR-010 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-EXPORT-SKIPPED",
         exit_code=0,
         summary="desktop entry '{app}' of realm '{realm}' is not exported: {reason}",
@@ -514,7 +606,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (
         1,
         "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, "
-        "GINN-E-REALM-USER",
+        "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
+        "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
@@ -522,7 +615,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         4,
         "conflict with existing state: name taken, undo refused, unacknowledged host change, "
         "interrupted operation not yet recovered, a realm in a state its verb does not allow "
-        "(GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS)",
+        "(GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), "
+        "a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM)",
     ),
     (65, "data error (EX_DATAERR): image or package signature not verified"),
     (69, "network failure"),

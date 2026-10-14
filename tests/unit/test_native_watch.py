@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,21 @@ def _stub(tmp_path: Path, name: str = "hook.sh", status: int = 0) -> tuple[Path,
     return script, log
 
 
+_STARTED: list[subprocess.Popen[bytes]] = []
+"""Every watch that `_start` made. A test that fails before its own stop leaves one running."""
+
+
+@pytest.fixture(autouse=True)
+def _no_watch_left_running() -> Iterator[None]:
+    """Kill the watches that the test started and did not stop, so none outlives its test."""
+    yield
+    while _STARTED:
+        proc = _STARTED.pop()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=WAIT_S)
+
+
 def _start(
     helper: Path,
     watched: Path,
@@ -110,9 +126,11 @@ def _start(
     if once:
         argv.append("--once")
     argv += [str(watched), str(quiet), str(maximum), *command]
-    return subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
         argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    _STARTED.append(proc)
+    return proc
 
 
 def _finish(proc: subprocess.Popen[bytes]) -> tuple[int, str]:

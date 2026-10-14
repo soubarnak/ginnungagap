@@ -15,6 +15,7 @@ races the pre-check, and the share list rebuilt at enter.
 
 import json
 import os
+import signal
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
@@ -27,17 +28,22 @@ import pytest
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError
+from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
+from ginn.ops.security_ops import proxy_state_path
 from ginn.podman.adapter import PODMAN_ERROR_EXIT, CreateSpec
 from ginn.podman.models import ContainerInfo, ExecResult
 from ginn.runtime import attach
+from ginn.runtime import enter as enter_module
 from ginn.runtime._enter_plan import display_name, exec_user, login_argv, share_after
 from ginn.runtime.attach import AttachResult
 from ginn.runtime.enter import BUSY_STEP_S, BUSY_WAIT_S, EnterHooks, enter_realm
 from ginn.runtime.env import SessionEnv
 from ginn.runtime.mounts import Skipped
+from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
+from ginn.security._proc import Proc
 from ginn.store.locks import realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -216,6 +222,7 @@ def lifecycle_hooks(tmp_path: Path, mountinfo: Path) -> LifecycleHooks:
     return LifecycleHooks(
         exists=lambda p: p.startswith(str(tmp_path)) and os.path.exists(p),
         mountinfo=mountinfo,
+        security=SecurityHooks(gpg_extra=lambda: None),
     )
 
 
@@ -921,6 +928,55 @@ def test_a_holder_that_outlasts_the_wait_is_refused_with_realm_busy(
     assert "stop" not in fake.ops()
 
 
+@pytest.mark.fr("FR-068")
+@pytest.mark.fr("DR-033")
+@pytest.mark.fr("NFR-004")
+def test_a_wait_for_a_holder_registers_the_app_once_and_releases_it_once(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each wait step repeats the lock-free look, but only the command's first look registers the
+    app and tries its proxy. That app is the one released when the command ends (FR-068)."""
+    _pending_realm(env, fake, user, lifecycle_hooks, home)
+    time_ = FakeTime()
+    held = ExitStack()
+    held.enter_context(realm_lock(env.paths, RealmName("lab"), "reattach"))
+    starts: list[Proc] = []
+    releases: list[Proc] = []
+    real_start = enter_module.start_app
+    real_finish = enter_module.finish_app
+
+    def counted_start(*args: Any, **kwargs: Any) -> Proc:
+        app = real_start(*args, **kwargs)
+        starts.append(app)
+        return app
+
+    def counted_finish(env_: OpEnv, name: RealmName, app: Proc) -> None:
+        releases.append(app)
+        real_finish(env_, name, app)
+
+    def the_holder_finishes(seconds: float) -> None:
+        # Three steps pass while the holder runs, then it ends and this enter reattaches.
+        time_.sleep(seconds)
+        if len(time_.sleeps) == 3:
+            held.close()
+
+    monkeypatch.setattr(enter_module, "start_app", counted_start)
+    monkeypatch.setattr(enter_module, "finish_app", counted_finish)
+    hooks = make_hooks(lifecycle_hooks, time_=time_, sleep=the_holder_finishes)
+    assert enter(env, fake, "lab", user, hooks, argv=["true"]) == 0
+
+    assert len(time_.sleeps) == 3
+    assert len(starts) == 1
+    assert releases == starts
+    assert _launched_apps(env.paths, "lab") == []
+    assert fake.ops().count("exec_interactive") == 1
+
+
 @pytest.mark.fr("DR-033")
 def test_any_other_lock_holder_is_refused_at_once_without_a_wait(
     env: OpEnv,
@@ -1068,3 +1124,303 @@ def test_a_record_that_says_running_while_its_container_exited_is_started_again(
     assert "start" in fake.ops()
     assert stored(env, "lab").state is RealmState.RUNNING
     assert exec_call(fake).container_id == container_id(env, "lab")
+
+
+def _launched_apps(paths: OwnedPaths, name: str) -> list[dict[str, Any]]:
+    """The apps that the realm's proxy state holds now (FR-068). No state file means no app."""
+    path = proxy_state_path(paths, RealmName(name))
+    if not path.exists():
+        return []
+    apps: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))["apps"]
+    return apps
+
+
+class LaunchedDuringExec(EnterPodman):
+    """Records the launched apps of realm `lab` as each command starts, then runs `during`.
+
+    `during` stands for the command: it returns, raises, or sends a signal to this process.
+    """
+
+    def __init__(self, *, root: str, paths: OwnedPaths, during: Callable[[], None]) -> None:
+        super().__init__(root=root)
+        self.paths = paths
+        self.during = during
+        self.apps_seen: list[list[dict[str, Any]]] = []
+
+    def exec_interactive(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> int:
+        self.apps_seen.append(_launched_apps(self.paths, "lab"))
+        self.during()
+        return super().exec_interactive(container_id, argv, **kwargs)
+
+
+def _send_to_self(signum: int) -> None:
+    """Sends `signum` to this process, as the end of a command would. Without the enter handler the
+    signal would end the test run, so that case raises instead."""
+    if signal.getsignal(signum) is signal.SIG_DFL:
+        raise RuntimeError("no enter handler is installed for the signal")
+    os.kill(os.getpid(), signum)
+
+
+def _command_fails() -> None:
+    raise RuntimeError("the command failed")
+
+
+@pytest.fixture
+def release_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release of a launched app fails, as when the proxy state cannot be written."""
+
+    def gone(env: OpEnv, name: RealmName, proc: object) -> None:
+        raise OSError("the proxy state is gone")
+
+    monkeypatch.setattr("ginn.runtime.enter.finish_app", gone)
+
+
+@pytest.mark.fr("FR-068")
+def test_the_launched_app_runs_during_the_command_and_is_released_after_a_normal_exit(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+) -> None:
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=lambda: None)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+
+    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"]) == 0
+
+    assert [len(apps) for apps in fake.apps_seen] == [1]
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+def test_the_launched_app_is_released_when_the_command_raises(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+) -> None:
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=_command_fails)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+
+    with pytest.raises(RuntimeError, match="the command failed"):
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+def test_a_look_that_fails_before_the_command_releases_the_app(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreadable(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the session read failed")
+
+    monkeypatch.setattr("ginn.runtime.enter.session_env", unreadable)
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=lambda: None)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+
+    with pytest.raises(RuntimeError, match="the session read failed"):
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    assert fake.apps_seen == []
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_ends_the_command_through_its_exit_path_and_the_app_is_released(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    signum: int,
+) -> None:
+    fake = LaunchedDuringExec(
+        root=str(tmp_path), paths=env.paths, during=lambda: _send_to_self(signum)
+    )
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    before = signal.getsignal(signum)
+
+    with pytest.raises(SystemExit) as info:
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    assert info.value.code == 128 + signum
+    assert _launched_apps(env.paths, "lab") == []
+    assert signal.getsignal(signum) is before
+
+
+class _CommandRuns(LaunchedDuringExec):
+    """A command that podman exec runs as pid 4242. `during` stands for the command's own signal,
+    and the exec then returns 143, as podman does when the command ends on SIGTERM."""
+
+    def exec_interactive(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> int:
+        kwargs["on_spawn"](4242)
+        self.during()
+        return 143
+
+
+class _CommandExitsThenIsSignalled(LaunchedDuringExec):
+    """A command that podman exec runs as pid 4242, and reports its exit through `on_exit` before
+    `during` sends the signal. The signal comes after the client is reaped (FR-068)."""
+
+    def exec_interactive(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> int:
+        kwargs["on_spawn"](4242)
+        kwargs["on_exit"]()
+        self.during()
+        return 143
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_after_the_client_is_reaped_is_not_forwarded_to_its_pid(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    signum: int,
+) -> None:
+    """Once `on_exit` has run, the forwarder has no pid, so a signal ends ginn through its exit
+    path and never reaches the pid, which the kernel may have given to another process (FR-068)."""
+    fake = _CommandExitsThenIsSignalled(
+        root=str(tmp_path), paths=env.paths, during=lambda: _send_to_self(signum)
+    )
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    sent: list[tuple[int, int]] = []
+    hooks = replace(make_hooks(lifecycle_hooks), kill=lambda pid, sig: sent.append((pid, sig)))
+
+    with pytest.raises(SystemExit) as info:
+        enter(env, fake, "lab", user, hooks, argv=["true"])
+
+    assert info.value.code == 128 + signum
+    assert sent == []
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_during_the_command_is_forwarded_to_it_and_its_status_comes_back(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    signum: int,
+) -> None:
+    """The signal goes to the command, not to ginn. No exception ends the wait, so the command's
+    status comes back, and the app is released after the command is gone (FR-068)."""
+    fake = _CommandRuns(root=str(tmp_path), paths=env.paths, during=lambda: _send_to_self(signum))
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    sent: list[tuple[int, int]] = []
+    hooks = replace(make_hooks(lifecycle_hooks), kill=lambda pid, sig: sent.append((pid, sig)))
+
+    assert enter(env, fake, "lab", user, hooks, argv=["true"]) == 143
+
+    assert sent == [(4242, signum)]
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.fr("IR-011")
+@pytest.mark.parametrize("status", [0, 7])
+def test_a_failed_release_is_a_warning_and_the_exit_status_is_unchanged(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    release_fails: None,
+    status: int,
+) -> None:
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=lambda: None)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    fake.exec_results[("true",)] = ExecResult(status, "", "")
+    notices: list[GinnWarning] = []
+    hooks = replace(make_hooks(lifecycle_hooks), notify=notices.append)
+
+    assert enter(env, fake, "lab", user, hooks, argv=["true"]) == status
+
+    assert [notice.code for notice in notices] == ["GINN-W-PROXY-RELEASE"]
+    assert "lab" in notices[0].message
+    assert "the proxy state is gone" in notices[0].message
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.fr("IR-011")
+def test_a_failed_release_never_replaces_the_error_of_the_command(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+    release_fails: None,
+) -> None:
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=_command_fails)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    notices: list[GinnWarning] = []
+    hooks = replace(make_hooks(lifecycle_hooks), notify=notices.append)
+
+    with pytest.raises(RuntimeError, match="the command failed"):
+        enter(env, fake, "lab", user, hooks, argv=["true"])
+
+    assert [notice.code for notice in notices] == ["GINN-W-PROXY-RELEASE"]
+
+
+@pytest.mark.fr("FR-068")
+@pytest.mark.fr("FR-042")
+def test_a_root_session_that_waits_for_a_lock_holder_registers_no_launched_app(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    home: Path,
+    tmp_path: Path,
+) -> None:
+    """A `--root` enter is not a launched app, also while it waits (runtime/enter.py)."""
+    recorder = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=lambda: None)
+    _pending_realm(env, recorder, user, lifecycle_hooks, home)
+    time_ = FakeTime()
+    held = ExitStack()
+    held.enter_context(realm_lock(env.paths, RealmName("lab"), "reattach"))
+
+    def the_other_operation_finishes(seconds: float) -> None:
+        time_.sleep(seconds)
+        held.close()
+        enter(env, recorder, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+
+    hooks = make_hooks(lifecycle_hooks, time_=time_, sleep=the_other_operation_finishes)
+
+    assert enter(env, recorder, "lab", user, hooks, argv=["true"], root=True) == 0
+
+    assert recorder.apps_seen[-1] == []
+    assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-068")
+def test_a_proxy_that_fails_to_start_warns_and_the_command_still_runs(
+    env: OpEnv,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+) -> None:
+    """The enter is not refused when the proxy does not start: the app is registered with no bus,
+    the warning reaches the caller, and the command runs (ADR-010, FR-068)."""
+    fake = LaunchedDuringExec(root=str(tmp_path), paths=env.paths, during=lambda: None)
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    runtime = user.host_env["XDG_RUNTIME_DIR"]
+    with_bus = replace(
+        user, host_env={**user.host_env, "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus"}
+    )
+
+    def refused(argv: Sequence[str]) -> object:
+        raise GinnError("GINN-E-DBUS-PROXY", "proxy failed", "", 1, details={})
+
+    security = replace(
+        lifecycle_hooks.security, dbus_binary="/usr/bin/xdg-dbus-proxy", proxy_launch=refused
+    )
+    notices: list[GinnWarning] = []
+    hooks = replace(make_hooks(replace(lifecycle_hooks, security=security)), notify=notices.append)
+
+    assert enter(env, fake, "lab", with_bus, hooks, argv=["true"]) == 0
+
+    assert [notice.code for notice in notices] == ["GINN-W-DBUS-PROXY"]
+    assert _launched_apps(env.paths, "lab") == []

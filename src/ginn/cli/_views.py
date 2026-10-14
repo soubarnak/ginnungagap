@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from ginn.domain import RealmState
+from ginn.domain.permissions import effective_toggles
 from ginn.ops.lifecycle import RealmStatus, render_status_text
 from ginn.store.records import RealmRecord
 
@@ -43,6 +44,38 @@ def record_text(record: RealmRecord) -> str:
     lines.extend(record.share_skipped)
     if record.restart_required:
         lines.append("restart required")
+    return "\n".join(lines)
+
+
+def permissions_json(record: RealmRecord) -> dict[str, object]:
+    """The tier and the permissions of a realm (FR-060, FR-063), with its restart flag.
+
+    `toggles` are the effective ones: a Basic or Development realm shows its tier's set.
+    """
+    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
+    return {
+        "name": record.settings.name.value,
+        "state": record.state.value,
+        "tier": record.settings.tier.value,
+        "toggles": sorted(toggle.value for toggle in toggles),
+        "shares": [share.to_dict() for share in record.permissions.shares],
+        "restart_required": record.restart_required,
+    }
+
+
+def permissions_text(record: RealmRecord) -> str:
+    """The tier, the toggles and each share, then the restart flag (FR-066)."""
+    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
+    lines = [
+        f"realm {record.settings.name.value} tier {record.settings.tier.value}",
+        "toggles: " + (", ".join(sorted(toggle.value for toggle in toggles)) or "none"),
+    ]
+    lines += [f"share: {share.path} ({share.mode})" for share in record.permissions.shares]
+    if record.restart_required:
+        lines.append(
+            f"restart required: run 'ginn stop {record.settings.name.value}' and "
+            f"'ginn start {record.settings.name.value}' to apply the change"
+        )
     return "\n".join(lines)
 
 

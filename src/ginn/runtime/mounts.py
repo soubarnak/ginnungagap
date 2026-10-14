@@ -3,8 +3,9 @@
 
 The plan has two parts, as ADR-008 (amended 2026-10-12) decides.
 - `create_binds` is what podman binds at `podman create`. Only stable sources: the Realm Home at
-  the host home path, the host fonts and timezone (read-only), the GPU device nodes, and the
-  `--tmpfs` for the realm's runtime directory. A fixed path that is a symlink is checked at its
+  the host home path, the host fonts and timezone (read-only) while `fonts_timezone` is on, the GPU
+  device nodes while `gpu` is on, and the `--tmpfs` for the realm's runtime directory (FR-061,
+  FR-063). A fixed path that is a symlink is checked at its
   target, but the bind source is the literal path, because podman resolves it at each start.
 - `attach_plan` is the variable grants: `~/Downloads`, the external mount roots, and the session
   paths. ginn-rebind (ADR-008) attaches them into the running realm after `podman start`, and again
@@ -18,9 +19,9 @@ created (FR-064).
 A grant whose source is missing, forbidden or outside the allowed roots is skipped and recorded in
 a `Skipped` with its rule id, and the rest of the plan is still built. Only malformed input raises:
 a relative home, a bad user name, a Realm Home outside Owned Paths (DR-021), a session path that is
-not absolute. Development and Custom add grants in M6 (T6.2), so both tiers raise
-NotImplementedError until then. User-supplied shares arrive in T6.2 and will raise
-GINN-E-PATH-FORBIDDEN instead of skipping, because the user asked for them.
+not absolute. Development adds `~/Projects` and the shell startup files (FR-062), and Custom takes
+its toggles and shares (FR-063). A share is refused with GINN-E-PATH-FORBIDDEN when `perms` adds
+it, so a share refused here is a skip with its reason, as the other grants are.
 
 Each grant sits at the same absolute path inside the realm as on the host (FR-065), with two
 exceptions. The Realm Home is mounted at the host home path (FR-048), from its resolved source
@@ -35,6 +36,7 @@ Owned Paths, before start. A `container` entry is made inside the running realm 
 
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,15 +44,26 @@ from typing import Final, Literal
 
 from ginn.domain.enums import Tier
 from ginn.domain.paths import ROOTS_REASON, Mode, SharedPath, path_refusal, under_allowed_root
+from ginn.domain.permissions import (
+    BASIC_TOGGLES,
+    CustomShare,
+    Permissions,
+    Toggle,
+    effective_toggles,
+)
 from ginn.errors import GinnError
 from ginn.podman.adapter import Mount
 
 Exists = Callable[[str], bool]
 """Filesystem view for the skip decisions. Tests pass a fake, and the default reads the host."""
+IsDir = Callable[[str], bool]
+"""Whether a host path is a directory. It sets the placeholder kind of a Custom share."""
 
 Location = Literal["realm_home", "container"]
 
 DOWNLOADS: Final = "Downloads"
+PROJECTS: Final = "Projects"
+SHELL_RC_FILES: Final = (".bashrc", ".zshrc")
 USER_MEDIA_ROOT: Final = "/run/media"
 MOUNT_ROOTS: Final = ("/media", "/mnt")
 FONTS: Final = "/usr/share/fonts"
@@ -60,6 +73,8 @@ RUNTIME_PARENT: Final = "/run/user"
 _IMAGE_DIRS: Final = ("/tmp",)  # noqa: S108 - the image directory, not a temp file
 """Directories the image holds, so an attach does not list them as mountpoints."""
 SYMLINK_ROOT_REASON: Final = "a symbolic link, not a mount root"
+INTERNAL_KIND: Final = "internal"
+"""The grant kind of a ginn-made socket under the Owned runtime root (ADR-008, CL-14)."""
 _USER_NAME: Final = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
 
@@ -75,6 +90,10 @@ class SessionBind:
     realm: str
     mode: Mode = "rw"
     is_dir: bool = False
+    internal: bool = False
+    """True for a socket that ginn made under its own runtime root (ADR-008, CL-14). Such a source
+    is admitted by its typed grant (kind `internal`), which DR-004's Owned Path rule does not apply
+    to, because it governs shares that the user chooses, not ginn's own sockets."""
 
 
 @dataclass(frozen=True)
@@ -164,29 +183,34 @@ def create_binds(
     owned_paths: Sequence[Path],
     env: Mapping[str, str],
     exists: Exists = os.path.exists,
+    toggles: frozenset[Toggle] = BASIC_TOGGLES,
 ) -> CreateBinds:
     """The stable binds for `podman create`. `env` carries the AS-011 XDG overrides.
 
     `realm_home` must lie inside `owned_paths` by its resolved path (DR-021). That resolved path
     is the mount source, so the bind is exactly what was checked. It is mounted at `host_home`
-    (FR-048).
+    (FR-048). `toggles` are the effective toggles of the realm (FR-061, FR-063): the fonts and
+    timezone binds need FONTS_TIMEZONE, and the GPU device needs GPU. A toggle that is off plans
+    no bind and reports nothing for it.
     """
     _check_tier(tier)
     _check_home(host_home)
     source = _realm_home_source(realm_home, owned_paths)
     mounts = [Mount("bind", str(source), str(host_home), ())]
     skipped: list[Skipped] = []
-    for fixed in (FONTS, LOCALTIME):
+    fixed_paths = (FONTS, LOCALTIME) if Toggle.FONTS_TIMEZONE in toggles else ()
+    for fixed in fixed_paths:
         entry = _fixed_bind(fixed, home=host_home, owned_paths=owned_paths, env=env, exists=exists)
         if isinstance(entry, Skipped):
             skipped.append(entry)
         else:
             mounts.append(entry)
     devices: list[str] = []
-    if exists(GPU_DEVICE):
-        devices.append(GPU_DEVICE)
-    else:
-        skipped.append(Skipped("device", GPU_DEVICE, "missing"))
+    if Toggle.GPU in toggles:
+        if exists(GPU_DEVICE):
+            devices.append(GPU_DEVICE)
+        else:
+            skipped.append(Skipped("device", GPU_DEVICE, "missing"))
     return CreateBinds(
         mounts=mounts,
         devices=devices,
@@ -202,42 +226,91 @@ def attach_plan(
     uid: int,
     user: str,
     owned_paths: Sequence[Path],
+    runtime_root: Path,
     session_binds: Sequence[SessionBind],
     env: Mapping[str, str],
     exists: Exists = os.path.exists,
+    permissions: Permissions | None = None,
+    is_dir: IsDir = os.path.isdir,
 ) -> AttachPlan:
     """The variable grants for a running realm. Each is checked now, and skipped when refused.
 
-    `session_binds` come from runtime/env.py. Each one keeps its fixed realm name.
+    The grants follow the toggles of `tier` (domain/permissions.py, FR-061..063): Basic gets
+    Downloads and the mount roots, Development adds `~/Projects` and the shell startup files, and
+    Custom gets the toggles it stores and its shares. `permissions` is read only for Custom. A
+    share is checked again here, so a refused one is a skip with its reason. `session_binds` come
+    from runtime/env.py. Each one keeps its fixed realm name. A grant that another grant already
+    names is skipped, because two binds cannot share one realm path. `runtime_root` is ginn's own
+    runtime root, which is the only place an internal grant (a ginn-made socket) may come from.
     """
     _check_tier(tier)
     _check_home(host_home)
     _check_user(user)
-    grants: list[_Grant | Skipped] = [
-        _folder(
-            f"~/{DOWNLOADS}",
-            host_home / DOWNLOADS,
-            realm=str(host_home / DOWNLOADS),
-            parents=(),
-            home=host_home,
-            owned_paths=owned_paths,
-            env=env,
-            exists=exists,
-        ),
-        _folder(
-            f"{USER_MEDIA_ROOT}/{user}",
-            Path(USER_MEDIA_ROOT) / user,
-            realm=f"{USER_MEDIA_ROOT}/{user}",
-            parents=(USER_MEDIA_ROOT,),
-            home=host_home,
-            owned_paths=owned_paths,
-            env=env,
-            exists=exists,
-        ),
-    ]
-    for root in MOUNT_ROOTS:
+    custom = Permissions() if permissions is None else permissions
+    toggles = effective_toggles(tier, custom.toggles)
+    shares = custom.shares if tier is Tier.CUSTOM else ()
+    grants: list[_Grant | Skipped | None] = []
+    if Toggle.DOWNLOADS in toggles:
         grants.append(
-            _mount_root(root, home=host_home, owned_paths=owned_paths, env=env, exists=exists)
+            _folder(
+                f"~/{DOWNLOADS}",
+                host_home / DOWNLOADS,
+                realm=str(host_home / DOWNLOADS),
+                parents=(),
+                home=host_home,
+                owned_paths=owned_paths,
+                env=env,
+                exists=exists,
+            )
+        )
+    if Toggle.MOUNT_ROOTS in toggles:
+        grants.append(
+            _folder(
+                f"{USER_MEDIA_ROOT}/{user}",
+                Path(USER_MEDIA_ROOT) / user,
+                realm=f"{USER_MEDIA_ROOT}/{user}",
+                parents=(USER_MEDIA_ROOT,),
+                home=host_home,
+                owned_paths=owned_paths,
+                env=env,
+                exists=exists,
+            )
+        )
+        for root in MOUNT_ROOTS:
+            grants.append(
+                _mount_root(root, home=host_home, owned_paths=owned_paths, env=env, exists=exists)
+            )
+    if Toggle.PROJECTS in toggles:
+        grants.append(
+            _folder(
+                f"~/{PROJECTS}",
+                host_home / PROJECTS,
+                realm=str(host_home / PROJECTS),
+                parents=(),
+                home=host_home,
+                owned_paths=owned_paths,
+                env=env,
+                exists=exists,
+            )
+        )
+    if Toggle.SHELL_RC in toggles:
+        for rc_name in SHELL_RC_FILES:
+            grants.append(
+                _startup_file(
+                    rc_name, host_home=host_home, owned_paths=owned_paths, env=env, exists=exists
+                )
+            )
+    for share in shares:
+        grants.append(
+            _share(
+                share,
+                home=host_home,
+                owned_paths=owned_paths,
+                runtime_root=runtime_root,
+                env=env,
+                exists=exists,
+                is_dir=is_dir,
+            )
         )
     for bind in session_binds:
         grants.append(
@@ -246,6 +319,7 @@ def attach_plan(
                 uid=uid,
                 home=host_home,
                 owned_paths=owned_paths,
+                runtime_root=runtime_root,
                 env=env,
                 exists=exists,
             )
@@ -253,19 +327,26 @@ def attach_plan(
     attach: list[Attach] = []
     points: list[Mountpoint] = []
     skipped: list[Skipped] = []
+    realms: set[str] = set()
     for grant in grants:
+        if grant is None:
+            continue
         if isinstance(grant, Skipped):
             skipped.append(grant)
             continue
         entry, needed = grant
+        if entry.realm in realms:
+            skipped.append(Skipped("share", entry.host, "already granted by another grant"))
+            continue
+        realms.add(entry.realm)
         attach.append(entry)
         points.extend(point for point in needed if point not in points)
     return AttachPlan(attach=attach, mountpoints=points, skipped=skipped)
 
 
 def _check_tier(tier: Tier) -> None:
-    if tier is not Tier.BASIC:
-        raise NotImplementedError(f"tier {tier.value} grants arrive in M6 (T6.2); basic only")
+    if not isinstance(tier, Tier):
+        raise TypeError(f"tier must be a Tier, not {type(tier).__name__}")
 
 
 def _check_home(host_home: Path) -> None:
@@ -387,23 +468,130 @@ def _session(
     uid: int,
     home: Path,
     owned_paths: Sequence[Path],
+    runtime_root: Path,
     env: Mapping[str, str],
     exists: Exists,
 ) -> _Grant | Skipped:
     """A session path from runtime/env.py, with the full DR-004 check (subtree included)."""
     if not os.path.isabs(bind.host) or not bind.realm.startswith("/"):
         raise ValueError(f"session bind must use absolute paths: {bind!r}")
+    kind = INTERNAL_KIND if bind.internal else "session"
     if not exists(bind.host):
         return Skipped(
-            "session", bind.host, "missing", bind.host, bind.realm, bind.mode, bind.is_dir, True
+            kind, bind.host, "missing", bind.host, bind.realm, bind.mode, bind.is_dir, True
         )
     target = _real(bind.host)
-    reason = path_refusal(target, env=env, home=home, owned_paths=owned_paths, mode=bind.mode)
+    if bind.internal:
+        reason = _internal_refusal(
+            target, runtime_root=runtime_root, env=env, home=home, mode=bind.mode
+        )
+    else:
+        reason = path_refusal(target, env=env, home=home, owned_paths=owned_paths, mode=bind.mode)
     if reason is not None:
-        return Skipped("session", bind.host, reason)
-    entry = Attach("session", str(target), bind.realm, bind.mode)
+        return Skipped(kind, bind.host, reason)
+    entry = Attach(kind, str(target), bind.realm, bind.mode)
     parents = _session_parents(bind.realm, uid)
     return entry, _points(bind.realm, is_dir=bind.is_dir, parents=parents, home=home)
+
+
+def _startup_file(
+    rc_name: str,
+    *,
+    host_home: Path,
+    owned_paths: Sequence[Path],
+    env: Mapping[str, str],
+    exists: Exists,
+) -> _Grant | Skipped | None:
+    """A shell startup file, read-only (FR-062, AS-010). A missing one is no grant and no skip.
+
+    The file is optional: most hosts lack some of them, and a skip for each would only add noise
+    to `ginn status`. The next start plans it again, so it is attached once the file exists.
+    """
+    raw = host_home / rc_name
+    if not exists(str(raw)):
+        return None
+    try:
+        shared = SharedPath.parse(
+            str(raw), home=host_home, owned_paths=owned_paths, mode="ro", env=env
+        )
+    except GinnError as err:
+        return Skipped("share", f"~/{rc_name}", str(err.details["reason"]))
+    realm = str(raw)
+    entry = Attach("share", str(shared.path), realm, "ro")
+    return entry, _points(realm, is_dir=False, parents=(), home=host_home)
+
+
+def _share(
+    share: CustomShare,
+    *,
+    home: Path,
+    owned_paths: Sequence[Path],
+    runtime_root: Path,
+    env: Mapping[str, str],
+    exists: Exists,
+    is_dir: IsDir,
+) -> _Grant | Skipped:
+    """A Custom share (FR-063), at the same path in the realm (FR-065), with its own mode.
+
+    `perms` checked the path when it was added, with GINN-E-PATH-FORBIDDEN. The check runs again
+    here, since a link may now point elsewhere. A missing source is a skip that the next enter or
+    launch retries (FR-064), and a refused one is a skip that is not retried.
+    """
+    raw = share.path
+    if not exists(raw):
+        return Skipped("share", raw, "missing", raw, raw, share.mode, True, missing=True)
+    reason = recheck(
+        "share",
+        raw,
+        raw,
+        share.mode,
+        home=home,
+        owned_paths=owned_paths,
+        runtime_root=runtime_root,
+        env=env,
+    )
+    if reason is not None:
+        return Skipped("share", raw, reason)
+    entry = Attach("share", raw, raw, share.mode)
+    parents = _share_parents(raw, home)
+    return entry, _points(raw, is_dir=is_dir(raw), parents=parents, home=home)
+
+
+def _share_parents(realm: str, home: Path) -> tuple[str, ...]:
+    """The directory above a Custom share, unless it is `/` or the Realm Home itself."""
+    parent = os.path.dirname(realm)
+    return () if parent in ("/", str(home)) else (parent,)
+
+
+def _internal_refusal(
+    target: Path,
+    *,
+    runtime_root: Path,
+    env: Mapping[str, str],
+    home: Path,
+    mode: Mode,
+) -> str | None:
+    """The refusal of a ginn-made socket: a socket under ginn's runtime root (DR-004, CL-14).
+
+    The Owned Path rule of DR-004 is not applied to it (ADR-008, CL-14): the socket is ginn's own.
+    It must lie under the runtime root, resolved, and be a socket (`S_ISSOCK`, lstat of the
+    resolved target), so no other Owned Path, such as the state root or the audit log, can stand
+    in for it. Every other rule of `path_refusal` still applies, with no Owned Path list.
+    """
+    root = Path(os.path.realpath(runtime_root))
+    if root not in target.parents:
+        return "not under the ginn runtime root (ADR-008)"
+    if not _is_socket(target):
+        return "not a socket, and the ginn runtime root holds only ginn's sockets (ADR-008)"
+    return path_refusal(target, env=env, home=home, owned_paths=(), mode=mode)
+
+
+def _is_socket(path: Path) -> bool:
+    """True when `path` is a socket node. A path that cannot be read is not one."""
+    try:
+        return stat.S_ISSOCK(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
 def _session_parents(realm: str, uid: int) -> tuple[str, ...]:
@@ -426,6 +614,7 @@ def recheck(
     *,
     home: Path,
     owned_paths: Sequence[Path],
+    runtime_root: Path,
     env: Mapping[str, str],
 ) -> str | None:
     """The DR-004 rules for one grant, applied again before it is attached after start.
@@ -439,6 +628,11 @@ def recheck(
     if kind == "session":
         resolved = os.path.realpath(host)
         return path_refusal(resolved, env=env, home=home, owned_paths=owned_paths, mode=mode)
+    if kind == INTERNAL_KIND:
+        resolved_internal = Path(os.path.realpath(host))
+        return _internal_refusal(
+            resolved_internal, runtime_root=runtime_root, env=env, home=home, mode=mode
+        )
     if _is_mount_root(realm):
         if os.path.realpath(host) != host:
             return SYMLINK_ROOT_REASON

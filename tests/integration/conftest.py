@@ -180,6 +180,8 @@ def _build_host(base: Path, helper: str, results: Results) -> Host:
         },
         uid=uid,
     )
+    # `from_paths` passes --cdi-spec-dir on every call (S-06), as the product adapter does.
+    # So `start` resolves the NVIDIA spec that `create` writes there.
     cli = PodmanCli.from_paths(paths, binary=tool("podman"), oci_runtime="crun")
     env = OpEnv.for_paths(paths, getpass.getuser(), root_dir=root_dir, clock=time.time)
     image = pull_reference(DISTRO)

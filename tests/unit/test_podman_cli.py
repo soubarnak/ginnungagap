@@ -150,15 +150,20 @@ def use_fixture_dir(tmp_path: Path, cases: dict[str, Any]) -> None:
 
 
 def spy_env(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str] | None]:
-    """Record the `env` argument of every subprocess.run call, and run each call as usual."""
+    """Record the `env` argument of every podman client that starts, and run each one as usual.
+
+    `subprocess.run` starts its child with Popen, and exec_interactive uses Popen directly, so the
+    spy is on Popen: each call is recorded once.
+    """
     seen: list[dict[str, str] | None] = []
-    real_run = subprocess.run
+    real_popen = subprocess.Popen
 
-    def spy(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(kwargs.get("env"))
-        return real_run(argv, **kwargs)
+    class SpyPopen(real_popen):  # type: ignore[valid-type,misc]
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            seen.append(kwargs.get("env"))
+            super().__init__(argv, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", spy)
+    monkeypatch.setattr(subprocess, "Popen", SpyPopen)
     return seen
 
 
@@ -208,6 +213,7 @@ def logged(log: Path) -> list[dict[str, Any]]:
 
 
 def global_flags(tmp_path: Path) -> list[str]:
+    """The global flags of a default adapter, which names the owned CDI directory (FR-069)."""
     paths = host_paths(tmp_path)
     return [
         "--remote=false",
@@ -219,6 +225,8 @@ def global_flags(tmp_path: Path) -> list[str]:
         str(paths.podman_tmpdir),
         "--runtime",
         "crun",
+        "--cdi-spec-dir",
+        str(paths.cdi),
     ]
 
 
@@ -322,6 +330,26 @@ def test_every_call_carries_root_runroot_tmpdir_and_runtime(
         assert argv[1 : 1 + len(flags)] == flags, argv
     # The shim logs the argv without the program name.
     assert [entry["argv"][0 : len(flags)] for entry in logged(shim)] == [flags] * 7
+
+
+@pytest.mark.fr("FR-069")
+def test_the_owned_cdi_directory_is_named_on_every_call_by_default(
+    shim: Path, tmp_path: Path
+) -> None:
+    """`from_paths` names the owned CDI directory before the subcommand, so `start` resolves
+    the NVIDIA spec that `create` writes there (FR-069, S-06). An explicit directory still wins."""
+    paths = configured_paths(tmp_path)
+    cli = PodmanCli.from_paths(paths)
+    cli.info()
+    argv = cli.history[0]
+    assert argv[argv.index("--cdi-spec-dir") + 1] == str(paths.cdi)
+    assert argv.index("--cdi-spec-dir") < argv.index("info")
+
+    other = PodmanCli.from_paths(paths, cdi_spec_dir=tmp_path / "other-cdi")
+    other.info()
+    assert other.history[0][other.history[0].index("--cdi-spec-dir") + 1] == str(
+        tmp_path / "other-cdi"
+    )
 
 
 @pytest.mark.fr("IR-020")
@@ -660,6 +688,22 @@ def test_network_text_with_another_exit_status_is_internal(shim: Path, tmp_path:
     assert err.code == "GINN-E-INTERNAL"
 
 
+@pytest.mark.fr("FR-069")
+def test_unresolvable_cdi_devices_map_to_nvidia_cdi_not_internal(
+    shim: Path, tmp_path: Path
+) -> None:
+    """A GPU start whose CDI devices podman cannot resolve is GINN-E-NVIDIA-CDI, with the decisive
+    line, and not an internal error (FR-069). The remedy names the spec and `ginn doctor`."""
+    stderr = "Error: setting up CDI devices: unresolvable CDI devices nvidia.com/gpu=all\n"
+    use_fixture_dir(tmp_path, {"start": {"stdout": "", "stderr": stderr, "exit": 125}})
+    err = expect_error(lambda: make_cli(tmp_path).start(CONTAINER))
+    assert err.code == "GINN-E-NVIDIA-CDI"
+    assert err.exit_code == 1
+    assert err.details["exit"] == 125
+    assert str(err.details["stderr"]).endswith("unresolvable CDI devices nvidia.com/gpu=all")
+    assert "ginn doctor" in err.remedy
+
+
 @pytest.mark.fr("NFR-040")
 def test_status_code_inside_a_digest_is_not_an_http_status(shim: Path, tmp_path: Path) -> None:
     hexdigest = "sha256:" + "a503" + "0" * 60
@@ -790,6 +834,58 @@ def test_exec_builds_an_argv_list_with_option_terminator(shim: Path, tmp_path: P
     ]
 
 
+@pytest.mark.fr("FR-068")
+def test_exec_interactive_hands_the_client_pid_to_the_caller_before_it_waits(
+    shim: Path, tmp_path: Path
+) -> None:
+    """`on_spawn` gets the podman client's pid as it starts, so enter can forward a signal to it."""
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
+    seen: list[int] = []
+    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"], on_spawn=seen.append) == 7
+    assert len(seen) == 1 and seen[0] > 0 and seen[0] != os.getpid()
+
+
+@pytest.mark.fr("FR-068")
+def test_exec_interactive_calls_on_exit_once_the_wait_has_reaped_the_client(
+    shim: Path, tmp_path: Path
+) -> None:
+    """`on_exit` runs right after the wait returns, and by then the client's pid is reaped, so the
+    caller cannot signal a pid that was reused (FR-068)."""
+    use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
+    pids: list[int] = []
+    reaped: list[bool] = []
+
+    def on_exit() -> None:
+        try:
+            os.kill(pids[0], 0)
+        except ProcessLookupError:
+            reaped.append(True)
+        else:
+            reaped.append(False)
+
+    status = make_cli(tmp_path).exec_interactive(
+        CONTAINER, ["false"], on_spawn=pids.append, on_exit=on_exit
+    )
+    assert status == 7
+    assert reaped == [True]
+
+
+@pytest.mark.fr("FR-068")
+def test_a_signal_sent_to_the_client_ends_it_and_the_status_is_128_plus_the_signal(
+    tmp_path: Path,
+) -> None:
+    """No handler is involved: a real client (a shell that execs sleep) is sent SIGTERM through its
+    pid, and the wait returns 143, as the convention for a command that a signal ends (FR-068)."""
+    wrapper = tmp_path / "podman-sleep"
+    wrapper.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    cli = PodmanCli.from_paths(configured_paths(tmp_path), binary=str(wrapper))
+    status = cli.exec_interactive(
+        CONTAINER, ["true"], on_spawn=lambda pid: os.kill(pid, signal.SIGTERM)
+    )
+    assert status == 128 + signal.SIGTERM
+
+
 @pytest.mark.fr("IR-011")
 def test_exec_interactive_returns_the_inner_status(shim: Path, tmp_path: Path) -> None:
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
@@ -847,6 +943,29 @@ def _interrupt_handlers() -> tuple[object, object]:
     return (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGQUIT))
 
 
+class _FakeClient:
+    """A stand-in for the podman client that exec_interactive starts with Popen.
+
+    `wait` returns `returncode`, or raises `raises`. `kill` is recorded, so a test can see that an
+    interrupted wait kills the client before the interruption propagates.
+    """
+
+    pid = 4321
+
+    def __init__(self, returncode: int = 0, raises: BaseException | None = None) -> None:
+        self.returncode = returncode
+        self.raises = raises
+        self.killed = False
+
+    def wait(self) -> int:
+        if self.raises is not None:
+            raise self.raises
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
 @pytest.mark.fr("IR-011")
 def test_exec_interactive_without_a_tty_catches_interrupts_while_podman_runs(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -856,11 +975,11 @@ def test_exec_interactive_without_a_tty_catches_interrupts_while_podman_runs(
     handler is not SIG_IGN, because an ignored signal would survive execve into podman."""
     seen: dict[str, object] = {}
 
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_popen(args: list[str], **kwargs: Any) -> _FakeClient:
         seen["handlers"] = _interrupt_handlers()
-        return subprocess.CompletedProcess(args, 130)
+        return _FakeClient(130)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     before = _interrupt_handlers()
     status = make_cli(tmp_path).exec_interactive(CONTAINER, ["sleep", "9"])
     assert status == 130
@@ -903,11 +1022,11 @@ def test_exec_interactive_with_a_tty_leaves_the_signals_to_the_terminal(
 ) -> None:
     seen: dict[str, object] = {}
 
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_popen(args: list[str], **kwargs: Any) -> _FakeClient:
         seen["handlers"] = _interrupt_handlers()
-        return subprocess.CompletedProcess(args, 0)
+        return _FakeClient(0)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     before = _interrupt_handlers()
     assert make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"], tty=True) == 0
     assert seen["handlers"] == before
@@ -917,14 +1036,14 @@ def test_exec_interactive_with_a_tty_leaves_the_signals_to_the_terminal(
 def test_the_interrupt_handlers_come_back_when_the_child_raises(
     shim: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def interrupted(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(subprocess, "run", interrupted)
+    """An interrupted wait kills and reaps the client, as subprocess.run does, then re-raises."""
+    client = _FakeClient(raises=KeyboardInterrupt())
+    monkeypatch.setattr(subprocess, "Popen", lambda args, **kwargs: client)
     before = _interrupt_handlers()
     with pytest.raises(KeyboardInterrupt):
         make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"])
     assert _interrupt_handlers() == before
+    assert client.killed is True
 
 
 @pytest.mark.fr("IR-011")
@@ -935,11 +1054,11 @@ def test_off_the_main_thread_the_interrupt_handlers_are_not_touched(
     the handlers it already has, and no ValueError is raised."""
     seen: dict[str, object] = {}
 
-    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def fake_popen(args: list[str], **kwargs: Any) -> _FakeClient:
         seen["handlers"] = _interrupt_handlers()
-        return subprocess.CompletedProcess(args, 130)
+        return _FakeClient(130)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     before = _interrupt_handlers()
     outcome: dict[str, object] = {}
 

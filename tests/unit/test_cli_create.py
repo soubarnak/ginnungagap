@@ -51,6 +51,19 @@ def test_defaults_are_basic_tier_services_off_and_the_distro_name(
     assert capsys.readouterr().out == "realm debian created: state stopped\n"
 
 
+@pytest.mark.fr("FR-060")
+@pytest.mark.parametrize(
+    ("option", "tier"), [("development", Tier.DEVELOPMENT), ("custom", Tier.CUSTOM)]
+)
+def test_the_tier_flag_reaches_the_create(
+    world: World, monkeypatch: pytest.MonkeyPatch, option: str, tier: Tier
+) -> None:
+    requests = _recorded(monkeypatch)
+    assert main(["create", "debian", "--tier", option]) == 0
+    (request,) = requests
+    assert request.tier is tier
+
+
 @pytest.mark.fr("FR-010")
 @pytest.mark.fr("FR-015")
 def test_name_and_with_packages_are_taken_from_the_flags(
@@ -80,8 +93,6 @@ def test_a_bad_realm_name_is_an_argument_error_before_anything_runs(
 @pytest.mark.parametrize(
     ("argv", "feature", "milestone"),
     [
-        (["create", "arch", "--tier", "development"], "create of a development realm", "M6"),
-        (["create", "arch", "--tier", "custom"], "create of a custom realm", "M6"),
         (["create", "arch", "--services", "on"], "create of a services-on realm", "M7"),
         (["create", "arch", "--resume"], "create --resume", "M8"),
         (["create", "kali", "--everything"], "create --everything", "M8"),
@@ -189,6 +200,7 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
         "generation": 1,
         "image_digest": payload["image_digest"],
         "locale_note": payload["locale_note"],
+        "gpu_note": payload["gpu_note"],
     }
     record = RealmStore(world.paths).load(RealmName("debian"))
     assert record.state is RealmState.STOPPED

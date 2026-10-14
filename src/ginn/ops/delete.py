@@ -8,7 +8,10 @@ these steps. Each one is a journal step, in this order. The names are stable and
 - deleting: the record moves to `deleting` (DR-020), unless it already reads `deleting`. A later
   delete finds the record there, and recovery (ops/recovery.py) leaves an interrupted delete there.
 - stopped: each container that podman lists for the realm and that is not created or exited is
-  stopped. A stop that fails is noted, and the container is removed anyway (see below).
+  stopped. A stop that fails is noted, and the container is removed anyway (see below). Then the
+  realm leaves the Agent Proxy filter, and its D-Bus proxy is stopped and its state removed
+  (FR-067, FR-019 AC-1). A failure there is a GinnError, so the record stays `deleting` and the next
+  delete finishes the release.
 - container-removed: each container that podman lists for the realm is removed with force. The
   realm root is the container, so this removes it (FR-019). A container that is already gone is
   not an error.
@@ -100,6 +103,7 @@ from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import unexport_all
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import STOP_TIMEOUT_S
+from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_REALM
@@ -309,6 +313,7 @@ def _delete(
     _step(mutation, hooks, "deleting")
 
     notes = _stop_containers(podman, name, hooks.stop_timeout_s)
+    _release_filter_and_proxy(env, name)
     _step(mutation, hooks, "stopped")
 
     _remove_containers(podman, name)
@@ -365,6 +370,21 @@ def _stop_containers(podman: Podman, name: RealmName, timeout_s: int) -> list[st
         except GinnError as exc:
             notes.append(f"stop of {info.id[:12]} failed with {exc.code}; removed with rm --force")
     return notes
+
+
+def _release_filter_and_proxy(env: OpEnv, name: RealmName) -> None:
+    """Leave the Agent Proxy filter, then forget the realm's D-Bus proxy (FR-067, FR-019 AC-1).
+
+    The filter leaves first, so it stops when no member is left. A plain OSError is raised as a
+    GinnError, so the delete fails with a code and the record stays `deleting` for the next delete.
+    """
+    try:
+        leave_agent(env, name)
+        forget_proxy(env, name)
+    except OSError as exc:
+        err = make("GINN-E-INTERNAL")
+        err.details.update({"reason": f"release of realm {name.value}: {exc.strerror or exc}"})
+        raise err from exc
 
 
 def _remove_containers(podman: Podman, name: RealmName) -> None:

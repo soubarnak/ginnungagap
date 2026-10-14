@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from ginn.domain.enums import Tier
+from ginn.domain.permissions import BASIC_TOGGLES, Toggle
 from ginn.runtime.env import (
     PASSED_VARIABLES,
     PROXY_VARIABLES,
@@ -482,6 +483,7 @@ def test_session_binds_feed_the_attach_plan_unchanged(layout: Layout) -> None:
         uid=UID,
         user=USER,
         owned_paths=layout.owned,
+        runtime_root=layout.owned[3],
         session_binds=result.binds,
         env=host,
         exists=present_only([*present, str(layout.home / "Downloads")]),
@@ -572,3 +574,90 @@ def test_a_skip_without_a_bind_still_names_its_fixed_realm_path(layout: Layout) 
     result = run(layout, {"WAYLAND_DISPLAY": "bad name", "XDG_RUNTIME_DIR": HOST_RUNTIME})
     [skip] = result.skipped
     assert (skip.reason, skip.realm, skip.missing) == ("not a socket name", WAYLAND_REALM, False)
+
+
+def run_with(
+    layout: Layout,
+    host_env: Mapping[str, str],
+    toggles: frozenset[Toggle],
+    present: Sequence[str] = (),
+    kinds: Mapping[str, int] | None = None,
+) -> SessionEnv:
+    """The session of `run`, with the effective toggles of the realm (FR-061, FR-063)."""
+    return session_env(
+        host_env,
+        home=layout.home,
+        uid=UID,
+        owned_paths=layout.owned,
+        file_type=fake_fs(present, kinds),
+        toggles=toggles,
+    )
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_display_toggle_that_is_off_gives_no_display_grant(layout: Layout) -> None:
+    authority = str(layout.home / ".Xauthority")
+    host_env = {
+        "WAYLAND_DISPLAY": "wayland-1",
+        "DISPLAY": ":0",
+        "XAUTHORITY": authority,
+        "XDG_RUNTIME_DIR": HOST_RUNTIME,
+    }
+    result = run_with(
+        layout,
+        host_env,
+        BASIC_TOGGLES - {Toggle.DISPLAY},
+        present=[WAYLAND, X0, X11_DIR, authority, PIPEWIRE],
+        kinds={authority: stat.S_IFREG},
+    )
+    assert "WAYLAND_DISPLAY" not in result.env
+    assert "DISPLAY" not in result.env
+    assert "XAUTHORITY" not in result.env
+    display_realms = {WAYLAND_REALM, AUTHORITY_REALM, X11_DIR}
+    assert display_realms.isdisjoint({bind.realm for bind in result.binds})
+    assert display_realms.isdisjoint({bind.realm for bind in result.absent})
+    assert result.skipped == []
+    assert [bind.realm for bind in result.binds] == [f"{REALM_RUNTIME}/pipewire-0"]
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_an_audio_toggle_that_is_off_gives_no_audio_socket(layout: Layout) -> None:
+    result = run_with(
+        layout,
+        {"XDG_RUNTIME_DIR": HOST_RUNTIME},
+        BASIC_TOGGLES - {Toggle.AUDIO},
+        present=[PIPEWIRE, PULSE],
+    )
+    assert not [bind for bind in result.binds if bind.realm in AUDIO_REALMS]
+    assert not [bind for bind in result.absent if bind.realm in AUDIO_REALMS]
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_timezone_toggle_that_is_off_gives_no_tz_variable(layout: Layout) -> None:
+    host_env = {"LANG": "en_GB.UTF-8", "TZ": "Europe/London", "XDG_RUNTIME_DIR": HOST_RUNTIME}
+    off = run_with(layout, host_env, BASIC_TOGGLES - {Toggle.FONTS_TIMEZONE})
+    assert "TZ" not in off.env
+    assert off.env["LANG"] == "en_GB.UTF-8"
+    on = run_with(layout, host_env, BASIC_TOGGLES)
+    assert on.env["TZ"] == "Europe/London"
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_display_toggle_that_is_on_keeps_the_display_slots(layout: Layout) -> None:
+    result = run_with(layout, {"XDG_RUNTIME_DIR": HOST_RUNTIME}, BASIC_TOGGLES)
+    slots = {bind.realm for bind in result.absent}
+    assert {WAYLAND_REALM, AUTHORITY_REALM, X11_DIR} <= slots
+    assert {f"{REALM_RUNTIME}/pipewire-0", f"{REALM_RUNTIME}/pulse/native"} <= slots
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_the_session_default_is_the_basic_grants(layout: Layout) -> None:
+    host_env = {"WAYLAND_DISPLAY": "wayland-1", "XDG_RUNTIME_DIR": HOST_RUNTIME}
+    default = run(layout, host_env, present=[WAYLAND])
+    explicit = run_with(layout, host_env, BASIC_TOGGLES, present=[WAYLAND])
+    assert default == explicit

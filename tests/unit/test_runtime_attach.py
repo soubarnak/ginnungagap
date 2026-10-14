@@ -1125,7 +1125,12 @@ def test_a_session_path_takes_the_host_the_current_session_binds(world: World) -
 @pytest.mark.fr("FR-061")
 def test_the_admission_rules_refuse_what_the_plan_would_refuse(world: World) -> None:
     (world.host_home / "Downloads").mkdir(parents=True)
-    admit = admission(home=world.host_home, owned_paths=[world.realm_home], env={})
+    admit = admission(
+        home=world.host_home,
+        owned_paths=[world.realm_home],
+        runtime_root=world.realm_home / "run",
+        env={},
+    )
     host = str(world.host_home / "Downloads")
     inside = GrantRecord("share", host, host, "rw", True)
     outside = GrantRecord("share", "/etc", host, "rw", True)
@@ -1205,3 +1210,92 @@ def test_unshare_keeps_the_global_flags(tmp_path: Path) -> None:
     ]
     assert argv[9:] == ["unshare", sys.executable, "-c", "pass"]
     assert recorded["env"]["XDG_RUNTIME_DIR"] == str(runtime)
+
+
+class _RecordingExec:
+    """A podman stand-in that records each exec argv and reports success (make_mountpoints).
+
+    `users` holds the `user` of each call, in order, next to its argv.
+    """
+
+    def __init__(self) -> None:
+        self.argvs: list[list[str]] = []
+        self.users: list[str] = []
+
+    def exec(self, container: str, argv: list[str], **kwargs: object) -> ExecResult:
+        self.argvs.append(list(argv))
+        self.users.append(str(kwargs.get("user")))
+        # `test -L` answers whether the path is a symbolic link: exit 1 means it is not one.
+        not_a_link = argv[:2] == ["test", "-L"]
+        return ExecResult(exit_code=1 if not_a_link else 0, stdout="", stderr="")
+
+
+@pytest.mark.fr("FR-061")
+def test_a_runtime_subdirectory_is_made_by_the_realm_user_at_mode_0700() -> None:
+    """The gnupg parent is made as the realm user, at mode 0700, so no root command touches it.
+
+    The realm user owns /run/user/<uid> (the tmpfs is chowned to it), so a root `mkdir`, `test -L`,
+    `chown` or `chmod` there would follow a link the realm planted (FR-061).
+    """
+    podman = _RecordingExec()
+    grant = GrantRecord(
+        "session", "/run/user/1000/gpg.sock", "/run/user/1000/gnupg/S.gpg-agent", "ro", False
+    )
+    make_mountpoints(
+        podman,  # type: ignore[arg-type]
+        "ginn-lab-g1",
+        [grant],
+        realm_home=Path("/owned/home/lab"),
+        host_home=Path("/home/alice"),
+    )
+    calls = list(zip(podman.users, podman.argvs, strict=True))
+    assert ("1000", ["test", "-L", "/run/user/1000/gnupg"]) in calls
+    assert ("1000", ["mkdir", "-p", "-m", "0700", "--", "/run/user/1000/gnupg"]) in calls
+    assert not any("/run/user/1000/gnupg" in argv and user == "0:0" for user, argv in calls)
+    assert not any(argv[0] in ("chown", "chmod") for argv in podman.argvs)
+
+
+@pytest.mark.fr("FR-067")
+def test_the_runtime_directory_itself_and_other_roots_are_not_chowned() -> None:
+    podman = _RecordingExec()
+    grants = [
+        GrantRecord("session", "/run/user/1000/w", "/run/user/1000/ginn-ssh-agent", "rw", False),
+        GrantRecord("share", "/mnt/x", "/mnt/x", "rw", True),
+    ]
+    make_mountpoints(
+        podman,  # type: ignore[arg-type]
+        "ginn-lab-g1",
+        grants,
+        realm_home=Path("/owned/home/lab"),
+        host_home=Path("/home/alice"),
+    )
+    assert not any(argv[0] in ("chown", "chmod") for argv in podman.argvs)
+
+
+@pytest.mark.fr("FR-061")
+def test_a_symbolic_link_runtime_subdirectory_is_refused_before_anything_is_made() -> None:
+    """`test -L` runs as the realm user first, and a link there stops the start before `mkdir`."""
+
+    class _LinkExec(_RecordingExec):
+        """`test -L` exits 0: the path is a symbolic link."""
+
+        def exec(self, container: str, argv: list[str], **kwargs: object) -> ExecResult:
+            self.argvs.append(list(argv))
+            self.users.append(str(kwargs.get("user")))
+            return ExecResult(exit_code=0, stdout="", stderr="")
+
+    podman = _LinkExec()
+    grant = GrantRecord(
+        "session", "/run/user/1000/gpg.sock", "/run/user/1000/gnupg/S.gpg-agent", "ro", False
+    )
+    with pytest.raises(GinnError) as caught:
+        make_mountpoints(
+            podman,  # type: ignore[arg-type]
+            "ginn-lab-g1",
+            [grant],
+            realm_home=Path("/owned/home/lab"),
+            host_home=Path("/home/alice"),
+        )
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    assert podman.argvs == [["test", "-L", "/run/user/1000/gnupg"]]
+    assert podman.users == ["1000"]

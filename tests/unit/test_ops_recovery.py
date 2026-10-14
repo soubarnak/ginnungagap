@@ -17,6 +17,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import ExitStack
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,9 +50,12 @@ from ginn.ops.recovery import (
     find_pending,
     recover,
 )
+from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.security import agent
+from ginn.security._proc import Proc
 from ginn.store import journal as journal_module
 from ginn.store.audit import AuditEntry, AuditLog
 from ginn.store.journal import PARAMS_OVERFLOW, Journal, JournalEntry, process_start_ticks
@@ -1706,3 +1710,39 @@ def test_an_aur_install_interrupted_during_the_menu_sync_removes_nothing(
     assert _manifest_names(paths) == []
     assert podman.execs == []
     assert not journal.exists()
+
+
+@pytest.mark.fr("FR-067")
+@pytest.mark.fr("FR-122")
+def test_an_interrupted_start_leaves_the_filter_it_joined_and_the_filter_stops(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """A start killed after it joined the filter is settled to stopped, and recovery leaves the
+    filter (FR-067). With no member left, the filter stops. The helper here is a real child in its
+    own session, so only that group is signalled."""
+    basic = _record(state=RealmState.STOPPED)
+    _save(paths, replace(basic, settings=replace(basic.settings, tier=Tier.DEVELOPMENT)))
+    child = subprocess.Popen(  # noqa: S603 - a fixed argv that sleeps
+        [sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True
+    )
+    try:
+        proc = Proc.of(child.pid)
+        assert proc is not None
+        filter_record = agent.AgentRecord(
+            proc=proc,
+            upstream="/up",
+            listen=str(paths.runtime / "agent" / "ssh.sock"),
+            members=("arch",),
+        )
+        write_json_atomic(agent_state_path(paths), filter_record.to_dict())
+        _write_journal(paths, _dead(op="start", step="started"))
+        outcome = _only(recover(env, _Podman(ContainerState.EXITED)))
+        assert outcome.outcome == OUTCOME_RECOVERED
+        assert _state(paths) is RealmState.STOPPED
+        stored = read_agent_record(paths)
+        assert stored.members == () and stored.proc is None
+        assert child.wait(timeout=10) is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()

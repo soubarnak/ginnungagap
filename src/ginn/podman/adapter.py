@@ -29,6 +29,8 @@ _USER: Final = re.compile(r"[0-9]+:[0-9]+")
 _MOUNT_TYPES: Final = frozenset({"bind", "volume", "tmpfs"})
 _NETWORKS: Final = frozenset({"host", "pasta"})
 PRIVILEGED_MESSAGE: Final = "NFR-SEC-001: podman create must never run privileged"
+_SECURITY_OPT: Final = re.compile(r"([A-Za-z-]+)(?:[=:](.*))?", re.DOTALL)
+_CONTROL: Final = frozenset("\0\n\r")
 PODMAN_ERROR_EXIT: Final = 125
 """Exit status podman uses for its own failures (`podman exec` included)."""
 
@@ -105,8 +107,11 @@ class CreateSpec:
     devices: list[str] = field(default_factory=list)
     caps_add: list[str] = field(default_factory=list)
     security_opts: list[str] = field(default_factory=list)
+    group_add: list[str] = field(default_factory=list)
     tmpfs: list[str] = field(default_factory=list)
     cdi_devices: list[str] = field(default_factory=list)
+    cdi_spec_dir: str | None = None
+    """The CDI spec directory of `cdi_devices`, passed as the global `--cdi-spec-dir` (ADR-012)."""
     entrypoint_argv: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
 
@@ -153,12 +158,25 @@ class CreateSpec:
             argv += ["--cap-add", cap]
         for opt in self.security_opts:
             argv += ["--security-opt", opt]
+        for group in self.group_add:
+            argv += ["--group-add", group]
         if self.entrypoint_argv:
             argv += ["--entrypoint", json.dumps(self.entrypoint_argv)]
         argv.append(self.image_digest_ref)
         argv += self.command
         _refuse_privileged(argv, self.caps_add)
         return argv
+
+    def global_flags(self) -> list[str]:
+        """The podman global flags of this create. They come before the subcommand (S-06).
+
+        `--cdi-spec-dir` is global, so PodmanCli passes these ahead of `create` for this call only,
+        and never for another call (ADR-012). The directory is checked here as in `to_argv`.
+        """
+        if self.cdi_spec_dir is None:
+            return []
+        _check_cdi_dir(self.cdi_spec_dir)
+        return ["--cdi-spec-dir", self.cdi_spec_dir]
 
 
 def _opt(argv: list[str], flag: str, value: str | None) -> None:
@@ -190,6 +208,8 @@ def _check_spec(spec: CreateSpec) -> None:
             raise ValueError(f"label name {key!r} is not valid")
     for mount in spec.mounts:
         _check_mount(mount)
+    for group in spec.group_add:
+        require_arg(group, "group-add")
 
 
 def _check_passwd_entry(entry: str, *, keep_id: bool) -> None:
@@ -220,11 +240,57 @@ def _mount_value(mount: Mount) -> str:
     return ",".join([*parts, *mount.options])
 
 
+def _check_cdi_dir(value: str) -> None:
+    """A CDI spec directory is a plain absolute path, with nothing that podman would split on."""
+    if not value.startswith("/") or value != value.strip() or any(c in value for c in ",:=\0\n\r"):
+        raise ValueError(
+            f"NFR-SEC-005: a CDI spec directory must be a plain absolute path: {value!r}"
+        )
+
+
+def unsafe_security_opt(opt: str) -> bool:
+    """True for a `--security-opt` value that lowers a confinement, in any spelling (NFR-SEC-001).
+
+    podman reads `key=value` and `key:value`, so both forms are read. A leading or trailing space, a
+    control character, and a form this reader cannot parse are refused as well: the test is what
+    podman might do with the value, not how it is spelled.
+    """
+    if opt != opt.strip() or _CONTROL & set(opt):
+        return True
+    match = _SECURITY_OPT.fullmatch(opt)
+    if match is None:
+        return True
+    key = match.group(1).lower()
+    value = (match.group(2) or "").strip().lower()
+    if key == "privileged":
+        return True
+    if key in ("seccomp", "apparmor", "systempaths") and value == "unconfined":
+        return True
+    if key == "label" and (value.startswith("disable") or value.startswith("type:spc_t")):
+        return True
+    if key == "unmask" and value == "all":
+        return True
+    return key == "no-new-privileges" and value in ("false", "0", "no")
+
+
 def _refuse_privileged(argv: Sequence[str], caps_add: Sequence[str]) -> None:
-    """Raise ValueError if the argv could make the container privileged (NFR-SEC-001)."""
-    for arg in argv:
+    """Raise ValueError if the argv could make the container privileged (NFR-SEC-001).
+
+    This is the second check. The allowlist of tiers (security/caps.py) is the first. Here every
+    `--security-opt` value of the argv is read too, in its separate-token and its `=` form, so a
+    value that lowers a confinement is refused whatever built it (ADR-006).
+    """
+    for index, arg in enumerate(argv):
         if arg == "--privileged" or arg.startswith("--privileged="):
             raise ValueError(PRIVILEGED_MESSAGE)
+        if arg == "--security-opt" and index + 1 < len(argv):
+            value = argv[index + 1]
+        elif arg.startswith("--security-opt="):
+            value = arg.partition("=")[2]
+        else:
+            continue
+        if unsafe_security_opt(value):
+            raise ValueError(f"{PRIVILEGED_MESSAGE}; security option {value!r} lowers confinement")
     if any(cap.strip().upper() == "ALL" for cap in caps_add):
         raise ValueError(f"{PRIVILEGED_MESSAGE}; capability ALL is refused")
 
@@ -299,10 +365,15 @@ class Podman(Protocol):
         tty: bool = False,
         interactive: bool = False,
         pass_env: Sequence[str] = (),
+        on_spawn: Callable[[int], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
     ) -> int:
         """Run argv with the caller's stdio and return the exit status (for `ginn enter`).
 
         `pass_env` is as in `exec`: names only, copied by podman from its own environment.
+        `on_spawn`, when given, receives the pid of the podman client as soon as it starts, before
+        the wait, so the caller can signal it (FR-068). `on_exit`, when given, runs as soon as the
+        client is reaped, so the caller stops signalling that pid before it can be reused.
         """
         ...
 

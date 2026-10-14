@@ -758,6 +758,7 @@ def test_every_dependency_and_host_setup_item_has_a_check(host: Host) -> None:
         "nvidia",  # FR-069
         "elogind",  # DEP-3, ADR-004
         "render-nodes",  # S-06
+        "session-bus",  # FR-068, AS-012
     }
     assert len(names) == len(checks.CHECKS)
 
@@ -1004,3 +1005,34 @@ def test_elogind_reads_every_config_tree_with_standard_precedence(
 def test_elogind_boolean_spellings(host: Host, value: str, status: Status) -> None:
     _write(host.root / "etc/elogind/logind.conf", f"[Login]\nKillUserProcesses={value}\n")
     assert checks.check_elogind(host.probe()).status is status
+
+
+def _with_bus(host: Host, address: str) -> Probe:
+    probe = host.probe()
+    return dataclasses.replace(probe, env={**probe.env, "DBUS_SESSION_BUS_ADDRESS": address})
+
+
+@pytest.mark.fr("FR-068")
+def test_an_abstract_session_bus_is_a_warning(host: Host) -> None:
+    """An abstract socket is reachable from a host-network realm past the proxy (AS-012)."""
+    probe = _with_bus(host, "unix:path=/run/user/1000/bus,abstract=/tmp/dbus-x")
+    result = checks.check_session_bus(probe)
+    assert result.status is Status.WARN
+    assert result.message == (
+        "session bus uses an abstract socket; realms on the host network can reach it unfiltered; "
+        "FR-068 filtering is not in effect"
+    )
+
+
+@pytest.mark.fr("FR-068")
+def test_an_abstract_member_of_a_later_bus_is_a_warning(host: Host) -> None:
+    probe = _with_bus(host, "unix:path=/run/user/1000/bus;unix:abstract=/tmp/x")
+    assert checks.check_session_bus(probe).status is Status.WARN
+
+
+@pytest.mark.fr("FR-068")
+def test_a_path_session_bus_and_no_bus_pass(host: Host) -> None:
+    assert checks.check_session_bus(_with_bus(host, "unix:path=/run/user/1000/bus")).status is (
+        Status.PASS
+    )
+    assert checks.check_session_bus(host.probe()).status is Status.PASS

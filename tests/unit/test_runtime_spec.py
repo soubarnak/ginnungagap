@@ -17,6 +17,7 @@ from ginn.distros import available
 from ginn.distros import load as load_distro
 from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
+from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime._enter_plan import login_argv
 from ginn.runtime.mounts import Skipped, create_binds
@@ -179,6 +180,11 @@ def spec_from_binds(
 def option_values(argv: list[str], flag: str) -> list[str]:
     """Every value that follows `flag` in argv."""
     return [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == flag]
+
+
+def _pairs(argv: list[str]) -> list[tuple[str, str]]:
+    """The (flag, value) pairs of an argv, for every flag that takes a value."""
+    return [(token, argv[i + 1]) for i, token in enumerate(argv[:-1]) if token.startswith("--")]
 
 
 def mount_targets(argv: list[str]) -> list[str]:
@@ -381,11 +387,9 @@ def test_kali_is_refused_until_its_network_and_capability_overlay_exist() -> Non
 
 
 @pytest.mark.fr("FR-010")
-def test_services_on_and_other_tiers_are_refused_until_their_milestones() -> None:
+def test_services_on_is_refused_until_m7() -> None:
     with pytest.raises(NotImplementedError, match="M7"):
         make_spec(services=True)
-    with pytest.raises(NotImplementedError, match="M6"):
-        make_spec(tier=Tier.DEVELOPMENT)
 
 
 @pytest.mark.fr("NFR-SEC-001")
@@ -453,3 +457,74 @@ def test_a_passwd_field_podman_would_rewrite_is_refused(field: str, bad: str) ->
     values[field] = bad
     with pytest.raises(ValueError, match="passwd field"):
         realm_passwd_entry(values["user"], UID, GID, Path(values["home"]), values["login_shell"])
+
+
+def _custom_realm_spec(
+    toggles: frozenset[Toggle],
+    *,
+    present: Iterable[str] = STABLE_PATHS,
+) -> RealmSpec:
+    """A Custom realm's spec from realm_spec, with `toggles` as its Custom toggles (FR-063)."""
+    return realm_spec(
+        RealmName("arch"),
+        DistroId("arch"),
+        uid=UID,
+        gid=GID,
+        user=USER,
+        login_shell="/bin/bash",
+        host_home=HOME,
+        realm_home=REALM_HOME,
+        owned_paths=[OWNED],
+        env={},
+        exists=_present(present),
+        tier=Tier.CUSTOM,
+        permissions=Permissions(toggles=toggles),
+    )
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_custom_realm_with_the_gpu_toggle_on_gets_the_dri_device_and_off_gets_none() -> None:
+    on = _pairs(create_argv(_custom_realm_spec(BASIC_TOGGLES)))
+    off = _pairs(create_argv(_custom_realm_spec(BASIC_TOGGLES - {Toggle.GPU})))
+    assert ("--device", "/dev/dri") in on
+    assert ("--device", "/dev/dri") not in off
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_custom_realm_with_the_fonts_timezone_toggle_off_has_no_fonts_or_localtime_bind() -> None:
+    on = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES)))
+    off = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES - {Toggle.FONTS_TIMEZONE})))
+    assert {FONTS, LOCALTIME} <= set(on)
+    assert not {FONTS, LOCALTIME} & set(off)
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_gpu_toggle_that_is_off_plans_no_device_and_no_missing_device_skip() -> None:
+    """A switched-off grant is not planned, so a host without /dev/dri reports nothing for it."""
+    binds = create_binds(
+        Tier.CUSTOM,
+        host_home=HOME,
+        uid=UID,
+        realm_home=REALM_HOME,
+        owned_paths=[OWNED],
+        env={},
+        exists=_present([FONTS, LOCALTIME]),
+        toggles=BASIC_TOGGLES - {Toggle.GPU},
+    )
+    assert binds.devices == []
+    assert not [skip for skip in binds.skipped if skip.kind == "device"]
+    on = create_binds(
+        Tier.CUSTOM,
+        host_home=HOME,
+        uid=UID,
+        realm_home=REALM_HOME,
+        owned_paths=[OWNED],
+        env={},
+        exists=_present([FONTS, LOCALTIME]),
+        toggles=BASIC_TOGGLES,
+    )
+    assert on.devices == []
+    assert [skip.kind for skip in on.skipped if skip.kind == "device"] == ["device"]

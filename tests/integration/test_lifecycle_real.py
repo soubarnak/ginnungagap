@@ -304,8 +304,8 @@ def gate(host: Host) -> Iterator[Gate]:
         host_home=host.host_home,
         host_env=host.session_env(),
     )
-    # Each session starts from an empty store, but test_d pulls the image first. It is removed here,
-    # so the create below pulls it and the timing includes the pull.
+    # The modules before this one delete their realms, so no container uses the image. test_d may
+    # have pulled it, so it is removed here, and the create below pulls it again (the timing).
     removed_image = host.cli.image_exists(host.image)
     if removed_image:
         host.cli.rmi(host.image)
@@ -383,7 +383,8 @@ def _realm_user_facts(host: Host, cid: str) -> dict[str, Any]:
 
 
 def _drop_realm(host: Host, name: str) -> None:
-    """Delete a realm this test created, through the product delete. The image stays pulled."""
+    """Delete a realm this test created, through the product delete. The delete removes the image
+    when no container uses it, so a later create pulls it again."""
     if RealmStore(host.paths, time.time).exists(RealmName(name)):
         delete_realm(host.env, host.cli, RealmName(name), purge_home=False, confirm=lambda _p: True)
 

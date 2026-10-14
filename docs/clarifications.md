@@ -19,6 +19,8 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-11 | Host Setup undo when a path is shared, or its state is gone | FR-003 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-12 | Identical paths and fixed names for grants attached after start | FR-065, FR-061, FR-066, IR-025 | open, for SRS v1.1; the plan proceeds under the proposed wording |
 | CL-13 | Doctor readiness: "all checks passing" and the disk thresholds | FR-001, FR-007 | open, for SRS v1.1; the plan proceeds under the proposed wording |
+| CL-14 | ginn's own sockets as typed internal grants | DR-004, FR-067, FR-068, NFR-SEC-006, NFR-SEC-008 | open, for SRS v1.1; the plan proceeds under the proposed wording |
+| CL-15 | An abstract-socket session bus with the host network (FR-026) | FR-068, FR-026, AS-012 | open, for SRS v1.1 |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -131,3 +133,21 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - How ginn works now: `ginn doctor` exits 1 only when a check reports FAIL (GINN-E-DOCTOR-FAILED). WARN and INFO exit 0 and are printed with their reason. A fully configured host reports PASS on every check, and a test pins that (`tests/unit/test_doctor_checks.py`). The 2 GiB and 10 GiB values are named as ginn-defined in `src/ginn/doctor/checks.py`.
 - Evidence: unit tests under a fake host (T3.6, T3.7). G1 (`spikes/results/G1-host-setup-roundtrip.md`, 2026-10-12, commit 4a3b508) ran `ginn doctor` as the user on a Void host. The first run had one FAIL, for the runsvdir check: the service was up, and the supervisor was idle because `~/.local/state/ginn/sv` did not exist yet. Setup does not create that directory, by design. Doctor now reports that idle supervisor as a WARN with `mkdir -m 0700 -p` as the fix, so no check fails right after setup. That change is by code and unit test, and it is not yet re-run on the host. AC-2 is unproven on a host, because the podman WARN (the config is written at the first podman call) keeps a check from reporting PASS.
 - Status: open, for SRS v1.1. The SRS author decides the wording. The plan proceeds under the proposed wording, and T3.6 and T3.7 are built to it.
+
+## CL-14: ginn's own sockets as typed internal grants
+
+- Requirement IDs: DR-004, FR-067, FR-068, NFR-SEC-006, NFR-SEC-008.
+- Issue: DR-004 makes every Owned Path never shareable. The ginn runtime root, `/run/ginn/<uid>`, is an Owned Path (ADR-004). ginn creates two sockets under it that a realm must reach. One is the Agent Proxy filter socket, `agent/ssh.sock` (FR-067). The other is a realm's D-Bus proxy socket, `proxy/<realm>/bus.sock` (FR-068). Binding either one reads an Owned Path, which DR-004 forbids for a shared path. The SRS does not say how ginn may bind a socket that it made itself.
+- Proposed wording: "DR-004 does not apply to a socket that ginn creates under its runtime root. ginn may bind such a socket into a realm as a typed internal grant, for the Agent Proxy (FR-067) and the session D-Bus proxy (FR-068). A user cannot name such a path as a shared path. The other Owned Paths, those that hold records, the audit log, the journal or a Realm Home, stay unshareable (NFR-SEC-008)."
+- How ginn works now: `runtime/mounts.py` marks both binds with `internal=True`, and their grant kind is `internal`. `_internal_refusal` admits the source only when it lies under the ginn runtime root, resolved, and it is a socket (`S_ISSOCK`). Every other path rule still applies, with no Owned Path list, so a socket under another Owned Path, such as the state root, is refused. A user share goes through the Owned Path list (`ops/permissions.py`), so the user cannot name these sockets. The Owned Paths that hold records, the audit log, the journal and Realm Homes keep the full DR-004 check. ADR-008 gives the attach rule.
+- Evidence: the T6.8 gate passes FR-067 on a Void host. The real filter socket is a socket in a Development realm, and stopping the last realm clears it (`spikes/results/T6.8-tiers-real.md`, section 3). The same gate passes FR-063-AC2: a share of `~/.ssh` is refused with GINN-E-PATH-FORBIDDEN. FR-068 is not in the host gate (section 4), so the D-Bus socket is unit-tested only. `tests/unit/test_security_agent.py` and `tests/unit/test_security_dbus_filter.py` build the internal binds. `tests/unit/test_runtime_mounts.py` checks that an internal source outside the runtime root, or one that is not a socket, is refused (DR-004).
+- Status: open, for SRS v1.1; the plan proceeds under the proposed wording.
+
+## CL-15: an abstract-socket session bus with the host network
+
+- Requirement IDs: FR-068, FR-026, AS-012.
+- Issue: FR-068 AC-1 says that a realm reaches the host session bus only through the filter. A realm runs on the host network namespace (FR-026, every non-Kali realm). An abstract unix socket belongs to a network namespace, so such a realm can connect to an abstract session bus directly, past the proxy. The filter then cannot hold, and AC-1 holds only when the host bus is a path socket (`unix:path=`).
+- Proposed wording: "FR-068 AC-1 holds when the host session bus is reachable as a path socket. A session address whose bus is an abstract socket is not filtered, and the realm gets no bus for it, with AS-012 as the reason."
+- How ginn works now: `runtime/realm_security.bus_plan` refuses an address with an `abstract=` member (AS-012). The realm gets no proxy and no bus bind, and the refusal is a `bus` skip, so `ginn status` lists it. `ginn doctor` reports the `session-bus` check as a WARN with the text "session bus uses an abstract socket; realms on the host network can reach it unfiltered; FR-068 filtering is not in effect". The refusal stops ginn's own bus only. It does not stop a realm from reaching an abstract socket that the host runs.
+- Evidence: unit tests only (`tests/unit/test_runtime_realm_security.py`, `tests/unit/test_doctor_checks.py`). Not measured on a host.
+- Status: open, for SRS v1.1; the plan proceeds under the proposed wording.

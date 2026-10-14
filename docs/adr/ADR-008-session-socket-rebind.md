@@ -285,3 +285,5 @@ The trigger is lazy, and it stays in Python. The enter and launch path compares 
 | NFR-001 | The helper is not resident. It runs at start, enter and launch. At start it attaches every variable grant. At enter and launch it re-attaches a grant only when its host source changed (lazy re-attach). |
 | DR-010 | The helper writes no Owned Path. The runtime root stays as ADR-004 sets it. |
 | NFR-SEC-005 | The helper runs from an argv list. No shell string is built. |
+
+The Agent Proxy filter socket (FR-067) and a realm's D-Bus proxy socket (FR-068) are ginn's own sockets under the runtime root, and they are bound as typed internal grants, an exception to DR-004 that CL-14 in `docs/clarifications.md` records.

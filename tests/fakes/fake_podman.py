@@ -11,7 +11,7 @@ GINN-E-IMAGE-UNVERIFIED for a digest pull. The retry rule matches cli.py, throug
 
 import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, NamedTuple
@@ -387,6 +387,8 @@ class FakePodman:
         tty: bool = False,
         interactive: bool = False,
         pass_env: Sequence[str] = (),
+        on_spawn: Callable[[int], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
     ) -> int:
         self._note_exec(
             "exec_interactive", container_id, argv, user, env, workdir, pass_env, tty, interactive

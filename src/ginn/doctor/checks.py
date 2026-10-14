@@ -957,6 +957,38 @@ def check_render_nodes(p: Probe) -> CheckResult:
     return _pass(name, f"render node modes: {listing}")
 
 
+ABSTRACT_BUS_WARNING: Final = (
+    "session bus uses an abstract socket; realms on the host network can reach it unfiltered; "
+    "FR-068 filtering is not in effect"
+)
+"""The doctor message for an abstract session bus (FR-068, AS-012, docs/clarifications.md CL-15)."""
+
+
+def _has_abstract_member(address: str) -> bool:
+    """True when a unix member of a session address names an abstract socket (AS-012)."""
+    for member in address.split(";"):
+        if not member.startswith("unix:"):
+            continue
+        if any(part.partition("=")[0] == "abstract" for part in member[len("unix:") :].split(",")):
+            return True
+    return False
+
+
+def check_session_bus(p: Probe) -> CheckResult:
+    """An abstract socket in the session bus address is reachable from a host-network realm.
+
+    Every non-Kali realm shares the host network namespace (FR-026), so such a socket bypasses the
+    FR-068 proxy. The check reads the environment only, and it is a WARN, never a FAIL.
+    """
+    name = "session-bus"
+    address = p.env.get("DBUS_SESSION_BUS_ADDRESS", "")
+    if _has_abstract_member(address):
+        return _warn(name, ABSTRACT_BUS_WARNING)
+    if not address:
+        return _pass(name, "no session bus address; a realm gets no bus")
+    return _pass(name, "the session bus is a path socket, which the FR-068 proxy filters")
+
+
 CHECKS: Final[tuple[Callable[[Probe], CheckResult], ...]] = (
     check_podman,
     check_subids,
@@ -975,6 +1007,7 @@ CHECKS: Final[tuple[Callable[[Probe], CheckResult], ...]] = (
     check_nvidia,
     check_elogind,
     check_render_nodes,
+    check_session_bus,
 )
 """Every check, in report order. Each NFR-041 item of Host Setup and of SRS section 2.5 has one."""
 

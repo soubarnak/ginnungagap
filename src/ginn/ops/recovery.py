@@ -57,6 +57,9 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
 - stop, install, remove, tier, perms, services and any other op with no state of its own: the
   record takes the state that podman reports, `running` or `stopped`, when the record is `stopped`,
   `running` or `failed`.
+- An interrupted start or stop that leaves the realm not running also leaves the Agent Proxy
+  filter (FR-067), after the journal file is removed. A failure there is a note on the outcome, and
+  the next filter sync drops a member that does not run. The entry is never blocked by it.
 - install and remove also replay the Install Manifest write that the package step did not reach.
   The journal step `installed` (install) or `removed` (remove) is written after the package manager
   succeeds and before the manifest is saved, so an entry at that step gets the manifest written from
@@ -116,6 +119,7 @@ from ginn.domain import (
 )
 from ginn.errors import GinnError
 from ginn.ops._mutating import OpEnv, is_finished
+from ginn.ops.security_ops import leave_agent
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS, parse_names, shown
 from ginn.packages.manifest import installed, removed
@@ -382,7 +386,28 @@ def _settle_locked(
         env, entry, op_id, own=bool(own), outcome=decision.outcome, reason=decision.reason
     )
     env.journal.finish(entry)
-    return _outcome(current, decision.outcome, decision.reason, warnings=notes)
+    filter_notes = _leave_filter(env, name, store, entry)
+    return _outcome(current, decision.outcome, decision.reason, warnings=(*notes, *filter_notes))
+
+
+def _leave_filter(
+    env: OpEnv, name: RealmName, store: RealmStore, entry: JournalEntry
+) -> tuple[str, ...]:
+    """Leave the filter after an interrupted start or stop that does not leave the realm running.
+
+    The realm lock is held here, so the filter's global lock is taken inside it (the lock order of
+    ops/security_ops.py). A failure is returned as a note, and never raised.
+    """
+    if entry.op not in (OP_START, OP_STOP):
+        return ()
+    try:
+        if store.load(name).state is RealmState.RUNNING:
+            return ()
+        leave_agent(env, name)
+    except (GinnError, OSError) as err:
+        detail = err.message if isinstance(err, GinnError) else str(err)
+        return (f"agent filter not released: {detail}",)
+    return ()
 
 
 def _write_manifest(

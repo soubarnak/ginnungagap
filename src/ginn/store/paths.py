@@ -297,6 +297,11 @@ class OwnedPaths:
         return self.data / "cdi"
 
     @property
+    def seccomp(self) -> Path:
+        """The generated seccomp profiles of nested-container realms (ADR-006, DR-010)."""
+        return self.data / "seccomp"
+
+    @property
     def sv(self) -> Path:
         return self.state / "sv"
 

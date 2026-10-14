@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """CreateSpec renders a deterministic `podman create` argv that is never privileged."""
 
+from pathlib import Path
+
 import pytest
 
-from ginn.podman.adapter import CreateSpec, Mount
+from ginn.podman.adapter import CreateSpec, Mount, _refuse_privileged, unsafe_security_opt
+from ginn.podman.cli import PodmanCli
 
 DIGEST = (
     "docker.io/library/alpine@sha256:"
@@ -136,7 +139,7 @@ def test_services_on_spec_golden_argv_uses_s01_flags() -> None:
     [
         basic_spec(),
         services_on_spec(),
-        basic_spec(network="pasta", caps_add=["NET_RAW"], security_opts=["label=disable"]),
+        basic_spec(network="pasta", caps_add=["NET_RAW"]),
         basic_spec(cdi_devices=["nvidia.com/gpu=all"]),
     ],
     ids=["basic", "services-on", "kali-pasta", "nvidia-cdi"],
@@ -286,3 +289,85 @@ def test_a_passwd_entry_podman_would_rewrite_is_refused(entry: str) -> None:
 def test_a_passwd_entry_needs_keep_id() -> None:
     with pytest.raises(ValueError, match="keep-id"):
         basic_spec(passwd_entry=ENTRY, userns=None).to_argv()
+
+
+@pytest.mark.fr("NFR-SEC-001")
+@pytest.mark.parametrize(
+    "option",
+    [
+        "seccomp=unconfined",
+        "seccomp:unconfined",
+        " seccomp=unconfined",
+        "seccomp=unconfined ",
+        "apparmor=unconfined",
+        "label=disable",
+        "label:disable",
+        "label=type:spc_t",
+        "systempaths=unconfined",
+        "unmask=ALL",
+        "no-new-privileges=false",
+        "privileged",
+    ],
+)
+def test_a_security_option_that_lowers_confinement_is_refused_in_every_spelling(
+    option: str,
+) -> None:
+    with pytest.raises(ValueError, match="NFR-SEC-001"):
+        basic_spec(security_opts=[option]).to_argv()
+
+
+@pytest.mark.fr("NFR-SEC-001")
+def test_the_equals_form_of_a_security_option_is_read_too() -> None:
+    """A value built into the argv in its `--security-opt=value` form is refused the same way."""
+    with pytest.raises(ValueError, match="NFR-SEC-001"):
+        _refuse_privileged(["create", "--security-opt=seccomp=unconfined"], [])
+
+
+@pytest.mark.fr("NFR-SEC-001")
+def test_the_separate_token_form_of_a_security_option_is_read_too() -> None:
+    with pytest.raises(ValueError, match="NFR-SEC-001"):
+        _refuse_privileged(["create", "--security-opt", "label=type:spc_t"], [])
+
+
+@pytest.mark.fr("NFR-SEC-002")
+def test_the_security_options_ginn_adds_are_not_refused() -> None:
+    argv = basic_spec(
+        security_opts=["unmask=/proc/*", "seccomp=/data/ginn/seccomp/a.json"]
+    ).to_argv()
+    assert ["--security-opt", "unmask=/proc/*"] == argv[
+        argv.index("--security-opt") : argv.index("--security-opt") + 2
+    ]
+    assert not unsafe_security_opt("unmask=/proc/*")
+    assert not unsafe_security_opt("seccomp=/data/ginn/seccomp/a.json")
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_a_cdi_spec_directory_must_be_plain_and_absolute() -> None:
+    assert basic_spec(cdi_spec_dir="/data/ginn/cdi").global_flags() == [
+        "--cdi-spec-dir",
+        "/data/ginn/cdi",
+    ]
+    assert basic_spec().global_flags() == []
+    for value in ("relative/cdi", "/data/a,b", "/data/a:b", " /data/cdi"):
+        with pytest.raises(ValueError, match="NFR-SEC-005"):
+            basic_spec(cdi_spec_dir=value).global_flags()
+
+
+@pytest.mark.fr("FR-069")
+def test_the_cdi_spec_directory_is_a_global_flag_of_this_create_only(tmp_path: Path) -> None:
+    """`--cdi-spec-dir` goes before the subcommand, for the create that names it (ADR-012)."""
+    cli = PodmanCli(
+        tmp_path / "root",
+        tmp_path / "runroot",
+        tmpdir=tmp_path / "tmp",
+        image_tmp=tmp_path / "image",
+        containers_conf=tmp_path / "containers.conf",
+        storage_conf=tmp_path / "storage.conf",
+        runtime_root=tmp_path / "runtime",
+        cdi_spec_dir=tmp_path / "adapter-cdi",
+    )
+    per_call = cli._global_flags(["--cdi-spec-dir", "/data/ginn/cdi"])
+    assert per_call[-2:] == ["--cdi-spec-dir", "/data/ginn/cdi"]
+    assert str(tmp_path / "adapter-cdi") not in per_call
+    default = cli._global_flags()
+    assert default[-2:] == ["--cdi-spec-dir", str(tmp_path / "adapter-cdi")]

@@ -62,6 +62,8 @@ COMMAND_MODULES: tuple[str, ...] = (
     "sync",
     "install",
     "remove",
+    "tier",
+    "perms",
 )
 
 

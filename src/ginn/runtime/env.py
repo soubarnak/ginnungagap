@@ -18,7 +18,8 @@ be of the file type its role needs: a socket, a regular file or a directory. A s
 type is skipped and reported, as a missing one is, and it never fails a start. The filesystem reads
 are the stat probes, which tests replace with a fake, and the `realpath` in the D-Bus check.
 
-Rules, by variable:
+Rules, by variable. The display rules apply only while the DISPLAY toggle is on, the audio rule
+only while AUDIO is on, and TZ only while FONTS_TIMEZONE is on (FR-061, FR-063).
 - HOME is the host home path, and XDG_RUNTIME_DIR is `/run/user/<uid>`. Both are always set.
 - WAYLAND_DISPLAY is passed only when the host sets it. The host socket is a relative name looked
   up under the host runtime directory, or an absolute path. It must be a socket. It is bound into
@@ -55,6 +56,7 @@ from pathlib import Path
 from typing import Final
 
 from ginn.domain.paths import Mode, path_refusal
+from ginn.domain.permissions import BASIC_TOGGLES, Toggle
 from ginn.runtime.mounts import SessionBind, Skipped, runtime_dir
 
 X11_DIR: Final = "/tmp/.X11-unix"  # noqa: S108 - fixed host socket dir, not a temp file
@@ -103,6 +105,24 @@ def _host_file_type(path: str) -> int | None:
         return None
 
 
+EXTRA_ENV_NAMES: Final = frozenset({"SSH_AUTH_SOCK", "DBUS_SESSION_BUS_ADDRESS", "LD_LIBRARY_PATH"})
+"""The exec variables a security module may add: the agent socket, the bus and the GPU path."""
+
+
+@dataclass(frozen=True)
+class SessionExtras:
+    """What the security grants add to a session: binds, exec variables and skips (ADR-008).
+
+    `binds` are variable grants, checked again with DR-004 when they are attached. `env` may hold
+    only EXTRA_ENV_NAMES. `skipped` is reported as the session's own skips. Built by
+    runtime/realm_security.py, so this module does not import the security modules.
+    """
+
+    binds: tuple[SessionBind, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+    skipped: tuple[Skipped, ...] = ()
+
+
 @dataclass(frozen=True)
 class SessionEnv:
     """The exec-time environment, the proxy names, the session binds and the skips for one realm.
@@ -128,42 +148,70 @@ def session_env(
     uid: int,
     owned_paths: Sequence[Path],
     file_type: FileType = _host_file_type,
+    extras: SessionExtras | None = None,
+    toggles: frozenset[Toggle] = BASIC_TOGGLES,
 ) -> SessionEnv:
-    """Return the realm environment, proxy names and session binds for the host session."""
+    """Return the realm environment, proxy names and session binds for the host session.
+
+    `extras` adds the security grants after the session's own binds (FR-067, FR-068, FR-069). Its
+    variables must be in EXTRA_ENV_NAMES, so an unexpected name raises ValueError. `toggles` are
+    the effective toggles of the realm (FR-061, FR-063). The display rules need DISPLAY, the audio
+    sockets need AUDIO, and TZ needs FONTS_TIMEZONE. A toggle that is off gives no bind, variable or
+    empty slot for its grant.
+    """
     if not home.is_absolute():
         raise ValueError(f"host home must be absolute, not {home}")
     realm_runtime = runtime_dir(uid)
     host_runtime = _host_runtime(host_env, uid)
     result = SessionEnv(env={"HOME": str(home), "XDG_RUNTIME_DIR": realm_runtime}, binds=[])
     checks = _Checks(env=host_env, home=home, owned_paths=owned_paths, file_type=file_type)
-    _wayland(host_env, host_runtime, realm_runtime, checks, result)
-    _x11(host_env, checks, result)
-    _authority(host_env, realm_runtime, checks, result)
-    _audio(host_runtime, realm_runtime, checks, result)
-    _values(host_env, result)
-    _unbound(result, realm_runtime)
+    if Toggle.DISPLAY in toggles:
+        _wayland(host_env, host_runtime, realm_runtime, checks, result)
+        _x11(host_env, checks, result)
+        _authority(host_env, realm_runtime, checks, result)
+    if Toggle.AUDIO in toggles:
+        _audio(host_runtime, realm_runtime, checks, result)
+    _values(host_env, result, timezone=Toggle.FONTS_TIMEZONE in toggles)
+    _unbound(result, realm_runtime, toggles)
+    if extras is not None:
+        unknown = sorted(set(extras.env) - EXTRA_ENV_NAMES)
+        if unknown:
+            raise ValueError(f"a security grant may not set {', '.join(unknown)}")
+        result.binds.extend(extras.binds)
+        result.env.update(extras.env)
+        result.skipped.extend(extras.skipped)
     return result
 
 
-def _fixed_realms(realm_runtime: str) -> tuple[tuple[str, Mode, bool], ...]:
-    """The fixed realm paths of the session grants, each with its mode and kind (ADR-008, CL-12)."""
-    return (
-        (f"{realm_runtime}/{WAYLAND_REALM}", "rw", False),
-        (f"{realm_runtime}/{AUTHORITY_REALM}", "ro", False),
-        (X11_DIR, "ro", True),
-        (f"{realm_runtime}/{PIPEWIRE_SOCKET}", "rw", False),
-        (f"{realm_runtime}/{PULSE_SOCKET}", "rw", False),
-    )
+def _fixed_realms(
+    realm_runtime: str, toggles: frozenset[Toggle]
+) -> tuple[tuple[str, Mode, bool], ...]:
+    """The fixed realm paths of the session grants that `toggles` allow, each with its mode and
+    kind (ADR-008, CL-12). The display paths need DISPLAY, and the audio sockets need AUDIO."""
+    slots: list[tuple[str, Mode, bool]] = []
+    if Toggle.DISPLAY in toggles:
+        slots += [
+            (f"{realm_runtime}/{WAYLAND_REALM}", "rw", False),
+            (f"{realm_runtime}/{AUTHORITY_REALM}", "ro", False),
+            (X11_DIR, "ro", True),
+        ]
+    if Toggle.AUDIO in toggles:
+        slots += [
+            (f"{realm_runtime}/{PIPEWIRE_SOCKET}", "rw", False),
+            (f"{realm_runtime}/{PULSE_SOCKET}", "rw", False),
+        ]
+    return tuple(slots)
 
 
-def _unbound(result: SessionEnv, realm_runtime: str) -> None:
+def _unbound(result: SessionEnv, realm_runtime: str, toggles: frozenset[Toggle]) -> None:
     """Record each fixed session path that this session does not bind as an empty-host slot.
 
     A slot with no host is not a skip. An autostart, which has no session variables, still gets
-    its slots, so the first enter or launch from a session can fill them.
+    its slots, so the first enter or launch from a session can fill them. A path whose toggle is
+    off is no slot at all.
     """
     bound = {bind.realm for bind in (*result.binds, *result.absent)}
-    for realm, mode, is_dir in _fixed_realms(realm_runtime):
+    for realm, mode, is_dir in _fixed_realms(realm_runtime, toggles):
         if realm not in bound:
             result.absent.append(SessionBind("", realm, mode, is_dir))
 
@@ -341,12 +389,15 @@ def _audio(host_runtime: str, realm_runtime: str, checks: _Checks, result: Sessi
             _record(result, checks, socket, host, realm, "rw", stat.S_IFSOCK)
 
 
-def _values(host_env: Mapping[str, str], result: SessionEnv) -> None:
+def _values(host_env: Mapping[str, str], result: SessionEnv, *, timezone: bool) -> None:
     """Set LANG and TZ in `env`, and name each proxy variable the host sets in `pass_through`.
 
-    A proxy value is read here only to check it for NUL and newline. It is never stored.
+    TZ is the timezone grant, so it is set only when `timezone` is on (FR-061). A proxy value is
+    read here only to check it for NUL and newline. It is never stored.
     """
     for name in (*PASSED_VARIABLES, *PROXY_VARIABLES):
+        if name == "TZ" and not timezone:
+            continue
         raw = host_env.get(name, "")
         if not raw:
             continue
