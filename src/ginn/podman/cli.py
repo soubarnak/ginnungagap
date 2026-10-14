@@ -44,7 +44,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import FrameType
-from typing import Final
+from typing import IO, Final, NamedTuple
 
 from ginn.errors import GinnError, make
 from ginn.ops.retry import NETWORK_PATTERNS
@@ -52,12 +52,14 @@ from ginn.podman.adapter import (
     PATH_NOT_FOUND_REASON,
     PODMAN_ERROR_EXIT,
     CreateSpec,
+    ExecTarget,
     RetryHook,
     require_arg,
     require_digest_ref,
     with_network_retry,
 )
 from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
+from ginn.runtime import exec_relay
 from ginn.store.paths import OwnedPaths, check_runtime_dir
 
 _IN_USE_PATTERNS: Final = (re.compile(r"image is in use by a container", re.IGNORECASE),)
@@ -148,6 +150,96 @@ def _internal(detail: str) -> GinnError:
 def _exit_status(returncode: int) -> int:
     """Map a signal return code (negative) to 128 + signal, the shell convention."""
     return 128 - returncode if returncode < 0 else returncode
+
+
+class _Output(NamedTuple):
+    """What a bounded read kept: the stdout bytes, the stderr tail, and the bound that ended it."""
+
+    stdout: bytearray
+    stderr: bytearray
+    reason: str | None
+
+
+def _left(deadline: float | None) -> float | None:
+    """The seconds left before `deadline`, or None when there is no deadline."""
+    return None if deadline is None else max(deadline - time.monotonic(), 0.0)
+
+
+def _read_bounded(
+    out: IO[bytes],
+    err: IO[bytes],
+    *,
+    timeout_s: float | None,
+    deadline: float | None,
+    max_output: int | None,
+    stdout_tail: bool,
+) -> _Output:
+    """Read both streams until EOF, or until a bound stops the run (FR-044). Shared by both routes.
+
+    The deadline is checked on every pass of the loop, so a process that prints without pause still
+    times out. The two streams are read through a selector, so a descriptor above 1024 works too.
+    Each stream keeps only its last `STDERR_TAIL_BYTES` or `STDOUT_TAIL_BYTES` when `stdout_tail` is
+    set. The byte count against `max_output` is kept in full either way. The caller stops the
+    client when a reason comes back.
+    """
+    out_limit = STDOUT_TAIL_BYTES if stdout_tail else None
+    buffer = bytearray()
+    tail = bytearray()
+    printed = 0
+    reason: str | None = None
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(out, selectors.EVENT_READ, "stdout")
+        selector.register(err, selectors.EVENT_READ, "stderr")
+        while reason is None and selector.get_map():
+            if deadline is not None and time.monotonic() >= deadline:
+                reason = f"timed out after {timeout_s} s"
+                break
+            events = selector.select(_left(deadline))
+            if not events:
+                reason = f"timed out after {timeout_s} s"
+                break
+            for key, _ in events:
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stdout":
+                    printed += len(chunk)
+                    buffer.extend(chunk)
+                    if out_limit is not None:
+                        del buffer[: max(len(buffer) - out_limit, 0)]
+                    if max_output is not None and printed > max_output:
+                        reason = f"printed more than {max_output} bytes"
+                        break
+                else:
+                    tail.extend(chunk)
+                    del tail[: max(len(tail) - STDERR_TAIL_BYTES, 0)]
+    finally:
+        selector.close()
+    return _Output(buffer, tail, reason)
+
+
+def _bounded_failure(reason: str) -> GinnError:
+    """GINN-E-INTERNAL for a run that a bound stopped, with the reason in its details."""
+    err = _internal(f"exec {reason}")
+    err.details["reason"] = reason
+    return err
+
+
+_BOUNDED_DECODE: Final = "surrogateescape"
+"""How a bounded exec decodes its output, so encoding it back gives the exact bytes (NFR-042)."""
+_UNBOUNDED_DECODE: Final = "replace"
+"""How an unbounded exec decodes its output, as `_run` does through subprocess."""
+
+
+def _completed(
+    argv: Sequence[str], read: _Output, returncode: int, decode: str
+) -> subprocess.CompletedProcess[str]:
+    """The result of a finished run, its output decoded as `decode` says (UTF-8)."""
+    text = bytes(read.stdout).decode("utf-8", errors=decode)
+    errors = bytes(read.stderr).decode("utf-8", errors=decode)
+    return subprocess.CompletedProcess(argv, returncode, text, errors)
 
 
 def _do_nothing(signum: int, frame: FrameType | None) -> None:
@@ -302,6 +394,7 @@ class PodmanCli:
         cdi_spec_dir: Path | None = None,
         verbose: Callable[[str], None] | None = None,
         owned_paths: OwnedPaths | None = None,
+        cgroup_file: Path = exec_relay.PROC_CGROUP,
     ) -> None:
         """Prefer `from_paths`. This constructor takes every location explicitly.
 
@@ -329,6 +422,7 @@ class PodmanCli:
         self.cdi_spec_dir = cdi_spec_dir
         self.verbose = verbose
         self.owned_paths = owned_paths
+        self.cgroup_file = cgroup_file
         self.history: list[list[str]] = []
         self.tightened: list[str] = []
 
@@ -584,6 +678,7 @@ class PodmanCli:
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -594,6 +689,7 @@ class PodmanCli:
         timeout_s: float | None = None,
         max_output: int | None = None,
         stdout_tail: bool = False,
+        on_ack: Callable[[int], None] | None = None,
     ) -> ExecResult:
         """Run one command in the container and return its status and output.
 
@@ -603,24 +699,48 @@ class PodmanCli:
         126 and 127 are passed through: podman reports them for a command that cannot be run in
         a container that did start. With `capture=False` the output goes to the terminal, so
         stderr cannot be read and the status is returned as it is.
+
+        `target` decides the route (ADR-014, Decision 1). A services-on target outside the
+        supervisor leaf goes through the exec relay, with the same argv tail as the direct route.
+        `on_ack` gets the podman client's pid once it has started, on either route.
         """
         if not capture:
             status = self.exec_interactive(
                 container_id,
                 argv,
+                target=target,
                 user=user,
                 env=env,
                 workdir=workdir,
                 tty=tty,
                 interactive=interactive,
                 pass_env=pass_env,
+                on_ack=on_ack,
             )
             return ExecResult(status, "", "")
         args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
-        if timeout_s is None and max_output is None and not stdout_tail:
+        bounded = timeout_s is not None or max_output is not None or stdout_tail
+        decode = _BOUNDED_DECODE if bounded else _UNBOUNDED_DECODE
+        if self._routes_to_relay(target):
+            result = self._run_relayed(
+                target,
+                container_id,
+                args,
+                pass_env,
+                tty=tty,
+                interactive=interactive,
+                timeout_s=timeout_s,
+                max_output=max_output,
+                stdout_tail=stdout_tail,
+                on_ack=on_ack,
+                decode=decode,
+            )
+        elif not bounded and on_ack is None:
             result = self._run(args)
         else:
-            result = self._run_bounded(args, timeout_s, max_output, stdout_tail)
+            result = self._run_bounded(
+                args, timeout_s, max_output, stdout_tail, on_ack=on_ack, decode=decode
+            )
         if result.returncode == PODMAN_ERROR_EXIT:
             raise self._failure("exec", result)
         return ExecResult(result.returncode, result.stdout, result.stderr)
@@ -631,20 +751,19 @@ class PodmanCli:
         timeout_s: float | None,
         max_output: int | None,
         stdout_tail: bool = False,
+        on_ack: Callable[[int], None] | None = None,
+        decode: str = _BOUNDED_DECODE,
     ) -> subprocess.CompletedProcess[str]:
         """Run like `_run`, but stop after `timeout_s` seconds, or when stdout passes `max_output`.
 
-        The deadline is checked on every pass of the loop, so a process that prints without pause
-        still times out. The two output streams are read through a selector, so a descriptor above
-        1024 works too. Each stream keeps only its last `STDERR_TAIL_BYTES` or `STDOUT_TAIL_BYTES`
-        when `stdout_tail` is set: the error line of a failed command survives, and a flood of
-        progress output does not fill memory. The byte count against `max_output` is kept in full
-        either way, so the cap still applies to what the process printed. A run that hits a limit is
-        killed and waited for, then GINN-E-INTERNAL is raised with the reason in `details`. The kill
-        reaches only the podman client. A process that podman started in the container keeps running
-        there, because `podman exec` has no kill of its own, so a limit bounds ginn's wait, not the
-        realm's work. Output is decoded with surrogateescape, so encoding it gives the exact bytes.
-        Fixed argv list, no shell (NFR-SEC-005).
+        A run that hits a limit is killed and waited for, then GINN-E-INTERNAL is raised with the
+        reason in `details`. The kill reaches only the podman client. A process that podman started
+        in the container keeps running there, because `podman exec` has no kill of its own, so a
+        limit bounds ginn's wait, not the realm's work. Output is decoded as `decode` says: a
+        bounded exec keeps surrogateescape, so encoding it gives the exact bytes. An unbounded one
+        replaces bad bytes, as `_run` does. `on_ack`, when given, gets the client's pid right after
+        Popen, which is the pid the relay route reports too (ADR-014). Fixed argv list, no shell
+        (NFR-SEC-005).
         """
         argv = self._prepare(args)
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
@@ -656,66 +775,112 @@ class PodmanCli:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
         if proc.stdout is None or proc.stderr is None:  # both are PIPE above
             raise _internal("cannot read the output of podman")
-        out_limit = STDOUT_TAIL_BYTES if stdout_tail else None
-        buffer = bytearray()
-        tail = bytearray()
-        printed = 0
-        reason: str | None = None
-        selector = selectors.DefaultSelector()
+        read = _Output(bytearray(), bytearray(), None)
+        returncode: int | None = None
         try:
-            selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
-            while reason is None and selector.get_map():
-                if deadline is not None and time.monotonic() >= deadline:
-                    reason = f"timed out after {timeout_s} s"
-                    break
-                wait = None if deadline is None else max(deadline - time.monotonic(), 0.0)
-                events = selector.select(wait)
-                if not events:
-                    reason = f"timed out after {timeout_s} s"
-                    break
-                for key, _ in events:
-                    chunk = os.read(key.fd, 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    if key.data == "stdout":
-                        printed += len(chunk)
-                        buffer.extend(chunk)
-                        if out_limit is not None:
-                            del buffer[: max(len(buffer) - out_limit, 0)]
-                        if max_output is not None and printed > max_output:
-                            reason = f"printed more than {max_output} bytes"
-                            break
-                    else:
-                        tail.extend(chunk)
-                        del tail[: max(len(tail) - STDERR_TAIL_BYTES, 0)]
-            if reason is None:
-                left = None if deadline is None else max(deadline - time.monotonic(), 0.0)
+            if on_ack is not None:
+                on_ack(proc.pid)
+            read = _read_bounded(
+                proc.stdout,
+                proc.stderr,
+                timeout_s=timeout_s,
+                deadline=deadline,
+                max_output=max_output,
+                stdout_tail=stdout_tail,
+            )
+            if read.reason is None:
                 try:
-                    returncode = proc.wait(timeout=left)
+                    returncode = proc.wait(timeout=_left(deadline))
                 except subprocess.TimeoutExpired:
-                    reason = f"timed out after {timeout_s} s"
+                    read = read._replace(reason=f"timed out after {timeout_s} s")
         finally:
-            selector.close()
             if proc.poll() is None:
                 proc.kill()
             proc.stdout.close()
             proc.stderr.close()
             proc.wait()
-        if reason is not None:
-            err = _internal(f"exec {reason}")
-            err.details["reason"] = reason
-            raise err
-        text = bytes(buffer).decode("utf-8", errors="surrogateescape")
-        errors = bytes(tail).decode("utf-8", errors="surrogateescape")
-        return subprocess.CompletedProcess(argv, returncode, text, errors)
+        if read.reason is not None or returncode is None:
+            raise _bounded_failure(read.reason or f"timed out after {timeout_s} s")
+        return _completed(argv, read, returncode, decode)
+
+    def _run_relayed(
+        self,
+        target: ExecTarget,
+        container_id: str,
+        args: Sequence[str],
+        pass_env: Sequence[str],
+        *,
+        tty: bool,
+        interactive: bool,
+        timeout_s: float | None,
+        max_output: int | None,
+        stdout_tail: bool,
+        on_ack: Callable[[int], None] | None,
+        decode: str,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a captured exec through the supervisor relay (ADR-014, Decision 1).
+
+        The worker gets the write ends of two pipes, which the relay's podman writes to, and the
+        read ends come back here. The read loop is the one `_run_bounded` uses, so both bounds stay
+        in the client. A bound, or a failure after ACK, stops the run with SIGTERM and then SIGKILL
+        (`Exchange.stop`). The raised GINN-E-INTERNAL is the one the direct route raises.
+        """
+        argv = self._prepare(args)
+        request = self._relay_request(
+            target, container_id, args, pass_env, tty=tty, interactive=interactive, captured=True
+        )
+        socket_path, service = self._relay_endpoint()
+        out_read, out_write = os.pipe()
+        err_read, err_write = os.pipe()
+        try:
+            exchange = exec_relay.open_exchange(
+                socket_path, request, (0, out_write, err_write, out_read, err_read), service=service
+            )
+        except BaseException:
+            for fd in (out_read, out_write, err_read, err_write):
+                os.close(fd)
+            raise
+        os.close(out_write)
+        os.close(err_write)
+        out = os.fdopen(out_read, "rb", buffering=0)
+        err = os.fdopen(err_read, "rb", buffering=0)
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
+        read = _Output(bytearray(), bytearray(), None)
+        returncode: int | None = None
+        try:
+            if on_ack is not None:
+                on_ack(exchange.pid)
+            read = _read_bounded(
+                out,
+                err,
+                timeout_s=timeout_s,
+                deadline=deadline,
+                max_output=max_output,
+                stdout_tail=stdout_tail,
+            )
+            if read.reason is None:
+                returncode = exchange.wait(_left(deadline))
+                if returncode is None:
+                    read = read._replace(reason=f"timed out after {timeout_s} s")
+            if read.reason is not None:
+                exchange.stop()
+        except BaseException:
+            exchange.stop()
+            raise
+        finally:
+            out.close()
+            err.close()
+            exchange.close()
+        if read.reason is not None or returncode is None:
+            raise _bounded_failure(read.reason or f"timed out after {timeout_s} s")
+        return _completed(argv, read, returncode, decode)
 
     def exec_interactive(
         self,
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -724,17 +889,43 @@ class PodmanCli:
         pass_env: Sequence[str] = (),
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> int:
         """Run podman exec with the caller's stdio and return the command's status (IR-011).
 
-        The client is started with Popen, so `on_spawn` gets its pid before the wait, and the caller
-        can signal it (FR-068). The wait returns when the client exits, whatever the caller did in
-        `on_spawn` or in a signal handler. `on_exit` runs as soon as the client is reaped, so the
-        caller can stop signalling its pid before the pid can be reused. If the wait is interrupted,
-        the client is killed and reaped before the interruption propagates, as subprocess.run does,
-        and `on_exit` runs after that too.
+        The direct route starts the client with Popen, so `on_spawn` gets its pid before the wait,
+        and the caller can signal it (FR-068). The wait returns when the client exits, whatever the
+        caller did in `on_spawn` or in a signal handler. `on_exit` runs as soon as the client is
+        reaped, so the caller can stop signalling its pid before the pid can be reused. If the wait
+        is interrupted, the client is killed and reaped before the interruption propagates, as
+        subprocess.run does, and `on_exit` runs after that too.
+
+        On the relay route the pid is the one the relay acknowledges. The caller's signals are
+        forwarded to the worker as SIG messages, so the caller must not signal that pid itself
+        (ADR-014, `exec_relay.run_attached`). CL-27 records the forwarding.
         """
         args = self._exec_args(container_id, argv, user, env, workdir, tty, interactive, pass_env)
+        if self._routes_to_relay(target):
+            self._prepare(args)
+            request = self._relay_request(
+                target,
+                container_id,
+                args,
+                pass_env,
+                tty=tty,
+                interactive=interactive,
+                captured=False,
+            )
+            socket_path, service = self._relay_endpoint()
+            status = exec_relay.run_attached(
+                socket_path,
+                request,
+                service=service,
+                on_spawn=on_spawn,
+                on_ack=on_ack,
+                on_exit=on_exit,
+            )
+            return _exit_status(status)
         full = self._prepare(args)
         # Without a TTY, a Ctrl-C reaches ginn too: a do-nothing handler holds it while podman runs.
         guard: AbstractContextManager[None] = nullcontext() if tty else _parent_ignores_interrupts()
@@ -745,6 +936,8 @@ class PodmanCli:
                 try:
                     if on_spawn is not None:
                         on_spawn(client.pid)
+                    if on_ack is not None:
+                        on_ack(client.pid)
                     returncode = client.wait()
                     if on_exit is not None:
                         on_exit()
@@ -757,6 +950,57 @@ class PodmanCli:
         except OSError as exc:
             raise _internal(f"cannot run {self.binary}: {exc.strerror or exc}") from exc
         return _exit_status(returncode)
+
+    def _routes_to_relay(self, target: ExecTarget) -> bool:
+        """True when the exec goes through the supervisor relay (ADR-014, Decision 1).
+
+        Only a services-on target does, and only from outside the supervisor leaf. A process
+        inside the leaf moves into the realm itself, as it always did.
+        """
+        return target.services and not exec_relay.in_supervisor_leaf(self.cgroup_file)
+
+    def _relay_endpoint(self) -> tuple[Path, Path | None]:
+        """The listener's socket, and the `_exec` service that `sv up` starts when it refuses.
+
+        Without Owned Paths (the explicit constructor) there is no service to start, so the service
+        is None and a refused socket is reported at once.
+        """
+        socket_path = self.runtime_root / exec_relay.SOCKET_NAME
+        if self.owned_paths is None:
+            return socket_path, None
+        from ginn.services.exec_relay import exec_service_dir  # lazy: services imports PodmanCli
+
+        return socket_path, exec_service_dir(self.owned_paths)
+
+    def _relay_request(
+        self,
+        target: ExecTarget,
+        container_id: str,
+        args: Sequence[str],
+        pass_env: Sequence[str],
+        *,
+        tty: bool,
+        interactive: bool,
+        captured: bool,
+    ) -> exec_relay.Request:
+        """The REQ of one exec: the direct route's tail, and the pass-through values (ADR-014).
+
+        A pass-through value is read from the environment that podman would see on the direct
+        route, so a name that is not there is left unset on both routes. The values travel in the
+        REQ, never on a command line (NFR-SEC-005).
+        """
+        env = self._env()
+        passed = tuple(f"{name}={env[name]}" for name in sorted(set(pass_env)) if name in env)
+        return exec_relay.Request(
+            realm=target.realm,
+            container_id=container_id,
+            tail=tuple(args),
+            passed=passed,
+            tty=tty,
+            interactive=interactive,
+            mutating=target.mutating,
+            captured=captured,
+        )
 
     @staticmethod
     def _exec_args(

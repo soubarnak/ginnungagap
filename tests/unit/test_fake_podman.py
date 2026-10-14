@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from ginn.errors import GinnError
-from ginn.podman.adapter import CreateSpec, Podman
+from ginn.podman.adapter import CreateSpec, ExecTarget, Podman
 from ginn.podman.models import ContainerState, ExecResult
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 DIGEST = "sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395"
 DIGEST_REF = f"docker.io/library/alpine@{DIGEST}"
@@ -69,7 +71,7 @@ def test_container_moves_from_created_to_running_to_exited() -> None:
 def test_state_machine_rejects_invalid_transitions() -> None:
     fake = FakePodman()
     container_id = fake.create(spec())
-    expect_code("GINN-E-INTERNAL", lambda: fake.exec(container_id, ["true"]))
+    expect_code("GINN-E-INTERNAL", lambda: fake.exec(container_id, ["true"], target=DIRECT_TARGET))
     fake.start(container_id)
     expect_code("GINN-E-INTERNAL", lambda: fake.start(container_id))
     expect_code("GINN-E-INTERNAL", lambda: fake.rm(container_id, force=False))
@@ -151,10 +153,12 @@ def test_exec_returns_canned_results_keyed_by_argv() -> None:
     fake = FakePodman(exec_results={("sh", "-c", "exit 3"): canned})
     container_id = fake.create(spec())
     fake.start(container_id)
-    assert fake.exec(container_id, ["sh", "-c", "exit 3"]) == canned
-    assert fake.exec(container_id, ["true"]) == ExecResult(0, "", "")
-    assert fake.exec(container_id, ["sh", "-c", "exit 3"], capture=False) == ExecResult(3, "", "")
-    assert fake.exec_interactive(container_id, ["sh", "-c", "exit 3"]) == 3
+    assert fake.exec(container_id, ["sh", "-c", "exit 3"], target=DIRECT_TARGET) == canned
+    assert fake.exec(container_id, ["true"], target=DIRECT_TARGET) == ExecResult(0, "", "")
+    assert fake.exec(
+        container_id, ["sh", "-c", "exit 3"], capture=False, target=DIRECT_TARGET
+    ) == ExecResult(3, "", "")
+    assert fake.exec_interactive(container_id, ["sh", "-c", "exit 3"], target=DIRECT_TARGET) == 3
 
 
 @pytest.mark.fr("NFR-061")
@@ -162,7 +166,7 @@ def test_injected_exec_failure_raises_with_the_chosen_code() -> None:
     fake = FakePodman(fail_exec_with="GINN-E-NETWORK")
     container_id = fake.create(spec())
     fake.start(container_id)
-    expect_code("GINN-E-NETWORK", lambda: fake.exec(container_id, ["true"]))
+    expect_code("GINN-E-NETWORK", lambda: fake.exec(container_id, ["true"], target=DIRECT_TARGET))
 
 
 @pytest.mark.fr("NFR-061")
@@ -208,13 +212,17 @@ def test_fake_exec_refuses_the_names_that_the_cli_refuses() -> None:
     cid = fake.create(spec())
     fake.start(cid)
     with pytest.raises(ValueError):
-        fake.exec_interactive(cid, ["true"], pass_env=["NAME=value"])
+        fake.exec_interactive(cid, ["true"], pass_env=["NAME=value"], target=DIRECT_TARGET)
     with pytest.raises(ValueError):
-        fake.exec_interactive(cid, ["true"], env={"http_proxy": "x"}, pass_env=["http_proxy"])
+        fake.exec_interactive(
+            cid, ["true"], env={"http_proxy": "x"}, pass_env=["http_proxy"], target=DIRECT_TARGET
+        )
     with pytest.raises(ValueError):
-        fake.exec_interactive(cid, ["true"], env={"BAD=KEY": "x"})
+        fake.exec_interactive(cid, ["true"], env={"BAD=KEY": "x"}, target=DIRECT_TARGET)
     assert fake.exec_calls == []
-    fake.exec_interactive(cid, ["true"], env={"LANG": "C"}, pass_env=["http_proxy"])
+    fake.exec_interactive(
+        cid, ["true"], env={"LANG": "C"}, pass_env=["http_proxy"], target=DIRECT_TARGET
+    )
     (call,) = fake.exec_calls
     assert call.pass_env == ("http_proxy",)
     assert call.env == {"LANG": "C"}

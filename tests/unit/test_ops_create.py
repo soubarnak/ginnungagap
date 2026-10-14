@@ -52,7 +52,7 @@ from ginn.ops.create import (
     required_bytes,
 )
 from ginn.ops.disk import estimate_required
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
 from ginn.runtime.realm_security import SecurityHooks
@@ -66,6 +66,8 @@ from ginn.store.scratch import SCRATCH_PREFIX
 from ginn.trust import manifest as trust
 from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 UID = 1000
 GID = 1000

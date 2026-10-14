@@ -129,7 +129,7 @@ from ginn.ops.security_ops import (
     sync_agent,
     write_nvidia,
 )
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.attach import (
     MOUNTINFO,
@@ -1145,6 +1145,9 @@ def _attach(
             owned_paths=grants.owned,
             runtime_root=env.paths.runtime,
             env=user.host_env,
+        ),
+        target=ExecTarget(
+            realm=record.name.value, services=bool(record.services_at_create), mutating=False
         ),
         helper=hooks.helper,
         mountinfo=hooks.mountinfo,

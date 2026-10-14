@@ -189,9 +189,15 @@ def _services_state(paths: OwnedPaths) -> tuple[bool, bool]:
     """(a services-on realm is stored, a services-on realm needs the relay now) (ADR-014).
 
     A realm is services-on when its record has `services_at_create` or `settings.services` set.
-    It needs the relay only while its container was created services-on (`services_at_create`)
-    and its record reads running, rebuilding or updating. A container created services-off runs its
-    execs directly, whatever the flag says now, and the flag takes effect at the rebuild.
+    It needs the relay while its container was created services-on (`services_at_create`) and its
+    record reads running, rebuilding or updating. A container created services-off runs its execs
+    directly, whatever the flag says now, and the flag takes effect at the rebuild.
+
+    A rebuild that turns services on has a record of services-off (`services_at_create`) with
+    `settings.services` set, and its replay runs through the relay (ADR-014, T7.10 review). So a
+    REBUILDING record whose `settings.services` is set needs the relay too, before the new
+    generation exists on this host. Without that the directory would be marked down and the first
+    replay exec would find no relay.
 
     A record that does not load counts as a services-on realm that needs the relay, so the relay
     stays up for it (NFR-001 gives way to the safe answer for a record ginn cannot read).
@@ -207,6 +213,8 @@ def _services_state(paths: OwnedPaths) -> tuple[bool, bool]:
             continue
         on = True
         if record.services_at_create and record.state in ACTIVE_STATES:
+            return True, True
+        if record.state is RealmState.REBUILDING and record.settings.services:
             return True, True
     return on, False
 
@@ -320,6 +328,17 @@ def _clear_down(service: Path) -> None:
     fsync_dir(service)
 
 
+def up_exec_service(service: Path, *, hooks: SupervisorHooks | None = None) -> None:
+    """Start the relay service in `service`, the `_exec` directory, with `sv up` (ADR-014).
+
+    The client calls this when the relay socket refuses a connection, and then polls the socket.
+    The sv lookup and the wait are this module's own (`_sv`). A missing sv or a failed `sv up` is
+    GINN-E-SERVICE-CONTROL with sv's detail, and the caller maps it to what it reports.
+    """
+    seams = SupervisorHooks() if hooks is None else hooks
+    _sv(seams, "up", service, seams.up_wait_s)
+
+
 def _sv(hooks: SupervisorHooks, verb: str, service: Path, wait_s: int) -> None:
     """Run `sv -w <wait> <verb> <dir>` and raise GINN-E-SERVICE-CONTROL on failure (ADR-014).
 
@@ -393,6 +412,7 @@ def _internal(detail: str) -> GinnError:
 
 
 __all__ = [
+    "up_exec_service",
     "EXEC_RELAY_HELPER",
     "EXEC_SERVICE",
     "LOCK_DIR_NAME",

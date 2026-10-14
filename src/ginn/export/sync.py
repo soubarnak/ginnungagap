@@ -71,7 +71,7 @@ from ginn.export.desktop import (
 )
 from ginn.export.icons import IconError, IconIndex, copy_icon, resolve_icon
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.spec import LABEL_REALM
 from ginn.store.paths import OwnedPaths, write_bytes_atomic
@@ -269,13 +269,22 @@ def _runs(podman: Podman, record: RealmRecord, name: RealmName) -> bool:
     )
 
 
+def _read_target(record: RealmRecord, realm: str) -> ExecTarget:
+    """The exec target of a read of the realm, by its services mode at create (ADR-014).
+
+    The reads are never mutating. A realm created services-on reads through the relay, so the
+    listing and the file reads work from the user session (F2).
+    """
+    return ExecTarget(realm=realm, services=bool(record.services_at_create), mutating=False)
+
+
 def _list_desktop(podman: Podman, record: RealmRecord, realm: str) -> dict[str, tuple[int, str]]:
     """The desktop files of the realm: app ID to (size, mtime). A failure raises and changes
     nothing."""
     cid = record.container_id
     if cid is None:
         raise make("GINN-E-EXPORT-LIST", realm=realm, reason="the realm has no container")
-    result = run_listing(podman, cid, DESKTOP_LIST, realm=realm)
+    result = run_listing(podman, cid, DESKTOP_LIST, realm=realm, target=_read_target(record, realm))
     if result.exit_code != 0:
         reason = f"find exited with status {result.exit_code}"
         raise make("GINN-E-EXPORT-LIST", realm=realm, reason=reason)
@@ -389,6 +398,7 @@ class _Sync:
         self._podman = podman
         self._cid = record.container_id or ""
         self._realm = realm
+        self._target = _read_target(record, realm)
         self._program = program
         self._result = result
         self._applications = paths.applications_dir
@@ -473,7 +483,11 @@ class _Sync:
             return _Skip(f"larger than {DESKTOP_MAX_BYTES} bytes")
         try:
             raw = read_realm_file(
-                self._podman, self._cid, f"{DESKTOP_DIR}/{app}.desktop", cap=DESKTOP_MAX_BYTES
+                self._podman,
+                self._cid,
+                f"{DESKTOP_DIR}/{app}.desktop",
+                cap=DESKTOP_MAX_BYTES,
+                target=self._target,
             )
         except RealmFileTooLarge as exc:
             return _Skip(str(exc))
@@ -516,6 +530,7 @@ class _Sync:
                     app=app,
                     dest_dir=self._icon_dir,
                     size=size,
+                    target=self._target,
                 )
             except IconError as exc:
                 self._result.warnings.append(
@@ -528,7 +543,9 @@ class _Sync:
     def _index_for(self) -> IconIndex:
         """The realm's icon listing, built once. An absolute icon path is looked up in it too."""
         if self._index is None:
-            self._index = IconIndex.build(self._podman, self._cid, realm=self._realm)
+            self._index = IconIndex.build(
+                self._podman, self._cid, realm=self._realm, target=self._target
+            )
         return self._index
 
     def _warn_skipped(self, app: str, reason: str) -> None:

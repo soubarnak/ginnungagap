@@ -10,6 +10,7 @@ the choke point records them (ops/_mutating.py): an ok rebuild has one `ok` audi
 failed one has its error code. Nothing here runs podman, sudo or the helper binary (AGENTS.md).
 """
 
+import errno
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -43,6 +44,7 @@ from ginn.security.caps import option_keys
 from ginn.security.nested import CONFIG_DIR, FILES
 from ginn.services.runit_user import DOWN, journald_dropin, service_dir
 from ginn.services.supervisor import Result, SupervisorHooks
+from ginn.store.journal import Journal
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from ginn.trust import manifest as trust
@@ -2276,3 +2278,118 @@ def test_a_lazy_services_on_rebuild_whose_image_has_no_init_is_deferred_with_the
     assert started.generation == 1
     assert generation_of(fake, 2) == []
     assert stored(env).generation == 1
+
+
+@pytest.fixture
+def journal_steps(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every journal step name, in the order the operations record them (FR-122)."""
+    steps: list[str] = []
+    original: Callable[..., Any] = Journal.step
+
+    def recording(self: Journal, entry: Any, name: str, params: Any = None, **kwargs: Any) -> Any:
+        steps.append(name)
+        return original(self, entry, name, params, **kwargs)
+
+    monkeypatch.setattr(Journal, "step", recording)
+    return steps
+
+
+@pytest.mark.fr("FR-122")
+def test_a_rebuild_replay_records_exec_acked_for_each_install(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    journal_steps: list[str],
+) -> None:
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+        packages=("curl", "git"),
+    )
+    rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert "exec-acked" in journal_steps
+    assert journal_steps.index("exec-acked") < journal_steps.index("swapping")
+
+
+@pytest.mark.fr("FR-084")
+def test_a_rebuild_syncs_the_relay_while_rebuilding_and_again_at_the_swap(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states: list[str] = []
+
+    def record(paths: Any, *_args: Any, **_kwargs: Any) -> None:
+        states.append(RealmStore(paths).load(NAME).state.value)
+
+    monkeypatch.setattr("ginn.ops.rebuild.sync_exec_service", record)
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert states == [RealmState.REBUILDING.value, RealmState.STOPPED.value]
+
+
+@pytest.mark.fr("FR-084")
+def test_a_failed_relay_sync_during_a_rebuild_is_a_warning_and_the_swap_stands(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.EIO, "the sv directory is unreadable")
+
+    monkeypatch.setattr("ginn.ops.rebuild.sync_exec_service", broken)
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    result = rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert result.record.generation == 2
+    assert result.record.state is RealmState.STOPPED
+    assert "GINN-W-RELAY-SYNC" in [w.code for w in result.warnings]

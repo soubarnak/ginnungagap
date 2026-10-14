@@ -33,7 +33,7 @@ from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
 from ginn.ops.security_ops import proxy_state_path
-from ginn.podman.adapter import PODMAN_ERROR_EXIT, CreateSpec
+from ginn.podman.adapter import PODMAN_ERROR_EXIT, CreateSpec, ExecTarget
 from ginn.podman.models import ContainerInfo, ExecResult
 from ginn.runtime import attach
 from ginn.runtime import enter as enter_module
@@ -53,6 +53,8 @@ from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import ExecCall, FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 UID = 1000
 GID = 1000

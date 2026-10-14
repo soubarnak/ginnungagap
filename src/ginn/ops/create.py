@@ -115,7 +115,7 @@ from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
-from ginn.podman.adapter import PATH_NOT_FOUND_REASON, Podman
+from ginn.podman.adapter import PATH_NOT_FOUND_REASON, ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
     AttachResult,
@@ -511,6 +511,7 @@ class _Create:
                 runtime_root=self._env.paths.runtime,
                 env=env,
             ),
+            target=self._target(mutating=False),
             helper=self._hooks.helper,
             mountinfo=self._hooks.mountinfo,
         )
@@ -528,7 +529,10 @@ class _Create:
         """
         expected = self._plan.spec.passwd_entry
         result = self._podman.exec(
-            self._container_id(), ["getent", "passwd", str(self._request.uid)], user=ROOT_USER
+            self._container_id(),
+            ["getent", "passwd", str(self._request.uid)],
+            target=self._target(mutating=False),
+            user=ROOT_USER,
         )
         found = result.stdout.strip()
         if result.exit_code != 0 or found != expected:
@@ -617,6 +621,7 @@ class _Create:
             self._plan.everything,
             realm=self._request.name.value,
             retry_hook=self._retry,
+            target=self._target(mutating=False),
         )
 
     def _install_with(self) -> None:
@@ -724,6 +729,17 @@ class _Create:
         self._store.save(record)
         self._record = record
 
+    def _target(self, *, mutating: bool) -> ExecTarget:
+        """The exec target of this operation, by the services mode of the container it builds.
+
+        A services-on create stops after `created` and runs no exec, so its execs are all services
+        off. A rebuild overrides nothing here: its plan carries the mode of the new generation
+        (ADR-014, Decision 1).
+        """
+        return ExecTarget(
+            realm=self._request.name.value, services=self._plan.spec.services, mutating=mutating
+        )
+
     def _exec(self, argv: list[str], *, step: str) -> None:
         """Run a package step as container root, with its failure mapped (FR-012, FR-040).
 
@@ -738,6 +754,7 @@ class _Create:
             realm=self._request.name.value,
             step=step,
             retry_hook=self._retry,
+            target=self._target(mutating=True),
         )
 
 

@@ -37,7 +37,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from functools import partial
 from typing import Final
 
 from ginn.distros import DistroDef, Verb
@@ -51,9 +50,11 @@ from ginn.ops.lifecycle import HostUser, start_realm, stop_realm
 from ginn.ops.packages import PackageHooks
 from ginn.ops.retry import network_retry_hook
 from ginn.packages.manager import CheckResult, database_inconsistent, run_check, run_step
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.spec import KALI, LABEL_REALM
+from ginn.services.exec_relay import relay_failure, sync_exec_service
+from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 
 OP_UPDATE: Final = "update"
@@ -72,7 +73,7 @@ DbCheck = Callable[[Podman, str, DistroDef], bool]
 
 True marks the realm `broken`. A check that fails is not a finding: the realm is restored, and the
 failure is a note on the update's error. The default is the db-check verb of the data, bound to the
-realm's name (`_db_check_for`).
+realm's name and its exec target (`_db_check_for`).
 """
 
 
@@ -143,6 +144,7 @@ def _upgrade(
     realm: str,
     hooks: PackageHooks,
     mutation: Mutation,
+    target: ExecTarget,
 ) -> None:
     """The native full upgrade (FR-023 AC-2), with the refresh the data asks for first.
 
@@ -160,6 +162,7 @@ def _upgrade(
             realm=realm,
             step="refresh",
             retry_hook=retry,
+            target=target,
         )
         mutation.step("refreshed")
     run_step(
@@ -170,6 +173,7 @@ def _upgrade(
         realm=realm,
         step="upgrade",
         retry_hook=retry,
+        target=target,
     )
     mutation.step("upgraded")
 
@@ -195,17 +199,47 @@ def _inconsistent(
 
 
 def _db_check_for(
-    name: RealmName, definition: DistroDef, db_check: DbCheck | None
+    name: RealmName, definition: DistroDef, db_check: DbCheck | None, target: ExecTarget
 ) -> DbCheck | None:
     """The check an update uses after a failure (FR-120 AC-2, ADR-011).
 
     The caller's `db_check` when it gives one. Otherwise the db-check verb of the data, bound to the
-    realm's name for its errors. None when the data defines no such verb, so no realm is marked
-    broken.
+    realm's name for its errors and to the realm's exec target (ADR-014). None when the data
+    defines no such verb, so no realm is marked broken.
     """
     if db_check is not None or not definition.has_db_check:
         return db_check
-    return partial(database_inconsistent, realm=name.value)
+    realm = name.value
+
+    def check(podman: Podman, cid: str, verb_definition: DistroDef) -> bool:
+        return database_inconsistent(podman, cid, verb_definition, realm=realm, target=target)
+
+    return check
+
+
+def _sync_relay_for_update(env: OpEnv, podman: Podman, mutation: Mutation) -> None:
+    """Sync the supervisor relay with the UPDATING state, before the upgrade execs (ADR-014).
+
+    A services-on realm that updates runs its execs through the relay. A failed sync is a warning,
+    and the upgrade goes on, because the next sync retries it.
+    """
+    try:
+        sync_exec_service(env.paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the upgrade goes on, so this is a warning
+        mutation.warnings.append(relay_failure(exc))
+
+
+def _relay_follows_failure(paths: OwnedPaths, podman: Podman, err: GinnError) -> None:
+    """Sync the relay after a failed update has left UPDATING (ADR-014). Best effort.
+
+    A BROKEN or a restored realm may no longer need the relay, so the sync follows the state. A
+    failure is a GINN-W-RELAY-SYNC note on the error, and the error stays the update's own.
+    """
+    try:
+        sync_exec_service(paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the update has failed already, so this is a note
+        warning = relay_failure(exc)
+        err.add_note(f"{warning.code}: {warning.message}")
 
 
 def _sync_menu(
@@ -241,17 +275,31 @@ def _update_locked(
     with mutating(env, OP_UPDATE, name, {"distro": definition.id}) as mutation:
         current, cid = _load_running(store, podman, name)
         previous = current.state
+        target = ExecTarget(
+            realm=name.value, services=bool(current.services_at_create), mutating=True
+        )
+        check = _db_check_for(name, definition, db_check, target)
         store.set_state(name, RealmState.UPDATING)
         mutation.step("updating")
+        _sync_relay_for_update(env, podman, mutation)
         try:
-            _upgrade(podman, cid, definition, realm=name.value, hooks=hooks, mutation=mutation)
+            _upgrade(
+                podman,
+                cid,
+                definition,
+                realm=name.value,
+                hooks=hooks,
+                mutation=mutation,
+                target=target,
+            )
         except GinnError as err:
             # A GinnError ends the operation as finished (see _mutating). The record must be settled
             # here, because nothing later moves a realm that is left at `updating`.
-            if _inconsistent(podman, cid, definition, db_check, err):
+            if _inconsistent(podman, cid, definition, check, err):
                 store.set_state(name, RealmState.BROKEN)
             else:
                 store.set_state(name, previous)
+            _relay_follows_failure(env.paths, podman, err)
             raise
         store.set_state(name, previous)
         mutation.step("restored")
@@ -315,13 +363,14 @@ def update_realm(
             allowed="stopped, failed or running",
         )
     definition = load_distro(record.settings.distro.value)
-    check = _db_check_for(name, definition, db_check)
     notices: list[GinnWarning] = []
     was_stopped = record.state is RealmState.STOPPED
     try:
         if not _running(podman, record):
             start_realm(env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices)
-        _update_locked(env, podman, name, definition, hooks=hooks, db_check=check, notices=notices)
+        _update_locked(
+            env, podman, name, definition, hooks=hooks, db_check=db_check, notices=notices
+        )
     except GinnError as err:
         _stop_after(
             env,
@@ -407,6 +456,9 @@ def check_realm(
         realm=name.value,
         retry_hook=network_retry_hook(hooks.sleep),
         tmpdir=tmpdir,
+        target=ExecTarget(
+            realm=name.value, services=bool(record.services_at_create), mutating=False
+        ),
     )
     return RealmCheck(name.value, state, result=result)
 

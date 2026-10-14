@@ -18,13 +18,14 @@ to stopped, and that is then usable too. The helpers, the fixtures and the creat
 test_ops_rebuild.py.
 """
 
+import errno
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from ginn.domain import RealmState, Tier
+from ginn.domain import InstallMethod, InstallSource, ManifestEntry, RealmName, RealmState, Tier
 from ginn.errors import GinnError, make
 from ginn.ops import rebuild as rebuild_ops
 from ginn.ops._mutating import OpEnv
@@ -33,6 +34,7 @@ from ginn.ops.permissions import set_tier
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.service import set_services_mode
 from ginn.podman.models import ContainerState
+from ginn.runtime import exec_relay
 from ginn.runtime.spec import LABEL_GENERATION
 from ginn.services.runit_user import DOWN, service_dir
 from ginn.store.records import RealmRecord, RealmStore
@@ -76,6 +78,7 @@ STEPS: tuple[str, ...] = (
     "attached",
     "user",
     "integrated",
+    "exec-acked",
     "replayed",
     "stopped",
     "swapping",
@@ -92,7 +95,7 @@ CASES: tuple[tuple[str, str, str, bool], ...] = tuple(
     for previous in PREVIOUS
     for services in SERVICES
 )
-"""The fault matrix: 11 steps by 3 kinds by 2 previous states by 2 services modes, 132 cases."""
+"""The fault matrix: 12 steps by 3 kinds by 2 previous states by 2 services modes, 144 cases."""
 
 
 class SimulatedCrash(Exception):
@@ -148,7 +151,7 @@ def _check_usable(
 
 @pytest.mark.fr("NFR-031")
 def test_the_fault_matrix_has_at_least_fifty_cases() -> None:
-    assert len(CASES) == len(STEPS) * len(KINDS) * len(PREVIOUS) * len(SERVICES) == 132
+    assert len(CASES) == len(STEPS) * len(KINDS) * len(PREVIOUS) * len(SERVICES) == 144
     assert len(set(CASES)) == len(CASES)
 
 
@@ -174,8 +177,11 @@ def test_a_fault_at_every_rebuild_step_leaves_the_old_root_usable(
     if services:
         runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
         lifecycle = _supervised_lifecycle(tmp_path, mountinfo, runit)
-        before = _services_realm(
-            env, fake, home, tmp_path, sleeps, mountinfo, runit, running=previous == "running"
+        before = _with_curl(
+            env,
+            _services_realm(
+                env, fake, home, tmp_path, sleeps, mountinfo, runit, running=previous == "running"
+            ),
         )
     else:
         before = make_realm(
@@ -285,6 +291,7 @@ TRANSITION_STEPS: dict[str, tuple[str, ...]] = {
         "attached",
         "user",
         "integrated",
+        "exec-acked",
         "replayed",
         "stopped",
         "swapping",
@@ -310,6 +317,13 @@ SAVE_CASES: tuple[tuple[str, str, str, str], ...] = tuple(
 )
 LAZY_CASES: tuple[tuple[str, str], ...] = tuple((step, kind) for step in STEPS for kind in KINDS)
 """Every journal step of a lazy tier rebuild at a start, with each kind of fault."""
+
+
+def _with_curl(env: OpEnv, record: RealmRecord) -> RealmRecord:
+    """The realm with one repo package in its manifest. A services-on realm is created with none,
+    so its replay would run no install, and no `exec-acked` step would be recorded (FR-122)."""
+    RealmStore(env.paths).save(replace(record, manifest=[base.CURL]))
+    return RealmStore(env.paths).load(NAME)
 
 
 def _runit_state(env: OpEnv) -> tuple[bool, bool]:
@@ -345,7 +359,10 @@ def _transition_realm(
     if transition == "to-on":
         make_realm(env, fake, home, tmp_path, sleeps, mountinfo, running=running)
     else:
-        _services_realm(env, fake, home, tmp_path, sleeps, mountinfo, runit, running=running)
+        _with_curl(
+            env,
+            _services_realm(env, fake, home, tmp_path, sleeps, mountinfo, runit, running=running),
+        )
     set_services_mode(env, NAME, on=transition == "to-on")
     return stored(env), _supervised_lifecycle(tmp_path, mountinfo, runit)
 
@@ -651,3 +668,93 @@ def test_a_fault_in_a_lazy_tier_rebuild_at_start_keeps_the_old_root_and_the_chan
     if kind != "kill":
         assert generation_of(fake, 2) == []
         assert _home_tree(env) == home_before, "the Realm Home is as the failed rebuild left it"
+
+
+RELAY_NAMES: tuple[str, ...] = tuple(f"lib-{index:04d}" for index in range(300))
+
+
+def _manifest_of(names: tuple[str, ...]) -> list[ManifestEntry]:
+    return [
+        ManifestEntry(name=n, source=InstallSource.REPO, method=InstallMethod.GINN) for n in names
+    ]
+
+
+def _replay_calls(fake: ScriptedPodman) -> list[Any]:
+    """The replay installs of the rebuild: the exec calls that carry a name of RELAY_NAMES."""
+    return [c for c in fake.exec_calls if c.op == "exec" and any(w in RELAY_NAMES for w in c.argv)]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-049")
+def test_a_services_on_rebuild_replays_three_hundred_packages_in_relay_sized_calls(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    lifecycle = _supervised_lifecycle(tmp_path, mountinfo, runit)
+    record = _services_realm(env, fake, home, tmp_path, sleeps, mountinfo, runit, running=False)
+    RealmStore(env.paths).save(replace(record, manifest=_manifest_of(RELAY_NAMES)))
+    result = rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+    replay = _replay_calls(fake)
+    assert [sum(w in RELAY_NAMES for w in c.argv) for c in replay] == [200, 100]
+    assert all(c.target is not None and c.target.services for c in replay)
+    for call in replay:
+        exec_relay.encode(
+            exec_relay.Request(
+                realm=NAME.value,
+                container_id=call.container_id,
+                tail=("exec", "--", call.container_id, *call.argv),
+                passed=(),
+                tty=False,
+                interactive=False,
+                mutating=True,
+                captured=True,
+            )
+        )
+    assert [e.name for e in result.record.manifest] == list(RELAY_NAMES)
+    assert result.replay_missing == ()
+
+
+@pytest.mark.fr("FR-021")
+def test_a_services_off_rebuild_replays_three_hundred_packages_in_one_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    base.make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=RELAY_NAMES)
+    fake.exec_calls.clear()  # the create of the realm installs its packages too
+    rebuild(env, fake, home, tmp_path, sleeps, mountinfo)
+    replay = _replay_calls(fake)
+    assert [sum(w in RELAY_NAMES for w in c.argv) for c in replay] == [300]
+    assert all(c.target is not None and not c.target.services for c in replay)
+
+
+@pytest.mark.fr("FR-084")
+def test_a_failed_rebuild_syncs_the_relay_once_its_record_is_back_at_stopped(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def broken(paths: Any, *_args: Any, **_kwargs: Any) -> None:
+        seen.append(RealmStore(paths).load(RealmName("debian")).state.value)
+        raise OSError(errno.EIO, "the sv directory is unreadable")
+
+    monkeypatch.setattr("ginn.ops.rebuild.sync_exec_service", broken)
+    base.make_realm(env, fake, home, tmp_path, sleeps, mountinfo)
+    with pytest.raises(GinnError) as caught:
+        rebuild(env, fake, home, tmp_path, sleeps, mountinfo, on_step=_inject("swapping", "error"))
+    assert seen == [RealmState.REBUILDING.value, RealmState.STOPPED.value]
+    assert any("GINN-W-RELAY-SYNC" in note for note in caught.value.__notes__)

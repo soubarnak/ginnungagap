@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Final
 
 from ginn.errors import GinnError, make
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ExecResult
 
 LISTING_USER: Final = "0:0"
@@ -49,7 +49,12 @@ def _reason(exc: GinnError) -> str:
 
 
 def run_listing(
-    podman: Podman, container_id: str, argv: tuple[str, ...], *, realm: str
+    podman: Podman,
+    container_id: str,
+    argv: tuple[str, ...],
+    *,
+    realm: str,
+    target: ExecTarget,
 ) -> ExecResult:
     """Run one listing argv in the realm as container root, bounded. Raise GINN-E-EXPORT-LIST
     when it cannot run: a podman error, a hang, or an overflow."""
@@ -57,6 +62,7 @@ def run_listing(
         return podman.exec(
             container_id,
             argv,
+            target=target,
             capture=True,
             user=LISTING_USER,
             timeout_s=LISTING_TIMEOUT_S,
@@ -66,7 +72,14 @@ def run_listing(
         raise make("GINN-E-EXPORT-LIST", realm=realm, reason=_reason(exc)) from exc
 
 
-def read_realm_file(podman: Podman, container_id: str, path: str, *, cap: int) -> bytes:
+def read_realm_file(
+    podman: Podman,
+    container_id: str,
+    path: str,
+    *,
+    cap: int,
+    target: ExecTarget,
+) -> bytes:
     """The bytes of the realm file `path`, at most `cap` bytes, read by one bounded `cat`.
 
     The output is cut at `cap + 1`, so the copy never holds more than that. The bytes come back
@@ -78,6 +91,7 @@ def read_realm_file(podman: Podman, container_id: str, path: str, *, cap: int) -
         result = podman.exec(
             container_id,
             ("cat", "--", path),
+            target=target,
             capture=True,
             user=LISTING_USER,
             timeout_s=LISTING_TIMEOUT_S,

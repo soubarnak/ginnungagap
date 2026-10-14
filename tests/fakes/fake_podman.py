@@ -20,6 +20,7 @@ from ginn.errors import GinnError, make
 from ginn.podman.adapter import (
     PATH_NOT_FOUND_REASON,
     CreateSpec,
+    ExecTarget,
     RetryHook,
     require_digest_ref,
     with_network_retry,
@@ -54,6 +55,10 @@ class FakeCall(NamedTuple):
     args: tuple[object, ...]
 
 
+FAKE_CLIENT_PID: Final = 4242
+"""The pid the fake reports to `on_ack`. No process runs, so no real pid exists."""
+
+
 @dataclass
 class ExecCall:
     """One exec or exec_interactive call, with its options as the adapter received them.
@@ -71,6 +76,7 @@ class ExecCall:
     workdir: str | None
     tty: bool
     interactive: bool
+    target: ExecTarget | None = None
 
 
 @dataclass
@@ -312,6 +318,7 @@ class FakePodman:
         pass_env: Sequence[str],
         tty: bool,
         interactive: bool,
+        target: ExecTarget,
     ) -> None:
         """Keep the options of one exec call, as the adapter received them.
 
@@ -339,6 +346,7 @@ class FakePodman:
                 workdir=workdir,
                 tty=tty,
                 interactive=interactive,
+                target=target,
             )
         )
 
@@ -371,6 +379,7 @@ class FakePodman:
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -381,12 +390,18 @@ class FakePodman:
         timeout_s: float | None = None,
         max_output: int | None = None,
         stdout_tail: bool = False,
+        on_ack: Callable[[int], None] | None = None,
     ) -> ExecResult:
         """The limits are accepted for the protocol. A test injects a hang or an overflow itself.
-        `stdout_tail` is accepted too: the fake answers with its whole canned output."""
+        `stdout_tail` is accepted too: the fake answers with its whole canned output. `on_ack` gets
+        the fake client pid once the exec has run, as the relay's ACK would (FR-122)."""
         self.exec_users.append(user)
-        self._note_exec("exec", container_id, argv, user, env, workdir, pass_env, tty, interactive)
+        self._note_exec(
+            "exec", container_id, argv, user, env, workdir, pass_env, tty, interactive, target
+        )
         result = self._exec("exec", container_id, argv)
+        if on_ack is not None:
+            on_ack(FAKE_CLIENT_PID)
         if not capture:
             return ExecResult(result.exit_code, "", "")
         if (
@@ -404,6 +419,7 @@ class FakePodman:
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -412,11 +428,24 @@ class FakePodman:
         pass_env: Sequence[str] = (),
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> int:
         self._note_exec(
-            "exec_interactive", container_id, argv, user, env, workdir, pass_env, tty, interactive
+            "exec_interactive",
+            container_id,
+            argv,
+            user,
+            env,
+            workdir,
+            pass_env,
+            tty,
+            interactive,
+            target,
         )
-        return self._exec("exec_interactive", container_id, argv).exit_code
+        status = self._exec("exec_interactive", container_id, argv).exit_code
+        if on_ack is not None:
+            on_ack(FAKE_CLIENT_PID)
+        return status
 
     def cp_from(self, container_id: str, src: str, dst: Path) -> None:
         self._record("cp_from", container_id, src, str(dst))

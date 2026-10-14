@@ -506,7 +506,7 @@ def test_the_listing_asks_for_a_timeout_and_an_output_cap(
 
     def spy(container_id: str, argv: Sequence[str], **kwargs: object) -> ExecResult:
         if tuple(argv) == DESKTOP_LIST:
-            seen.append(dict(kwargs))
+            seen.append({key: value for key, value in kwargs.items() if key != "target"})
         return real_exec(container_id, argv, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(world.fake, "exec", spy)
@@ -546,7 +546,7 @@ def test_a_desktop_file_swapped_to_a_huge_one_after_the_listing_is_cut_and_skipp
 
     def spy(container_id: str, argv: Sequence[str], **kwargs: object) -> ExecResult:
         if tuple(argv) == ("cat", "--", path):
-            seen.append(dict(kwargs))
+            seen.append({key: value for key, value in kwargs.items() if key != "target"})
         return real_exec(container_id, argv, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(world.fake, "exec", spy)

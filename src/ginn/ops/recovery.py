@@ -120,10 +120,11 @@ No other command runs it, so an app launch or a runit restart makes no podman ca
 
 import contextlib
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
-from ginn.distros import Verb, available
+from ginn.distros import DistroDef, Verb, available
 from ginn.distros import load as load_distro
 from ginn.domain import (
     DistroId,
@@ -135,16 +136,25 @@ from ginn.domain import (
     RealmState,
     can_transition,
 )
-from ginn.errors import GinnError
+from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv, is_finished
 from ginn.ops.images import remove_estimate_containers, remove_image
 from ginn.ops.security_ops import leave_agent
 from ginn.packages.aur import query_argv
-from ginn.packages.manager import MAX_OUTPUT_CHARS, parse_names, shown
+from ginn.packages.manager import (
+    MAX_OUTPUT_CHARS,
+    explicit_manifest,
+    name_batches,
+    parse_names,
+    refused,
+    remove_passes,
+    shown,
+)
 from ginn.packages.manifest import installed, removed
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.spec import LABEL_ESTIMATE, LABEL_GENERATION, LABEL_REALM
+from ginn.services.exec_relay import exec_lock_busy, relay_failure, sync_exec_service
 from ginn.services.runit_user import remove_service, service_dir
 from ginn.services.supervise import signal_runsv_down
 from ginn.store._time import utc_from_epoch
@@ -179,6 +189,9 @@ STEP_TOOLCHAIN: Final = "toolchain"
 """The AUR build's journal step after its toolchain is installed."""
 STEP_BUILT: Final = "built"
 STEP_UPGRADING: Final = "upgrading"
+_LISTED_STEPS: Final = frozenset({"exec-acked", "refreshed", "checked"})
+"""Journal steps of a package verb after which its change may have started, though its own step
+is not recorded. Recovery reads the realm's explicit list for them (ADR-014, T7.10 review)."""
 """The AUR build's journal step before each package install (packages/aur.py)."""
 _QUERY_TIMEOUT_S: Final = 300.0
 _REMOVE_TIMEOUT_S: Final = 300.0
@@ -241,8 +254,10 @@ class _Decision:
 
     `stop_container` is the id of a container to stop before the record is written, or None.
     `manifest`, when set, is the Install Manifest to write with the record (FR-040, FR-041).
-    `remove_names` and `remove_argv` are packages to remove best effort (FR-043), and `remove_in`
-    is the running container they are removed from. Without a container they are reported left.
+    `remove_names` are packages to remove best effort (FR-043), `remove_definition` is the
+    distribution that gives their removal argv, and `remove_in` is the running container they are
+    removed from. Without a container they are reported left. `remove_target` is the exec target of
+    that removal, set with `remove_in` (ADR-014).
     """
 
     outcome: str
@@ -251,8 +266,9 @@ class _Decision:
     stop_container: str | None = None
     manifest: list[ManifestEntry] | None = None
     remove_names: tuple[str, ...] = ()
-    remove_argv: tuple[str, ...] = ()
     remove_in: str | None = None
+    remove_target: ExecTarget | None = None
+    remove_definition: DistroDef | None = None
 
 
 def find_pending(env: OpEnv) -> list[JournalFile]:
@@ -472,6 +488,10 @@ def _settle_locked(
     if current.entry is None:
         return _outcome(current, OUTCOME_CORRUPT, damaged_reason(current))
     entry = current.entry
+    if exec_lock_busy(env.paths, name):
+        # A mutating exec of the realm still runs (FR-123, ADR-014). Its journal entry is the one
+        # it needs, so nothing is settled, removed or written while it runs. The lock is only read.
+        raise make("GINN-E-REALM-BUSY", op=f"exec of realm '{name.value}'")
     op_id = _op_id(entry)
     damaged = list(index.damaged)
     own: tuple[AuditEntry, ...] = ()
@@ -510,8 +530,22 @@ def _settle_locked(
         env, entry, op_id, own=bool(own), outcome=decision.outcome, reason=decision.reason
     )
     env.journal.finish(entry)
+    relay_notes: list[str] = []
+    if entry.op == OP_REBUILD:
+        # The rebuild has settled, so the relay follows the realm's state again (ADR-014). A failed
+        # sync is a warning, and the next sync retries it.
+        try:
+            sync_exec_service(env.paths, podman)
+        except Exception as exc:  # noqa: BLE001 - the settlement is written, so this is a warning
+            warning = relay_failure(exc)
+            relay_notes.append(f"{warning.code}: {warning.message}")
     filter_notes = _leave_filter(env, name, store, entry)
-    return _outcome(current, decision.outcome, decision.reason, warnings=(*notes, *filter_notes))
+    return _outcome(
+        current,
+        decision.outcome,
+        decision.reason,
+        warnings=(*notes, *relay_notes, *filter_notes),
+    )
 
 
 def _leave_filter(
@@ -578,6 +612,8 @@ def _decide_package(podman: Podman, record: RealmRecord, entry: JournalEntry) ->
     replays = entry.op == OP_REMOVE and entry.step == STEP_REMOVED
     replays = replays or (entry.op == OP_INSTALL and entry.step == STEP_INSTALLED)
     decision = _decide_by_podman(podman, record, entry.op)
+    if not replays and entry.step in _LISTED_STEPS:
+        return _listed_manifest(podman, record, entry, decision)
     if not replays or decision.outcome == OUTCOME_BLOCKED:
         return decision
     names = _journal_names(entry, record.settings.distro)
@@ -592,6 +628,41 @@ def _decide_package(podman: Podman, record: RealmRecord, entry: JournalEntry) ->
         manifest = removed(record.manifest, names)
     reason = f"{decision.reason}; the Install Manifest now matches the interrupted {entry.op}"
     return replace(decision, manifest=manifest, reason=reason)
+
+
+def _listed_manifest(
+    podman: Podman, record: RealmRecord, entry: JournalEntry, decision: _Decision
+) -> _Decision:
+    """An install or remove that stopped after a change may have started, before its step was
+    recorded. The Install Manifest follows the realm's explicit-package list, read when the
+    container runs (FR-040, FR-041, ADR-014, T7.10 review). The list is read-only, and the reason
+    says when the manifest is left as it is."""
+    if decision.outcome == OUTCOME_BLOCKED:
+        return decision
+    names = _journal_names(entry, record.settings.distro)
+    if names is None:
+        reason = "the journal entry names no valid package list, so the manifest is left as it is"
+        return replace(decision, reason=f"{decision.reason}; {reason}")
+    if record.container_id is None or _podman_state(podman, record) is not ContainerState.RUNNING:
+        reason = "the container is not running, so the Install Manifest is left as it is"
+        return replace(decision, reason=f"{decision.reason}; {reason}")
+    manifest = explicit_manifest(
+        podman,
+        record.container_id,
+        load_distro(record.settings.distro.value),
+        realm=record.name.value,
+        services=bool(record.services_at_create),
+        manifest=record.manifest,
+        names=names,
+        installed_now=entry.op == OP_INSTALL,
+    )
+    if manifest is None:
+        reason = "the package list cannot be read, so the Install Manifest is left as it is"
+        return replace(decision, reason=f"{decision.reason}; {reason}")
+    if manifest == record.manifest:
+        return decision
+    reason = "the Install Manifest follows the realm's explicit packages"
+    return replace(decision, manifest=manifest, reason=f"{decision.reason}; {reason}")
 
 
 def _decide_aur(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _Decision:
@@ -638,6 +709,11 @@ def _decide_aur(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _De
             result = podman.exec(
                 container,
                 query_argv(),
+                target=ExecTarget(
+                    realm=record.name.value,
+                    services=bool(record.services_at_create),
+                    mutating=False,
+                ),
                 user="0:0",
                 env=_ROOT_ENV,
                 timeout_s=_QUERY_TIMEOUT_S,
@@ -695,10 +771,10 @@ def _decide_aur(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _De
     if manifest is not None and not unverified:
         reason = f"{reason}; the Install Manifest now matches the interrupted install"
     remove_names: tuple[str, ...] = ()
-    remove_argv: tuple[str, ...] = ()
+    remove_definition: DistroDef | None = None
     if removable:
         remove_names = tuple(sorted(set(removable)))
-        remove_argv = tuple(load_distro(distro.value).argv(Verb.REMOVE, list(remove_names)))
+        remove_definition = load_distro(distro.value)
     if notes:
         reason = f"{reason}; {'; '.join(notes)}"
     return replace(
@@ -706,8 +782,11 @@ def _decide_aur(podman: Podman, record: RealmRecord, entry: JournalEntry) -> _De
         manifest=manifest,
         reason=reason,
         remove_names=remove_names,
-        remove_argv=remove_argv,
+        remove_definition=remove_definition,
         remove_in=container if remove_names else None,
+        remove_target=ExecTarget(
+            realm=record.name.value, services=bool(record.services_at_create), mutating=True
+        ),
     )
 
 
@@ -722,30 +801,67 @@ def _remove_left_over(podman: Podman, decision: _Decision) -> _Decision:
     if not decision.remove_names:
         return decision
     names = shown(list(decision.remove_names))
-    if decision.remove_in is None:
+    if (
+        decision.remove_in is None
+        or decision.remove_target is None
+        or decision.remove_definition is None
+    ):
         note = f"left installed, since the realm is not running: {names}"
     else:
         try:
-            result = podman.exec(
-                decision.remove_in,
-                list(decision.remove_argv),
-                user="0:0",
-                env=_ROOT_ENV,
-                timeout_s=_REMOVE_TIMEOUT_S,
-                max_output=MAX_OUTPUT_CHARS,
-                stdout_tail=True,
-            )
+            _remove_left_over_passes(podman, decision)
         except GinnError as exc:
             reason = exc.details.get("reason")
             if exc.code == "GINN-E-INTERNAL" and isinstance(reason, str):
                 note = f"left installed, since the removal stopped at its limit: {names}"
+            elif exc.code == "GINN-E-PKG-MANAGER":
+                note = f"left installed, since pacman refused the removal: {names}"
             else:
                 note = f"left installed, since the removal failed ({exc.code}): {names}"
         else:
-            if result.exit_code == 0:
-                return decision
-            note = f"left installed, since pacman refused the removal: {names}"
+            return decision
     return replace(decision, reason=f"{decision.reason}; build-only packages {note}")
+
+
+def _remove_left_over_passes(podman: Podman, decision: _Decision) -> None:
+    """Remove the left-over names in calls the route carries, refused batches retried after the
+    pass (remove_passes, ADR-014). A name already gone is not passed again. The check reads the
+    installed list, not the explicit one: build-only packages are dependencies, not explicit."""
+    container = decision.remove_in
+    target = decision.remove_target
+    definition = decision.remove_definition
+    if container is None or target is None or definition is None:
+        raise make("GINN-E-INTERNAL")
+
+    def remove_batch(batch: Sequence[str]) -> None:
+        result = podman.exec(
+            container,
+            definition.argv(Verb.REMOVE, list(batch)),
+            target=target,
+            user="0:0",
+            env=_ROOT_ENV,
+            timeout_s=_REMOVE_TIMEOUT_S,
+            max_output=MAX_OUTPUT_CHARS,
+            stdout_tail=True,
+        )
+        if result.exit_code != 0:
+            detail = f"pacman refused the removal (exit {result.exit_code})"
+            raise refused(target.realm, "remove", detail)
+
+    def still_present() -> frozenset[str]:
+        listing = podman.exec(
+            container,
+            query_argv(),
+            target=ExecTarget(realm=target.realm, services=target.services, mutating=False),
+            user="0:0",
+            env=_ROOT_ENV,
+            timeout_s=_QUERY_TIMEOUT_S,
+            max_output=MAX_OUTPUT_CHARS,
+        )
+        return parse_names(listing.stdout, realm=target.realm, step="query")
+
+    batches = name_batches(list(decision.remove_names), target)
+    remove_passes(batches, remove_batch, still_present=still_present if len(batches) > 1 else None)
 
 
 def _write_settlement(

@@ -46,11 +46,13 @@ from ginn.packages.aur import (
     srcinfo_argv,
     upgrade_argv,
 )
-from ginn.podman.adapter import CreateSpec, RetryHook
+from ginn.podman.adapter import CreateSpec, ExecTarget, RetryHook
 from ginn.podman.models import ExecResult
 from ginn.runtime.spec import LABEL_REALM
 from ginn.store.journal import PARAMS_OVERFLOW
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 DIGEST = "registry.example/arch@sha256:" + "ab" * 32
 REALM = "arch"
@@ -219,6 +221,7 @@ def _run(
         gid=gid,
         retry_hook=hook,
         step=step,
+        target=DIRECT_TARGET,
     )
 
 

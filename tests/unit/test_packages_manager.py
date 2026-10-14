@@ -51,10 +51,12 @@ from ginn.packages.manager import (
     run_step,
     shown,
 )
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ExecResult
 from ginn.runtime.spec import LABEL_REALM
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 SHIPPED = ("arch", "debian", "fedora", "kali")
 PACKAGE_VERBS = (Verb.INSTALL, Verb.REMOVE, Verb.REMOVE_CHECK, Verb.RESOLVE, Verb.ESTIMATE)
@@ -252,7 +254,16 @@ def test_run_step_runs_the_argv_as_container_root_under_the_locale() -> None:
     definition = _definition("arch")
     argv = definition.argv(Verb.INSTALL, ["htop"])
     _canned(fake, argv, 0, "")
-    result = run_step(fake, cid, definition, argv, realm=REALM, step="install", retry_hook=None)
+    result = run_step(
+        fake,
+        cid,
+        definition,
+        argv,
+        realm=REALM,
+        step="install",
+        retry_hook=None,
+        target=DIRECT_TARGET,
+    )
     assert result.exit_code == 0
     call = fake.exec_calls[-1]
     assert call.argv == tuple(argv)
@@ -269,7 +280,16 @@ def test_run_step_raises_the_mapped_error_on_a_non_zero_status() -> None:
     argv = definition.argv(Verb.INSTALL, ["gimp"])
     _canned(fake, argv, 100, "", "E: Unable to locate package gimp")
     with pytest.raises(GinnError) as caught:
-        run_step(fake, cid, definition, argv, realm=REALM, step="install", retry_hook=None)
+        run_step(
+            fake,
+            cid,
+            definition,
+            argv,
+            realm=REALM,
+            step="install",
+            retry_hook=None,
+            target=DIRECT_TARGET,
+        )
     assert caught.value.code == "GINN-E-PKG-MANAGER"
     assert caught.value.details["step"] == "install"
 
@@ -287,7 +307,16 @@ def test_a_network_failure_is_offered_to_the_retry_hook_and_raised_when_refused(
         return False
 
     with pytest.raises(GinnError) as caught:
-        run_step(fake, cid, definition, argv, realm=REALM, step="install", retry_hook=refuse)
+        run_step(
+            fake,
+            cid,
+            definition,
+            argv,
+            realm=REALM,
+            step="install",
+            retry_hook=refuse,
+            target=DIRECT_TARGET,
+        )
     assert caught.value.code == "GINN-E-NETWORK"
     assert attempts == [1]
 
@@ -308,7 +337,7 @@ def test_explicit_packages_reads_the_list_verb(name: str, stdout: str) -> None:
     cid = _running(fake)
     definition = _definition(name)
     _canned(fake, definition.argv(Verb.LIST_EXPLICIT), 0, stdout)
-    names = explicit_packages(fake, cid, definition, realm=REALM)
+    names = explicit_packages(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert names == parse_names(stdout, realm=REALM)
     assert fake.exec_calls[-1].env == {"LC_ALL": "C.UTF-8"}
     assert fake.exec_calls[-1].user == "0:0"
@@ -321,7 +350,7 @@ def test_explicit_packages_raises_rather_than_return_an_empty_list() -> None:
     definition = _definition("arch")
     _canned(fake, definition.argv(Verb.LIST_EXPLICIT), 1, "", "error: database is locked")
     with pytest.raises(GinnError) as caught:
-        explicit_packages(fake, cid, definition, realm=REALM)
+        explicit_packages(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
 
 
@@ -349,9 +378,9 @@ def test_removal_dependents_lists_only_the_packages_beyond_the_request() -> None
     cid = _running(fake, "deb")
     definition = _definition("debian")
     _canned(fake, definition.argv(Verb.REMOVE_CHECK, ["gimp"]), 0, APT_SIMULATE)
-    assert removal_dependents(fake, cid, definition, ["gimp"], realm="deb") == frozenset(
-        {"libgimp2.0"}
-    )
+    assert removal_dependents(
+        fake, cid, definition, ["gimp"], realm="deb", target=DIRECT_TARGET
+    ) == frozenset({"libgimp2.0"})
 
 
 @pytest.mark.fr("FR-041")
@@ -361,7 +390,10 @@ def test_removal_dependents_is_empty_when_only_the_request_is_removed() -> None:
     definition = _definition("debian")
     text = "Remv htop [3.3]\n0 upgraded, 0 newly installed, 1 to remove\n"
     _canned(fake, definition.argv(Verb.REMOVE_CHECK, ["htop"]), 0, text)
-    assert removal_dependents(fake, cid, definition, ["htop"], realm="deb") == frozenset()
+    assert (
+        removal_dependents(fake, cid, definition, ["htop"], realm="deb", target=DIRECT_TARGET)
+        == frozenset()
+    )
 
 
 @pytest.mark.fr("FR-041")
@@ -370,7 +402,9 @@ def test_removal_dependents_reads_the_dnf_dry_run_although_dnf_exits_one() -> No
     cid = _running(fake, "fed")
     definition = _definition("fedora")
     _canned(fake, definition.argv(Verb.REMOVE_CHECK, ["htop"]), 1, DNF_TRANSACTION)
-    assert removal_dependents(fake, cid, definition, ["htop"], realm="fed") == frozenset({"gimp"})
+    assert removal_dependents(
+        fake, cid, definition, ["htop"], realm="fed", target=DIRECT_TARGET
+    ) == frozenset({"gimp"})
 
 
 @pytest.mark.fr("FR-041")
@@ -380,7 +414,7 @@ def test_removal_refuses_an_unread_plan_that_does_not_list_the_request() -> None
     definition = _definition("debian")
     _canned(fake, definition.argv(Verb.REMOVE_CHECK, ["gimp"]), 0, "E: some other text\n")
     with pytest.raises(GinnError) as caught:
-        removal_dependents(fake, cid, definition, ["gimp"], realm="deb")
+        removal_dependents(fake, cid, definition, ["gimp"], realm="deb", target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
     assert caught.value.details["step"] == "remove-check"
     assert "gimp" in caught.value.details["detail"]
@@ -394,7 +428,7 @@ def test_the_dry_run_runs_as_root_under_the_locale_and_never_as_a_shell() -> Non
     definition = _definition("debian")
     argv = definition.argv(Verb.REMOVE_CHECK, ["gimp"])
     _canned(fake, argv, 0, APT_SIMULATE)
-    removal_dependents(fake, cid, definition, ["gimp"], realm="deb")
+    removal_dependents(fake, cid, definition, ["gimp"], realm="deb", target=DIRECT_TARGET)
     call = fake.exec_calls[-1]
     assert call.argv == tuple(argv)
     assert call.argv[0] == "apt-get"
@@ -498,7 +532,9 @@ def test_a_dependent_on_an_apt_row_is_reported_by_removal_dependents() -> None:
     cid = _running(fake, "deb")
     definition = _definition("debian")
     _canned(fake, definition.argv(Verb.REMOVE_CHECK, ["gimp"]), 0, APT_TWO_ON_ONE_ROW)
-    dependents = removal_dependents(fake, cid, definition, ["gimp"], realm="deb")
+    dependents = removal_dependents(
+        fake, cid, definition, ["gimp"], realm="deb", target=DIRECT_TARGET
+    )
     assert dependents == frozenset({"libgimp2.0"})
 
 
@@ -516,7 +552,16 @@ def test_a_realistic_network_failure_is_retried_with_the_delays_then_raised_as_n
         return True
 
     with pytest.raises(GinnError) as caught:
-        run_step(fake, cid, definition, argv, realm=REALM, step="install", retry_hook=retry)
+        run_step(
+            fake,
+            cid,
+            definition,
+            argv,
+            realm=REALM,
+            step="install",
+            retry_hook=retry,
+            target=DIRECT_TARGET,
+        )
     assert caught.value.code == "GINN-E-NETWORK"
     assert caught.value.exit_code == 69
     assert attempts == [1, 2, 3]
@@ -543,6 +588,7 @@ def test_a_signature_error_wins_over_network_text_and_is_not_retried() -> None:
             realm=REALM,
             step="install",
             retry_hook=lambda attempt, err: attempts.append(attempt) is None,
+            target=DIRECT_TARGET,
         )
     assert caught.value.code == "GINN-E-PKG-SIGNATURE"
     assert attempts == []
@@ -567,6 +613,7 @@ def test_a_stale_metadata_404_is_not_a_network_failure_and_is_not_retried() -> N
             realm=REALM,
             step="install",
             retry_hook=lambda attempt, err: attempts.append(attempt) is None,
+            target=DIRECT_TARGET,
         )
     assert caught.value.code == "GINN-E-PKG-MANAGER"
     assert caught.value.details["stale_metadata"] is True
@@ -648,12 +695,14 @@ def test_the_count_rule_is_the_data_and_not_the_distribution_id() -> None:
     _canned(fake, ("apt", "list", "--upgradable"), 0, DEB_LISTING)
     # Without a `[upgradable from:` mark, Debian's own rule counts nothing. The same listing,
     # counted line by line by the data, is two updates. The id plays no part in either count.
-    shipped = run_check(fake, cid, load("debian"), realm="deb")
+    shipped = run_check(fake, cid, load("debian"), realm="deb", target=DIRECT_TARGET)
     assert shipped == CheckResult(UpdateStatus.NONE, 0)
     renamed = _edited(
         "debian", drop=("check_updates_count_regex",), check_updates_count="nonblank-lines"
     )
-    assert run_check(fake, cid, renamed, realm="deb") == CheckResult(UpdateStatus.UPDATES, 2)
+    assert run_check(fake, cid, renamed, realm="deb", target=DIRECT_TARGET) == CheckResult(
+        UpdateStatus.UPDATES, 2
+    )
 
 
 @pytest.mark.fr("FR-024")
@@ -662,13 +711,13 @@ def test_the_exit_status_that_means_updates_is_read_from_the_data_only() -> None
     fake = FakePodman()
     cid = _running(fake, "fed")
     _canned(fake, ("dnf", "--refresh", "check-upgrade"), 100, DNF_LISTING)
-    assert run_check(fake, cid, load("fedora"), realm="fed") == CheckResult(
+    assert run_check(fake, cid, load("fedora"), realm="fed", target=DIRECT_TARGET) == CheckResult(
         UpdateStatus.UPDATES, None
     )
     # Without the key, exit 100 is a failure, as it is for apt (FR-040).
     without = _edited("fedora", drop=("check_updates_exit_for_updates",))
     with pytest.raises(GinnError) as caught:
-        run_check(fake, cid, without, realm="fed")
+        run_check(fake, cid, without, realm="fed", target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
 
 
@@ -678,7 +727,7 @@ def test_a_consistent_database_is_not_inconsistent_and_runs_as_root_under_the_lo
     cid = _running(fake, REALM)
     definition = _definition("arch")
     _canned(fake, definition.argv(Verb.DB_CHECK), 0, "")
-    assert database_inconsistent(fake, cid, definition, realm=REALM) is False
+    assert database_inconsistent(fake, cid, definition, realm=REALM, target=DIRECT_TARGET) is False
     call = fake.exec_calls[-1]
     assert call.argv == tuple(definition.argv(Verb.DB_CHECK))
     assert call.user == "0:0"
@@ -702,7 +751,7 @@ def test_an_inconsistent_database_is_read_as_the_data_names_it(
     cid = _running(fake, REALM)
     definition = _definition(name)
     _canned(fake, definition.argv(Verb.DB_CHECK), exit_code, stdout)
-    assert database_inconsistent(fake, cid, definition, realm=REALM) is True
+    assert database_inconsistent(fake, cid, definition, realm=REALM, target=DIRECT_TARGET) is True
 
 
 @pytest.mark.fr("FR-120")
@@ -716,7 +765,9 @@ def test_stdout_counts_only_where_the_data_says_it_does(
     cid = _running(fake, REALM)
     definition = _definition(name)
     _canned(fake, definition.argv(Verb.DB_CHECK), 0, stdout)
-    assert database_inconsistent(fake, cid, definition, realm=REALM) is expected
+    assert (
+        database_inconsistent(fake, cid, definition, realm=REALM, target=DIRECT_TARGET) is expected
+    )
 
 
 @pytest.mark.fr("FR-120")
@@ -729,7 +780,7 @@ def test_a_check_that_podman_could_not_run_raises_and_never_reads_as_broken(
     definition = _definition("arch")
     _canned(fake, definition.argv(Verb.DB_CHECK), exit_code, "", "OCI runtime error\n")
     with pytest.raises(GinnError) as caught:
-        database_inconsistent(fake, cid, definition, realm=REALM)
+        database_inconsistent(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
     assert caught.value.details["step"] == "db-check"
     assert caught.value.details["exit"] == exit_code
@@ -739,7 +790,9 @@ def test_a_check_that_podman_could_not_run_raises_and_never_reads_as_broken(
 def test_a_distribution_without_a_db_check_verb_is_never_inconsistent_and_runs_nothing() -> None:
     fake = FakePodman()
     cid = _running(fake, REALM)
-    assert database_inconsistent(fake, cid, load("_test"), realm=REALM) is False
+    assert (
+        database_inconsistent(fake, cid, load("_test"), realm=REALM, target=DIRECT_TARGET) is False
+    )
     assert fake.exec_calls == []
 
 
@@ -750,5 +803,5 @@ def test_db_check_output_over_the_cap_is_refused_and_not_read() -> None:
     definition = _definition("debian")
     _canned(fake, definition.argv(Verb.DB_CHECK), 0, "x" * (MAX_OUTPUT_CHARS + 1))
     with pytest.raises(GinnError) as caught:
-        database_inconsistent(fake, cid, definition, realm=REALM)
+        database_inconsistent(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"

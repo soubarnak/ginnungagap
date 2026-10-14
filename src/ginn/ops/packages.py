@@ -72,14 +72,17 @@ from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
 from ginn.ops.retry import network_retry_hook
 from ginn.packages.aur import install_aur
 from ginn.packages.manager import (
+    explicit_manifest,
     explicit_packages,
+    name_batches,
     printable,
     removal_dependents,
+    remove_passes,
     run_step,
     shown,
 )
 from ginn.packages.manifest import installed, removed
-from ginn.podman.adapter import Podman, RetryHook
+from ginn.podman.adapter import ExecTarget, Podman, RetryHook
 from ginn.podman.models import ContainerState
 from ginn.runtime.spec import KALI, LABEL_REALM
 from ginn.store._time import utc_from_epoch
@@ -204,6 +207,19 @@ def _load_running(
     return current, cid
 
 
+def _acked(mutation: Mutation) -> Callable[[int], None]:
+    """The `on_ack` of a mutating exec: the journal step `exec-acked`, once the exec has started.
+
+    The step is recorded after the worker or the direct route has the client's pid, and before the
+    exec ends, so recovery can see that an exec of this operation was running (FR-122, ADR-014).
+    """
+
+    def acked(_pid: int) -> None:
+        mutation.step("exec-acked")
+
+    return acked
+
+
 def _reconcile_failed(
     store: RealmStore,
     podman: Podman,
@@ -224,22 +240,18 @@ def _reconcile_failed(
     dropped. A list that cannot be read, or is over the caps, changes nothing, and the caller
     re-raises the operation's own error either way.
     """
-    try:
-        explicit = explicit_packages(podman, cid, definition, realm=name.value)
-    except Exception:  # noqa: BLE001 - the operation's own error is the one the caller raises
+    manifest = explicit_manifest(
+        podman,
+        cid,
+        definition,
+        realm=name.value,
+        services=bool(current.services_at_create),
+        manifest=current.manifest,
+        names=names,
+        installed_now=installed_now,
+    )
+    if manifest is None or manifest == current.manifest:
         return
-    if installed_now:
-        present = [raw for raw in names if raw in explicit]
-        if not present:
-            return
-        manifest = installed(
-            current.manifest, present, source=InstallSource.REPO, method=InstallMethod.GINN
-        )
-    else:
-        gone = [raw for raw in names if raw not in explicit]
-        if not gone:
-            return
-        manifest = removed(current.manifest, gone)
     store.save(replace(current, manifest=manifest, updated_at=utc_from_epoch(clock)))
 
 
@@ -295,6 +307,9 @@ def _install_aur_body(
         uid=uid,
         gid=gid,
         retry_hook=_retry(hooks),
+        target=ExecTarget(
+            realm=name.value, services=bool(current.services_at_create), mutating=True
+        ),
         step=mutation.step,
     )
     if outcome.residual:
@@ -331,6 +346,7 @@ def _install_body(
     current, cid = _load_running(store, podman, name, action=OP_INSTALL)
     retry = _retry(hooks)
     realm = name.value
+    target = ExecTarget(realm=realm, services=bool(current.services_at_create), mutating=True)
     if Verb.INSTALL in definition.refresh_before:
         run_step(
             podman,
@@ -340,18 +356,25 @@ def _install_body(
             realm=realm,
             step="refresh",
             retry_hook=retry,
+            target=target,
+            on_ack=_acked(mutation),
         )
         mutation.step("refreshed")
     try:
-        run_step(
-            podman,
-            cid,
-            definition,
-            definition.argv(Verb.INSTALL, names),
-            realm=realm,
-            step="install",
-            retry_hook=retry,
-        )
+        # A relay route installs in calls of its own size. A failed call leaves the earlier ones
+        # installed, and the reconcile below reads the realm's list for all of `names` (FR-040).
+        for batch in name_batches(names, target):
+            run_step(
+                podman,
+                cid,
+                definition,
+                definition.argv(Verb.INSTALL, batch),
+                realm=realm,
+                step="install",
+                retry_hook=retry,
+                target=target,
+                on_ack=_acked(mutation),
+            )
     except GinnError:
         _reconcile_failed(
             store,
@@ -394,10 +417,23 @@ def _remove_body(
     current, cid = _load_running(store, podman, name, action=OP_REMOVE)
     retry = _retry(hooks)
     realm = name.value
+    services = bool(current.services_at_create)
+    dry_target = ExecTarget(realm=realm, services=services, mutating=False)
+    remove_target = ExecTarget(realm=realm, services=services, mutating=True)
     if definition.has_remove_check:
-        dependents = removal_dependents(
-            podman, cid, definition, names, realm=realm, retry_hook=retry
-        )
+        # Every batch is checked before anything is removed, so a refusal changes nothing (FR-041).
+        dependents: set[str] = set()
+        for batch in name_batches(names, dry_target):
+            dependents |= removal_dependents(
+                podman,
+                cid,
+                definition,
+                batch,
+                realm=realm,
+                retry_hook=retry,
+                target=dry_target,
+            )
+        dependents -= set(names)
         if dependents:
             err = make(
                 "GINN-E-PKG-DEPENDENTS",
@@ -407,15 +443,31 @@ def _remove_body(
             )
             raise err
         mutation.step("checked")
-    try:
+    batches = name_batches(names, remove_target)
+
+    def remove_batch(batch: Sequence[str]) -> None:
         run_step(
             podman,
             cid,
             definition,
-            definition.argv(Verb.REMOVE, names),
+            definition.argv(Verb.REMOVE, batch),
             realm=realm,
             step="remove",
             retry_hook=retry,
+            target=remove_target,
+            on_ack=_acked(mutation),
+        )
+
+    def still_present() -> frozenset[str]:
+        return explicit_packages(podman, cid, definition, realm=realm, target=dry_target)
+
+    try:
+        # A batch removed as a dependent of an earlier one is not passed again, and a batch refused
+        # because it needs a later one removed first is retried after the pass (ADR-014, T7.10).
+        remove_passes(
+            batches,
+            remove_batch,
+            still_present=still_present if len(batches) > 1 else None,
         )
     except GinnError:
         _reconcile_failed(

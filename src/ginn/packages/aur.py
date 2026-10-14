@@ -82,13 +82,15 @@ from ginn.packages.manager import (
     MAX_NAMES,
     MAX_OUTPUT_CHARS,
     check_output,
+    name_batches,
     parse_names,
     printable,
     refused,
+    remove_passes,
     run_step,
     shown,
 )
-from ginn.podman.adapter import Podman, RetryHook
+from ginn.podman.adapter import ExecTarget, Podman, RetryHook
 from ginn.podman.models import ExecResult
 from ginn.store.journal import PARAMS_OVERFLOW
 
@@ -566,6 +568,7 @@ class _Realm:
     realm: str
     retry_hook: RetryHook | None
     user: str
+    target: ExecTarget
 
     def exec(
         self,
@@ -586,6 +589,7 @@ class _Realm:
             realm=self.realm,
             step=step,
             retry_hook=self.retry_hook,
+            target=self.target,
             user=self.user if builder else _ROOT,
             env=build_env() if builder else _ROOT_ENV,
             workdir=workdir,
@@ -595,16 +599,22 @@ class _Realm:
         )
 
     def install(self, names: Iterable[str], *, step: str) -> None:
-        """Install `names` as container root, from the distribution data (FR-040)."""
-        self.exec(self.definition.argv(Verb.INSTALL, sorted(names)), step=step, bound=BOUND_ROOT)
+        """Install `names` as container root, from the distribution data (FR-040).
+
+        A relay route takes the names in calls of its own size (name_batches, ADR-014).
+        """
+        for batch in name_batches(sorted(names), self.target):
+            self.exec(self.definition.argv(Verb.INSTALL, batch), step=step, bound=BOUND_ROOT)
 
     def install_deps(self, names: Iterable[str]) -> None:
         """Install the runtime names of the requested packages, as dependencies (`--asdeps`)."""
-        self.exec(install_deps_argv(sorted(names)), step="dependencies", bound=BOUND_ROOT)
+        for batch in name_batches(sorted(names), self.target):
+            self.exec(install_deps_argv(batch), step="dependencies", bound=BOUND_ROOT)
 
     def upgrade(self, files: Sequence[str], *, asdeps: bool) -> None:
         """Install one built package file (pacman `--upgrade`), as a dependency when `asdeps`."""
-        self.exec(upgrade_argv(files, asdeps=asdeps), step="install", bound=BOUND_ROOT)
+        for batch in name_batches(files, self.target):
+            self.exec(upgrade_argv(batch, asdeps=asdeps), step="install", bound=BOUND_ROOT)
 
     def installed(self) -> frozenset[str]:
         """The installed package names now (container root). Over the caps, it raises."""
@@ -711,9 +721,7 @@ def _remove_build_only(run: _Realm, removable: list[str], step: Step) -> AurOutc
     reason = ""
     if removable:
         try:
-            run.exec(
-                run.definition.argv(Verb.REMOVE, removable), step="remove-build", bound=BOUND_ROOT
-            )
+            _remove_names(run, removable, "remove-build")
         except GinnError as err:
             needed = _needed_by_pacman(err, set(removable))
             reason = f"{err.code}: {err.message}"
@@ -724,11 +732,7 @@ def _remove_build_only(run: _Realm, removable: list[str], step: Step) -> AurOutc
                 reason = f"{reason}: {why}"
             if needed and rest:
                 try:
-                    run.exec(
-                        run.definition.argv(Verb.REMOVE, rest),
-                        step="remove-build",
-                        bound=BOUND_ROOT,
-                    )
+                    _remove_names(run, rest, "remove-build")
                     residual = tuple(sorted(needed))
                     reason = (
                         f"{reason}; pacman needs {shown(sorted(needed))}, and the rest were removed"
@@ -743,7 +747,18 @@ def restore(run: _Realm, before: frozenset[str]) -> None:
     """Remove every package the operation added, so the package set is `before` again (AC-2)."""
     added = sorted(run.installed() - before)
     if added:
-        run.exec(run.definition.argv(Verb.REMOVE, added), step="restore", bound=BOUND_ROOT)
+        _remove_names(run, added, "restore")
+
+
+def _remove_names(run: _Realm, names: Sequence[str], step: str) -> None:
+    """Remove `names` in calls the route carries. A batch refused by the manager is retried after
+    the pass, and a name another removal took is not passed again (remove_passes, ADR-014)."""
+
+    def one(batch: Sequence[str]) -> None:
+        run.exec(run.definition.argv(Verb.REMOVE, batch), step=step, bound=BOUND_ROOT)
+
+    batches = name_batches(sorted(names), run.target)
+    remove_passes(batches, one, still_present=run.installed if len(batches) > 1 else None)
 
 
 def _cleanup(run: _Realm) -> None:
@@ -765,6 +780,7 @@ def install_aur(
     uid: int,
     gid: int,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
     step: Step,
 ) -> AurOutcome:
     """Build `names` from the AUR, install them, and remove the build-only set (FR-043).
@@ -778,7 +794,7 @@ def install_aur(
         err = make("GINN-E-INTERNAL")
         err.details["detail"] = "the AUR build needs a realm user that is not root (FR-043)"
         raise err
-    run = _Realm(podman, container_id, definition, realm, retry_hook, f"{uid}:{gid}")
+    run = _Realm(podman, container_id, definition, realm, retry_hook, f"{uid}:{gid}", target)
     before = run.installed()
     try:
         return _build(run, names, before, step)

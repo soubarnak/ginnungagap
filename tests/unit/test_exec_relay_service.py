@@ -52,6 +52,7 @@ from ginn.services.exec_relay import (
     relay_path,
     render,
     sync_exec_service,
+    up_exec_service,
 )
 from ginn.services.runit_user import crash_log, write_service_dir
 from ginn.services.supervise import write_crashes
@@ -1019,3 +1020,66 @@ def test_a_failed_relay_sync_on_a_running_start_is_a_warning_and_the_start_succe
     record = lifecycle_ops.start_realm(env, world.fake, REALM, session=user, warnings=notices)
     assert record.state is RealmState.RUNNING
     assert [notice.code for notice in notices] == ["GINN-W-RELAY-SYNC"]
+
+
+@pytest.mark.fr("FR-084")
+def test_a_rebuild_that_turns_services_on_keeps_the_relay_up_when_its_directory_is_present(
+    world: World, cli: PodmanCli, sv: SvRecorder
+) -> None:
+    """A rebuild turns services on: the record still says services-off at create, and its settings
+    ask for services on. Its replay runs through the relay, so the directory must not be marked
+    down (ADR-014, T7.10 review)."""
+    _save(world, "lab", services=True, state=RealmState.RUNNING)
+    _sync(world, cli, sv)
+    _supervise(world)
+    store = RealmStore(world.paths)
+    record = store.load(RealmName("lab"))
+    store.save(
+        replace(
+            record,
+            services_at_create=False,
+            state=RealmState.REBUILDING,
+            previous_state=RealmState.STOPPED,
+        )
+    )
+    sv.calls.clear()
+    _sync(world, cli, sv)
+    assert not (exec_service_dir(world.paths) / DOWN).exists()
+    assert sv.verbs() == ["up"]
+
+
+@pytest.mark.fr("FR-082")
+def test_a_stopped_services_off_container_with_services_asked_on_needs_no_relay(
+    world: World, cli: PodmanCli, sv: SvRecorder
+) -> None:
+    """Only the rebuild needs the relay for a new services-on mode. A stopped realm whose container
+    is services-off runs its execs directly, so its directory is marked down (ADR-014)."""
+    _save(world, "lab", services=True, state=RealmState.RUNNING)
+    _sync(world, cli, sv)
+    _supervise(world)
+    store = RealmStore(world.paths)
+    record = store.load(RealmName("lab"))
+    store.save(replace(record, services_at_create=False, state=RealmState.STOPPED))
+    sv.calls.clear()
+    _sync(world, cli, sv)
+    assert (exec_service_dir(world.paths) / DOWN).exists()
+    assert sv.verbs() == ["down"]
+
+
+@pytest.mark.fr("FR-084")
+def test_up_exec_service_runs_sv_up_on_the_relay_directory(world: World, sv: SvRecorder) -> None:
+    service = exec_service_dir(world.paths)
+    up_exec_service(service, hooks=hooks_of(sv))
+    assert sv.verbs() == ["up"]
+    assert sv.calls[0][-1] == str(service)
+
+
+@pytest.mark.fr("FR-084")
+def test_a_failed_up_exec_service_is_a_service_control_error_with_sv_detail(
+    world: World, sv: SvRecorder
+) -> None:
+    sv.reply = Result(1, "", "sv: fail: boom\n")
+    with pytest.raises(GinnError) as caught:
+        up_exec_service(exec_service_dir(world.paths), hooks=hooks_of(sv))
+    assert caught.value.code == "GINN-E-SERVICE-CONTROL"
+    assert "boom" in str(caught.value.details.get("detail", ""))

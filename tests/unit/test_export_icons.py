@@ -19,9 +19,11 @@ from ginn.export.icons import (
     copy_icon,
     resolve_icon,
 )
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ExecResult
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 DIGEST = "registry.example/debian@sha256:" + "ab" * 32
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
@@ -166,7 +168,7 @@ def test_an_absolute_path_not_in_the_listing_is_refused(path: str) -> None:
 def test_a_failed_listing_leaves_theme_names_unresolved() -> None:
     fake, cid = _fake()
     fake.exec_results[ICON_LIST] = ExecResult(2, "", "find: broken")
-    index = IconIndex.build(fake, cid, realm="arch")
+    index = IconIndex.build(fake, cid, realm="arch", target=DIRECT_TARGET)
     assert index.error is not None
     with pytest.raises(IconError, match="listing failed"):
         resolve_icon(index, "firefox")
@@ -176,7 +178,7 @@ def test_a_failed_listing_leaves_theme_names_unresolved() -> None:
 def test_the_listing_is_one_exec_in_the_realm() -> None:
     fake, cid = _fake()
     fake.exec_results[ICON_LIST] = ExecResult(0, LISTING, "")
-    index = IconIndex.build(fake, cid, realm="arch")
+    index = IconIndex.build(fake, cid, realm="arch", target=DIRECT_TARGET)
     assert index.error is None
     assert fake.ops().count("exec") == 1
     assert resolve_icon(index, "firefox")[0].endswith("firefox.svg")
@@ -195,6 +197,7 @@ def test_copy_writes_the_checked_icon_into_the_host_folder(tmp_path: Path) -> No
         app="firefox",
         dest_dir=dest_dir,
         size=1200,
+        target=DIRECT_TARGET,
     )
     assert dest == dest_dir / "firefox.png"
     assert dest.read_bytes() == PNG
@@ -212,6 +215,7 @@ def test_copy_refuses_a_listed_icon_over_the_cap_without_copying(tmp_path: Path)
             app="big",
             dest_dir=tmp_path,
             size=ICON_MAX_BYTES + 1,
+            target=DIRECT_TARGET,
         )
     assert _cats(fake) == []
 
@@ -228,6 +232,7 @@ def test_copy_refuses_an_icon_that_grows_over_the_cap(tmp_path: Path) -> None:
             app="big",
             dest_dir=tmp_path,
             size=1,
+            target=DIRECT_TARGET,
         )
     assert not (tmp_path / "big.png").exists()
 
@@ -255,6 +260,7 @@ def test_copy_refuses_content_that_does_not_match_its_extension(
             app="x",
             dest_dir=tmp_path,
             size=len(content),
+            target=DIRECT_TARGET,
         )
     assert not any(tmp_path.glob("x.*"))
 
@@ -271,6 +277,7 @@ def test_svg_and_xpm_content_that_matches_is_copied(tmp_path: Path) -> None:
         app="a",
         dest_dir=tmp_path,
         size=len(SVG),
+        target=DIRECT_TARGET,
     )
     xpm = copy_icon(
         fake,
@@ -279,6 +286,7 @@ def test_svg_and_xpm_content_that_matches_is_copied(tmp_path: Path) -> None:
         app="b",
         dest_dir=tmp_path,
         size=len(XPM),
+        target=DIRECT_TARGET,
     )
     assert svg.read_bytes() == SVG
     assert xpm.read_bytes() == XPM
@@ -295,6 +303,7 @@ def test_a_failed_copy_out_of_the_realm_is_an_icon_error(tmp_path: Path) -> None
             app="m",
             dest_dir=tmp_path,
             size=1,
+            target=DIRECT_TARGET,
         )
 
 
@@ -330,7 +339,7 @@ def test_a_hung_or_overflowing_listing_is_export_list_and_is_bounded() -> None:
     cid = fake.create(CreateSpec(name="ginn-arch-g1", image_digest_ref=DIGEST, network="host"))
     fake.start(cid)
     with pytest.raises(GinnError) as err:
-        IconIndex.build(fake, cid, realm="arch")
+        IconIndex.build(fake, cid, realm="arch", target=DIRECT_TARGET)
     assert err.value.code == "GINN-E-EXPORT-LIST"
 
 
@@ -342,11 +351,11 @@ def test_the_icon_listing_asks_podman_for_a_timeout_and_an_output_cap() -> None:
     real = fake.exec
 
     def spy(container_id: str, argv: Sequence[str], **kwargs: object) -> ExecResult:
-        seen.append(dict(kwargs))
+        seen.append({key: value for key, value in kwargs.items() if key != "target"})
         return real(container_id, argv, **kwargs)  # type: ignore[arg-type]
 
     fake.exec = spy  # type: ignore[method-assign]
-    IconIndex.build(fake, cid, realm="arch")
+    IconIndex.build(fake, cid, realm="arch", target=DIRECT_TARGET)
     assert seen[0]["timeout_s"] == LISTING_TIMEOUT_S
     assert seen[0]["max_output"] == LISTING_MAX_BYTES
 
@@ -385,7 +394,9 @@ def test_an_oversized_target_behind_a_link_is_refused_before_any_copy(tmp_path: 
     realm_path, size = resolve_icon(index, "alias")
     fake, cid = _fake()
     with pytest.raises(IconError, match="larger than"):
-        copy_icon(fake, cid, realm_path, app="a", dest_dir=tmp_path, size=size)
+        copy_icon(
+            fake, cid, realm_path, app="a", dest_dir=tmp_path, size=size, target=DIRECT_TARGET
+        )
     assert _cats(fake) == []
 
 
@@ -396,7 +407,15 @@ def test_a_directory_at_the_path_is_an_icon_error_and_nothing_is_written(tmp_pat
         1, "", "cat: /usr/share/pixmaps/x.png: Is a directory\n"
     )
     with pytest.raises(IconError, match="cannot copy"):
-        copy_icon(fake, cid, "/usr/share/pixmaps/x.png", app="x", dest_dir=tmp_path, size=1)
+        copy_icon(
+            fake,
+            cid,
+            "/usr/share/pixmaps/x.png",
+            app="x",
+            dest_dir=tmp_path,
+            size=1,
+            target=DIRECT_TARGET,
+        )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -409,11 +428,19 @@ def test_the_copy_is_one_bounded_cat_as_container_root(tmp_path: Path) -> None:
 
     def spy(container_id: str, argv: Sequence[str], **kwargs: object) -> ExecResult:
         if tuple(argv[:2]) == ("cat", "--"):
-            seen.append(dict(kwargs))
+            seen.append({key: value for key, value in kwargs.items() if key != "target"})
         return real(container_id, argv, **kwargs)  # type: ignore[arg-type]
 
     fake.exec = spy  # type: ignore[method-assign]
-    copy_icon(fake, cid, "/usr/share/pixmaps/x.png", app="x", dest_dir=tmp_path, size=len(PNG))
+    copy_icon(
+        fake,
+        cid,
+        "/usr/share/pixmaps/x.png",
+        app="x",
+        dest_dir=tmp_path,
+        size=len(PNG),
+        target=DIRECT_TARGET,
+    )
     assert seen == [
         {
             "capture": True,
@@ -431,5 +458,13 @@ def test_an_icon_swapped_to_a_huge_file_after_the_listing_is_cut_and_refused(
     fake, cid = _fake()
     fake.files["/usr/share/pixmaps/x.png"] = PNG + b"x" * (ICON_MAX_BYTES + 10)
     with pytest.raises(IconError, match="larger than"):
-        copy_icon(fake, cid, "/usr/share/pixmaps/x.png", app="x", dest_dir=tmp_path, size=100)
+        copy_icon(
+            fake,
+            cid,
+            "/usr/share/pixmaps/x.png",
+            app="x",
+            dest_dir=tmp_path,
+            size=100,
+            target=DIRECT_TARGET,
+        )
     assert list(tmp_path.iterdir()) == []
