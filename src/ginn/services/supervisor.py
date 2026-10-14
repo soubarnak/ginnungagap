@@ -225,6 +225,21 @@ def down(paths: OwnedPaths, name: RealmName, *, hooks: SupervisorHooks) -> None:
     _command(paths, name, "down", hooks.down_wait_s, "stop", hooks)
 
 
+def stop_if_supervised(paths: OwnedPaths, name: RealmName, *, hooks: SupervisorHooks) -> None:
+    """`sv down` for the realm's runit service when a runsv watches it, and nothing else (FR-081).
+
+    A runsv that is proven gone (GINN-E-SUPERVISOR-DOWN) is passed over: nothing restarts the realm
+    then, and the caller stops the container itself. Every other failure, and a timeout, is raised,
+    so the caller stops nothing while a runsv may still restart the realm (AS-028, FR-081 AC-2).
+    """
+    if not is_supervised(paths, name):
+        return
+    try:
+        down(paths, name, hooks=hooks)
+    except GinnError as err:
+        if err.code != "GINN-E-SUPERVISOR-DOWN":
+            raise
+
 def status(paths: OwnedPaths, name: RealmName, *, hooks: SupervisorHooks) -> RunitStatus:
     """Read the runit state of the realm's directory with `sv status` (FR-081 AC-1).
 

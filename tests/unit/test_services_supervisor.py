@@ -422,3 +422,46 @@ def test_is_supervised_is_true_only_with_the_ok_fifo(paths: OwnedPaths) -> None:
     assert supervisor.is_supervised(paths, NAME) is False
     _supervise(paths)
     assert supervisor.is_supervised(paths, NAME) is True
+
+
+@pytest.mark.fr("FR-081")
+def test_stop_if_supervised_sends_sv_down_only_to_a_directory_a_runsv_watches(
+    paths: OwnedPaths, fake_sv: FakeSv, clock: FakeClock
+) -> None:
+    _service(paths)
+    fake_sv.reply("down", out="ok: down: /x/lab: 0s, normally up\n")
+
+    supervisor.stop_if_supervised(paths, NAME, hooks=fake_sv.hooks(clock))
+    assert fake_sv.calls() == [], "no runsv watches the directory, so nothing is sent"
+
+    _supervise(paths)
+    supervisor.stop_if_supervised(paths, NAME, hooks=fake_sv.hooks(clock))
+    assert [call[2] for call in fake_sv.calls()] == ["down"]
+
+
+@pytest.mark.fr("FR-081")
+def test_stop_if_supervised_passes_over_a_runsv_proven_gone(
+    paths: OwnedPaths, fake_sv: FakeSv, clock: FakeClock
+) -> None:
+    _service(paths)
+    _supervise(paths)
+    fake_sv.reply("down", code=1, err="fail: /x/lab: runsv not running\n")
+
+    supervisor.stop_if_supervised(paths, NAME, hooks=fake_sv.hooks(clock))
+
+
+@pytest.mark.fr("FR-081")
+def test_stop_if_supervised_raises_a_control_failure_so_the_caller_stops_nothing(
+    paths: OwnedPaths, fake_sv: FakeSv, clock: FakeClock
+) -> None:
+    _service(paths)
+    _supervise(paths)
+    fake_sv.reply(
+        "down",
+        code=1,
+        err="warning: /x/lab: unable to open supervise/control: file does not exist\n",
+    )
+
+    with pytest.raises(GinnError) as caught:
+        supervisor.stop_if_supervised(paths, NAME, hooks=fake_sv.hooks(clock))
+    assert caught.value.code == "GINN-E-SERVICE-CONTROL"

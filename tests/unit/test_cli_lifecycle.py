@@ -25,6 +25,7 @@ STATUS_KEYS = (
     "state",
     "container_state",
     "state_mismatch",
+    "state_reason",
     "supervision",
     "distro",
     "tier",

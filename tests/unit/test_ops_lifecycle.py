@@ -44,6 +44,7 @@ from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime import attach
+from ginn.runtime.idle import IdleHooks, log_path, record_path
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security.agent import AgentRecord
@@ -71,6 +72,7 @@ STATUS_KEYS = (
     "state",
     "container_state",
     "state_mismatch",
+    "state_reason",
     "supervision",
     "distro",
     "tier",
@@ -412,13 +414,15 @@ def test_a_podman_error_inside_the_body_leaves_the_record_running_and_no_stop_ru
     real_inspect = fake.inspect
     seen = {"calls": 0}
 
-    def inspect_fails_second_time(container_id: str) -> ContainerInfo:
+    def inspect_fails_in_the_body(container_id: str) -> ContainerInfo:
         seen["calls"] += 1
-        if seen["calls"] == 2:  # the first call is the check before the operation
+        # Call 1 is the check before the operation, call 2 the idle-stop check (which treats a
+        # podman error as no confirmation), and call 3 the body's own check. The body must fail.
+        if seen["calls"] == 3:
             raise make("GINN-E-INTERNAL")
         return real_inspect(container_id)
 
-    monkeypatch.setattr(fake, "inspect", inspect_fails_second_time)
+    monkeypatch.setattr(fake, "inspect", inspect_fails_in_the_body)
 
     with pytest.raises(GinnError) as caught:
         start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
@@ -670,6 +674,7 @@ class RunitFake:
         self.status_reply: Result | None = None
         self.down_reply: Result | None = None
         self.want_up = False
+        self.normally_up = True
 
     def run(self, argv: Sequence[str], timeout: float) -> Result:
         self.argvs.append(list(argv))
@@ -699,7 +704,8 @@ class RunitFake:
         if self.state == "run":
             return f"run: {self.service}: (pid 4321) 0s"
         want = ", want up" if self.want_up else ""
-        return f"down: {self.service}: 0s, normally up{want}"
+        normal = ", normally up" if self.normally_up else ""
+        return f"down: {self.service}: 0s{normal}{want}"
 
 
 def _services_hooks(
@@ -838,7 +844,7 @@ def test_a_services_on_start_stops_waiting_when_runit_has_given_the_realm_up(
 ) -> None:
     _supervised_realm(env, fake, "lab", state=RealmState.FAILED, running=False)
     runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
-    runit.on_up = lambda: setattr(runit, "state", "down")
+    runit.on_up = lambda: (setattr(runit, "state", "down"), setattr(runit, "normally_up", False))
     started_at = clock()
 
     with pytest.raises(GinnError) as caught:
@@ -872,24 +878,29 @@ def test_a_services_on_start_of_a_running_realm_runs_no_sv(
 
 @pytest.mark.fr("FR-016")
 @pytest.mark.fr("FR-081")
-def test_stop_of_a_services_on_realm_sends_sv_down_and_leaves_the_record_to_the_supervised_stop(
+def test_stop_of_a_services_on_realm_holds_the_lock_across_sv_down_and_records_the_stop(
     env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks, clock: FakeClock
 ) -> None:
+    """The stop holds the realm lock while sv runs, so the finish script that sv waits for sees it
+    held by this stop and writes nothing. The stop records `stopped` itself, after sv returns."""
     _supervised_realm(env, fake, "lab", state=RealmState.RUNNING, running=True)
     runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
     runit.state = "run"
     cid = container_id(env, "lab")
+    lock_during_sv: list[str] = []
 
     def supervised_stop() -> None:
-        fake.stop(cid, 30)  # ginn-wait stops the container, and finish records the stop
-        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.STOPPED)
+        lock_during_sv.append(_try_lock(env))  # busy: this stop holds it
+        fake.stop(cid, 30)  # ginn-wait stops the container; the finish script writes nothing
 
     runit.on_down = supervised_stop
     record = stop_realm(env, fake, RealmName("lab"), hooks=_services_hooks(hooks, runit, clock))
 
     assert record.state is RealmState.STOPPED
+    assert lock_during_sv == ["busy"]
     assert runit.argvs == [[SV, "-w", str(supervisor.DOWN_WAIT_S), "down", str(runit.service)]]
-    assert audited_ops(env) == [], "the stop is audited by the supervised process"
+    assert audited_ops(env) == ["stop"]
+    assert stored(env, "lab").state is RealmState.STOPPED
 
 
 @pytest.mark.fr("FR-016")
@@ -1293,7 +1304,7 @@ def test_status_json_has_the_pinned_keys_and_the_disk_keys(
     assert tuple(data) == STATUS_KEYS
     assert isinstance(disk, dict)
     assert tuple(disk) == ("realm_home_bytes", "realm_home_partial", "container_bytes")
-    assert data["exported_apps"] is None
+    assert data["exported_apps"] == 0  # no host entry of the realm exists
     assert data["error"] is None
     assert json.loads(json.dumps(data)) == data
 
@@ -2244,3 +2255,455 @@ def test_a_stop_whose_sv_control_fails_stops_nothing_and_names_the_control_error
     assert caught.value.code == "GINN-E-SERVICE-CONTROL"
     assert "stop" not in fake.ops()
     assert stored(env, "lab").state is RealmState.RUNNING
+
+
+PODMAN_PREFIX = ["/usr/bin/podman", "--root", "/data/podman", "--runroot", "/run/ginn/podman"]
+IDLE_PID = 7777
+
+
+class IdleSpawns:
+    """The spawn seam of the idle watcher: records each argv, starts nothing."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: Any, log: Path) -> int:
+        self.calls.append(list(argv))
+        return IDLE_PID
+
+
+def _with_idle(hooks: LifecycleHooks, tmp_path: Path, spawns: IdleSpawns) -> LifecycleHooks:
+    """The hooks with an executable ginn-idle that exists, and the recording spawn."""
+    helper = tmp_path / "ginn-idle"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o755)
+    idle = IdleHooks(
+        helper=str(helper),
+        grace_s=60,
+        spawn=spawns,
+        start_ticks=lambda pid: 500 + pid,
+    )
+    return replace(hooks, idle=idle)
+
+
+@pytest.mark.fr("FR-018")
+def test_a_services_off_start_arms_the_idle_watcher_for_the_containers_init(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    spawns = IdleSpawns()
+    notices: list[GinnWarning] = []
+
+    record = start_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_idle(hooks, tmp_path, spawns),
+        warnings=notices,
+    )
+
+    cid = container_id(env, "lab")
+    init = fake.inspect(cid).pid
+    assert record.state is RealmState.RUNNING
+    assert spawns.calls == [
+        [str(tmp_path / "ginn-idle"), str(init), "60", *PODMAN_PREFIX, "--", cid]
+    ]
+    assert [notice.code for notice in notices] == []
+
+
+@pytest.mark.fr("FR-018")
+def test_a_services_on_start_arms_no_idle_watcher(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    """A services-on realm is stopped by its runit service, never by a watcher (FR-018, ADR-003)."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    spawns = IdleSpawns()
+    start_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_idle(hooks, tmp_path, spawns),
+        supervised=True,
+    )
+    assert spawns.calls == []
+
+
+@pytest.mark.fr("FR-018")
+def test_a_missing_helper_warns_and_the_services_off_start_still_succeeds(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    spawns = IdleSpawns()
+    absent = replace(
+        hooks,
+        idle=IdleHooks(helper=str(tmp_path / "absent" / "ginn-idle"), spawn=spawns),
+    )
+    notices: list[GinnWarning] = []
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=absent, warnings=notices)
+
+    assert record.state is RealmState.RUNNING
+    assert spawns.calls == []
+    assert [notice.code for notice in notices] == ["GINN-W-IDLE-STOP"]
+
+
+@pytest.mark.fr("FR-018")
+def test_a_failed_inspect_for_the_watcher_warns_and_the_start_still_succeeds(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start's own inspect succeeds. The watcher's inspect, after the start, fails."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    armed = {"on": False}
+    real_inspect = fake.inspect
+
+    def inspect(container_id: str) -> ContainerInfo:
+        if armed["on"]:
+            raise make("GINN-E-INTERNAL")
+        return real_inspect(container_id)
+
+    real_start = lifecycle._start
+
+    def start_then_arm(*args: Any, **kwargs: Any) -> RealmRecord:
+        result = real_start(*args, **kwargs)
+        armed["on"] = True
+        return result
+
+    monkeypatch.setattr(fake, "inspect", inspect)
+    monkeypatch.setattr(lifecycle, "_start", start_then_arm)
+    spawns = IdleSpawns()
+    notices: list[GinnWarning] = []
+
+    record = start_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_idle(hooks, tmp_path, spawns),
+        warnings=notices,
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert spawns.calls == []
+    assert [notice.code for notice in notices] == ["GINN-W-IDLE-STOP"]
+
+
+@pytest.mark.fr("FR-018")
+def test_a_second_start_of_a_running_realm_arms_nothing(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    spawns = IdleSpawns()
+
+    start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_with_idle(hooks, tmp_path, spawns)
+    )
+
+    assert spawns.calls == []
+
+
+@pytest.mark.fr("FR-018")
+def test_an_adapter_without_global_argv_arms_no_watcher(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    """A fake has no podman binary to name in the watcher's argv, so nothing is armed."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    spawns = IdleSpawns()
+
+    start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_with_idle(hooks, tmp_path, spawns)
+    )
+
+    assert spawns.calls == []
+
+
+STOP_LINE_TAIL = "ginn-idle: no user process for 60 s; stopping {cid}\n"
+FAIL_LINE = "ginn-idle: podman stop failed; init 4321 still runs\n"
+
+
+def _idle_evidence(
+    env: OpEnv,
+    text: str | None,
+    *,
+    container: str | None = None,
+    watcher_pid: int = 999_999,
+    watcher_start: int = 1,
+) -> str:
+    """Write the watcher record and log of realm `lab`, as a services-off start would (FR-018).
+
+    `text` is the log (None writes no log). The record names the realm's container unless
+    `container` is given.
+    """
+    cid = container or container_id(env, "lab")
+    (env.paths.runtime / "idle").mkdir(mode=0o700, exist_ok=True)
+    record = {
+        "watcher_pid": watcher_pid,
+        "watcher_start": watcher_start,
+        "container_id": cid,
+        "init_pid": 4321,
+        "init_start": 900,
+    }
+    record_path(env.paths, RealmName("lab")).write_text(json.dumps(record), encoding="utf-8")
+    if text is not None:
+        log_path(env.paths, RealmName("lab")).write_text(text, encoding="utf-8")
+    return cid
+
+
+def _stop_line(cid: str) -> str:
+    return STOP_LINE_TAIL.format(cid=cid)
+
+
+def _set_state_targets(monkeypatch: pytest.MonkeyPatch) -> list[RealmState]:
+    """Record every state that set_state writes, in order (the crash path writes failed)."""
+    targets: list[RealmState] = []
+    real = RealmStore.set_state
+
+    def spy(self: RealmStore, name: RealmName, new_state: Any) -> RealmRecord:
+        targets.append(new_state)
+        return real(self, name, new_state)
+
+    monkeypatch.setattr(RealmStore, "set_state", spy)
+    return targets
+
+
+@pytest.mark.fr("FR-018")
+def test_a_start_of_an_idle_stopped_realm_records_the_idle_stop_then_starts_plainly(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The idle stop is a clean stop: running to stopped, audited as its own entry, and no crash
+    (running to failed) before the start."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    _idle_evidence(env, _stop_line(container_id(env, "lab")))
+    targets = _set_state_targets(monkeypatch)
+    spawns = IdleSpawns()
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_with_idle(hooks, tmp_path, spawns)
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert targets == [RealmState.STOPPED], "no failed state: the idle stop is not a crash"
+    assert audited_ops(env) == ["idle-stop", "start"]
+    (idle_entry,) = audit_of(env, "idle-stop")
+    assert idle_entry.outcome == "ok"
+    assert len(spawns.calls) == 1, "the new start arms a watcher for its own container"
+
+
+@pytest.mark.fr("FR-018")
+def test_a_failed_stop_line_is_a_crash_and_no_idle_stop_is_recorded(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    cid = container_id(env, "lab")
+    _idle_evidence(env, _stop_line(cid) + FAIL_LINE)
+    targets = _set_state_targets(monkeypatch)
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=_with_idle(hooks, tmp_path, IdleSpawns())
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert targets == [RealmState.FAILED], "a stop that podman failed is the crash path"
+    assert audited_ops(env) == ["start"]
+
+
+@pytest.mark.fr("FR-018")
+def test_a_stop_of_an_idle_stopped_realm_is_already_stopped_and_runs_no_podman_stop(
+    env: OpEnv, fake: LifecyclePodman, hooks: LifecycleHooks
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    _idle_evidence(env, _stop_line(container_id(env, "lab")))
+
+    record = stop_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert record.state is RealmState.STOPPED
+    assert "stop" not in fake.ops()
+    assert audited_ops(env) == ["idle-stop"]
+
+
+@pytest.mark.fr("FR-018")
+def test_status_of_an_idle_stopped_realm_reads_stopped_with_the_idle_reason_and_writes_nothing(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    _idle_evidence(env, _stop_line(container_id(env, "lab")))
+    before = record_bytes(env, "lab")
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.state == "stopped"
+    assert status.state_reason == "idle"
+    assert status.state_mismatch is False
+    assert record_bytes(env, "lab") == before
+    assert audited_ops(env) == []
+
+
+@pytest.mark.fr("FR-018")
+def test_status_keeps_the_mismatch_when_the_stop_line_is_followed_by_a_failure(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    _idle_evidence(env, _stop_line(container_id(env, "lab")) + FAIL_LINE)
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.state == "running"
+    assert status.state_reason is None
+    assert status.state_mismatch is True
+
+
+@pytest.mark.fr("FR-018")
+def test_status_of_a_running_container_is_not_idle_even_with_the_stop_line(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    _idle_evidence(env, _stop_line(container_id(env, "lab")))
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.state == "running"
+    assert status.state_reason is None
+
+
+@pytest.mark.fr("FR-018")
+def test_a_watcher_record_for_another_container_does_not_make_the_stop_idle(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    _idle_evidence(env, _stop_line("some-other-container"), container="some-other-container")
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.state == "running"
+    assert status.state_mismatch is True
+
+
+@pytest.mark.fr("FR-018")
+def test_a_reused_watcher_pid_does_not_change_the_idle_answer(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    """The answer rests on the record and the log, which a new arm replaces. A reused pid is not
+    read at all, so it cannot make a stop idle or stop being idle."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    _idle_evidence(
+        env,
+        _stop_line(container_id(env, "lab")),
+        watcher_pid=os.getpid(),
+        watcher_start=1,
+    )
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.state == "stopped"
+    assert status.state_reason == "idle"
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("AS-028")
+def test_a_stop_requested_during_a_start_is_not_read_as_a_give_up(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """A `down` status with `normally up` is a stop request (the down file is absent), not runsv
+    giving the realm up after crashes, which writes the down file (AS-028)."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.on_up = lambda: setattr(runit, "state", "down")  # normally_up stays True
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=_services_hooks(hooks, runit, clock, start_wait_s=60.0),
+        )
+
+    assert caught.value.code == "GINN-E-SERVICE-TIMEOUT"
+    assert "stop was requested" in caught.value.details["detail"]
+    assert "AS-028" not in caught.value.details["detail"]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_runsv_proven_gone_during_the_start_wait_is_supervisor_down(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """Only a proven-gone runsv is an error that ends the wait. An unreadable status is unknown."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    runit.on_up = lambda: setattr(
+        runit, "status_reply", Result(1, "", "fail: x: runsv not running\n")
+    )
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=_services_hooks(hooks, runit, clock, start_wait_s=60.0),
+        )
+
+    assert caught.value.code == "GINN-E-SUPERVISOR-DOWN"
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_start_refusal_names_the_states_a_user_can_start_from(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    _supervised_realm(env, fake, "lab", state=RealmState.BROKEN, running=False)
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env, fake, RealmName("lab"), session=user, hooks=_services_hooks(hooks, runit, clock)
+        )
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert "stopped or failed" in caught.value.message
+    assert "running" not in caught.value.message
+
+
+@pytest.mark.fr("FR-044")
+def test_exported_apps_counts_the_host_entries_of_this_realm_only(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    make_realm(env, fake, "other", RealmState.STOPPED, running=False)
+    env.paths.applications_dir.mkdir(parents=True, exist_ok=True)
+    for realm, app in [("lab", "alpha"), ("lab", "beta"), ("other", "gamma")]:
+        (env.paths.applications_dir / f"ginn-{realm}-{app}.desktop").write_text(
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            f"Name={app}\n"
+            "Exec=/bin/true\n"
+            f"X-Ginn-Realm={realm}\n"
+            f"X-Ginn-Source={app}\n",
+            encoding="utf-8",
+        )
+
+    status = realm_status(env, fake, RealmName("lab"), disk=False)
+
+    assert status.exported_apps == 2
+    assert realm_status(env, fake, RealmName("other"), disk=False).exported_apps == 1

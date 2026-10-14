@@ -38,6 +38,7 @@ from ginn.services import supervisor
 from ginn.services.runit_user import service_dir, write_service_dir
 from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.journal import process_start_ticks
+from ginn.store.locks import realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
 from tests.fakes.clock import FakeClock
@@ -1251,7 +1252,7 @@ def test_a_running_services_on_realm_is_stopped_through_sv_before_its_removal(
             str(service_dir(env.paths, RealmName("lab"))),
         ]
     ]
-    assert stub.lock_during_down == ["free"], "sv down runs before the delete takes the lock"
+    assert stub.lock_during_down == ["busy"], "the delete holds the lock across sv down (ADR-003)"
     assert "rm" not in stub.ops_at_down, "runit is down before the container is removed"
     assert not service_dir(env.paths, RealmName("lab")).exists()
 
@@ -1288,7 +1289,8 @@ def test_a_services_on_delete_whose_stop_times_out_writes_nothing(
     assert caught.value.code == "GINN-E-SERVICE-TIMEOUT"
     assert (env.paths.realms / "lab.json").read_bytes() == before
     assert fake.ops() == []
-    assert [entry.op for entry in env.audit.read() if entry.op != "integrity"] == []
+    assert [entry.outcome for entry in env.audit.read() if entry.op == "delete"] == ["error"]
+    assert [entry.op for entry in env.audit.read() if entry.op != "integrity"] == ["delete"]
 
 
 @pytest.mark.fr("FR-019")
@@ -1417,3 +1419,39 @@ def test_a_services_on_delete_refused_by_an_unrecovered_journal_entry_stops_noth
     assert stub.argvs == []
     assert fake.ops() == []
     assert containers_of(fake, "lab") != []
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_delete_while_a_stop_holds_the_lock_is_refused_before_any_sv_call(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+
+    with realm_lock(env.paths, RealmName("lab"), "stop"):
+        with pytest.raises(GinnError) as caught:
+            delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert caught.value.code == "GINN-E-REALM-BUSY"
+    assert stub.argvs == []
+    assert containers_of(fake, "lab") != []
+
+
+@pytest.mark.fr("FR-018")
+@pytest.mark.fr("FR-019")
+def test_a_delete_removes_the_realms_idle_watcher_record_and_log(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    directory = env.paths.runtime / "idle"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    (directory / "lab.json").write_text("{}", encoding="utf-8")
+    (directory / "lab.log").write_text("ginn-idle: x\n", encoding="utf-8")
+    (directory / "other.json").write_text("{}", encoding="utf-8")
+
+    delete_realm(env, fake, RealmName("lab"))
+
+    assert not (directory / "lab.json").exists()
+    assert not (directory / "lab.log").exists()
+    assert (directory / "other.json").exists(), "another realm's watcher is not touched"

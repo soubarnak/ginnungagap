@@ -640,6 +640,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "T7.4; until then ginn does not start it, and its Integration Package Set is not installed",
         source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
     ),
+    ErrorSpec(
+        code="GINN-W-IDLE-STOP",
+        exit_code=0,
+        summary="realm '{realm}' will not stop when it is idle: {detail}",
+        remedy="the realm keeps running until 'ginn stop {realm}'; the idle stop (FR-018) is armed "
+        "by the next start, once the native helpers are installed (make -C native install)",
+        source="FR-018, NFR-002 (ginn-defined; not an SRS code)",
+    ),
 )
 
 CATALOGUE: dict[str, ErrorSpec] = {spec.code: spec for spec in _SPECS}

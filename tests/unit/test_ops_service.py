@@ -38,6 +38,7 @@ from ginn.services.runit_user import (
     service_dir,
     write_service_dir,
 )
+from ginn.store.locks import realm_lock
 from ginn.store.records import RealmStore
 from tests.fakes.clock import FakeClock
 from tests.unit.realm_cli_support import DIGEST, World, build_world, record_of
@@ -549,3 +550,69 @@ def test_autostart_with_no_service_directory_is_service_missing_and_saves_no_fla
 
     assert caught.value.code == "GINN-E-SERVICE-MISSING"
     assert stored(world).settings.autostart is False
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.parametrize("holder", ["stop", "delete"])
+def test_a_finish_that_finds_a_stop_or_delete_holding_the_lock_writes_nothing_and_exits_zero(
+    world: World, env, helper: Path, sleeps: list[float], clock: FakeClock, holder: str
+) -> None:  # type: ignore[no-untyped-def]
+    """The stop or delete runs sv down under the lock and records the stop itself (ADR-003)."""
+    services_realm(world, RealmState.RUNNING, running=True)
+    crash = crash_log(world.paths, REALM)
+    crash.parent.mkdir(parents=True, exist_ok=True)
+    crash.write_text("[]", encoding="utf-8")
+    before = (world.paths.realms / "lab.json").read_bytes()
+
+    with realm_lock(world.paths, REALM, holder):
+        result = finish_service(
+            env, REALM, exit_code=0, signal_no=0, hooks=hooks_for(helper, sleeps)
+        )
+
+    assert result is ServiceExit.STOPPED
+    assert (world.paths.realms / "lab.json").read_bytes() == before
+    assert not crash.exists()
+    assert [entry.op for entry in env.audit.read() if entry.op != "integrity"] == []
+
+
+@pytest.mark.fr("FR-081")
+def test_a_finish_that_finds_another_operation_holding_the_lock_is_refused_as_before(
+    world: World, env, helper: Path, sleeps: list[float], clock: FakeClock
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+
+    with realm_lock(world.paths, REALM, "rebuild"):
+        with pytest.raises(GinnError) as caught:
+            finish_service(env, REALM, exit_code=0, signal_no=0, hooks=hooks_for(helper, sleeps))
+
+    assert caught.value.code == "GINN-E-REALM-BUSY"
+    assert stored(world).state is RealmState.RUNNING
+
+
+@pytest.mark.fr("DR-012")
+def test_autostart_off_on_a_services_off_realm_is_refused_before_any_write(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False, services=False)
+    before = stored(world)
+
+    with pytest.raises(GinnError) as caught:
+        set_autostart(env, REALM, on=False)
+
+    assert caught.value.code == "GINN-E-OPTION-INVALID"
+    assert stored(world) == before
+    assert audit_ops(env) == []
+
+
+@pytest.mark.fr("DR-020")
+def test_the_autostart_refusal_names_the_states_it_accepts_without_the_updating_ones(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.BROKEN, running=False)
+
+    with pytest.raises(GinnError) as caught:
+        set_autostart(env, REALM, on=True)
+
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert "stopped, running or failed" in caught.value.message
+    assert "updating" not in caught.value.message

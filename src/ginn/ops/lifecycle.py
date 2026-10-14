@@ -65,11 +65,14 @@ is appended to the `warnings` list of the call, once the operation has finished.
 writes nothing has none. A failed operation raises, and its warning goes into the error's notes.
 
 Status and list. `RealmStatus.to_json()` gives these keys, in this order, and a golden test pins
-them: name, state, container_state, state_mismatch, supervision, distro, tier, services, autostart,
-generation, image_digest, created_at, updated_at, restart_required, share_skipped, disk,
+them: name, state, container_state, state_mismatch, state_reason, supervision, distro, tier,
+services, autostart, generation, image_digest, created_at, updated_at, restart_required,
+share_skipped, disk,
 exported_apps, error. supervision is the runit state of a services-on realm (`sv status`, FR-081
 AC-1), `unavailable` with its error code when runit does not answer, and None for services off.
-- state: the record's state, verbatim (DR-020). It is never rewritten from podman's view.
+- state: the record's state, verbatim (DR-020), except that a running services-off record whose
+  container its idle watcher stopped reads `stopped` with state_reason `idle` (FR-018). That is a
+  read; the record is not written. podman's view is never written into the record.
 - container_state: podman's state of the record's container ("created", "running", "exited",
   ...). "absent" means podman lists no such container. "unavailable" means podman did not answer;
   "unknown" is podman's own state for a container it does not model. Null means the container is
@@ -105,6 +108,7 @@ from ginn.domain import RealmName, RealmState, transition
 from ginn.domain.permissions import effective_toggles
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
+from ginn.export.sync import _scan_host as _host_entries
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.security_ops import (
     leave_agent,
@@ -124,6 +128,8 @@ from ginn.runtime.attach import (
     share_skipped,
 )
 from ginn.runtime.env import SessionEnv, session_env
+from ginn.runtime.idle import IdleHooks, idle_stopped
+from ginn.runtime.idle import arm as arm_idle_watcher
 from ginn.runtime.mounts import AttachPlan, Exists, attach_plan
 from ginn.runtime.realm_security import (
     SecurityHooks,
@@ -287,6 +293,9 @@ class LifecycleHooks:
     before_start: Callable[[], None] | None = None
     """Runs when the start is about to call `podman start`, not when it returns early for a
     container that runs. A services-on start removes the stale conmon pidfile here (FR-081)."""
+    idle: IdleHooks = field(default_factory=IdleHooks)
+    """The idle watcher of a services-off realm: the helper, its grace and how it is started
+    (FR-018, runtime/idle.py)."""
 
 
 @dataclass(frozen=True)
@@ -313,6 +322,7 @@ class RealmStatus:
     state: str | None
     container_state: str | None
     state_mismatch: bool | None
+    state_reason: str | None
     supervision: str | None
     distro: str | None
     tier: str | None
@@ -325,6 +335,7 @@ class RealmStatus:
     restart_required: bool | None
     share_skipped: list[str] | None
     disk: DiskUsage | None
+    exported_apps: int | None = None
     error: str | None = None
 
     def to_json(self) -> dict[str, object]:
@@ -333,6 +344,7 @@ class RealmStatus:
             "state": self.state,
             "container_state": self.container_state,
             "state_mismatch": self.state_mismatch,
+            "state_reason": self.state_reason,
             "supervision": self.supervision,
             "distro": self.distro,
             "tier": self.tier,
@@ -345,7 +357,7 @@ class RealmStatus:
             "restart_required": self.restart_required,
             "share_skipped": None if self.share_skipped is None else list(self.share_skipped),
             "disk": None if self.disk is None else self.disk.to_json(),
-            "exported_apps": None,
+            "exported_apps": self.exported_apps,
             "error": self.error,
         }
 
@@ -572,6 +584,8 @@ def refuse_before_supervisor(
     name: RealmName,
     allowed: frozenset[RealmState],
     action: str,
+    *,
+    shown_text: str | None = None,
 ) -> None:
     """Refuse a services-on start, stop or delete before any `sv` call (FR-081, DR-032).
 
@@ -587,12 +601,13 @@ def refuse_before_supervisor(
     """
     record = _load(RealmStore(env.paths, env.clock), name)
     if record.state not in allowed:
+        listed = shown_text or ", ".join(sorted(state.value for state in allowed))
         raise make(
             "GINN-E-REALM-STATE",
             realm=name.value,
             state=record.state.value,
             action=action,
-            allowed=", ".join(sorted(state.value for state in allowed)),
+            allowed=listed,
         )
     env.integrity.before_op(env.audit, env.user)
     for entry in env.journal.pending():
@@ -636,15 +651,22 @@ def start_realm(
         raise ValueError(f"host home must be absolute, not {user.host_home}")
     if current.state is RealmState.RUNNING and _running(podman, name, current.container_id):
         return current
+    if current.state is RealmState.RUNNING and not current.settings.services:
+        _settle_idle_stop(env, podman, name)
+        current = _load(RealmStore(env.paths, env.clock), name)
     _refuse_stale_options(current)
     if current.settings.services and not supervised:
-        refuse_before_supervisor(env, name, _SUPERVISED_START_FROM, "start")
+        refuse_before_supervisor(
+            env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
+        )
         return _start_supervised(env, podman, name, hooks)
     params = {"generation": current.generation}
     with mutating(env, "start", name, params) as mutation:
         if supervised:
             _follow_autostart(env, name)
         record = _start(env, podman, name, user, hooks, mutation)
+        if not record.settings.services:
+            _arm_idle(env, podman, record, hooks, mutation)
     if warnings is not None:
         warnings.extend(mutation.warnings)
     return record
@@ -672,26 +694,36 @@ def _start_supervised(
         record = _load(store, name)
         if record.state is RealmState.RUNNING and _running(podman, name, record.container_id):
             return record
-        if _given_up(env, name, hooks):
-            raise _start_timeout(name, clock() - started, "runsv stopped the service (AS-028)")
+        reason = _runit_stopped(env, name, hooks)
+        if reason is not None:
+            raise _start_timeout(name, clock() - started, reason)
         if clock() >= deadline:
             raise _start_timeout(name, clock() - started, "the realm does not run yet")
         hooks.supervisor.sleep(hooks.start_poll_s)
 
 
-def _given_up(env: OpEnv, name: RealmName, hooks: LifecycleHooks) -> bool:
-    """True when runsv has given the realm up: its service is down and runsv does not want it up
-    (AS-028). A crash restart reads `down` with `want up`, so it is not a give-up. The record is not
-    read for this. A record that is `failed` can be left from an earlier give-up until the
-    supervised
-    start writes it, so only the status of runsv decides. A status that cannot be read is unknown,
-    and the wait goes on to its deadline.
+def _runit_stopped(env: OpEnv, name: RealmName, hooks: LifecycleHooks) -> str | None:
+    """Why runsv has stopped the realm's service during a start, or None while it runs (AS-028).
+
+    A `down` status without `want up` means runsv does not restart the service. The down file tells
+    the two causes apart. With `normally up` the down file is absent, so this was a stop request,
+    such as a `ginn stop` during the wait. Without it, the finish script wrote the down file, so
+    runsv gave the realm up after repeated crashes. A crash restart reads `down` with `want up`,
+    which is neither. The record is not read: a `failed` record can be left from an earlier give-up
+    until the supervised start writes it. A status that cannot be read is unknown, and the wait goes
+    on. A runsv proven gone (GINN-E-SUPERVISOR-DOWN) propagates.
     """
     try:
         status = supervisor.status(env.paths, name, hooks=hooks.supervisor)
-    except GinnError:
-        return False
-    return status.state == supervisor.DOWN and not status.want_up
+    except GinnError as err:
+        if err.code == "GINN-E-SUPERVISOR-DOWN":
+            raise
+        return None
+    if status.state != supervisor.DOWN or status.want_up:
+        return None
+    if status.normally_up:
+        return "a stop was requested while the realm started"
+    return "runsv stopped the service after repeated crashes (AS-028)"
 
 
 def _start_timeout(name: RealmName, elapsed: float, detail: str) -> GinnError:
@@ -702,6 +734,95 @@ def _start_timeout(name: RealmName, elapsed: float, detail: str) -> GinnError:
         seconds=round(elapsed),
         detail=detail,
     )
+
+
+def _settle_idle_stop(env: OpEnv, podman: Podman, name: RealmName) -> None:
+    """Record a services-off realm that its idle watcher stopped, as stopped and not as a crash.
+
+    The check reads only, and it writes only when the idle stop is confirmed: the container does not
+    run, and the watcher's log says it stopped that container (runtime/idle.py). The write takes the
+    realm lock again and checks once more under it. It is journaled and audited as an "idle-stop"
+    operation of its own, so the start or stop that follows is a plain one. The stop releases the
+    agent filter and the proxy, as a stop does (FR-067). A podman error here is not a confirmation:
+    nothing is written, and the operation that follows reports the error as it always did.
+    """
+    store = RealmStore(env.paths, env.clock)
+    record = _load(store, name)
+    cid = record.container_id
+    if record.state is not RealmState.RUNNING or cid is None:
+        return
+    try:
+        if _running(podman, name, cid):
+            return
+    except GinnError:
+        return
+    if not idle_stopped(env.paths, name, container_id=cid, container_running=False):
+        return
+    with mutating(env, "idle-stop", name, {"generation": record.generation}) as mutation:
+        try:
+            current = _load(store, name)
+            confirmed = (
+                current.state is RealmState.RUNNING
+                and current.container_id == cid
+                and not _running(podman, name, cid)
+                and idle_stopped(env.paths, name, container_id=cid, container_running=False)
+            )
+        except GinnError:
+            confirmed = False
+        if confirmed:
+            store.set_state(name, RealmState.STOPPED)
+            mutation.step("stopped")
+            _release_after_stop(env, name, mutation)
+
+
+def _idle_stopped_status(env: OpEnv, record: RealmRecord, container_state: str | None) -> bool:
+    """True when a running services-off record's container was stopped by its idle watcher (FR-018).
+
+    Read-only: podman's answer and the watcher's files. The record is not written.
+    """
+    if record.state is not RealmState.RUNNING or record.settings.services:
+        return False
+    if record.container_id is None or _mismatch(RealmState.RUNNING, container_state) is not True:
+        return False
+    return idle_stopped(
+        env.paths, record.name, container_id=record.container_id, container_running=False
+    )
+
+
+def _arm_idle(
+    env: OpEnv,
+    podman: Podman,
+    record: RealmRecord,
+    hooks: LifecycleHooks,
+    mutation: Mutation,
+) -> None:
+    """Arm the idle watcher of a services-off realm that has just started (FR-018, NFR-002).
+
+    The init pid comes from one `podman inspect`, and the podman binary and its global flags from
+    the adapter's `global_argv`. An object without that method (a test fake) arms nothing. Every
+    failure is a GINN-W-IDLE-STOP warning: the start has happened, and it stays a success (FR-018).
+    The arm runs under the realm lock, which the start holds, so the watcher record has one writer.
+    """
+    global_argv = getattr(podman, "global_argv", None)
+    cid = record.container_id
+    if not callable(global_argv) or cid is None:
+        return
+    name = record.settings.name
+    try:
+        init_pid = podman.inspect(cid).pid
+    except GinnError as err:
+        mutation.warnings.append(warn("GINN-W-IDLE-STOP", realm=name.value, detail=_detail(err)))
+        return
+    notice = arm_idle_watcher(
+        env.paths,
+        name,
+        container_id=cid,
+        init_pid=init_pid,
+        podman_argv=list(global_argv()),
+        hooks=hooks.idle,
+    )
+    if notice is not None:
+        mutation.warnings.append(notice)
 
 
 def _follow_autostart(env: OpEnv, name: RealmName) -> None:
@@ -867,6 +988,9 @@ def stop_realm(
     current = _load(RealmStore(env.paths, env.clock), name)
     if current.settings.services:
         return _stop_supervised(env, podman, name, hooks, warnings)
+    if current.state is RealmState.RUNNING:
+        _settle_idle_stop(env, podman, name)
+        current = _load(RealmStore(env.paths, env.clock), name)
     if current.state is RealmState.STOPPED and not _running(podman, name, current.container_id):
         return current
     params = {"generation": current.generation}
@@ -886,27 +1010,26 @@ def _stop_supervised(
 ) -> RealmRecord:
     """Stop a services-on realm through its runit service (FR-016, FR-081).
 
-    `sv down` makes runsv send ginn-wait its TERM. ginn-wait stops the container and exits 0, and
-    the finish script records `stopped` under the realm lock. This process holds no lock while it
-    waits. A realm that no runsv supervises has no runit entry to restart it, so there is nothing to
-    signal. A supervisor that does not answer (GINN-E-SUPERVISOR-DOWN) has no runsv left to restart
-    the realm either, so it is passed over, as delete passes it over. A record that is not `stopped`
-    after the stop (a realm given up after crashes is `failed`, and DR-020 has no failed-to-stopped
-    path for runit to take) is stopped here, with podman under the lock, as a services-off realm is.
+    The stop holds the realm lock across `sv down`. `sv down` makes runsv send ginn-wait its TERM,
+    ginn-wait stops the container, and the finish script comes back. That script sees the lock held
+    by this stop, and it writes nothing (services/service.py `finish_service`). So this stop records
+    `stopped` itself, after sv has returned. A realm that no runsv supervises has no runit entry to
+    restart it, so there is nothing to signal. A runsv proven gone (GINN-E-SUPERVISOR-DOWN) is
+    passed over, because nothing restarts the realm then. A record that is not `stopped` after the
+    stop (a realm given up after crashes is `failed`, and DR-020 has no failed-to-stopped path for
+    runit to take) is stopped here, with podman, as a services-off realm is.
     """
-    refuse_before_supervisor(env, name, _SUPERVISED_STOP_FROM, "stop")
-    if supervisor.is_supervised(env.paths, name):
-        try:
-            supervisor.down(env.paths, name, hooks=hooks.supervisor)
-        except GinnError as err:
-            if err.code != "GINN-E-SUPERVISOR-DOWN":
-                raise
-    record = _load(RealmStore(env.paths, env.clock), name)
-    if record.state is RealmState.STOPPED and not _running(podman, name, record.container_id):
-        return record
-    params = {"generation": record.generation}
+    refuse_before_supervisor(
+        env, name, _SUPERVISED_STOP_FROM, "stop", shown_text="running or failed"
+    )
+    params = {"generation": _load(RealmStore(env.paths, env.clock), name).generation}
     with mutating(env, "stop", name, params) as mutation:
-        stopped = _stop(env, podman, name, hooks, mutation)
+        supervisor.stop_if_supervised(env.paths, name, hooks=hooks.supervisor)
+        record = _load(RealmStore(env.paths, env.clock), name)
+        if record.state is RealmState.STOPPED and not _running(podman, name, record.container_id):
+            stopped = record
+        else:
+            stopped = _stop(env, podman, name, hooks, mutation)
     if warnings is not None:
         warnings.extend(mutation.warnings)
     return stopped
@@ -1009,6 +1132,18 @@ def _disk(
     return DiskUsage(home_bytes, partial, container_bytes)
 
 
+def _exported_apps(env: OpEnv, name: RealmName) -> int | None:
+    """The number of the realm's exported menu entries on the host (FR-044, DR-008). Read only.
+
+    The host's `ginn-<realm>-<app>.desktop` entries that name the realm are its exports, and the
+    count is taken from them. None when the host cannot be read.
+    """
+    try:
+        return len(_host_entries(env.paths, name.value))
+    except (OSError, ValueError):
+        return None
+
+
 def _supervision(env: OpEnv, record: RealmRecord, hooks: LifecycleHooks) -> str:
     """The runit state of a services-on realm, read with `sv status` (FR-081 AC-1).
 
@@ -1031,11 +1166,13 @@ def _describe(
 ) -> RealmStatus:
     """The status of one readable record. Nothing is written (FR-020)."""
     container_state, info = _container_state(record, probed)
+    idle = _idle_stopped_status(env, record, container_state)
     return RealmStatus(
         name=record.name.value,
-        state=record.state.value,
+        state="stopped" if idle else record.state.value,
         container_state=container_state,
-        state_mismatch=_mismatch(record.state, container_state),
+        state_mismatch=False if idle else _mismatch(record.state, container_state),
+        state_reason="idle" if idle else None,
         supervision=_supervision(env, record, hooks) if record.settings.services else None,
         distro=record.settings.distro.value,
         tier=record.settings.tier.value,
@@ -1048,6 +1185,7 @@ def _describe(
         restart_required=record.restart_required,
         share_skipped=list(record.share_skipped),
         disk=_disk(env, record, info, hooks) if disk else None,
+        exported_apps=_exported_apps(env, record.name),
     )
 
 
@@ -1060,6 +1198,7 @@ def _corrupt(name: RealmName, err: GinnError) -> RealmStatus:
         state=None,
         container_state=None,
         state_mismatch=None,
+        state_reason=None,
         supervision=None,
         distro=None,
         tier=None,

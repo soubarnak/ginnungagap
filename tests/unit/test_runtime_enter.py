@@ -41,6 +41,7 @@ from ginn.runtime._enter_plan import display_name, exec_user, login_argv, share_
 from ginn.runtime.attach import AttachResult
 from ginn.runtime.enter import BUSY_STEP_S, BUSY_WAIT_S, EnterHooks, enter_realm
 from ginn.runtime.env import SessionEnv
+from ginn.runtime.idle import IdleHooks
 from ginn.runtime.mounts import Skipped
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
@@ -1495,3 +1496,38 @@ def test_a_proxy_that_fails_to_start_warns_and_the_command_still_runs(
 
     assert [notice.code for notice in notices] == ["GINN-W-DBUS-PROXY"]
     assert _launched_apps(env.paths, "lab") == []
+
+
+@pytest.mark.fr("FR-018")
+def test_an_enter_that_auto_starts_a_services_off_realm_arms_its_idle_watcher(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+    tmp_path: Path,
+) -> None:
+    """The auto-start of an enter is a services-off start, so the watcher is armed (FR-018)."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    fake.global_argv = lambda: ["/usr/bin/podman", "--root", "/data/podman"]  # type: ignore[attr-defined]
+    helper = tmp_path / "ginn-idle"
+    helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    helper.chmod(0o755)
+    spawns: list[list[str]] = []
+
+    def spawn(argv: Sequence[str], log: Path) -> int:
+        spawns.append(list(argv))
+        return 7777
+
+    hooks = replace(
+        lifecycle_hooks,
+        idle=IdleHooks(
+            helper=str(helper), grace_s=60, spawn=spawn, start_ticks=lambda pid: 500 + pid
+        ),
+    )
+
+    status = enter(env, fake, "lab", user, make_hooks(hooks), argv=["true"])
+
+    assert status == 0
+    assert len(spawns) == 1
+    assert spawns[0][-2:] == ["--", container_id(env, "lab")]
+    assert spawns[0][2] == "60"

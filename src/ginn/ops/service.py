@@ -59,6 +59,8 @@ from ginn.store.records import RealmRecord, RealmStore
 
 WAIT_ARG_SEPARATOR: Final = "--"
 """The separator between the global podman flags and the container in the ginn-wait argv."""
+_STOP_HOLDERS: Final = frozenset({"stop", "delete"})
+"""The operations that stop a services-on realm under the lock and record its stop themselves."""
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,7 @@ def _refuse_autostart_state(record: RealmRecord) -> None:
             realm=record.name.value,
             state=record.state.value,
             action="autostart",
-            allowed="stopped, running, failed, updating or rebuilding",
+            allowed="stopped, running or failed",
         )
 
 
@@ -208,7 +210,7 @@ def set_autostart(env: OpEnv, name: RealmName, *, on: bool) -> RealmRecord:
     store = RealmStore(env.paths, env.clock)
     current = store.load(name)
     _refuse_autostart_state(current)  # before any write
-    replace(current.settings, autostart=on)  # DR-012, before any write
+    replace(current.settings, autostart=True)  # DR-012 for both directions, before any write
     with mutating(env, "autostart", name, {"autostart": on}) as mutation:
         record = store.load(name)
         _refuse_autostart_state(record)
@@ -242,16 +244,27 @@ def _record_stopped(
     signal_no: int,
     warnings: list[GinnWarning] | None,
 ) -> None:
-    """A stop request: move the realm to stopped, then leave the filter and the proxy (FR-067)."""
+    """A stop request: move the realm to stopped, then leave the filter and the proxy (FR-067).
+
+    When a `ginn stop` or a `ginn delete` holds the realm lock, it runs `sv down` under that lock
+    and records the stop itself, after this script has returned. So this script writes nothing and
+    returns, and the caller still clears the crash log. Only those two holders are passed over. Any
+    other holder is refused as before (GINN-E-REALM-BUSY).
+    """
     store = RealmStore(env.paths, env.clock)
     params = {"exit": exit_code, "signal": signal_no}
-    with mutating(env, "stop", name, params) as mutation:
-        record = store.load(name)
-        if record.state is not RealmState.STOPPED and can_transition(
-            record.state, RealmState.STOPPED, record.previous_state
-        ):
-            store.set_state(name, RealmState.STOPPED)
-        _release(env, name, mutation)
+    try:
+        with mutating(env, "stop", name, params) as mutation:
+            record = store.load(name)
+            if record.state is not RealmState.STOPPED and can_transition(
+                record.state, RealmState.STOPPED, record.previous_state
+            ):
+                store.set_state(name, RealmState.STOPPED)
+            _release(env, name, mutation)
+    except GinnError as err:
+        if err.code == "GINN-E-REALM-BUSY" and err.details.get("op") in _STOP_HOLDERS:
+            return
+        raise
     if warnings is not None:
         warnings.extend(mutation.warnings)
 
