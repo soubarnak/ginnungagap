@@ -52,8 +52,11 @@ PODMAN_MUTATORS: tuple[str, ...] = (
     "exec",
     "exec_interactive",
     "unshare",
+    "cp_into",
 )
-"""The podman calls that change state. Each one is an effect, with a point before and after it."""
+"""The podman calls that change state. Each one is an effect, with a point before and after it.
+`cp_into` writes the services-on machine-id before the first start (ADR-007, F6). `cp_from`, the
+read of the init check, changes nothing, so it is not an effect."""
 
 
 class SimulatedCrash(BaseException):

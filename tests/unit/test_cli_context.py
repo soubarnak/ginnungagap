@@ -378,3 +378,51 @@ def test_a_read_only_command_leaves_a_killed_estimate_alone(world: World, argv: 
     main(argv)
 
     assert len(world.fake.containers) == 1
+
+
+def _realms_of(world: World) -> _context.Realms:
+    return _context.Realms(
+        paths=world.paths,
+        env=_context.op_env(world.paths),
+        podman=world.fake,
+        host=_context.host_user(),
+        gid=0,
+    )
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_command_that_passes_the_sweep_flag_removes_a_killed_creates_scratch(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The scratch of a killed create is swept by the commands that pass `sweep`, and by no other:
+    a read-only command runs no sweep, so it leaves the leftover where it is (F3, F6)."""
+    leftover = world.paths.runtime / "create-scratch-killed"
+    leftover.mkdir()
+    (leftover / "init").write_bytes(b"systemd")
+    out = Output(json_mode=False, verbose=True)
+    _context.settle_interrupted(_realms_of(world), out, read_only=True, sweep=True)
+    assert leftover.is_dir(), "a read-only command never sweeps"
+    _context.settle_interrupted(_realms_of(world), out, sweep=True)
+    assert not leftover.exists()
+    assert "scratch directories of killed creates are removed" in capsys.readouterr().err
+
+
+@pytest.mark.fr("FR-122")
+def test_a_scratch_sweep_outcome_is_a_verbose_line_even_when_it_is_blocked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    blocked = RecoveryOutcome(
+        realm="scratch",
+        op="scratch",
+        op_id=None,
+        outcome=OUTCOME_BLOCKED,
+        reason="is not a directory of this user (a link, a file or another owner)",
+        path="/run/ginn/1000/create-scratch-link",
+    )
+    _context._report(blocked, Output(json_mode=False, verbose=False))
+    assert capsys.readouterr().err == ""  # no warning, and nothing without --verbose
+    _context._report(blocked, Output(json_mode=False, verbose=True))
+    err = capsys.readouterr().err
+    assert err.startswith("recovery: /run/ginn/1000/create-scratch-link: blocked: ")
+    assert "GINN-W" not in err

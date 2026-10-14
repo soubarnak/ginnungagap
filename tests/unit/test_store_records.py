@@ -650,3 +650,20 @@ def test_leaving_a_rebuild_clears_the_building_container_and_keeps_the_named_one
     assert stopped.building_generation is None
     assert stopped.container_id == "c0ffee"
     assert store.load(RealmName("arch")).building_container_id is None
+
+
+@pytest.mark.fr("FR-080")
+def test_a_machine_id_survives_json_and_a_malformed_one_is_reported_as_internal(
+    tmp_path: Path,
+) -> None:
+    machine_id = "0123456789abcdef0123456789abcdef"
+    record = dataclasses.replace(_record(), machine_id=machine_id)
+    data = record.to_json()
+    assert data["machine_id"] == machine_id
+    assert RealmRecord.from_json(json.loads(json.dumps(data))) == record
+    legacy = {key: value for key, value in data.items() if key != "machine_id"}
+    assert RealmRecord.from_json(legacy).machine_id is None
+    for bad in ("0123", "0123456789ABCDEF0123456789ABCDEF"):
+        with pytest.raises(GinnError) as excinfo:
+            RealmRecord.from_json({**data, "machine_id": bad}, source=str(tmp_path / "x.json"))
+        assert excinfo.value.code == "GINN-E-INTERNAL"

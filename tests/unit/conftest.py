@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+import ginn.ops.delete as delete_mod
 import ginn.runtime.attach as attach_mod
 import ginn.runtime.realm_security as realm_security_mod
 from tests.unit.realm_cli_support import World, build_world
@@ -45,6 +46,14 @@ class _NoHostTools:
 @pytest.fixture(autouse=True)
 def _host_security_tools_are_fenced(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(realm_security_mod, "shutil", _NoHostTools)
+
+
+@pytest.fixture(autouse=True)
+def _cgroup_root_is_fenced(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A delete's realm cgroup directory (F9) is looked up under a temporary root, never in the
+    real /sys/fs/cgroup, which holds the user's own realms. A test that needs a directory passes
+    `DeleteHooks(cgroup_root=...)`."""
+    monkeypatch.setattr(delete_mod, "DEFAULT_CGROUP_ROOT", tmp_path / "sys-fs-cgroup")
 
 
 @pytest.fixture

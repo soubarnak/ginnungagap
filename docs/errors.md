@@ -12,7 +12,7 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | Exit | Meaning |
 |---|---|
 | 0 | success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions. |
-| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING |
+| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
 | 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM) |
@@ -46,9 +46,10 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-IMAGE-UNVERIFIED` | 65 | image digest for {distro} does not match the trust manifest | do not use this image; retry later, and update ginn if the mismatch persists | FR-011 AC-1 |
 | `GINN-E-INTERNAL` | 70 | internal error; this is a bug | re-run with --verbose and report the output | NFR-040 |
 | `GINN-E-INTERRUPTED` | 130 | interrupted by the user | run 'ginn list' to check realm state, then retry | IR-011 |
-| `GINN-E-NAME-INVALID` | 2 | realm name '{name}' does not match ^[a-z][a-z0-9-]{0,31}$ or is reserved | use a lowercase letter first, then lowercase letters, digits or hyphens; not ginn, host, root or all | DR-002 |
+| `GINN-E-NAME-INVALID` | 2 | realm name '{name}' does not match ^[a-z][a-z0-9-]{0,31}$ or is reserved | use a lowercase letter first, then lowercase letters, digits or hyphens; not ginn, host, root, all or supervisor | DR-002 |
 | `GINN-E-NAME-TAKEN` | 4 | realm name '{name}' is already taken | choose another name with --name | FR-010 AC-3 |
 | `GINN-E-NETWORK` | 69 | network failure; retries exhausted | check the network connection, then retry the command | FR-120 AC-1, AC-2 |
+| `GINN-E-NO-INIT` | 1 | services-on needs systemd in the realm: image '{image}' of realm '{realm}' has no /sbin/init | create the realm with services off, or pick a distribution whose image ships systemd; the create is rolled back and no container is left | FR-080, ADR-003, F3 (ginn-defined; not an SRS code) |
 | `GINN-E-NO-SUCH-REALM` | 3 | no realm named '{realm}' for this user | run 'ginn list' to see your realms | FR-025 AC-1 |
 | `GINN-E-NO-SUCH-USER` | 2 | no account named '{user}' on this host | create that account first, or run 'sudo ginn host-setup --user &lt;name&gt;' with the name of an existing account | FR-001 (ginn-defined; not an SRS code) |
 | `GINN-E-NOT-SUPPORTED-YET` | 2 | realm '{realm}' cannot be used yet: {feature} arrives in {milestone} | use a realm this build can run; docs/roadmap.md lists the milestones | FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code) |
@@ -85,6 +86,7 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-USAGE` | 2 | {detail} | run 'ginn --help' to list commands and options | IR-011 |
 | `GINN-W-AGENT-FILTER` | 0 | the SSH agent filter is not in line for realm '{realm}': {detail} | the realm's SSH grant may be missing or stale; start the realm again from a session with a running SSH agent, or run 'ginn doctor' to see the filter | FR-067 (ginn-defined; not an SRS code) |
 | `GINN-W-BUILD-RESIDUAL` | 0 | packages used only to build an AUR package are left in realm '{realm}': {packages} | check why they were kept ({reason}), then remove them with 'ginn remove {realm} PACKAGE' if they are not needed | FR-043 (ginn-defined; not an SRS code) |
+| `GINN-W-CGROUP-LEFT` | 0 | the cgroup directory of realm '{realm}' is not removed: {reason} | it holds no ginn state; once no process runs in it, 'rmdir' of that directory removes it, and a realm created again reuses it | FR-019, ADR-003 (ginn-defined; not an SRS code) |
 | `GINN-W-DBUS-PROXY` | 0 | the session bus filter for '{realm}' did not start, so the app has no session bus: {detail} | the app runs without a session bus; check that the host session bus is running and that xdg-dbus-proxy is installed, then launch the app again | FR-068, ADR-010 (ginn-defined; not an SRS code) |
 | `GINN-W-EXPORT-SKIPPED` | 0 | desktop entry '{app}' of realm '{realm}' is not exported: {reason} | fix the entry in the realm or remove its package; the next sync follows the realm | FR-044 (ginn-defined; not an SRS code) |
 | `GINN-W-EXPORT-SYNC` | 0 | the host menu of realm '{realm}' is not fully synced: {reason} | the realm and its packages are kept as they are; run 'ginn _sync {realm}' to retry the menu | FR-044 (ginn-defined; not an SRS code) |

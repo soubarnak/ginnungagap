@@ -3,12 +3,14 @@
 
 import pytest
 
-from ginn.domain.names import RealmName
+from ginn.domain.names import RESERVED_NAMES, RealmName
 from ginn.errors import GinnError
+from ginn.hostsetup.cgroups import SUPERVISOR_LEAF
+from ginn.runtime.spec import services_cgroup_parent
 
 pytestmark = [pytest.mark.fr("DR-002"), pytest.mark.fr("NFR-SEC-005")]
 
-RESERVED = ("ginn", "host", "root", "all")
+RESERVED = ("ginn", "host", "root", "all", "supervisor")
 SHELL_CHARS = ";|&$`(){}<>*?!'\"\\ \n\x00"
 
 
@@ -79,3 +81,22 @@ def test_direct_construction_is_checked_like_parse() -> None:
 def test_non_string_is_a_type_error() -> None:
     with pytest.raises(TypeError):
         RealmName(7)  # type: ignore[arg-type]
+
+
+def test_the_reserved_supervisor_name_is_host_setups_cgroup_leaf() -> None:
+    """CL-29: a realm named like Host Setup's leaf would share its cgroup directory. The domain
+    keeps the name as a literal, so this test pins it to the hostsetup constant."""
+    assert SUPERVISOR_LEAF in RESERVED_NAMES
+    assert RESERVED_NAMES == frozenset({"ginn", "host", "root", "all", SUPERVISOR_LEAF})
+    with pytest.raises(GinnError) as info:
+        RealmName("supervisor")
+    assert info.value.details["rule"] == "reserved word (DR-002)"
+
+
+@pytest.mark.parametrize("raw", ["arch", "lab", "supervisor-2", "a-supervisor"])
+def test_no_realm_cgroup_parent_is_the_supervisor_leaf(raw: str) -> None:
+    """The realm's services cgroup, /ginn/<uid>/<realm>, never equals the leaf
+    /ginn/<uid>/supervisor (CL-29). The names that would make it equal are the reserved ones, which
+    never parse."""
+    name = RealmName(raw)
+    assert services_cgroup_parent(1000, name) != f"/ginn/1000/{SUPERVISOR_LEAF}"

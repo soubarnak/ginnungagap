@@ -16,8 +16,10 @@ because the test host has a live session under /run/user/1000 (a PipeWire socket
 socket would bind an audio grant and run a mkdir that the test does not expect.
 """
 
+import errno
 import json
 import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -54,11 +56,13 @@ from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
 from ginn.runtime.realm_security import SecurityHooks
+from ginn.runtime.spec import MACHINE_ID_PATH
 from ginn.security.nvidia import NvidiaPlan, Status
 from ginn.services.runit_user import journald_dropin
 from ginn.store.locks import image_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.scratch import SCRATCH_PREFIX
 from ginn.trust import manifest as trust
 from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import FakePodman
@@ -2243,3 +2247,192 @@ def test_a_services_on_create_without_an_absolute_ginn_command_is_refused_before
         create_realm(env, fake, request(home, services=True), hooks=hooks)
     assert caught.value.code == "GINN-E-INTERNAL"
     assert not (env.paths.sv / "debian").exists()
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("NFR-003")
+def test_a_services_on_create_copies_a_machine_id_into_the_container_before_any_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-007, F6: the realm's machine-id goes into /etc/machine-id with podman cp, after the
+    create and before any start. The record keeps the same id, which a later rebuild reuses."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
+    content, mode = fake.containers[record.container_id].copied[MACHINE_ID_PATH]
+    assert re.fullmatch(rb"[0-9a-f]{32}\n", content)
+    assert mode == 0o644
+    assert record.machine_id == content.decode("ascii").strip()
+    assert RealmStore(env.paths).load(RealmName("debian")).machine_id == record.machine_id
+    ops = ops_of(fake)
+    assert ops.index("create") < ops.index("cp_into")
+    assert "start" not in ops
+
+
+@pytest.mark.fr("FR-080")
+def test_a_services_off_create_writes_no_machine_id_and_checks_no_init(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    record = create_realm(env, fake, request(home), hooks=hooks).record
+    assert record.machine_id is None
+    assert {"cp_from", "cp_into"}.isdisjoint(ops_of(fake))
+
+
+@pytest.mark.fr("FR-080")
+def test_a_services_on_image_without_sbin_init_is_refused_as_no_init_and_rolled_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """F3: an image with no /sbin/init fails the create with GINN-E-NO-INIT, which names the image
+    and the realm, instead of a start error. The rollback removes the container, the Realm Home and
+    the record, and nothing is started."""
+    fake.init_absent = True
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-NO-INIT"
+    assert caught.value.details["realm"] == "debian"
+    assert "@sha256:" in caught.value.details["image"]
+    assert fake.containers == {}
+    assert "start" not in ops_of(fake)
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert not (env.paths.homes / "debian").exists()
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_init_check_failure_that_is_not_a_missing_path_stays_internal(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only podman's not-found reason means an absent init. Any other copy failure is still
+    GINN-E-INTERNAL, so a broken podman is not reported as a missing systemd."""
+
+    def copy_fails(container_id: str, src: str, dst: Path) -> None:
+        raise make("GINN-E-INTERNAL")
+
+    monkeypatch.setattr(fake, "cp_from", copy_fails)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert fake.containers == {}
+
+
+def _scratch_left(env: OpEnv) -> list[str]:
+    return sorted(p.name for p in env.paths.runtime.iterdir() if p.name.startswith(SCRATCH_PREFIX))
+
+
+@pytest.mark.fr("FR-080")
+def test_the_init_check_stages_its_copy_in_a_create_scratch_directory_that_is_then_gone(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed create leaves its scratch directory behind, so the scratch carries the prefix that
+    the recovery sweep looks for (store/scratch.py). A finished create leaves none."""
+    staged: list[str] = []
+    original = fake.cp_from
+
+    def cp_from_recording(container_id: str, src: str, dst: Path) -> None:
+        staged.append(dst.parent.name)
+        original(container_id, src, dst)
+
+    monkeypatch.setattr(fake, "cp_from", cp_from_recording)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert len(staged) == 1
+    assert staged[0].startswith(SCRATCH_PREFIX)
+    assert _scratch_left(env) == []
+
+
+@pytest.mark.fr("FR-080")
+def test_a_refused_create_removes_its_scratch_directory_on_the_way_out(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.init_absent = True
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-NO-INIT"
+    assert _scratch_left(env) == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_os_error_making_the_create_scratch_is_internal_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scratch directory that cannot be made is GINN-E-INTERNAL, so run_journaled rolls the create
+    back: the container, the Realm Home and the record go. An OSError that escaped would skip the
+    rollback and leave a half-made realm."""
+
+    def no_scratch(paths: OwnedPaths) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(create_ops, "scratch_dir", no_scratch)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["detail"] == "create scratch directory: No space left on device"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert not (env.paths.homes / "debian").exists()
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_os_error_staging_the_machine_id_is_internal_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def copy_fails(container_id: str, src: Path, dst: str) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(fake, "cp_into", copy_fails)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert env.journal.pending() == []

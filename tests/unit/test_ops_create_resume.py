@@ -30,7 +30,7 @@ from ginn.ops.recovery import OUTCOME_BROKEN, recover
 from ginn.ops.resume import resume_create
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime import attach
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH
 from ginn.services.runit_user import journald_dropin, service_dir
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -840,3 +840,24 @@ def test_the_pending_fields_round_trip_and_a_record_without_them_reads_as_not_pe
         del data[key]
     old = RealmRecord.from_json(data)
     assert (old.create_pending, old.with_at_create, old.everything_confirmed) == (False, [], False)
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_resumed_services_on_create_keeps_the_machine_id_of_the_killed_create(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The id is saved on the record before the `created` step, so a create killed after that step
+    leaves the id on the broken record. The resume writes that same id into its new container."""
+    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
+    killed_id = _load(env).machine_id
+    assert killed_id is not None
+    result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
+    assert result.record.machine_id == killed_id
+    content, _mode = fake.containers[result.record.container_id].copied[MACHINE_ID_PATH]
+    assert content == f"{killed_id}\n".encode("ascii")

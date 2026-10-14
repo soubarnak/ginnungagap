@@ -36,6 +36,7 @@ from ginn.domain import (
     Tier,
 )
 from ginn.errors import GinnError, make
+from ginn.ops import recovery as recovery_module
 from ginn.ops._mutating import OpEnv, is_finished
 from ginn.ops.recovery import (
     _REMOVE_TIMEOUT_S,
@@ -46,9 +47,11 @@ from ginn.ops.recovery import (
     OUTCOME_FINISHED,
     OUTCOME_LIVE,
     OUTCOME_RECOVERED,
+    OUTCOME_SWEPT,
     RecoveryOutcome,
     find_pending,
     recover,
+    sweep_scratch,
 )
 from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.packages.aur import query_argv
@@ -61,9 +64,10 @@ from ginn.services.runit_user import service_dir
 from ginn.store import journal as journal_module
 from ginn.store.audit import AuditEntry, AuditLog
 from ginn.store.journal import PARAMS_OVERFLOW, Journal, JournalEntry, process_start_ticks
-from ginn.store.locks import realm_lock
+from ginn.store.locks import image_lock, realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
+from ginn.store.scratch import SCRATCH_PREFIX
 from tests.fakes.clock import FakeClock
 
 OP_ID = "0123456789abcdef0123456789abcdef"
@@ -2174,3 +2178,72 @@ def test_a_rebuild_saved_at_the_new_generation_removes_the_old_root_and_settles_
     assert podman.removed == [CID]
     assert list(podman.labels) == ["new-root"]
     assert RealmStore(paths).load(RealmName("arch")) == record
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_scratch_sweep_removes_a_killed_creates_leftover_when_no_create_runs(
+    env: OpEnv, paths: OwnedPaths
+) -> None:
+    leftover = paths.runtime / f"{SCRATCH_PREFIX}killed"
+    leftover.mkdir()
+    (leftover / "init").write_bytes(b"systemd")
+    outcomes = sweep_scratch(env)
+    assert [o.outcome for o in outcomes] == [OUTCOME_SWEPT]
+    assert outcomes[0].op == "scratch"
+    assert not leftover.exists()
+    assert sweep_scratch(env) == [], "a second sweep finds nothing left"
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_scratch_sweep_is_busy_while_a_create_holds_an_image_lock_and_removes_nothing(
+    env: OpEnv, paths: OwnedPaths
+) -> None:
+    """A live create holds the image lock of its distribution for its whole body, so its scratch
+    directory may be in use. The sweep then refuses to touch anything, and it runs once the lock is
+    free."""
+    leftover = paths.runtime / f"{SCRATCH_PREFIX}maybe-live"
+    leftover.mkdir()
+    with image_lock(paths, "debian", "create"):
+        outcomes = sweep_scratch(env)
+        assert [o.outcome for o in outcomes] == [OUTCOME_BUSY]
+        assert leftover.is_dir()
+    assert [o.outcome for o in sweep_scratch(env)] == [OUTCOME_SWEPT]
+    assert not leftover.exists()
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_scratch_sweep_keeps_a_link_and_reports_it_as_a_verbose_blocked_outcome(
+    env: OpEnv, paths: OwnedPaths, tmp_path: Path
+) -> None:
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "precious").write_text("keep", encoding="utf-8")
+    link = paths.runtime / f"{SCRATCH_PREFIX}link"
+    link.symlink_to(target, target_is_directory=True)
+    outcomes = sweep_scratch(env)
+    assert [o.outcome for o in outcomes] == [OUTCOME_BLOCKED]
+    assert outcomes[0].op == "scratch"
+    assert outcomes[0].path == str(link)
+    assert link.is_symlink()
+    assert (target / "precious").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-080")
+def test_a_scratch_sweep_with_no_leftovers_takes_no_lock_so_a_held_lock_cannot_refuse_it(
+    env: OpEnv, paths: OwnedPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With nothing to sweep, the sweep takes no image lock. So a create or a rebuild that holds a
+    distribution's lock never makes a command that passes `sweep` fail with GINN-E-REALM-BUSY."""
+    (paths.runtime / "unrelated").mkdir()
+
+    def must_not_lock(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a sweep with no leftovers took an image lock")
+
+    monkeypatch.setattr(recovery_module, "image_lock", must_not_lock)
+    assert sweep_scratch(env) == []
+    with image_lock(paths, "debian", "create"):
+        assert sweep_scratch(env) == []

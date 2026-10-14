@@ -10,6 +10,7 @@ these forms serve.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from ginn.runtime.spec import (
     create_argv,
     create_spec,
     mitigation_mounts,
+    new_machine_id,
 )
 from tests.unit.test_runtime_spec import make_spec
 
@@ -80,7 +82,7 @@ def test_with_the_mitigations_on_each_masked_unit_gets_a_read_only_dev_null_bind
     values = _mount_values(create_argv(spec))
     for unit in SERVICES_MASKED_UNITS:
         assert f"type=bind,source=/dev/null,target={UNIT_DIR}/{unit},ro" in values
-    assert len([v for v in values if "source=/dev/null" in v]) == 10
+    assert len([v for v in values if "source=/dev/null" in v]) == 11
     assert UNIT_DIR == "/etc/systemd/system"
 
 
@@ -131,11 +133,18 @@ def test_the_pidfile_is_optional_on_the_adapter() -> None:
 
 
 def test_the_masks_in_the_argv_match_the_list_the_s05_spike_used() -> None:
-    listed = [
-        line.strip()
-        for line in (Path(__file__).resolve().parents[2] / "spikes/s05/masks-base.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
-    assert list(SERVICES_MASKED_UNITS) == listed
+    """The argv masks the S-05 base ten, then logind from the S-05 logind file (CL-28)."""
+    spikes = Path(__file__).resolve().parents[2] / "spikes/s05"
+
+    def listed(name: str) -> list[str]:
+        lines = (spikes / name).read_text(encoding="utf-8").splitlines()
+        return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+
+    assert list(SERVICES_MASKED_UNITS) == [*listed("masks-base.txt"), *listed("masks-logind.txt")]
+
+
+@pytest.mark.fr("FR-080")
+def test_a_new_machine_id_is_32_lowercase_hex_digits_and_differs_per_call() -> None:
+    first, second = new_machine_id(), new_machine_id()
+    assert re.fullmatch(r"[0-9a-f]{32}", first)
+    assert first != second

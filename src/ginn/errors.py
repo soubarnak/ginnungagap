@@ -12,7 +12,7 @@ GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH
 (ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
 GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
-(FR-081, AS-028). `source` cites
+(FR-081, AS-028), and GINN-E-NO-INIT (FR-080, F3). `source` cites
 the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -237,7 +237,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=2,
         summary="realm name '{name}' does not match ^[a-z][a-z0-9-]{{0,31}}$ or is reserved",
         remedy="use a lowercase letter first, then lowercase letters, digits or hyphens; "
-        "not ginn, host, root or all",
+        "not ginn, host, root, all or supervisor",
         source="DR-002",
     ),
     ErrorSpec(
@@ -513,6 +513,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-081, DR-010 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-NO-INIT",
+        exit_code=1,
+        summary="services-on needs systemd in the realm: image '{image}' of realm '{realm}' has "
+        "no /sbin/init",
+        remedy="create the realm with services off, or pick a distribution whose image ships "
+        "systemd; the create is rolled back and no container is left",
+        source="FR-080, ADR-003, F3 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-RECOVERED",
         exit_code=0,
         summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",
@@ -642,6 +651,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-W-CGROUP-LEFT",
+        exit_code=0,
+        summary="the cgroup directory of realm '{realm}' is not removed: {reason}",
+        remedy="it holds no ginn state; once no process runs in it, 'rmdir' of that directory "
+        "removes it, and a realm created again reuses it",
+        source="FR-019, ADR-003 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-REBUILD-DEFERRED",
         exit_code=0,
         summary="the pending change of realm '{realm}' is not applied: its rebuild failed "
@@ -678,7 +695,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, "
         "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
         "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, "
-        "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING",
+        "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),

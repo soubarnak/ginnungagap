@@ -212,7 +212,7 @@ reason = "T6.8: the realm wiring is unit-tested (the CDI grant at create, the sp
 id = "FR-080"
 milestone = "M7"
 partial = true
-reason = "arch PASS on the glibc host (T7.7 review round, spikes/results/T7.7-services-real.md): the crun argv, cronie active before and after a restart, PID 1 systemd, runsv in the supervisor leaf. debian and fedora FAIL: their pinned images have no /sbin/init (F1), so the services-on start fails. The argv and the create path are unit-tested (tests/unit/test_runtime_spec.py, tests/unit/test_ops_create.py). The musl leg is not run (no musl host)."
+reason = "arch PASS on the glibc host (T7.7 review round, spikes/results/T7.7-services-real.md): the crun argv, cronie active before and after a restart, PID 1 systemd, runsv in the supervisor leaf. That run predates F6 (machine-id, CL-28), so its 7 failed units are the pre-fix state. debian and fedora are refused at create with GINN-E-NO-INIT, since their pinned images have no /sbin/init (F1, F3; the fix is ADR-015, proposed). The argv, the create path, the machine-id copy and the init check are unit-tested (tests/unit/test_ops_create.py, test_runtime_spec.py). The host re-gate of F6 is pending. The musl leg is not run (no musl host)."
 
 [[deferred]]
 id = "FR-081"
@@ -311,7 +311,7 @@ reason = "unit tests run for tools/measure; the RSS budget for the helpers needs
 id = "NFR-003"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). debian and fedora are NOT RUN (F1, no /sbin/init). The musl leg is not run."
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). That run predates F6 (machine-id copy and logind mask, CL-28, ADR-007 D8), which is unit-tested and whose host re-gate is pending. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). debian and fedora are refused at create with GINN-E-NO-INIT (F1, F3). The musl leg is not run."
 
 [[deferred]]
 id = "NFR-004"

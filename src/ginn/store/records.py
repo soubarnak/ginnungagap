@@ -10,6 +10,7 @@ load-modify-save, because flock conflicts even between descriptors in one proces
 """
 
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -34,6 +35,8 @@ from ginn.errors import GinnError, make
 from ginn.store._time import parse_utc, utc_from_epoch, utc_iso
 from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
 
+_MACHINE_ID: re.Pattern[str] = re.compile(r"[0-9a-f]{32}")
+"""A machine-id as systemd writes it: 32 lowercase hex digits (ADR-007, F6)."""
 _PREVIOUS_BOUND: frozenset[RealmState] = frozenset({RealmState.UPDATING, RealmState.REBUILDING})
 _RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.RUNNING})
 """The only states that lead to `updating` or `rebuilding`, so the only valid previous states."""
@@ -215,6 +218,11 @@ class RealmRecord:
     create_pending: bool = False
     with_at_create: list[str] = field(default_factory=list)
     everything_confirmed: bool = False
+    # The machine-id of a services-on realm (ADR-007, F6). The create or the rebuild that makes the
+    # container writes it with `podman cp` before the first start, and a later rebuild copies the
+    # same value, so the realm keeps one identity. Added without a schema bump: a record without
+    # the key reads as None, which is every services-off realm and a services-on one made before F6.
+    machine_id: str | None = None
 
     def create_grants_match(self, toggles: frozenset[Toggle]) -> bool:
         """True when `toggles` asks for the GPU and fonts and timezone grants this container has.
@@ -250,6 +258,8 @@ class RealmRecord:
             raise ValueError(f"{self.state.value} must not record a pending create")
         if not self.create_pending and (self.with_at_create or self.everything_confirmed):
             raise ValueError("a create's request is kept only while the create is pending")
+        if self.machine_id is not None and _MACHINE_ID.fullmatch(self.machine_id) is None:
+            raise ValueError("machine_id must be 32 lowercase hex digits")
 
     @property
     def name(self) -> RealmName:
@@ -292,6 +302,7 @@ class RealmRecord:
             "create_pending": self.create_pending,
             "with_at_create": list(self.with_at_create),
             "everything_confirmed": self.everything_confirmed,
+            "machine_id": self.machine_id,
         }
         if self.gpg_extra_known:
             data["gpg_extra"] = self.gpg_extra
@@ -353,6 +364,7 @@ class RealmRecord:
                 create_pending=_bool(data.get("create_pending", False)),
                 with_at_create=_str_list(data.get("with_at_create", [])),
                 everything_confirmed=_bool(data.get("everything_confirmed", False)),
+                machine_id=_opt_str(data.get("machine_id")),
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

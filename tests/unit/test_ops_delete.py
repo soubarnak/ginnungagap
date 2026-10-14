@@ -25,6 +25,7 @@ import pytest
 
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.errors import GinnError, make
+from ginn.hostsetup.cgroups import SUPERVISOR_LEAF
 from ginn.ops import delete as delete_module
 from ginn.ops._mutating import OpEnv, mutating
 from ginn.ops.delete import STEPS, DeleteHooks, check_purge, delete_realm
@@ -1545,3 +1546,130 @@ def test_a_killed_estimates_container_of_the_same_distribution_is_removed_before
     assert result.image == "removed"
     assert DIGEST not in fake.images
     assert not any(LABEL_ESTIMATE in c.labels for c in fake.containers.values())
+
+
+def _realm_cgroup(env: OpEnv, root: Path, name: str) -> Path:
+    """The realm's cgroup directory under `root`, as services_cgroup_parent names it (F9)."""
+    return root / "ginn" / str(env.paths.uid) / name
+
+
+@pytest.mark.fr("FR-019")
+def test_delete_removes_the_empty_cgroup_directory_of_the_realm(
+    env: OpEnv, fake: FakePodman, tmp_path: Path
+) -> None:
+    """F9: podman leaves the realm's cgroup directory behind, empty. The delete removes it, with
+    rmdir only."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    root = tmp_path / "cgroup"
+    directory = _realm_cgroup(env, root, "lab")
+    directory.mkdir(parents=True)
+    result = delete_realm(env, fake, RealmName("lab"), hooks=DeleteHooks(cgroup_root=root))
+    assert not directory.exists()
+    assert result.warnings == ()
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-019")
+def test_delete_with_no_cgroup_directory_for_the_realm_is_no_error(
+    env: OpEnv, fake: FakePodman, tmp_path: Path
+) -> None:
+    """A services-off realm has no cgroup directory. A missing one is the normal case."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    result = delete_realm(
+        env, fake, RealmName("lab"), hooks=DeleteHooks(cgroup_root=tmp_path / "cgroup")
+    )
+    assert result.warnings == ()
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-019")
+def test_a_cgroup_directory_that_still_holds_an_entry_is_left_with_a_warning(
+    env: OpEnv, fake: FakePodman, tmp_path: Path
+) -> None:
+    """F9: a directory that is not empty is never removed, not even by force. The delete warns
+    (GINN-W-CGROUP-LEFT) and finishes, so the record is removed and the entry is kept."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    root = tmp_path / "cgroup"
+    directory = _realm_cgroup(env, root, "lab")
+    directory.mkdir(parents=True)
+    (directory / "held").write_text("kept\n", encoding="utf-8")
+    result = delete_realm(env, fake, RealmName("lab"), hooks=DeleteHooks(cgroup_root=root))
+    assert [w.code for w in result.warnings] == ["GINN-W-CGROUP-LEFT"]
+    assert (directory / "held").read_text(encoding="utf-8") == "kept\n"
+    assert_gone(env, fake, "lab")
+
+
+def _recording_rmdir(calls: list[Path]) -> Callable[[Path], None]:
+    """An rmdir seam that records each call and then does the real rmdir (CL-29 tests)."""
+
+    def rmdir(path: Path) -> None:
+        calls.append(path)
+        os.rmdir(path)
+
+    return rmdir
+
+
+@pytest.mark.fr("FR-019")
+def test_a_realm_cgroup_that_is_a_link_is_never_followed_or_removed(
+    env: OpEnv, fake: FakePodman, tmp_path: Path
+) -> None:
+    """CL-29: a link where the realm's directory should be is left alone. The delete does not follow
+    it, so its target survives, and the delete warns."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    root = tmp_path / "cgroup"
+    directory = _realm_cgroup(env, root, "lab")
+    directory.parent.mkdir(parents=True)
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    directory.symlink_to(target)
+    calls: list[Path] = []
+    result = delete_realm(
+        env,
+        fake,
+        RealmName("lab"),
+        hooks=DeleteHooks(cgroup_root=root, rmdir_cgroup=_recording_rmdir(calls)),
+    )
+    assert calls == []
+    assert directory.is_symlink()
+    assert target.is_dir()
+    assert [w.code for w in result.warnings] == ["GINN-W-CGROUP-LEFT"]
+    assert_gone(env, fake, "lab")
+
+
+@pytest.mark.fr("FR-019")
+def test_a_realm_cgroup_directory_of_another_owner_is_left_with_a_warning(
+    env: OpEnv, tmp_path: Path
+) -> None:
+    """CL-29: only a directory that the user owns is removed. The directory here is the user's own,
+    and the expected owner is another uid, so the helper refuses it."""
+    root = tmp_path / "cgroup"
+    other = os.getuid() + 1
+    directory = root / "ginn" / str(other) / "lab"
+    directory.mkdir(parents=True)
+    calls: list[Path] = []
+    warning = delete_module._remove_realm_cgroup(
+        RealmName("lab"),
+        other,
+        DeleteHooks(cgroup_root=root, rmdir_cgroup=_recording_rmdir(calls)),
+    )
+    assert calls == []
+    assert directory.is_dir()
+    assert warning is not None and warning.code == "GINN-W-CGROUP-LEFT"
+
+
+@pytest.mark.fr("FR-019")
+def test_the_supervisor_leaf_name_is_never_removed_even_from_a_record(tmp_path: Path) -> None:
+    """CL-29: the name is reserved, so it never parses. A record that carried it past validation
+    would still name Host Setup's leaf, and the helper refuses to remove that directory."""
+    stub = RealmName.__new__(RealmName)
+    object.__setattr__(stub, "value", SUPERVISOR_LEAF)
+    root = tmp_path / "cgroup"
+    directory = root / "ginn" / str(os.getuid()) / SUPERVISOR_LEAF
+    directory.mkdir(parents=True)
+    calls: list[Path] = []
+    warning = delete_module._remove_realm_cgroup(
+        stub, os.getuid(), DeleteHooks(cgroup_root=root, rmdir_cgroup=_recording_rmdir(calls))
+    )
+    assert calls == []
+    assert directory.is_dir()
+    assert warning is not None and warning.code == "GINN-W-CGROUP-LEFT"

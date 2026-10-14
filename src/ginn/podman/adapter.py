@@ -33,6 +33,9 @@ _SECURITY_OPT: Final = re.compile(r"([A-Za-z-]+)(?:[=:](.*))?", re.DOTALL)
 _CONTROL: Final = frozenset("\0\n\r")
 PODMAN_ERROR_EXIT: Final = 125
 """Exit status podman uses for its own failures (`podman exec` included)."""
+PATH_NOT_FOUND_REASON: Final = "no such path in the container"
+"""The `reason` detail of a GINN-E-INTERNAL from `cp_from` or `cp_into` when the path that the
+call names is absent in the container. The ops layer reads it (ops/create.py, GINN-E-NO-INIT)."""
 
 
 def require_digest_ref(ref: str) -> None:
@@ -393,7 +396,23 @@ class Podman(Protocol):
         """
         ...
 
-    def cp_from(self, container_id: str, src: str, dst: Path) -> None: ...
+    def cp_from(self, container_id: str, src: str, dst: Path) -> None:
+        """Copy `src` out of the container to the host path `dst`. Podman follows a link in `src`.
+
+        A `src` that the container lacks raises GINN-E-INTERNAL with `reason` set to
+        PATH_NOT_FOUND_REASON.
+        """
+        ...
+
+    def cp_into(self, container_id: str, src: Path, dst: str) -> None:
+        """Copy the host file `src` into the container at `dst`. The mode is kept, and the owner is
+        the container's primary uid (`podman cp --archive`, the default).
+
+        Used for the services-on machine-id before the first start (ADR-007, F6). The container may
+        be created and not started. A `dst` whose parent the container lacks raises GINN-E-INTERNAL
+        with `reason` set to PATH_NOT_FOUND_REASON.
+        """
+        ...
 
     def top(self, container_id: str) -> list[tuple[int, int, str]]:
         """Return (pid, rss in KiB, command name) rows for the container's processes."""

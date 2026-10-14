@@ -14,9 +14,11 @@ product.
 Every realm this module makes is named `t77-...`. The module removes them at the start and the end.
 
 Which distributions boot as services-on realms on this host: arch does (its base image ships
-systemd). debian and fedora do not (their pinned images have no /sbin/init). Their items are
-declarative strict xfails for known gap F1, and the reason is the start's own message. The items
-that need a running realm use arch (RUN_DISTRO).
+systemd). debian and fedora do not (their pinned images have no /sbin/init). A services-on create
+on either is refused at create with GINN-E-NO-INIT, before any start (F1, F3). That refusal is the
+known gap F1: the items that expect it are strict xfails with `raises=KnownGapF1`, and
+`create_or_gap` raises KnownGapF1 for those two distributions only. A start error is never F1, so
+a failed start is a plain failure. The items that need a running realm use arch (RUN_DISTRO).
 
 Verdict policy: a known product gap is never turned into an xfail while the test runs. A failing
 assertion stays a failure unless the item carries a strict `xfail` mark for a tracked gap (F<n>).
@@ -61,8 +63,16 @@ class KnownGap(AssertionError):
     failure of that item stays a failure."""
 
 
-START_GAP_CODES = ("GINN-E-INTERNAL", "GINN-E-SERVICE-TIMEOUT")
-"""The start errors that a services-on realm gives when its image has no /sbin/init (F1, F3)."""
+class KnownGapF1(AssertionError):
+    """The failure of gap F1: an image without /sbin/init, refused at create (GINN-E-NO-INIT).
+
+    Two guards hold. The raise is gated on F1_DISTROS in `create_or_gap`, so a NO-INIT elsewhere
+    stays a plain failure. The mark is `raises=KnownGapF1`, and KnownGapF1 is not a KnownGap, so an
+    F11 item with `raises=KnownGap` cannot absorb it (pytest's `raises=` uses isinstance)."""
+
+
+F1_DISTROS = ("debian", "fedora")
+"""The distributions whose pinned images have no /sbin/init (F1). Only their NO-INIT is the gap."""
 PREFIX = "t77-"
 DISTROS = ("debian", "arch", "fedora")
 """The three distributions whose images are pinned in trust.toml (FR-080 parametrisation)."""
@@ -76,8 +86,8 @@ PODMAN = tool("podman")
 SV = tool("sv")
 
 F1_NO_INIT = (
-    "F1: the pinned debian and fedora images have no /sbin/init, so the services-on start fails; "
-    "see spikes/results/T7.7-services-real.md"
+    "F1: the pinned debian and fedora images have no /sbin/init, so a services-on create is "
+    "refused with GINN-E-NO-INIT; see spikes/results/T7.7-services-real.md"
 )
 F2_CLI_ATTACH = (
     "F2/F7: a lazy rebuild's grant attach runs from the CLI session and fails with "
@@ -94,20 +104,20 @@ F11_BUDGET = (
 )
 FR080_CASES = [
     pytest.param(
-        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
     pytest.param("arch"),
     pytest.param(
-        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
 ]
 NFR003_CASES = [
     pytest.param(
-        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
     pytest.param("arch", marks=pytest.mark.xfail(strict=True, reason=F11_BUDGET, raises=KnownGap)),
     pytest.param(
-        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGapF1)
     ),
 ]
 
@@ -148,39 +158,11 @@ def ginn(launcher: Path, *args: str, timeout: float = 900.0) -> Ran:
     return Ran(done.returncode, body)
 
 
-def has_init(paths: OwnedPaths, name: str) -> bool:
-    """Whether the realm's image has /sbin/init. `podman cp` reads the rootfs of the created
-    container, and nothing runs in it, so this is one read of the image."""
-    with tempfile.TemporaryDirectory(prefix="ginn-t77-init-", dir="/tmp") as tmp:  # noqa: S108
-        done = subprocess.run(  # noqa: S603 - fixed argv, no shell
-            [
-                *podman_cli(paths).global_argv(),
-                "cp",
-                f"{container_id(paths, name)}:/sbin/init",
-                str(Path(tmp) / "init"),
-            ],
-            capture_output=True,
-            text=True,
-            env={"XDG_RUNTIME_DIR": str(paths.runtime), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
-            timeout=120,
-            check=False,
-        )
-    return done.returncode == 0
-
-
-def start_ok(launcher: Path, paths: OwnedPaths, name: str) -> None:
-    """Start the realm and assert that the start succeeded. A failed start is never a skip. When the
-    start fails with a start error on an image that has no /sbin/init, it is the known gap F1 and
-    raises KnownGap for the item's mark. Any other failed start is a plain failure."""
+def start_ok(launcher: Path, name: str) -> None:
+    """Start the realm and assert that the start succeeded. A failed start is never a skip, and it
+    is never F1: an image without /sbin/init is refused at create (GINN-E-NO-INIT), before any
+    start. So every failed start is a plain failure, whatever its code."""
     ran = ginn(launcher, "start", name)
-    if ran.rc == 0:
-        return
-    err = ran.body.get("error")
-    code = err.get("code") if isinstance(err, dict) else None
-    if code in START_GAP_CODES and not has_init(paths, name):
-        raise KnownGap(
-            f"F1: the image has no /sbin/init and the services-on start failed: {ran.error_text()}"
-        )
     assert ran.rc == 0, ran.error_text()
 
 
@@ -488,6 +470,21 @@ def create(launcher: Path, distro: str, name: str, services: str) -> Ran:
     return ginn(launcher, "create", distro, "--name", name, "--services", services)
 
 
+def create_or_gap(launcher: Path, distro: str, name: str, services: str) -> Ran:
+    """`create`. A services-on refusal with GINN-E-NO-INIT on debian or fedora is the known gap F1
+    (F3, FR-080), and it raises KnownGapF1, which only an F1 mark absorbs. On any other distribution
+    the refusal is returned, so the caller's assertion fails: a NO-INIT there is a plain failure.
+    """
+    ran = create(launcher, distro, name, services)
+    err = ran.body.get("error")
+    no_init = isinstance(err, dict) and err.get("code") == "GINN-E-NO-INIT"
+    if ran.rc != 0 and no_init and distro in F1_DISTROS:
+        raise KnownGapF1(
+            f"F1: the image has no /sbin/init, so the create refused: {ran.error_text()}"
+        )
+    return ran
+
+
 def delete(launcher: Path, name: str) -> Ran:
     return ginn(launcher, "delete", name, "--purge-home", "--yes")
 
@@ -498,11 +495,13 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     """FR-080 (ADR-003 argv) and NFR-003 (ADR-007 a+b+d): the create argv of a services-on realm.
 
     Read from the container that the real create made: the crun services flags, the mitigations as
-    read-only binds (the journald drop-in and ten /dev/null unit masks), and no `--init`. It needs
-    no start, so it does not depend on the blocked supervised start.
+    read-only binds (the journald drop-in and eleven /dev/null unit masks), and no `--init`. It
+    needs
+    no start, so it does not depend on the blocked supervised start. It runs on arch, because
+    debian's image has no /sbin/init and its create is refused (F1, GINN-E-NO-INIT).
     """
-    name = PREFIX + "deb-argv"
-    ran = create(launcher, "debian", name, "on")
+    name = PREFIX + "arch-argv"
+    ran = create(launcher, RUN_DISTRO, name, "on")
     assert ran.rc == 0, ran.error_text()
     cid = container_id(paths, name)
     argv = json.loads(podman(paths, ["inspect", "--format", "{{json .Config.CreateCommand}}", cid]))
@@ -516,7 +515,7 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     assert argv[-1] == "/sbin/init"
     binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
     assert any(b.endswith("target=/etc/systemd/journald.conf.d/ginn.conf,ro") for b in binds)
-    assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 10
+    assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 11
     fmt = "{{range .Mounts}}{{.Destination}} rw={{.RW}}\n{{end}}"
     assert "/etc/systemd/journald.conf.d/ginn.conf rw=false" in podman(
         paths, ["inspect", "--format", fmt, cid]
@@ -530,8 +529,8 @@ def test_fr084_autostart_toggles_the_down_file(launcher: Path, paths: OwnedPaths
 
     The part that starts the realm when runsv starts is the test further down.
     """
-    name = PREFIX + "deb-auto"
-    assert create(launcher, "debian", name, "on").rc == 0
+    name = PREFIX + "arch-auto"
+    assert create(launcher, RUN_DISTRO, name, "on").rc == 0
     down = service_dir(paths, RealmName(name)) / "down"
     assert down.exists(), "a new services-on realm is not started by runit (ADR-003 decision 5)"
     on = ginn(launcher, "autostart", name, "on")
@@ -581,9 +580,9 @@ def test_fr080_systemd_unit_on_crun(launcher: Path, paths: OwnedPaths, distro: s
     the root-owned supervisor leaf. The in-realm steps run from the leaf (see leaf_exec).
     """
     name = PREFIX + distro[:4] + "-svc"
-    assert create(launcher, distro, name, "on").rc == 0
+    assert create_or_gap(launcher, distro, name, "on").rc == 0
     try:
-        start_ok(launcher, paths, name)
+        start_ok(launcher, name)
         install, unit = {
             "debian": ("apt-get install -y cron", "cron"),
             "arch": ("pacman -Sy --noconfirm cronie", "cronie"),
@@ -613,7 +612,7 @@ def test_fr080_systemd_unit_on_crun(launcher: Path, paths: OwnedPaths, distro: s
         assert runsv_cgroup.endswith(f"/ginn/{UID}/supervisor"), runsv_cgroup
         stopped = ginn(launcher, "stop", name)
         assert stopped.rc == 0, stopped.error_text()
-        start_ok(launcher, paths, name)
+        start_ok(launcher, name)
         status, out = leaf_exec(paths, name, f"systemctl is-active {unit}")
         assert status == 0 and out.strip() == "active", out[-400:]
     finally:
@@ -628,7 +627,7 @@ def running_realm(launcher: Path, paths: OwnedPaths) -> Iterator[str]:
     name = PREFIX + "arch-run"
     assert create(launcher, RUN_DISTRO, name, "on").rc == 0
     try:
-        start_ok(launcher, paths, name)
+        start_ok(launcher, name)
         yield name
     finally:
         ginn(launcher, "stop", name)
@@ -759,12 +758,12 @@ def test_nfr003_idle_rss_of_a_services_on_realm(
     carries the Pss total beside it.
     """
     name = PREFIX + distro[:4] + "-rss"
-    assert create(launcher, distro, name, "on").rc == 0
+    assert create_or_gap(launcher, distro, name, "on").rc == 0
     samples = int(os.environ.get("GINN_T77_SAMPLES", "10"))
     rows: list[dict[str, Any]] = []
     try:
         for index in range(samples):
-            start_ok(launcher, paths, name)
+            start_ok(launcher, name)
             time.sleep(60)
             host = host_memory()
             attribution = realm_rss(paths, name)
@@ -800,7 +799,7 @@ def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) 
         for name in names:
             assert create(launcher, RUN_DISTRO, name, "on").rc == 0
         for name in names:
-            start_ok(launcher, paths, name)
+            start_ok(launcher, name)
         time.sleep(60)
         per_realm = {name: realm_rss(paths, name) for name in names}
     finally:
@@ -827,18 +826,29 @@ def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) 
 @pytest.mark.fr("FR-080")
 @pytest.mark.fr("NFR-003")
 def test_logind_mask_against_the_fr080_apps(launcher: Path, paths: OwnedPaths) -> None:
-    """ADR-007 option: mask systemd-logind.service (spikes/s05/masks-logind.txt) only if the FR-080
-    apps still pass with it masked, after a restart of the realm. This test changes no default."""
+    """ADR-007 mitigation b masks systemd-logind.service by default (CL-28, the S-05 logind file).
+
+    The mask is the create-time read-only bind of /dev/null over the unit path, not a
+    `systemctl mask` symlink, and `systemctl mask` would refuse to replace a bind mount. So the
+    test does not run it. It reads the mask back on the first start (is-enabled `masked`, is-active
+    `inactive`), then restarts the realm, and checks that the FR-080 apps still run with logind
+    masked."""
     name = PREFIX + "arch-logind"
     assert create(launcher, RUN_DISTRO, name, "on").rc == 0
     try:
-        start_ok(launcher, paths, name)
+        start_ok(launcher, name)
         status, out = leaf_exec(paths, name, "pacman -Sy --noconfirm cronie")
         assert status == 0, out[-400:]
-        status, out = leaf_exec(paths, name, "systemctl mask systemd-logind.service")
-        assert status == 0, out[-400:]
+        status, out = leaf_exec(
+            paths,
+            name,
+            "echo ENABLED=$(systemctl is-enabled systemd-logind); "
+            "echo ACTIVE=$(systemctl is-active systemd-logind)",
+        )
+        assert "ENABLED=masked" in out.split(), out[-300:]
+        assert "ACTIVE=inactive" in out.split(), out[-300:]
         assert ginn(launcher, "stop", name).rc == 0
-        start_ok(launcher, paths, name)
+        start_ok(launcher, name)
         status, out = leaf_exec(
             paths,
             name,

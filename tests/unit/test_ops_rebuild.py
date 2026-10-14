@@ -38,7 +38,7 @@ from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.idle import IdleHooks
 from ginn.runtime.realm_security import SecurityHooks
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH
 from ginn.security.caps import option_keys
 from ginn.security.nested import CONFIG_DIR, FILES
 from ginn.services.runit_user import DOWN, journald_dropin, service_dir
@@ -2210,3 +2210,69 @@ def test_a_fault_in_the_everything_set_of_a_kali_rebuild_leaves_the_old_root_usa
     assert record.state is RealmState.STOPPED
     assert generation_of(fake, 2) == []
     assert realm_home_tree(env.paths.homes / KALI.value) == home_before
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-021")
+def test_a_services_on_rebuild_writes_the_realms_machine_id_into_the_new_generation(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-007, F6: gN+1 copies the id that the record holds, so the realm keeps one identity
+    across generations. The rebuild inherits the create's copy, and the swap keeps the id."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    before = _create_services(env, fake, home, hooks)
+    assert before.machine_id is not None
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    result = rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    )
+    record = result.record
+    assert record.generation == 2
+    assert record.machine_id == before.machine_id
+    content, _mode = fake.containers[record.container_id].copied[MACHINE_ID_PATH]
+    assert content == f"{before.machine_id}\n".encode("ascii")
+
+
+@pytest.mark.fr("FR-066")
+@pytest.mark.fr("FR-080")
+def test_a_lazy_services_on_rebuild_whose_image_has_no_init_is_deferred_with_the_reason(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """F3 on the lazy path: a services-off realm turned on, whose image has no /sbin/init. Its
+    start's rebuild is refused with GINN-E-NO-INIT, which the start reports as
+    GINN-W-REBUILD-DEFERRED with that message as its reason. The start goes on with the services-off
+    root, and no new generation is made or kept."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    fake.init_absent = True
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    notices: list[Any] = []
+    started = start_realm(
+        env,
+        fake,
+        NAME,
+        session=session(home),
+        hooks=_lazy(tmp_path, mountinfo, rebuild_hooks(tmp_path, sleeps, mountinfo), runit=runit),
+        warnings=notices,
+    )
+    assert [w.code for w in notices] == ["GINN-W-REBUILD-DEFERRED"]
+    assert "services-on needs systemd in the realm" in notices[0].message
+    assert started.generation == 1
+    assert generation_of(fake, 2) == []
+    assert stored(env).generation == 1

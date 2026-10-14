@@ -49,6 +49,7 @@ from typing import Final
 from ginn.errors import GinnError, make
 from ginn.ops.retry import NETWORK_PATTERNS
 from ginn.podman.adapter import (
+    PATH_NOT_FOUND_REASON,
     PODMAN_ERROR_EXIT,
     CreateSpec,
     RetryHook,
@@ -60,6 +61,9 @@ from ginn.podman.models import ContainerInfo, ExecResult, ImageInfo, PodmanInfo
 from ginn.store.paths import OwnedPaths, check_runtime_dir
 
 _IN_USE_PATTERNS: Final = (re.compile(r"image is in use by a container", re.IGNORECASE),)
+_PATH_NOT_FOUND_PATTERNS: Final = (re.compile(r"could not be found on container", re.IGNORECASE),)
+"""podman's wording when a `cp` path is absent in the container (F3): `"<path>" could not be found
+on container <name>: no such file or directory`."""
 _DIGEST_PATTERNS: Final = (
     re.compile(r"manifest unknown", re.IGNORECASE),
     re.compile(r"digest did not match", re.IGNORECASE),
@@ -486,6 +490,10 @@ class PodmanCli:
             # reason in the details. create and delete check for a user before they call rmi.
             err = make("GINN-E-INTERNAL")
             err.details["reason"] = "the image is in use by a container, so rmi refused it"
+        elif op == "cp" and _matches(_PATH_NOT_FOUND_PATTERNS, stderr):
+            # The ops layer reads this reason (GINN-E-NO-INIT, F3). The code stays GINN-E-INTERNAL.
+            err = make("GINN-E-INTERNAL")
+            err.details["reason"] = PATH_NOT_FOUND_REASON
         else:
             err = make("GINN-E-INTERNAL")
         err.details.update({"op": op, "exit": result.returncode, "stderr": _decisive_line(stderr)})
@@ -782,6 +790,16 @@ class PodmanCli:
         if not dst.is_absolute():
             raise ValueError(f"cp destination must be an absolute path (NFR-SEC-005): {dst}")
         args = ["cp", f"{require_arg(container_id, 'container')}:{src}", str(dst)]
+        self._expect("cp", self._run(args))
+
+    def cp_into(self, container_id: str, src: Path, dst: str) -> None:
+        # Both paths are absolute, so neither can start with '-', and podman never reads one as an
+        # option. The container path is cut at its first ':', so the container id must not hold one.
+        if not src.is_absolute():
+            raise ValueError(f"cp source must be an absolute path (NFR-SEC-005): {src}")
+        if not dst.startswith("/") or any(ch in dst for ch in "\0\n\r"):
+            raise ValueError(f"cp destination must be an absolute container path: {dst!r}")
+        args = ["cp", str(src), f"{require_arg(container_id, 'container')}:{dst}"]
         self._expect("cp", self._run(args))
 
     def top(self, container_id: str) -> list[tuple[int, int, str]]:

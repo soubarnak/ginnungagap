@@ -16,7 +16,7 @@ from ginn.errors import GinnError  # noqa: E402
 pytestmark = [pytest.mark.fr("DR-002"), pytest.mark.fr("NFR-SEC-005")]
 
 NAME = r"[a-z][a-z0-9-]{0,31}"
-RESERVED = ("ginn", "host", "root", "all")
+RESERVED = ("ginn", "host", "root", "all", "supervisor")
 SHELL_CHARS = ";|&$`(){}<>*?!'\"\\ \n\x00"
 
 

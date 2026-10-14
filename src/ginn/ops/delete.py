@@ -14,7 +14,8 @@ these steps. Each one is a journal step, in this order. The names are stable and
   delete finishes the release.
 - container-removed: each container that podman lists for the realm is removed with force. The
   realm root is the container, so this removes it (FR-019). A container that is already gone is
-  not an error.
+  not an error. Then the realm's empty cgroup directory goes (F9, ADR-003): rmdir only, a missing
+  directory is no error, and a directory that stays is a GINN-W-CGROUP-LEFT warning.
 - service-removed: the realm's runit service directory and its per-realm files go (FR-081). A
   services-off realm has none, so this is a no-op for it.
 - exports-removed: the realm's exported entries go: its menu entries and icon copies, its CLI
@@ -107,9 +108,10 @@ from pathlib import Path
 from typing import Final
 
 from ginn.domain import RealmName, RealmState
-from ginn.errors import GinnError, make
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import unexport_all
+from ginn.hostsetup.cgroups import DEFAULT_CGROUP_ROOT, SUPERVISOR_LEAF
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.images import remove_estimate_containers, remove_image
 from ginn.ops.lifecycle import STOP_TIMEOUT_S, refuse_before_supervisor
@@ -117,7 +119,7 @@ from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime import idle as idle_watch
-from ginn.runtime.spec import LABEL_REALM
+from ginn.runtime.spec import LABEL_REALM, services_cgroup_parent
 from ginn.services import supervisor
 from ginn.services.runit_user import remove_service
 from ginn.services.supervisor import SupervisorHooks
@@ -217,6 +219,12 @@ class DeleteHooks:
     mount_id: Callable[[int], int] = mount_id_of_fd
     max_depth: int = MAX_TREE_DEPTH
     supervisor: SupervisorHooks = field(default_factory=SupervisorHooks)
+    cgroup_root: Path | None = None
+    """The cgroup root that holds the realm's directory (F9). None is DEFAULT_CGROUP_ROOT, read when
+    the delete runs, so a test can point it at a temporary directory."""
+    rmdir_cgroup: Callable[[Path], None] = os.rmdir
+    """Removes the realm's cgroup directory. It is rmdir only, so a directory that holds a process
+    or a child cgroup is left, and the delete warns (GINN-W-CGROUP-LEFT)."""
 
 
 @dataclass(frozen=True)
@@ -328,6 +336,9 @@ def _delete(
     _step(mutation, hooks, "stopped")
 
     _remove_containers(podman, name)
+    cgroup_warning = _remove_realm_cgroup(name, env.paths.uid, hooks)
+    if cgroup_warning is not None:
+        mutation.warnings.append(cgroup_warning)
     _step(mutation, hooks, "container-removed")
 
     remove_service(env.paths, name)
@@ -415,6 +426,49 @@ def _remove_containers(podman: Podman, name: RealmName) -> None:
         except GinnError:
             if any(left.id == info.id for left in _listed(podman, name)):
                 raise
+
+
+def _remove_realm_cgroup(name: RealmName, uid: int, hooks: DeleteHooks) -> GinnWarning | None:
+    """Remove the realm's cgroup directory, `<root>/ginn/<uid>/<realm>`, when it is empty (F9).
+
+    Podman makes this directory for a services-on realm, and it outlives the container: podman
+    removes the container's own scope, and the realm's directory stays behind. It is removed with
+    rmdir, never recursively. A missing directory is the normal case (a services-off realm has
+    none), so it is no error. Any other failure, such as ENOTEMPTY (a process or a child cgroup is
+    left) or EBUSY, is a warning, and the delete goes on: the container is already gone, and the
+    directory holds no ginn state.
+
+    Defence in depth (CL-29). The name `supervisor` is reserved, but a record could still carry it,
+    and then this path is Host Setup's root-owned leaf. So the leaf name is never removed. The entry
+    is read with lstat first, and only a real directory (not a link) that the user owns is removed.
+    """
+    if name.value == SUPERVISOR_LEAF:
+        return warn(
+            "GINN-W-CGROUP-LEFT",
+            realm=name.value,
+            reason="the name is Host Setup's cgroup leaf, which is never removed",
+        )
+    root = DEFAULT_CGROUP_ROOT if hooks.cgroup_root is None else hooks.cgroup_root
+    path = root / services_cgroup_parent(uid, name).lstrip("/")
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return warn("GINN-W-CGROUP-LEFT", realm=name.value, reason=f"{path}: {exc.strerror or exc}")
+    if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != uid:
+        return warn(
+            "GINN-W-CGROUP-LEFT",
+            realm=name.value,
+            reason=f"{path} is not a directory of this user (a link or another owner)",
+        )
+    try:
+        hooks.rmdir_cgroup(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return warn("GINN-W-CGROUP-LEFT", realm=name.value, reason=f"{path}: {exc.strerror or exc}")
+    return None
 
 
 def _kept_or_absent(env: OpEnv, name: RealmName) -> str:

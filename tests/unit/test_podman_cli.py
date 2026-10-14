@@ -27,7 +27,7 @@ import pytest
 from ginn.errors import GinnError
 from ginn.ops import retry
 from ginn.podman import cli as podman_cli
-from ginn.podman.adapter import CreateSpec, Podman, RetryHook
+from ginn.podman.adapter import PATH_NOT_FOUND_REASON, CreateSpec, Podman, RetryHook
 from ginn.podman.cli import PodmanCli
 from ginn.store.paths import OwnedPaths
 
@@ -1189,3 +1189,43 @@ def test_rmi_of_an_image_in_use_is_internal_with_the_reason_named(
     assert err.code == "GINN-E-INTERNAL"
     assert err.details["reason"] == "the image is in use by a container, so rmi refused it"
     assert err.details["op"] == "rmi"
+
+
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("dst", ["etc/machine-id", "-rf", "/etc/machine-id\n"])
+def test_cp_into_refuses_a_destination_that_is_not_a_plain_absolute_container_path(
+    shim: Path, tmp_path: Path, dst: str
+) -> None:
+    src = tmp_path / "machine-id"
+    src.write_text("0" * 32 + "\n", encoding="ascii")
+    cli = make_cli(tmp_path)
+    with pytest.raises(ValueError, match="absolute"):
+        cli.cp_into(CONTAINER, src, dst)
+    assert cli.history == []
+    assert logged(shim) == []
+
+
+@pytest.mark.fr("NFR-SEC-005")
+def test_cp_into_passes_the_host_file_and_the_container_path_as_argv(
+    shim: Path, tmp_path: Path
+) -> None:
+    use_fixture_dir(tmp_path, {"cp": {"stdout": "", "stderr": "", "exit": 0}})
+    src = tmp_path / "machine-id"
+    src.write_text("0" * 32 + "\n", encoding="ascii")
+    make_cli(tmp_path).cp_into(CONTAINER, src, "/etc/machine-id")
+    argv = logged(shim)[0]["argv"]
+    assert argv[-3:] == ["cp", str(src), f"{CONTAINER}:/etc/machine-id"]
+
+
+@pytest.mark.fr("FR-080")
+def test_cp_from_a_path_the_container_lacks_carries_the_no_such_path_reason(
+    shim: Path, tmp_path: Path
+) -> None:
+    """F3: podman's not-found wording becomes the reason that the ops layer reads. The code stays
+    GINN-E-INTERNAL, so only the create's init check turns it into GINN-E-NO-INIT."""
+    stderr = '"/sbin/init" could not be found on container x: no such file or directory\n'
+    use_fixture_dir(tmp_path, {"cp": {"stdout": "", "stderr": stderr, "exit": 125}})
+    with pytest.raises(GinnError) as caught:
+        make_cli(tmp_path).cp_from(CONTAINER, "/sbin/init", tmp_path / "init")
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["reason"] == PATH_NOT_FOUND_REASON

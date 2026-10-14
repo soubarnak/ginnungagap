@@ -3,8 +3,8 @@
 
 Validation runs in `__post_init__`, so `RealmName("root")` fails as well as `RealmName.parse`.
 The rule: a lowercase letter, then up to 31 lowercase letters, digits or hyphens. The words
-`ginn`, `host`, `root` and `all` are reserved. Matching uses `re.fullmatch` so a trailing newline
-is rejected.
+`ginn`, `host`, `root`, `all` and `supervisor` are reserved. `supervisor` is the name of Host
+Setup's cgroup leaf (CL-29). Matching uses `re.fullmatch` so a trailing newline is rejected.
 """
 
 import re
@@ -15,7 +15,11 @@ from ginn.domain._errors import reject
 
 NAME_CODE: Final = "GINN-E-NAME-INVALID"
 NAME_RULE: Final = "^[a-z][a-z0-9-]{0,31}$ (DR-002)"
-RESERVED_NAMES: Final[frozenset[str]] = frozenset({"ginn", "host", "root", "all"})
+# "supervisor" is the root-owned cgroup leaf that Host Setup makes under each user's ginn cgroup
+# (hostsetup/cgroups.py SUPERVISOR_LEAF). A realm of that name would take the same cgroup directory,
+# and its delete could remove the leaf (CL-29). The domain may not import hostsetup, so a test pins
+# the two names equal.
+RESERVED_NAMES: Final[frozenset[str]] = frozenset({"ginn", "host", "root", "all", "supervisor"})
 _NAME_BODY: Final = re.compile(r"[a-z][a-z0-9-]{0,31}")
 
 

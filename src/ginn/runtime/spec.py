@@ -62,6 +62,7 @@ What the argv does not carry:
 """
 
 import os
+import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -86,8 +87,13 @@ KEEP_ALIVE_ENTRYPOINT: Final[tuple[str, ...]] = ("sleep",)
 KEEP_ALIVE_COMMAND: Final[tuple[str, ...]] = ("infinity",)
 """The services-off realm's keep-alive, `sleep infinity`, under `--init`. Entrypoint and command
 are both given, so the container keeps running whatever podman does with the image's CMD."""
-SERVICES_COMMAND: Final[tuple[str, ...]] = ("/sbin/init",)
+INIT_PATH: Final = "/sbin/init"
+"""The path of systemd in a services-on image. The create checks it exists (GINN-E-NO-INIT, F3)."""
+SERVICES_COMMAND: Final[tuple[str, ...]] = (INIT_PATH,)
 """The services-on realm's command: systemd as PID 1 (ADR-003). It follows the image."""
+MACHINE_ID_PATH: Final = "/etc/machine-id"
+"""Where a services-on container gets its machine-id, copied in with `podman cp` before the
+first start (ADR-007, F6). A bind mount is not used: it breaks systemd-machine-id-commit.service."""
 SERVICES_STOP_SIGNAL: Final = "SIGRTMIN+3"
 """The services-on stop signal, which systemd treats as poweroff (ADR-003)."""
 SERVICES_STOP_TIMEOUT_S: Final = 30
@@ -101,7 +107,7 @@ JOURNALD_DROPIN_TARGET: Final = "/etc/systemd/journald.conf.d/ginn.conf"
 """Where the ginn-owned journald drop-in is bind-mounted read-only (ADR-007 a)."""
 JOURNALD_DROPIN_TEXT: Final = "[Journal]\nStorage=volatile\nRuntimeMaxUse=8M\n"
 """The drop-in: the journal stays in RAM and is capped at 8 MiB (ADR-007 a)."""
-SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
+SERVICES_BASE_MASKED_UNITS: Final[tuple[str, ...]] = (
     "systemd-udevd.service",
     "systemd-udevd-control.socket",
     "systemd-udevd-kernel.socket",
@@ -113,8 +119,14 @@ SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
     "e2scrub_all.timer",
     "fstrim.timer",
 )
-"""The ten units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over its
-unit path under /etc/systemd/system. The list is spikes/s05/masks-base.txt (tests pin it)."""
+"""The ten base units of ADR-007 mitigation b. The list is spikes/s05/masks-base.txt, and the
+tests pin it."""
+SERVICES_LOGIND_UNIT: Final = "systemd-logind.service"
+"""The logind unit that ADR-007 mitigation b also masks (decided by the user, 2026-10-14, CL-28).
+The list is spikes/s05/masks-logind.txt (tests pin it)."""
+SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (*SERVICES_BASE_MASKED_UNITS, SERVICES_LOGIND_UNIT)
+"""The eleven units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over its
+unit path under /etc/systemd/system. The base ten, then logind (CL-28)."""
 UNIT_DIR: Final = "/etc/systemd/system"
 KALI: Final = "kali"
 HOST_NETWORK: Final = "host"
@@ -319,6 +331,16 @@ def services_cgroup_parent(uid: int, name: RealmName) -> str:
     it, so the services run inside that subtree.
     """
     return f"/ginn/{uid}/{name.value}"
+
+
+def new_machine_id() -> str:
+    """A new machine-id for a services-on realm: 128 random bits, as 32 lowercase hex digits.
+
+    systemd reads `/etc/machine-id` as its identity, and the realm's image ships the literal word
+    `uninitialized`, so systemd runs its first-boot path and dbus fails (F6). ops/create.py writes
+    this value into the container, and records it, so a rebuild keeps it (ADR-007).
+    """
+    return secrets.token_hex(16)
 
 
 def mitigation_mounts(spec: RealmSpec) -> list[Mount]:

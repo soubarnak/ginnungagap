@@ -17,8 +17,15 @@ from pathlib import Path
 from typing import Final, NamedTuple
 
 from ginn.errors import GinnError, make
-from ginn.podman.adapter import CreateSpec, RetryHook, require_digest_ref, with_network_retry
+from ginn.podman.adapter import (
+    PATH_NOT_FOUND_REASON,
+    CreateSpec,
+    RetryHook,
+    require_digest_ref,
+    with_network_retry,
+)
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult, ImageInfo, PodmanInfo
+from ginn.runtime.spec import INIT_PATH
 
 INJECTABLE_CODES: Final = frozenset(
     {"GINN-E-NETWORK", "GINN-E-IMAGE-UNVERIFIED", "GINN-E-INTERNAL"}
@@ -77,6 +84,8 @@ class _Container:
     exit_code: int = 0
     passwd_entry: str | None = None
     """The `--passwd-entry` podman writes for the keep-id user. `getent passwd` reads it (T4.9b)."""
+    copied: dict[str, tuple[bytes, int]] = field(default_factory=dict)
+    """The files `cp_into` put in the container: destination to (content, mode bits)."""
 
 
 def _cat(files: Mapping[str, bytes], path: str) -> ExecResult:
@@ -91,6 +100,17 @@ def _error(code: str, ref: str) -> GinnError:
     if code == "GINN-E-IMAGE-UNVERIFIED":
         return make(code, distro=ref.partition("@")[0])
     return make(code)
+
+
+_FAKE_INIT: Final = b"systemd\n"
+"""The stand-in for systemd's binary at `/sbin/init`, which the fake image carries by default."""
+
+
+def _path_not_found() -> GinnError:
+    """The error of a `cp` whose container path is absent, as PodmanCli raises it (F3)."""
+    err = make("GINN-E-INTERNAL")
+    err.details["reason"] = PATH_NOT_FOUND_REASON
+    return err
 
 
 def _getent_passwd(container: _Container, uid: str) -> ExecResult:
@@ -122,6 +142,9 @@ class FakePodman:
     fail_ops: dict[str, str] = field(default_factory=dict)
     pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
+    init_absent: bool = False
+    """True makes the image lack `/sbin/init`: `cp_from` of it fails as podman's cp does (F3).
+    Every other image path is answered from `files`, and `/sbin/init` is present by default."""
     tops: dict[str, list[tuple[int, int, str]]] = field(default_factory=dict)
     log_text: dict[str, str] = field(default_factory=dict)
     images: dict[str, ImageInfo] = field(default_factory=dict)
@@ -398,10 +421,18 @@ class FakePodman:
     def cp_from(self, container_id: str, src: str, dst: Path) -> None:
         self._record("cp_from", container_id, src, str(dst))
         self._container(container_id)
-        content = self.files.get(src)
+        if src == INIT_PATH and self.init_absent:
+            raise _path_not_found()
+        content = self.files.get(src, _FAKE_INIT if src == INIT_PATH else None)
         if content is None:
-            raise make("GINN-E-INTERNAL")
+            raise _path_not_found()
         dst.write_bytes(content)
+
+    def cp_into(self, container_id: str, src: Path, dst: str) -> None:
+        self._record("cp_into", container_id, dst)
+        self._take_op_failure("cp_into")
+        container = self._container(container_id)
+        container.copied[dst] = (src.read_bytes(), src.stat().st_mode & 0o777)
 
     def top(self, container_id: str) -> list[tuple[int, int, str]]:
         self._record("top", container_id)

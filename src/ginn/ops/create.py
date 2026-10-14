@@ -19,7 +19,10 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   (FR-011). A mismatch removes the image, and nothing is kept.
 - created: `podman create` runs from the realm's spec, Basic with services off (FR-010 AC-1), or
   with services on (ADR-003, runtime/spec.py). The record is saved again with the container ID, so a
-  crash cannot leave an unnamed container.
+  crash cannot leave an unnamed container. A services-on container then gets two checks before its
+  first start: the image must hold `/sbin/init` (GINN-E-NO-INIT, F3), and the realm's machine-id is
+  copied into `/etc/machine-id` with `podman cp` (ADR-007, F6). The id is kept on the record, so a
+  rebuild writes the same one.
 - services on: the create stops after `created`. Its container is made and never started: a
   services-on realm starts only through its runit entry (FR-081, ADR-003), and the CLI never starts
   it. So this create runs no `podman start`, `exec` or `stop`, attaches no grant, and runs no user
@@ -112,7 +115,7 @@ from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import PATH_NOT_FOUND_REASON, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
     AttachResult,
@@ -122,7 +125,7 @@ from ginn.runtime.attach import (
     share_skipped,
 )
 from ginn.runtime.mounts import attach_plan
-from ginn.runtime.spec import create_spec
+from ginn.runtime.spec import INIT_PATH, MACHINE_ID_PATH, create_spec, new_machine_id
 from ginn.security.nested import write_config
 from ginn.security.nvidia import Status
 from ginn.security.seccomp import write as write_profile
@@ -131,6 +134,7 @@ from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
 from ginn.store.paths import OWNED_DIR_MODE
 from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.scratch import scratch_dir
 
 STOP_TIMEOUT_S: Final = 30
 """Seconds `podman stop` waits before it kills the realm (FR-016, AS-023)."""
@@ -162,6 +166,13 @@ def _remove_tree(path: Path) -> None:
         path.unlink()
     elif path.is_dir():
         shutil.rmtree(path)
+
+
+def _scratch_failure(exc: OSError) -> GinnError:
+    """The GINN-E-INTERNAL of a scratch directory that cannot be made, written or read (F3, F6)."""
+    err = make("GINN-E-INTERNAL")
+    err.details.update({"detail": f"create scratch directory: {exc.strerror or exc}"})
+    return err
 
 
 def _cleared_request() -> dict[str, Any]:
@@ -357,7 +368,63 @@ class _Create:
         cid = self._podman.create(create_spec(self._plan.spec))
         self._cid = cid
         self._update(container_id=cid)
+        if self._plan.spec.services:
+            self._prepare_services(cid)
         self._step("created")
+
+    def _prepare_services(self, cid: str) -> None:
+        """Check that the image has systemd, and give the container its machine-id (F3, F6).
+
+        Both run before the first start, which for a services-on realm is its runit start
+        (ADR-003). The rebuild inherits this, so a rebuilt generation gets the same checks. A
+        failure is a GinnError, so the create or the rebuild is rolled back.
+        """
+        self._check_init(cid)
+        machine_id = self._current().machine_id or new_machine_id()
+        self._copy_machine_id(cid, machine_id)
+        self._update(machine_id=machine_id)
+
+    def _check_init(self, cid: str) -> None:
+        """Refuse a services-on image that has no /sbin/init, with GINN-E-NO-INIT (F3, FR-080).
+
+        The check copies `/sbin/init` out of the created container into a scratch directory under
+        the runtime root. podman follows a link in the source, so a link to systemd passes, and a
+        missing path fails with podman's not-found reason. That reason is the only one this check
+        takes for an absent init. Any other copy failure stays GINN-E-INTERNAL. A created container
+        is read here, not started, so nothing runs in it. The scratch copy is removed on exit.
+        """
+        try:
+            with scratch_dir(self._env.paths) as scratch:
+                try:
+                    self._podman.cp_from(cid, INIT_PATH, scratch / "init")
+                except GinnError as err:
+                    if err.details.get("reason") != PATH_NOT_FOUND_REASON:
+                        raise
+                    raise make(
+                        "GINN-E-NO-INIT",
+                        image=self._plan.spec.image,
+                        realm=self._request.name.value,
+                    ) from err
+        except OSError as exc:
+            # A failed scratch directory is a GinnError, so run_journaled rolls the create back.
+            raise _scratch_failure(exc) from exc
+
+    def _copy_machine_id(self, cid: str, machine_id: str) -> None:
+        """Write the realm's machine-id into the container with `podman cp` (ADR-007, F6).
+
+        The file goes in as a copy, not as a bind mount: a bind of /etc/machine-id makes
+        systemd-machine-id-commit.service fail (spikes/results/F6-F1-probe.md, section A.2). The
+        scratch file holds the id and a newline, with mode 0644, and it is removed on exit. An
+        OSError while the file is staged is a GinnError, so the create is rolled back.
+        """
+        try:
+            with scratch_dir(self._env.paths) as scratch:
+                src = scratch / "machine-id"
+                src.write_text(f"{machine_id}\n", encoding="ascii")
+                src.chmod(0o644)
+                self._podman.cp_into(cid, src, MACHINE_ID_PATH)
+        except OSError as exc:
+            raise _scratch_failure(exc) from exc
 
     def _write_journald_dropin(self) -> None:
         """Write the shared journald drop-in that the create argv binds (ADR-007 a, CR-007)."""

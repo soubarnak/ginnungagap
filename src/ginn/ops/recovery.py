@@ -123,7 +123,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
-from ginn.distros import Verb
+from ginn.distros import Verb, available
 from ginn.distros import load as load_distro
 from ginn.domain import (
     DistroId,
@@ -153,6 +153,7 @@ from ginn.store.journal import PARAMS_OVERFLOW, JournalEntry, JournalFile, damag
 from ginn.store.locks import image_lock, realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.scratch import ScratchSweep, leftover_names, remove_leftovers
 from ginn.trust import pull_reference
 
 OP_CREATE: Final = "create"
@@ -314,6 +315,53 @@ def sweep_estimates(env: OpEnv, podman: Podman) -> list[RecoveryOutcome]:
         return [blocked]
     labels = {info.labels[LABEL_ESTIMATE] for info in listed if LABEL_ESTIMATE in info.labels}
     return [_sweep_distro(env, podman, distro) for distro in sorted(labels)]
+
+
+_SCRATCH: Final = "scratch"
+"""The realm and op names of a scratch sweep's outcomes. The leftovers hold no realm."""
+
+
+def sweep_scratch(env: OpEnv) -> list[RecoveryOutcome]:
+    """Remove the scratch directories that a killed create left under the runtime root (F3, F6).
+
+    A create makes its scratch directory (store/scratch.py) while it holds the image lock of its
+    distribution, from its first check to its last copy. So the sweep takes the image lock of every
+    distribution without waiting. A held lock means that a create runs, and it may be using its
+    scratch directory, so the sweep removes nothing and reports the outcome busy. Under all the
+    locks, `remove_leftovers` removes what a killed create left, and only what the user owns. Each
+    entry it keeps is one outcome, and the next command tries again. `settle_interrupted` runs this
+    beside `sweep_estimates`, for the commands that pass its `sweep` flag.
+
+    The scan comes first, and no lock is taken unless a leftover exists. So a create or a rebuild
+    of any distribution is never refused with GINN-E-REALM-BUSY while there is nothing to sweep.
+    """
+    root = env.paths.runtime
+    try:
+        if not leftover_names(root):
+            return []
+        with contextlib.ExitStack() as locks:
+            for distro in available(include_test=True):
+                locks.enter_context(image_lock(env.paths, distro, "scratch sweep"))
+            swept: ScratchSweep = remove_leftovers(root, env.paths.uid)
+    except GinnError as exc:
+        if exc.code == _REALM_BUSY:
+            reason = "a create runs, so its scratch directory may be in use; the leftovers are kept"
+            return [RecoveryOutcome(_SCRATCH, _SCRATCH, None, OUTCOME_BUSY, reason, str(root))]
+        reason = f"the sweep stopped ({exc.code}); the leftovers are kept for the next command"
+        return [RecoveryOutcome(_SCRATCH, _SCRATCH, None, OUTCOME_BLOCKED, reason, str(root))]
+    except OSError as exc:
+        reason = f"the runtime root cannot be read ({exc.strerror or exc}); nothing is removed"
+        return [RecoveryOutcome(_SCRATCH, _SCRATCH, None, OUTCOME_BLOCKED, reason, str(root))]
+    outcomes: list[RecoveryOutcome] = []
+    if swept.removed:
+        reason = f"{len(swept.removed)} scratch directories of killed creates are removed"
+        outcomes.append(RecoveryOutcome(_SCRATCH, _SCRATCH, None, OUTCOME_SWEPT, reason, str(root)))
+    for name, why in swept.kept:
+        path = str(root / name)
+        outcomes.append(
+            RecoveryOutcome(_SCRATCH, _SCRATCH, None, OUTCOME_BLOCKED, f"{name} {why}", path)
+        )
+    return outcomes
 
 
 def _sweep_distro(env: OpEnv, podman: Podman, distro: str) -> RecoveryOutcome:

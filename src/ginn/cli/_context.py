@@ -47,6 +47,7 @@ from ginn.ops.recovery import (
     RecoveryOutcome,
     recover,
     sweep_estimates,
+    sweep_scratch,
 )
 from ginn.ops.service import ServiceHooks
 from ginn.podman.adapter import Podman
@@ -304,16 +305,20 @@ def settle_interrupted(
     """Run ops/recovery.py before a realm command, and report each outcome (FR-122).
 
     `sweep` runs first the sweep of a killed Kali estimate's leftovers (ops/recovery.py
-    `sweep_estimates`). Only the commands that touch the Kali image pass it: create and its resume,
-    delete, rebuild and update. Every other command skips it, so an app launch or a runit restart
-    pays no podman call for it (NFR-004). `read_only` is True for a command that writes no state,
-    such as `status`, `list` or an update check, and a read-only command never sweeps. A failure of
-    the recovery, a GinnError or any other exception (an OSError from the journal scan included),
-    then becomes a warning, and the command goes on, so the user still sees the realms. Otherwise
+    `sweep_estimates`), and the sweep of the scratch directories of a killed create
+    (`sweep_scratch`, F3, F6). Only the commands that touch the Kali image pass it: create and its
+    resume, delete, rebuild and update. Every other command skips it, so an app launch or a runit
+    restart pays no podman call for it (NFR-004). `read_only` is True for a command that writes no
+    state, such as `status`, `list` or an update check, and a read-only command never sweeps. A
+    failure of the recovery, a GinnError or any other exception (an OSError from the journal scan
+    included), then becomes a warning, and the command goes on, so the user still sees the realms.
+    Otherwise
     the exception propagates, and a command that changes a realm does not run.
     """
     try:
-        swept = sweep_estimates(realms.env, realms.podman) if sweep and not read_only else []
+        swept: list[RecoveryOutcome] = []
+        if sweep and not read_only:
+            swept = [*sweep_estimates(realms.env, realms.podman), *sweep_scratch(realms.env)]
         outcomes = [*swept, *recover(realms.env, realms.podman)]
     except Exception as exc:
         if not read_only:
@@ -342,11 +347,11 @@ def _describe(exc: Exception) -> str:
 
 
 def _report(outcome: RecoveryOutcome, output: Output) -> None:
-    if outcome.op == "estimate":
-        # A sweep of a killed Kali estimate's leftovers (ops/recovery.py sweep_estimates). The
-        # leftovers hold no realm, and the next command tries again. So every outcome is a verbose
-        # line, a blocked one too: a warning would name a journal file and a realm that do not
-        # exist.
+    if outcome.op in ("estimate", "scratch"):
+        # A sweep of a killed Kali estimate's leftovers (ops/recovery.py sweep_estimates), or of the
+        # scratch directories of a killed create (sweep_scratch). The leftovers hold no realm, and
+        # the next command tries again. So every outcome is a verbose line, a blocked one too: a
+        # warning would name a journal file and a realm that do not exist.
         output.verbose_line(f"recovery: {outcome.path}: {outcome.outcome}: {outcome.reason}")
         return
     if outcome.outcome in _SETTLED:
