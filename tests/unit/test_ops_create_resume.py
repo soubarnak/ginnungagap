@@ -31,7 +31,7 @@ from ginn.ops.resume import resume_create
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime import attach
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
-from ginn.services.runit_user import service_dir
+from ginn.services.runit_user import journald_dropin, service_dir
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from ginn.trust import manifest as trust
@@ -572,12 +572,25 @@ def test_a_services_on_resume_writes_its_runit_directory_and_never_starts_the_co
     tmp_path: Path,
     sleeps: list[float],
     mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
     fake.calls.clear()
+    # The killed create had already written the drop-in, so it is removed here. The check below
+    # then proves that the resume's own create writes it before podman binds it (ADR-007 a).
+    journald_dropin(env.paths).unlink(missing_ok=True)
+    seen: list[bool] = []
+    original_create = fake.create
+
+    def create_checking_source(spec: CreateSpec) -> str:
+        seen.append(journald_dropin(env.paths).is_file())
+        return original_create(spec)
+
+    monkeypatch.setattr(fake, "create", create_checking_source)
 
     result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
 
+    assert seen == [True], "the drop-in exists when podman binds it at the resume's create"
     assert "start" not in ops_of(fake)
     assert result.record.state is RealmState.STOPPED
     assert result.record.settings.services is True

@@ -1,0 +1,936 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Host gate for services mode, runit supervision and autostart (T7.7), on real rootless Podman.
+
+Run with `GINN_INTEGRATION=1 .venv/bin/pytest tests/integration/test_services_real.py -v -s` on a
+Void glibc host. The verdicts and numbers are in spikes/results/T7.7-services-real.md.
+
+This gate drives the product CLI against the user's real runit supervisor
+(`$XDG_STATE_HOME/ginn/sv`, run by `runsvdir` under the root service `ginn-soubarna`), not against
+the temp base of conftest.py.
+The CLI runs through a launcher that this module writes (`launcher`). The launcher points two native
+helper constants, ginn-wait and ginn-rebind, at `native/build`, because `/usr/libexec/ginn` is not
+installed on this host and installing it needs root. The launcher changes nothing else of the
+product.
+Every realm this module makes is named `t77-...`. The module removes them at the start and the end.
+
+Which distributions boot as services-on realms on this host: arch does (its base image ships
+systemd). debian and fedora do not (their pinned images have no /sbin/init). Their items are
+declarative strict xfails for known gap F1, and the reason is the start's own message. The items
+that need a running realm use arch (RUN_DISTRO).
+
+Verdict policy: a known product gap is never turned into an xfail while the test runs. A failing
+assertion stays a failure unless the item carries a strict `xfail` mark for a tracked gap (F<n>).
+Then an unexpected pass fails the suite. An environment-only gap is a skip.
+
+In-realm commands run through `leaf_exec`. A session process cannot enter a services-on cgroup, so
+the command runs as a throwaway runit service, which is inside the supervisor leaf.
+
+Musl: no musl host exists, so the musl leg is marked host_musl and conftest.py skips it.
+FR-085: deferred (CL-2), so its test is skipped with that reason.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import shlex
+import shutil
+import signal
+import subprocess  # noqa: S404 - fixed argv lists only, never a shell (NFR-SEC-005)
+import tempfile
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ginn.domain import RealmName
+from ginn.podman.cli import PodmanCli
+from ginn.services.runit_user import service_dir
+from ginn.services.supervisor import parse_status
+from ginn.store.paths import OwnedPaths
+from tests.integration.conftest import REPO, run_tool, tool
+
+
+class KnownGap(AssertionError):
+    """The failure of a tracked product gap (F<n>). Only the places where the gap shows raise it.
+    Each item that carries it names it with `raises=KnownGap` on its strict xfail mark, so any other
+    failure of that item stays a failure."""
+
+
+START_GAP_CODES = ("GINN-E-INTERNAL", "GINN-E-SERVICE-TIMEOUT")
+"""The start errors that a services-on realm gives when its image has no /sbin/init (F1, F3)."""
+PREFIX = "t77-"
+DISTROS = ("debian", "arch", "fedora")
+"""The three distributions whose images are pinned in trust.toml (FR-080 parametrisation)."""
+RUN_DISTRO = "arch"
+"""The distribution of the items that need a running services-on realm (module docstring)."""
+UID = os.getuid()
+NATIVE_BUILD = REPO / "native" / "build"
+CGROUP_ROOT = Path("/sys/fs/cgroup/ginn") / str(UID)
+"""The user's cgroup root, /sys/fs/cgroup/ginn/<uid> (ADR-003). The runtime root: paths.runtime."""
+PODMAN = tool("podman")
+SV = tool("sv")
+
+F1_NO_INIT = (
+    "F1: the pinned debian and fedora images have no /sbin/init, so the services-on start fails; "
+    "see spikes/results/T7.7-services-real.md"
+)
+F2_CLI_ATTACH = (
+    "F2/F7: a lazy rebuild's grant attach runs from the CLI session and fails with "
+    "GINN-E-ATTACH-FAILED; see spikes/results/T7.7-services-real.md"
+)
+F10_RESTART = (
+    "F10: a kill during a supervised start's attach makes the start fail (ATTACH-FAILED, container "
+    "state improper) and stops the realm, so the give-up cannot record failed; see "
+    "spikes/results/T7.7-services-real.md"
+)
+F11_BUDGET = (
+    "F11: the NFR-003 and NFR-021 budgets are read from VmRSS, and the budget method is open "
+    "(ADR-007); see spikes/results/T7.7-services-real.md"
+)
+FR080_CASES = [
+    pytest.param(
+        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+    ),
+    pytest.param("arch"),
+    pytest.param(
+        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+    ),
+]
+NFR003_CASES = [
+    pytest.param(
+        "debian", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+    ),
+    pytest.param("arch", marks=pytest.mark.xfail(strict=True, reason=F11_BUDGET, raises=KnownGap)),
+    pytest.param(
+        "fedora", marks=pytest.mark.xfail(strict=True, reason=F1_NO_INIT, raises=KnownGap)
+    ),
+]
+
+
+@dataclass
+class Ran:
+    """One finished ginn command: its exit status and its last JSON object (progress skipped)."""
+
+    rc: int
+    body: dict[str, Any]
+
+    def error_text(self) -> str:
+        err = self.body.get("error")
+        if isinstance(err, dict):
+            return f"{err.get('code')}: {err.get('message')}"
+        return f"exit {self.rc}"
+
+    def codes(self) -> list[str]:
+        return [str(w.get("code")) for w in self.body.get("warnings", []) if isinstance(w, dict)]
+
+
+def ginn(launcher: Path, *args: str, timeout: float = 900.0) -> Ran:
+    """Run the product CLI through the launcher with --json, and read its last JSON object."""
+    env = {**os.environ, "PATH": f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(launcher), "--json", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+        cwd="/tmp",  # noqa: S108 - a working directory, not a temp file
+        timeout=timeout,
+        check=False,
+    )
+    lines = (done.stdout + "\n" + done.stderr).splitlines()
+    objects = [json.loads(line) for line in lines if line.startswith("{")]
+    body = next((o for o in reversed(objects) if "progress" not in o), {})
+    return Ran(done.returncode, body)
+
+
+def has_init(paths: OwnedPaths, name: str) -> bool:
+    """Whether the realm's image has /sbin/init. `podman cp` reads the rootfs of the created
+    container, and nothing runs in it, so this is one read of the image."""
+    with tempfile.TemporaryDirectory(prefix="ginn-t77-init-", dir="/tmp") as tmp:  # noqa: S108
+        done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [
+                *podman_cli(paths).global_argv(),
+                "cp",
+                f"{container_id(paths, name)}:/sbin/init",
+                str(Path(tmp) / "init"),
+            ],
+            capture_output=True,
+            text=True,
+            env={"XDG_RUNTIME_DIR": str(paths.runtime), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+            timeout=120,
+            check=False,
+        )
+    return done.returncode == 0
+
+
+def start_ok(launcher: Path, paths: OwnedPaths, name: str) -> None:
+    """Start the realm and assert that the start succeeded. A failed start is never a skip. When the
+    start fails with a start error on an image that has no /sbin/init, it is the known gap F1 and
+    raises KnownGap for the item's mark. Any other failed start is a plain failure."""
+    ran = ginn(launcher, "start", name)
+    if ran.rc == 0:
+        return
+    err = ran.body.get("error")
+    code = err.get("code") if isinstance(err, dict) else None
+    if code in START_GAP_CODES and not has_init(paths, name):
+        raise KnownGap(
+            f"F1: the image has no /sbin/init and the services-on start failed: {ran.error_text()}"
+        )
+    assert ran.rc == 0, ran.error_text()
+
+
+def podman_cli(paths: OwnedPaths) -> PodmanCli:
+    """The product's podman adapter over ginn's own storage (--root, --runroot, --tmpdir)."""
+    return PodmanCli.from_paths(paths, binary=PODMAN, oci_runtime="crun")
+
+
+def podman(paths: OwnedPaths, args: list[str]) -> str:
+    """Run one podman call through the adapter's global flags, with ginn's own runtime directory."""
+    env = {"XDG_RUNTIME_DIR": str(paths.runtime), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [*podman_cli(paths).global_argv(), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=120,
+        check=True,
+    )
+    return done.stdout
+
+
+def container_id(paths: OwnedPaths, name: str) -> str:
+    """The id of the realm's container. Its labels name the realm (io.ginn.realm)."""
+    out = podman(
+        paths, ["ps", "-a", "--filter", f"label=io.ginn.realm={name}", "--format", "{{.ID}}"]
+    )
+    return out.split()[0]
+
+
+def pid_of(paths: OwnedPaths, name: str) -> int:
+    """The host pid of the realm's container init (PID 1 inside the container)."""
+    return int(podman(paths, ["inspect", "--format", "{{.State.Pid}}", container_id(paths, name)]))
+
+
+def sv_status(paths: OwnedPaths, name: str) -> str:
+    """The first line of `sv status` for the realm's runit directory (FR-081 AC-1)."""
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [SV, "status", str(service_dir(paths, RealmName(name)))],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    return (done.stdout.strip().splitlines() or [""])[0]
+
+
+def rss_kib(pid: int) -> dict[str, int]:
+    """VmRSS, RssAnon and RssFile of one process, in KiB (proc(5))."""
+    values = {"VmRSS": 0, "RssAnon": 0, "RssFile": 0}
+    for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
+        key = line.split(":", 1)[0]
+        if key in values:
+            values[key] = int(line.split()[1])
+    return values
+
+
+def pss_kib(pid: int) -> int | None:
+    """Pss of one process in KiB, from smaps_rollup (proc(5)). None when it cannot be read: a
+    process that runs under a subuid is not readable by the session user. The item does not fail."""
+    try:
+        for line in Path(f"/proc/{pid}/smaps_rollup").read_text(encoding="utf-8").splitlines():
+            if line.startswith("Pss:"):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def realm_helpers(name: str) -> dict[str, list[int]]:
+    """The realm's pids by role: its cgroup tree, its runsv and its ginn-wait.
+
+    runsvdir starts `runsv <entry>` with the directory name, so runsv is matched by the realm name.
+    ginn-wait is matched by its parent, which must be that runsv (the run script execs it).
+    """
+    found: dict[str, list[int]] = {"cgroup": [], "runsv": [], "ginn-wait": []}
+    if (CGROUP_ROOT / name).is_dir():
+        for procs in (CGROUP_ROOT / name).rglob("cgroup.procs"):
+            found["cgroup"] += [int(p) for p in procs.read_text(encoding="utf-8").split()]
+    waits: list[tuple[int, int]] = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+            comm = (proc / "comm").read_text(encoding="utf-8").strip()
+            ppid = int((proc / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if len(argv) >= 2 and argv[0].endswith(b"runsv"):
+            if argv[1].endswith(name.encode()) and argv[1].rsplit(b"/", 1)[-1] == name.encode():
+                found["runsv"].append(int(proc.name))
+        elif comm == "ginn-wait":
+            waits.append((int(proc.name), ppid))
+    found["ginn-wait"] = [pid for pid, ppid in waits if ppid in found["runsv"]]
+    return found
+
+
+def realm_rss(paths: OwnedPaths, name: str) -> dict[str, Any]:
+    """The NFR-003 attribution of one realm (ADR-007): its cgroup tree, conmon, runsv, ginn-wait and
+    the pause. The pause is ginn's catatonit, found by its pid file, and it is counted once per
+    realm. The budget is read from VmRSS (the spec's RSS); Pss is recorded beside it, and a process
+    whose Pss cannot be read is counted in pss_unreadable.
+    """
+    helpers = realm_helpers(name)
+    pids = set(helpers["cgroup"]) | set(helpers["runsv"]) | set(helpers["ginn-wait"])
+    conmon = paths.runtime / "services" / f"{name}.conmon.pid"
+    if conmon.exists():
+        pids.add(int(conmon.read_text(encoding="utf-8").strip()))
+    pause = paths.runtime / "libpod" / "tmp" / "pause.pid"
+    if pause.exists():
+        pids.add(int(pause.read_text(encoding="utf-8").strip()))
+    totals = {"VmRSS": 0, "RssAnon": 0, "RssFile": 0, "Pss": 0}
+    pss_unreadable = 0
+    for pid in sorted(pids):
+        try:
+            sample = rss_kib(pid)
+        except (OSError, ValueError):
+            continue
+        for key in ("VmRSS", "RssAnon", "RssFile"):
+            totals[key] += sample[key]
+        pss = pss_kib(pid)
+        if pss is None:
+            pss_unreadable += 1
+        else:
+            totals["Pss"] += pss
+    return {
+        "pids": sorted(pids),
+        "kib": totals,
+        "helpers": helpers,
+        "pss_unreadable": pss_unreadable,
+    }
+
+
+def host_memory() -> dict[str, Any]:
+    """MemAvailable and the memory pressure line, read before a sample (ADR-007 method notes)."""
+    avail = next(
+        int(line.split()[1])
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+        if line.startswith("MemAvailable:")
+    )
+    psi = Path("/proc/pressure/memory").read_text(encoding="utf-8").splitlines()[0]
+    return {"MemAvailable_kib": avail, "psi": psi}
+
+
+def leaf_exec(
+    paths: OwnedPaths, name: str, command: str, timeout: float = 600.0
+) -> tuple[int, str]:
+    """Run `command` as container root in the realm, from a process inside the supervisor leaf.
+
+    A session process cannot move into a services-on realm's cgroup: `podman exec` from the session
+    fails with EACCES (see the result file). The runsv of the supervisor is inside the leaf, so the
+    gate runs the exec as a throwaway runit service (`t77-exec-...`). Its run script writes the
+    output and the status of `podman exec` to a temp directory, then sleeps until the gate takes the
+    service down and removes it. It returns (status, output).
+    """
+    tag = f"{PREFIX}exec-{os.urandom(4).hex()}"
+    out = Path(tempfile.mkdtemp(prefix="ginn-t77-exec-", dir="/tmp"))  # noqa: S108 - mkdtemp, 0700
+    cli = podman_cli(paths).global_argv()
+    inner = " ".join(
+        shlex.quote(a) for a in [*cli, "exec", container_id(paths, name), "sh", "-c", command]
+    )
+    script = (
+        "#!/bin/sh\n"
+        f"export XDG_RUNTIME_DIR={paths.runtime} PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+        f"{inner} > {shlex.quote(str(out / 'out'))} 2>&1\n"
+        f"echo $? > {shlex.quote(str(out / 'rc'))}\n"
+        "exec sleep 3600\n"
+    )
+    svc_tmp = paths.sv / f".{tag}.tmp"
+    svc_dir = paths.sv / tag
+    svc_tmp.mkdir(mode=0o700)
+    (svc_tmp / "run").write_text(script, encoding="utf-8")
+    (svc_tmp / "run").chmod(0o755)
+    os.rename(svc_tmp, svc_dir)
+    try:
+        began = time.monotonic()
+        while not (out / "rc").exists():
+            if time.monotonic() - began > timeout:
+                raise TimeoutError(f"leaf exec did not finish in {timeout:.0f} s")
+            time.sleep(0.5)
+        status = int((out / "rc").read_text(encoding="utf-8").strip())
+        return status, (out / "out").read_text(encoding="utf-8", errors="replace")
+    finally:
+        _retire(svc_dir)
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def _retire(svc_dir: Path) -> None:
+    """Take a gate service down, wait for its runsv to exit, then remove its directory.
+
+    Removing the directory while runsv still has `supervise/` open leaves that directory behind, and
+    runsvdir restarts the service from it. So runsv exits first, and the directory goes after.
+    """
+    for verb in ("down", "exit"):
+        subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [SV, verb, str(svc_dir)], capture_output=True, text=True, timeout=60, check=False
+        )
+    began = time.monotonic()
+    while time.monotonic() - began < 30:
+        gone = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [SV, "status", str(svc_dir)], capture_output=True, text=True, timeout=30, check=False
+        )
+        if "not running" in gone.stdout + gone.stderr or "unable to" in gone.stdout + gone.stderr:
+            break
+        time.sleep(0.5)
+    shutil.rmtree(svc_dir, ignore_errors=True)
+
+
+def wait_run_with_init(
+    paths: OwnedPaths, name: str, not_pid: int = 0, timeout: float = 60.0
+) -> int:
+    """Wait until runsv runs the realm and its container init is up. Return that init's pid.
+
+    `sv status` shows `run` before the container has started, and then the container's pid is 0. A
+    kill is sent only to a positive pid that is not `not_pid` (the one already killed). Signalling
+    pid 0 would reach the whole process group, so it is never sent.
+    """
+    began = time.monotonic()
+    while time.monotonic() - began < timeout:
+        if sv_status(paths, name).startswith("run:"):
+            try:
+                pid = pid_of(paths, name)
+            except (subprocess.CalledProcessError, IndexError, ValueError):
+                pid = 0
+            if pid > 0 and pid != not_pid:
+                return pid
+        time.sleep(0.25)
+    raise TimeoutError(f"the realm {name} did not run with a container init within {timeout:.0f} s")
+
+
+def sweep(launcher: Path, paths: OwnedPaths) -> list[str]:
+    """Delete every realm whose name starts with PREFIX, with its Realm Home. Returns what is left.
+
+    The `t77-exec-*` services that leaf_exec left in the user's sv directory are retired first
+    (`_retire`), with their `.tmp` directories. Empty cgroup leaves of this module are removed too.
+    """
+    for realm in ginn(launcher, "list").body.get("realms", []):
+        name = str(realm.get("name", ""))
+        if name.startswith(PREFIX):
+            ginn(launcher, "delete", name, "--purge-home", "--yes")
+    for exec_dir in sorted(paths.sv.glob(f"{PREFIX}exec-*")):
+        if exec_dir.is_dir():
+            _retire(exec_dir)
+    for stale in sorted(paths.sv.glob(f".{PREFIX}exec-*.tmp")):
+        shutil.rmtree(stale, ignore_errors=True)
+    for leaf in CGROUP_ROOT.glob(f"{PREFIX}*"):
+        # podman and `ginn delete` leave the empty realm cgroup behind (finding F9). Only this
+        # module's own empty directories are removed.
+        if leaf.is_dir() and not (leaf / "cgroup.procs").read_text(encoding="utf-8").split():
+            with contextlib.suppress(OSError):
+                leaf.rmdir()
+    return [
+        str(r.get("name"))
+        for r in ginn(launcher, "list").body.get("realms", [])
+        if str(r.get("name", "")).startswith(PREFIX)
+    ]
+
+
+@pytest.fixture(scope="module")
+def paths() -> OwnedPaths:
+    return OwnedPaths.from_env()
+
+
+@pytest.fixture(scope="module")
+def launcher(paths: OwnedPaths) -> Iterator[Path]:
+    """The gate's ginn command: the product CLI with the helper paths of native/build (see the
+    docs)."""
+    run_tool([tool("make"), "-C", str(REPO / "native")])
+    base = Path(tempfile.mkdtemp(prefix="ginn-t77-", dir="/tmp"))  # noqa: S108 - mkdtemp, mode 0700
+    bin_dir = base / "bin"
+    bin_dir.mkdir(mode=0o700)
+    script = bin_dir / "ginn"
+    script.write_text(
+        f"#!{REPO / '.venv' / 'bin' / 'python'}\n"
+        "# T7.7 host-gate launcher (harness only): the helper paths point at native/build.\n"
+        "import sys\n"
+        "from ginn.__main__ import main\n"
+        "from ginn.cli import _context\n"
+        "from ginn.runtime import attach\n"
+        f"NATIVE = {str(NATIVE_BUILD)!r}\n"
+        "_context.WAIT_HELPER = NATIVE + '/ginn-wait'\n"
+        "attach.DEFAULT_HELPER = NATIVE + '/ginn-rebind'\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    try:
+        yield script
+    finally:
+        sweep(script, paths)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def no_leftovers(launcher: Path, paths: OwnedPaths) -> Iterator[None]:
+    """Stale t77 realms are removed before the module, and its own realms are removed after it."""
+    assert sweep(launcher, paths) == [], "stale t77 realms could not be removed before the gate"
+    yield
+    assert sweep(launcher, paths) == [], "t77 realms could not be removed after the gate"
+
+
+def create(launcher: Path, distro: str, name: str, services: str) -> Ran:
+    return ginn(launcher, "create", distro, "--name", name, "--services", services)
+
+
+def delete(launcher: Path, name: str) -> Ran:
+    return ginn(launcher, "delete", name, "--purge-home", "--yes")
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("NFR-003")
+def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> None:
+    """FR-080 (ADR-003 argv) and NFR-003 (ADR-007 a+b+d): the create argv of a services-on realm.
+
+    Read from the container that the real create made: the crun services flags, the mitigations as
+    read-only binds (the journald drop-in and ten /dev/null unit masks), and no `--init`. It needs
+    no start, so it does not depend on the blocked supervised start.
+    """
+    name = PREFIX + "deb-argv"
+    ran = create(launcher, "debian", name, "on")
+    assert ran.rc == 0, ran.error_text()
+    cid = container_id(paths, name)
+    argv = json.loads(podman(paths, ["inspect", "--format", "{{json .Config.CreateCommand}}", cid]))
+    assert "--systemd=always" in argv
+    assert "--init" not in argv
+    assert argv[argv.index("--cgroup-parent") + 1] == f"/ginn/{UID}/{name}"
+    assert argv[argv.index("--user") + 1] == "0:0"
+    assert argv[argv.index("--stop-signal") + 1] == "SIGRTMIN+3"
+    assert argv[argv.index("--stop-timeout") + 1] == "30"
+    assert "SYSTEMD_LOG_LEVEL=warning" in argv
+    assert argv[-1] == "/sbin/init"
+    binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
+    assert any(b.endswith("target=/etc/systemd/journald.conf.d/ginn.conf,ro") for b in binds)
+    assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 10
+    fmt = "{{range .Mounts}}{{.Destination}} rw={{.RW}}\n{{end}}"
+    assert "/etc/systemd/journald.conf.d/ginn.conf rw=false" in podman(
+        paths, ["inspect", "--format", fmt, cid]
+    )
+    assert delete(launcher, name).rc == 0
+
+
+@pytest.mark.fr("FR-084")
+def test_fr084_autostart_toggles_the_down_file(launcher: Path, paths: OwnedPaths) -> None:
+    """FR-084 AC-1, the file part: autostart on removes the `down` file and off creates it (DR-012).
+
+    The part that starts the realm when runsv starts is the test further down.
+    """
+    name = PREFIX + "deb-auto"
+    assert create(launcher, "debian", name, "on").rc == 0
+    down = service_dir(paths, RealmName(name)) / "down"
+    assert down.exists(), "a new services-on realm is not started by runit (ADR-003 decision 5)"
+    on = ginn(launcher, "autostart", name, "on")
+    assert on.rc == 0, on.error_text()
+    assert not down.exists()
+    off = ginn(launcher, "autostart", name, "off")
+    assert off.rc == 0, off.error_text()
+    assert down.exists()
+    assert delete(launcher, name).rc == 0
+
+
+@pytest.mark.fr("FR-083")
+@pytest.mark.xfail(strict=True, reason=F2_CLI_ATTACH, raises=KnownGap)
+def test_fr083_services_change_rebuilds_to_systemd_pid1(launcher: Path, paths: OwnedPaths) -> None:
+    """FR-083 AC-1: a services-off realm with htop, turned on, restarts as generation 2 with systemd
+    as PID 1 and htop still installed. Run on arch, the distribution that boots here.
+
+    The htop install runs on the services-off realm, which starts without systemd. The restart is
+    the lazy rebuild, which starts the new generation through runit (ADR-003 amendment, T8.3).
+    """
+    name = PREFIX + "arch-tog"
+    assert create(launcher, "arch", name, "off").rc == 0
+    try:
+        assert ginn(launcher, "start", name).rc == 0
+        assert ginn(launcher, "install", name, "htop").rc == 0
+        assert ginn(launcher, "stop", name).rc == 0
+        assert ginn(launcher, "services", name, "on").rc == 0
+        ran = ginn(launcher, "start", name)
+        assert ran.rc == 0, ran.error_text()
+        if "GINN-W-REBUILD-DEFERRED" in ran.codes():
+            raise KnownGap(f"F2/F7: the lazy rebuild was deferred; warnings {ran.codes()}")
+        assert ginn(launcher, "status", name).body.get("generation") == 2
+        status, pid1 = leaf_exec(paths, name, "cat /proc/1/comm")
+        assert status == 0 and pid1.strip() == "systemd", pid1[-300:]
+        status, htop = leaf_exec(paths, name, "command -v htop")
+        assert status == 0 and htop.strip(), htop[-300:]
+    finally:
+        ginn(launcher, "stop", name)
+        delete(launcher, name)
+
+
+@pytest.mark.parametrize("distro", FR080_CASES)
+@pytest.mark.fr("FR-080")
+def test_fr080_systemd_unit_on_crun(launcher: Path, paths: OwnedPaths, distro: str) -> None:
+    """FR-080 AC-1 and AC-2 under the crun argv (ADR-003): an enabled unit is active, and is active
+    again after a restart. PID 1 is systemd. The init sits under the realm cgroup, and runsv sits in
+    the root-owned supervisor leaf. The in-realm steps run from the leaf (see leaf_exec).
+    """
+    name = PREFIX + distro[:4] + "-svc"
+    assert create(launcher, distro, name, "on").rc == 0
+    try:
+        start_ok(launcher, paths, name)
+        install, unit = {
+            "debian": ("apt-get install -y cron", "cron"),
+            "arch": ("pacman -Sy --noconfirm cronie", "cronie"),
+            "fedora": ("dnf install -y cronie", "crond"),
+        }[distro]
+        status, out = leaf_exec(paths, name, install)
+        assert status == 0, out[-400:]
+        status, out = leaf_exec(
+            paths, name, f"systemctl enable --now {unit} && systemctl is-active {unit}"
+        )
+        assert status == 0 and out.strip().splitlines()[-1] == "active", out[-400:]
+        status, facts = leaf_exec(
+            paths,
+            name,
+            "cat /proc/1/comm; systemctl is-system-running; "
+            "systemctl --failed --no-legend --plain | cut -d ' ' -f1 | tr '\\n' ' '; "
+            "echo; cat /sys/fs/cgroup/cgroup.controllers",
+        )
+        assert status == 0, facts[-400:]
+        print("FR080_FACTS " + json.dumps({"distro": distro, "output": facts.split()}))
+        assert facts.split()[0] == "systemd"
+        init_cgroup = Path(f"/proc/{pid_of(paths, name)}/cgroup").read_text(encoding="utf-8")
+        assert f"/ginn/{UID}/{name}/" in init_cgroup
+        runsv = realm_helpers(name)["runsv"]
+        assert runsv, "no runsv is running for the realm"
+        runsv_cgroup = Path(f"/proc/{runsv[0]}/cgroup").read_text(encoding="utf-8").strip()
+        assert runsv_cgroup.endswith(f"/ginn/{UID}/supervisor"), runsv_cgroup
+        stopped = ginn(launcher, "stop", name)
+        assert stopped.rc == 0, stopped.error_text()
+        start_ok(launcher, paths, name)
+        status, out = leaf_exec(paths, name, f"systemctl is-active {unit}")
+        assert status == 0 and out.strip() == "active", out[-400:]
+    finally:
+        ginn(launcher, "stop", name)
+        delete(launcher, name)
+
+
+@pytest.fixture
+def running_realm(launcher: Path, paths: OwnedPaths) -> Iterator[str]:
+    """A services-on arch realm, started. The start must succeed (start_ok): a failed start is an
+    error of this fixture, and no item of the arch realm is skipped for it."""
+    name = PREFIX + "arch-run"
+    assert create(launcher, RUN_DISTRO, name, "on").rc == 0
+    try:
+        start_ok(launcher, paths, name)
+        yield name
+    finally:
+        ginn(launcher, "stop", name)
+        delete(launcher, name)
+
+
+@pytest.mark.fr("FR-081")
+def test_fr081_ac1_runit_shows_the_realm_up(running_realm: str, paths: OwnedPaths) -> None:
+    """FR-081 AC-1: `sv status` on the realm's supervision entry shows it up."""
+    assert sv_status(paths, running_realm).startswith("run:")
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("NFR-033")
+def test_fr081_ac2_a_killed_init_restarts_within_10_s(
+    launcher: Path, running_realm: str, paths: OwnedPaths
+) -> None:
+    """FR-081 AC-2 (NFR-033): kill the container's init. Within 10 s of the kill, runsv has
+    restarted `run` with a new run pid, a new container init runs, and `ginn status` reads running.
+
+    The clock starts at the kill. The restart is a new run pid in `sv status` (the ginn-wait that
+    runsv supervises), then a new container init (wait_run_with_init, not the killed pid), then
+    the realm record. The elapsed time is read once all three hold.
+    """
+    old_init = wait_run_with_init(paths, running_realm)
+    old_run = parse_status(sv_status(paths, running_realm)).pid
+    os.kill(old_init, signal.SIGKILL)
+    began = time.monotonic()
+    new_run = None
+    while time.monotonic() - began < 30:
+        status = parse_status(sv_status(paths, running_realm))
+        if status.pid is not None and status.pid != old_run and status.state == "run":
+            new_run = status.pid
+            break
+        time.sleep(0.25)
+    assert new_run is not None, "runsv did not restart run within 30 s"
+    new_init = wait_run_with_init(paths, running_realm, not_pid=old_init, timeout=30.0)
+    # The record reads failed while the crash is recorded and the restart's start runs, and it
+    # reads running once that start has attached (lifecycle.py, service.py). So the state is polled
+    # inside the window, and the elapsed time is read when it reads running.
+    state = ""
+    while True:
+        state = str(ginn(launcher, "status", running_realm).body.get("state"))
+        elapsed = time.monotonic() - began
+        if state == "running" or elapsed >= 10:
+            break
+        time.sleep(0.5)
+    print(
+        f"FR081_AC2_RESTART_S {elapsed:.2f} old_run={old_run} new_run={new_run} "
+        f"new_init={new_init} state={state}"
+    )
+    assert state == "running", f"ginn status reads {state} within 10 s of the kill"
+    assert elapsed <= 10, f"restart took {elapsed:.1f} s"
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.xfail(strict=True, reason=F10_RESTART, raises=KnownGap)
+def test_fr081_ac3_five_crashes_in_60_s_give_up(
+    launcher: Path, paths: OwnedPaths, running_realm: str
+) -> None:
+    """FR-081 AC-3 (AS-028): five kills within 60 s leave the realm down, and `ginn status` says
+    failed.
+
+    Each kill waits for a fresh, running container init (wait_run_with_init). The window is
+    60 s from the first kill.
+    """
+    began = time.monotonic()
+    last = 0
+    for _ in range(5):
+        last = wait_run_with_init(paths, running_realm, not_pid=last)
+        os.kill(last, signal.SIGKILL)
+    while time.monotonic() - began < 60 and not sv_status(paths, running_realm).startswith("down"):
+        time.sleep(0.25)
+    print(f"FR081_AC3_GIVE_UP_S {time.monotonic() - began:.2f}")
+    assert time.monotonic() - began <= 60, "five kills did not give up within 60 s"
+    time.sleep(15)
+    assert parse_status(sv_status(paths, running_realm)).state == "down"
+    state = str(ginn(launcher, "status", running_realm).body.get("state"))
+    if state != "failed":
+        raise KnownGap(f"five crashes left the realm {state}, not failed (F10)")
+
+
+@pytest.mark.fr("FR-084")
+def test_fr084_autostart_starts_the_realm_when_runsv_starts(
+    launcher: Path, paths: OwnedPaths
+) -> None:
+    """FR-084 AC-1 without a reboot: with autostart on, a new runsv (the user's supervisor starting)
+    starts the realm with no user action. `sv exit` ends the runsv, and runsvdir starts a new one.
+    The realm counts as started only when its record reads running, because `sv status` shows `run`
+    for a moment before a failed start.
+    """
+    name = PREFIX + "arch-boot"
+    assert create(launcher, RUN_DISTRO, name, "on").rc == 0
+    try:
+        assert ginn(launcher, "autostart", name, "on").rc == 0
+        exited = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [SV, "exit", str(service_dir(paths, RealmName(name)))],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert exited.returncode in (0, 1), exited.stderr
+        began = time.monotonic()
+        state = ""
+        while time.monotonic() - began < 40:
+            state = str(ginn(launcher, "status", name).body.get("state"))
+            if state == "running":
+                break
+            time.sleep(1)
+        print(f"FR084_AC1_START_S {time.monotonic() - began:.2f} state={state}")
+        assert state == "running", f"runsv did not start the realm (state {state})"
+    finally:
+        ginn(launcher, "stop", name)
+        delete(launcher, name)
+
+
+@pytest.mark.parametrize("distro", NFR003_CASES)
+@pytest.mark.fr("NFR-003")
+def test_nfr003_idle_rss_of_a_services_on_realm(
+    launcher: Path, paths: OwnedPaths, distro: str
+) -> None:
+    """NFR-003: idle RSS of a services-on realm after 60 s with the ADR-003 argv, median of runs.
+
+    The sample count is GINN_T77_SAMPLES (default 10, the roadmap count). Each run starts the realm,
+    settles it for 60 s, and samples realm_rss, with MemAvailable and the memory pressure line read
+    just before. The pause is counted once per realm (ADR-007). The median is VmRSS; each row also
+    carries the Pss total beside it.
+    """
+    name = PREFIX + distro[:4] + "-rss"
+    assert create(launcher, distro, name, "on").rc == 0
+    samples = int(os.environ.get("GINN_T77_SAMPLES", "10"))
+    rows: list[dict[str, Any]] = []
+    try:
+        for index in range(samples):
+            start_ok(launcher, paths, name)
+            time.sleep(60)
+            host = host_memory()
+            attribution = realm_rss(paths, name)
+            rows.append(
+                {
+                    "run": index + 1,
+                    "host": host,
+                    **attribution["kib"],
+                    "pss_unreadable": attribution["pss_unreadable"],
+                    "pids": attribution["pids"],
+                }
+            )
+            ginn(launcher, "stop", name)
+    finally:
+        delete(launcher, name)
+    totals = sorted(int(row["VmRSS"]) for row in rows)
+    median_mib = totals[len(totals) // 2] / 1024
+    print("NFR003_SAMPLES " + json.dumps({"distro": distro, "rows": rows}, sort_keys=True))
+    print(f"NFR003_MEDIAN_MIB {distro} {median_mib:.2f} MAX_MIB {totals[-1] / 1024:.2f}")
+    if median_mib > 40:
+        raise KnownGap(f"F11: VmRSS median {median_mib:.2f} MiB is over the 40 MiB budget")
+
+
+@pytest.mark.xfail(strict=True, reason=F11_BUDGET, raises=KnownGap)
+@pytest.mark.fr("NFR-021")
+def test_nfr021_five_idle_services_on_realms(launcher: Path, paths: OwnedPaths) -> None:
+    """NFR-021 (Should): five idle services-on realms running together, on arch. The pause is
+    counted once per realm (ADR-007), so the total is the sum of the five attributions. The budget
+    is read from VmRSS; the per-realm Pss is recorded beside it (F11)."""
+    names = [PREFIX + f"arch-five{i}" for i in range(5)]
+    per_realm: dict[str, dict[str, Any]] = {}
+    try:
+        for name in names:
+            assert create(launcher, RUN_DISTRO, name, "on").rc == 0
+        for name in names:
+            start_ok(launcher, paths, name)
+        time.sleep(60)
+        per_realm = {name: realm_rss(paths, name) for name in names}
+    finally:
+        for name in names:
+            delete(launcher, name)
+    vmrss_mib = sum(r["kib"]["VmRSS"] for r in per_realm.values()) / 1024
+    pss_mib = sum(r["kib"]["Pss"] for r in per_realm.values()) / 1024
+    print(
+        "NFR021_TOTAL "
+        + json.dumps(
+            {
+                "per_realm_vmrss_kib": {n: r["kib"]["VmRSS"] for n, r in per_realm.items()},
+                "per_realm_pss_kib": {n: r["kib"]["Pss"] for n, r in per_realm.items()},
+                "pss_unreadable": {n: r["pss_unreadable"] for n, r in per_realm.items()},
+                "vmrss_total_mib": round(vmrss_mib, 2),
+                "pss_total_mib": round(pss_mib, 2),
+            }
+        )
+    )
+    if vmrss_mib > 5 * 40:
+        raise KnownGap(f"F11: five realms total {vmrss_mib:.2f} MiB (VmRSS) against 200")
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("NFR-003")
+def test_logind_mask_against_the_fr080_apps(launcher: Path, paths: OwnedPaths) -> None:
+    """ADR-007 option: mask systemd-logind.service (spikes/s05/masks-logind.txt) only if the FR-080
+    apps still pass with it masked, after a restart of the realm. This test changes no default."""
+    name = PREFIX + "arch-logind"
+    assert create(launcher, RUN_DISTRO, name, "on").rc == 0
+    try:
+        start_ok(launcher, paths, name)
+        status, out = leaf_exec(paths, name, "pacman -Sy --noconfirm cronie")
+        assert status == 0, out[-400:]
+        status, out = leaf_exec(paths, name, "systemctl mask systemd-logind.service")
+        assert status == 0, out[-400:]
+        assert ginn(launcher, "stop", name).rc == 0
+        start_ok(launcher, paths, name)
+        status, out = leaf_exec(
+            paths,
+            name,
+            "systemctl enable --now cronie >/dev/null 2>&1; "
+            "echo CRON=$(systemctl is-active cronie); "
+            "echo LOGIND=$(systemctl is-active systemd-logind); "
+            "echo FAILED=$(systemctl --failed --no-legend --plain | wc -l)",
+        )
+        print("LOGIND_MASK_FACTS " + json.dumps({"output": out.split()}))
+        assert status == 0, out[-300:]
+        assert "CRON=active" in out.split(), out[-300:]
+    finally:
+        ginn(launcher, "stop", name)
+        delete(launcher, name)
+
+
+@pytest.mark.fr("NFR-002")
+@pytest.mark.fr("NFR-003")
+def test_nfr002_helper_rss_standalone(paths: OwnedPaths) -> None:
+    """NFR-002 and NFR-003 count the helpers. Each one runs alone, idle, for 60 s, and its VmRSS,
+    RssAnon and RssFile are read. The helper's podman arguments name ginn's own storage.
+
+    The runsv is taken down with `sv down` and `sv exit` (`_retire`), and every process is waited
+    on before the test returns.
+    """
+    base = Path(tempfile.mkdtemp(prefix="ginn-t77-helpers-", dir="/tmp"))  # noqa: S108
+    svc = base / "svc"
+    procs: dict[str, subprocess.Popen[bytes]] = {}
+    quiet: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    # The helpers take the podman path first, then its global flags (native/ginn-idle.c, ginn-
+    # wait.c).
+    global_args = podman_cli(paths).global_argv()
+    init = subprocess.Popen(["sleep", "900"])  # noqa: S603, S607
+    conmon = subprocess.Popen(["sleep", "900"])  # noqa: S603, S607
+    try:
+        svc.mkdir()
+        (svc / "run").write_text("#!/bin/sh\nexec sleep 900\n", encoding="utf-8")
+        (svc / "run").chmod(0o755)
+        (base / "watch").mkdir()
+        pidfile = base / "conmon.pid"
+        pidfile.write_text(str(conmon.pid), encoding="utf-8")
+        procs["runsv"] = subprocess.Popen([tool("runsv"), str(svc)], **quiet)  # noqa: S603
+        procs["ginn-watch"] = subprocess.Popen(  # noqa: S603
+            [str(NATIVE_BUILD / "ginn-watch"), str(base / "watch"), "1000", "5000", "/bin/true"],
+            **quiet,
+        )
+        procs["ginn-idle"] = subprocess.Popen(  # noqa: S603
+            [
+                str(NATIVE_BUILD / "ginn-idle"),
+                str(init.pid),
+                "3600",
+                *global_args,
+                "--",
+                "t77-nocontainer",
+            ],
+            **quiet,
+        )
+        procs["ginn-wait"] = subprocess.Popen(  # noqa: S603
+            [str(NATIVE_BUILD / "ginn-wait"), str(pidfile), *global_args, "--", "t77-nocontainer"],
+            **quiet,
+        )
+        time.sleep(60)
+        report = {name: rss_kib(p.pid) for name, p in procs.items() if p.poll() is None}
+        assert set(report) == set(procs), f"a helper exited: {sorted(set(procs) - set(report))}"
+        print("HELPER_RSS_KIB " + json.dumps(report, sort_keys=True))
+    finally:
+        if svc.exists():
+            _retire(svc)
+        for proc in procs.values():
+            proc.kill()
+        init.kill()
+        conmon.kill()
+        for proc in (*procs.values(), init, conmon):
+            proc.wait(timeout=30)
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.skip(
+    reason="FR-085 is deferred (CL-2): the Docker-in-realm Part B re-run has no FR to prove"
+)
+@pytest.mark.fr("FR-085")
+def test_fr085_dockerd_in_a_services_on_development_realm() -> None:
+    raise AssertionError("not run: FR-085 is deferred")
+
+
+@pytest.mark.host_musl
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-081")
+def test_fr080_on_musl() -> None:
+    """The musl leg of FR-080 and FR-081 (S-03). conftest.py skips this test on glibc hosts."""
+    raise AssertionError("the musl leg needs a musl host")

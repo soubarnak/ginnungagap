@@ -212,13 +212,13 @@ reason = "T6.8: the realm wiring is unit-tested (the CDI grant at create, the sp
 id = "FR-080"
 milestone = "M7"
 partial = true
-reason = "the services-on argv is unit-tested (T7.1, tests/unit/test_runtime_spec.py): the golden argv for arch, every non-Kali distribution with the same flags, no --privileged, no --init, no --cgroups=split, /sbin/init last. The create leaves the container stopped with GINN-W-SERVICES-PENDING and runs no start (tests/unit/test_ops_create.py, test_cli_create.py). Not yet proven: systemd as PID 1 with zero failed units, and FR-080 AC-1 and AC-2 under this argv on crun, on glibc and on musl, which run in T7.7 (test_services_real). A services-on realm cannot start until its runit entry (T7.3, T7.4) exists"
+reason = "arch PASS on the glibc host (T7.7 review round, spikes/results/T7.7-services-real.md): the crun argv, cronie active before and after a restart, PID 1 systemd, runsv in the supervisor leaf. debian and fedora FAIL: their pinned images have no /sbin/init (F1), so the services-on start fails. The argv and the create path are unit-tested (tests/unit/test_runtime_spec.py, tests/unit/test_ops_create.py). The musl leg is not run (no musl host)."
 
 [[deferred]]
 id = "FR-081"
 milestone = "M7"
 partial = true
-reason = "unit tests cover the supervised start and finish, the sv control, the start that waits without the realm lock, stop and delete through sv, and the autostart file (tests/unit/test_ops_service.py, test_ops_lifecycle.py, test_ops_delete.py, test_services_supervisor.py). AC-1 (runit shows the realm up) and AC-2 (restart within 10 s) need the host run in T7.7"
+reason = "AC-1 (sv shows the realm up) and AC-2 (restart within 10 s, state running, 7.64 s on the re-run) PASS on arch on the glibc host (T7.7). AC-3 (five crashes leave the realm failed) FAIL on the host (F10): a crash during a supervised start stops the realm, so the give-up reads stopped. The user decision of 2026-10-14 (a DR-020 amendment) is implemented on the F2 branch. The musl leg is not run. The supervised start, finish and sv control are unit-tested (tests/unit/test_ops_service.py, test_ops_lifecycle.py, test_services_supervisor.py)."
 
 [[deferred]]
 id = "FR-082"
@@ -230,7 +230,7 @@ reason = "the services-off create argv carries --init, a keep-alive entrypoint a
 id = "FR-083"
 milestone = "M7"
 partial = true
-reason = "ginn services on|off records the mode, and the next start rebuilds the realm into a container of that mode (T8.3, ADR-003 amendment of 2026-10-14); the same-mode no-op and that rebuild are unit-tested (tests/unit/test_ops_service.py, test_ops_rebuild.py, test_cli_services.py). AC-1 (htop stays installed, systemd is PID 1) needs the host run in T7.7"
+reason = "AC-1 (a services change keeps htop and makes systemd PID 1) FAIL on arch on the glibc host: the lazy rebuild's grant attach runs from the CLI session and is deferred (F2/F7). The mode record and the rebuild are unit-tested (tests/unit/test_ops_service.py, test_ops_rebuild.py, test_cli_services.py)."
 
 [[deferred]]
 id = "FR-100"
@@ -311,7 +311,7 @@ reason = "unit tests run for tools/measure; the RSS budget for the helpers needs
 id = "NFR-003"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested as a growth guard: it stays under 2 MiB resident (about 1.5 MiB on the dynamic glibc build, tests/unit/test_native_wait.py). The ADR-007 create-time forms (T7.3) are unit-tested as argv: the default carries mitigation d only, and the forms a and b are golden-tested behind SERVICES_MITIGATIONS, which stays off until S-05s (tests/unit/test_runtime_services_forms.py). The NFR-003 proof is the services-on RSS table of a real realm under the ADR-003 argv, on glibc and musl, which runs in T7.7 (test_services_real)"
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). debian and fedora are NOT RUN (F1, no /sbin/init). The musl leg is not run."
 
 [[deferred]]
 id = "NFR-004"

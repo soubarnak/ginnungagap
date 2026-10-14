@@ -134,7 +134,7 @@ from ginn.security.caps import TierExtras
 from ginn.security.nested import write_missing_config
 from ginn.security.seccomp import write as write_profile
 from ginn.services import autostart
-from ginn.services.runit_user import remove_service, write_journald_dropin, write_service_dir
+from ginn.services.runit_user import remove_service, write_service_dir
 from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
 from ginn.store.paths import OwnedPaths
@@ -504,8 +504,6 @@ class _Rebuild(_Create):
         remove_service(paths, name)
         self._rollback.add("service directory", lambda: remove_service(paths, name))
         try:
-            if self._plan.spec.services_mitigations:
-                write_journald_dropin(paths)
             write_service_dir(paths, name, program)
         except OSError as exc:
             err = make("GINN-E-INTERNAL")

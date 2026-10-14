@@ -41,7 +41,7 @@ from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
 from ginn.security.caps import option_keys
 from ginn.security.nested import CONFIG_DIR, FILES
-from ginn.services.runit_user import DOWN, service_dir
+from ginn.services.runit_user import DOWN, journald_dropin, service_dir
 from ginn.services.supervisor import Result, SupervisorHooks
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -683,13 +683,27 @@ def test_turning_services_on_then_starting_rebuilds_into_a_services_on_generatio
     tmp_path: Path,
     sleeps: list[float],
     mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A services-off realm is turned on, and its next start rebuilds it with the runit service
-    written by the rebuild, after its swap. The packages and the Realm Home are kept."""
+    written by the rebuild, after its swap. The packages and the Realm Home are kept.
+
+    The journald drop-in is removed first, so the check below proves that the rebuild writes it
+    before podman binds it in the new container (ADR-007 a).
+    """
     before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
     host_before = home_bytes(home)
     set_services_mode(env, NAME, on=True)
     assert not service_dir(env.paths, NAME).exists(), "no runit file before the rebuild"
+    journald_dropin(env.paths).unlink(missing_ok=True)
+    seen: list[bool] = []
+    original_create = fake.create
+
+    def create_checking_source(spec: CreateSpec) -> str:
+        seen.append(journald_dropin(env.paths).is_file())
+        return original_create(spec)
+
+    monkeypatch.setattr(fake, "create", create_checking_source)
     runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
     record = start_realm(
         env,
@@ -710,6 +724,7 @@ def test_turning_services_on_then_starting_rebuilds_into_a_services_on_generatio
     assert fake.containers[record.container_id].state is ContainerState.RUNNING
     assert home_bytes(home) == host_before
     assert generation_of(fake, 1) == []
+    assert seen == [True], "the drop-in exists when podman binds it at the rebuild's create"
 
 
 @pytest.mark.fr("FR-084")

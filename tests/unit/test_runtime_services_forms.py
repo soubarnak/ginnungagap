@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """The services-on create-time forms: the conmon pidfile and ADR-007 mitigations a, b and d.
 
-The argv is pure, so these cases pin it. Mitigations a and b are off by default (ADR-007, S-05s):
-the default argv carries d only, and a test pins that. With the flag on, the argv carries the
-ginn-owned journald drop-in and one `/dev/null` bind per masked unit, all read-only, and nothing
-under the realm's /etc is written (CR-007). NFR-003 is the memory budget these forms serve.
+The argv is pure, so these cases pin it. Mitigations a and b ship by default since S-05s passed
+(ADR-007, CL-23): the create plan sets the flag, and a bare spec's argv carries d only. With the
+flag on, the argv carries the ginn-owned journald drop-in and one `/dev/null` bind per masked unit,
+all read-only, and nothing under the realm's /etc is written (CR-007). NFR-003 is the memory budget
+these forms serve.
 """
 
 from __future__ import annotations
@@ -36,12 +37,15 @@ def _mount_values(argv: list[str]) -> list[str]:
     return [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
 
 
-def test_the_default_services_on_argv_has_no_journald_bind_and_no_mask_bind() -> None:
+def test_a_bare_services_on_spec_carries_mitigation_d_and_no_bind_forms() -> None:
     argv = create_argv(make_spec(services=True))
-    assert SERVICES_MITIGATIONS is False, "mitigations a and b wait for S-05s (ADR-007)"
     assert not any("journald" in word for word in argv)
     assert not any("source=/dev/null" in word for word in argv)
     assert "SYSTEMD_LOG_LEVEL=warning" in argv, "mitigation d is on by default"
+
+
+def test_the_create_plan_ships_mitigations_a_and_b_by_default() -> None:
+    assert SERVICES_MITIGATIONS is True, "a and b ship since S-05s passed (CL-23, ADR-007)"
 
 
 def test_the_services_on_argv_names_the_conmon_pidfile_after_the_cgroup_parent() -> None:

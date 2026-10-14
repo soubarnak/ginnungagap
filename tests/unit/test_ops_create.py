@@ -55,6 +55,7 @@ from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.security.nvidia import NvidiaPlan, Status
+from ginn.services.runit_user import journald_dropin
 from ginn.store.locks import image_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -409,6 +410,33 @@ def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
     assert argv[-1] == "/sbin/init"
     assert RealmStore(env.paths).load(RealmName("debian")) == record
     assert env.journal.pending() == []
+
+
+@pytest.mark.fr("NFR-003")
+@pytest.mark.fr("FR-080")
+def test_the_journald_drop_in_exists_before_podman_binds_it_at_create(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Podman reads a bind source when it creates the container, so ginn must write the drop-in
+    first (ADR-007 a). The fake checks the source at the call, as podman would."""
+    seen: list[bool] = []
+    original = fake.create
+
+    def create_checking_source(spec: CreateSpec) -> str:
+        seen.append(journald_dropin(env.paths).is_file())
+        return original(spec)
+
+    monkeypatch.setattr(fake, "create", create_checking_source)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert seen == [True]
+    assert "source=" + str(journald_dropin(env.paths)) in " ".join(fake.created_specs[0].to_argv())
 
 
 @pytest.mark.fr("FR-010")

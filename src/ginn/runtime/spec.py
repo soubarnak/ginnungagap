@@ -94,9 +94,9 @@ SERVICES_STOP_TIMEOUT_S: Final = 30
 """Seconds podman waits for a services-on realm to stop before it kills it (ADR-003)."""
 SERVICES_ENV: Final[tuple[tuple[str, str], ...]] = (("SYSTEMD_LOG_LEVEL", "warning"),)
 """The services-on environment: systemd logs warnings only (ADR-007 mitigation d)."""
-SERVICES_MITIGATIONS: Final = False
+SERVICES_MITIGATIONS: Final = True
 """Whether a services-on create ships ADR-007 mitigations a and b (journald drop-in, unit masks).
-Off until spike S-05s passes, or CL-10 is decided (roadmap T7.3). Mitigation d is always on."""
+On since spike S-05s passed (CL-23, 2026-10-14; ADR-007 Decision). Mitigation d is always on."""
 JOURNALD_DROPIN_TARGET: Final = "/etc/systemd/journald.conf.d/ginn.conf"
 """Where the ginn-owned journald drop-in is bind-mounted read-only (ADR-007 a)."""
 JOURNALD_DROPIN_TEXT: Final = "[Journal]\nStorage=volatile\nRuntimeMaxUse=8M\n"

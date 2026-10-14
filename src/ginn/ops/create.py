@@ -347,6 +347,10 @@ class _Create:
         self._step("pulled")
 
     def _create_container(self) -> None:
+        # Podman reads a bind source when the container is created, so the journald drop-in (ADR-007
+        # a) must exist before the call. The drop-in is shared by all realms, so no undo removes it.
+        if self._plan.spec.services_mitigations:
+            self._write_journald_dropin()
         # Registered before the call. An interrupt inside the call can leave a container whose id
         # was never stored, and the undo finds it by its labels.
         self._rollback.add("container", self._remove_container)
@@ -355,12 +359,20 @@ class _Create:
         self._update(container_id=cid)
         self._step("created")
 
+    def _write_journald_dropin(self) -> None:
+        """Write the shared journald drop-in that the create argv binds (ADR-007 a, CR-007)."""
+        try:
+            write_journald_dropin(self._env.paths)
+        except OSError as exc:
+            err = make("GINN-E-INTERNAL")
+            err.details.update({"detail": f"journald drop-in: {exc}"})
+            raise err from exc
+
     def _write_service(self) -> None:
-        """Write the realm's runit service directory and, when set, the journald drop-in.
+        """Write the realm's runit service directory. The journald drop-in is written before podman.
 
         The undo is registered before the write, and it removes the directory only for this realm
-        name, which the name check proved free. The drop-in is shared by all realms, so its undo
-        leaves it in place (as the NVIDIA spec does).
+        name, which the name check proved free.
         """
         program = self._hooks.program
         if program is None or not os.path.isabs(program):
@@ -371,8 +383,6 @@ class _Create:
         name = self._request.name
         self._rollback.add("service directory", lambda: remove_service(paths, name))
         try:
-            if self._plan.spec.services_mitigations:
-                write_journald_dropin(paths)
             write_service_dir(paths, name, program)
         except OSError as exc:
             # A GinnError rolls the create back, as any other failed step does (FR-120 AC-1).
