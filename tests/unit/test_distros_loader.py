@@ -734,6 +734,18 @@ def test_the_fatal_warning_list_is_optional_data_that_the_loader_reads() -> None
     assert [p.pattern for p in definition.check_fatal_warnings] == ["repository .* was skipped"]
 
 
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("NFR-060")
+def test_the_everything_packages_are_optional_data_and_only_kali_has_them() -> None:
+    assert from_mapping(_base(), source="fixture.toml").everything == ()
+    assert load("kali").everything == ("kali-linux-everything",)
+    for name in ("arch", "debian", "fedora"):
+        assert load(name).everything == ()
+    raw = _base()
+    raw["everything"] = ["meta-one", "meta-two"]
+    assert from_mapping(raw, source="fixture.toml").everything == ("meta-one", "meta-two")
+
+
 @pytest.mark.fr("FR-024")
 def test_update_status_has_exactly_three_outcomes() -> None:
     assert {status.value for status in UpdateStatus} == {"updates", "none", "error"}
@@ -1069,6 +1081,9 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
         "fatal warning regex does not compile",
         _set("check_fatal_warning_regex", value=["database ("]),
     ),
+    ("everything is a string", _set("everything", value="kali-linux-everything")),
+    ("everything names a bad package", _set("everything", value=["Bad_Name"])),
+    ("everything repeats a package", _set("everything", value=["meta", "meta"])),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),

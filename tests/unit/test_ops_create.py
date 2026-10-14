@@ -18,7 +18,7 @@ socket would bind an audio grant and run a mkdir that the test does not expect.
 
 import json
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,8 @@ from ginn.domain import (
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make
 from ginn.ops import _create_plan
+from ginn.ops import create as create_ops
+from ginn.ops._create_plan import SizeEstimate
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import (
     CreateHooks,
@@ -46,6 +48,7 @@ from ginn.ops.create import (
     create_realm,
     required_bytes,
 )
+from ginn.ops.disk import estimate_required
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
@@ -108,6 +111,19 @@ FORBIDDEN_TOKENS = frozenset(
     }
 )
 FORBIDDEN_SUBSTRINGS = ("gpgcheck=0", "SigLevel", "--cap-add")
+
+
+class _Vfs:
+    """A statvfs answer with `available` bytes for an unprivileged user (ops/disk.py)."""
+
+    def __init__(self, available: int) -> None:
+        self.f_bavail = available
+        self.f_frsize = 1
+
+
+def _statvfs(available: int) -> Callable[[str], _Vfs]:
+    """A statvfs seam that reports the same free space for every path."""
+    return lambda _path: _Vfs(available)
 
 
 def _helper_rows(argv: Sequence[str], root: str) -> str:
@@ -280,7 +296,7 @@ def hooks_for(
         return str(path).startswith(str(tmp_path))
 
     values: dict[str, Any] = {
-        "disk_free": lambda path: AMPLE,
+        "statvfs": _statvfs(AMPLE),
         "sleep": sleeps.append,
         "exists": under_tmp,
         "mountinfo": mountinfo,
@@ -647,7 +663,6 @@ def test_an_invalid_package_name_is_refused_before_any_podman_call(
 @pytest.mark.parametrize(
     ("name", "distro", "kwargs", "expected"),
     [
-        ("kali", "kali", {}, NotImplementedError),
         ("debian", "debian", {"everything": True}, GinnError),
         ("nosuch", "nosuch", {}, GinnError),
     ],
@@ -767,12 +782,13 @@ def test_free_space_below_the_estimate_refuses_before_any_download(
     mountinfo: Path,
 ) -> None:
     needed = required_bytes(trust.load().entry("debian"))
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, disk_free=lambda path: needed - 1)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1))
     with pytest.raises(GinnError) as caught:
         create_realm(env, fake, request(home), hooks=hooks)
     assert caught.value.code == "GINN-E-DISK-SPACE"
     assert caught.value.exit_code == 73
     assert caught.value.details["needed"] == f"{needed} bytes"
+    assert caught.value.details["path"] == str(env.paths.podman_root)
     assert "pull" not in ops_of(fake)
     assert "create" not in ops_of(fake)
     assert_nothing_left(env, fake)
@@ -789,9 +805,324 @@ def test_free_space_equal_to_the_estimate_times_1_10_is_enough(
     mountinfo: Path,
 ) -> None:
     needed = required_bytes(trust.load().entry("debian"))
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, disk_free=lambda path: needed)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed))
     result = create_realm(env, fake, request(home), hooks=hooks)
     assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-121")
+def test_the_space_check_covers_the_podman_root_and_the_realm_home(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both filesystems that the create fills are checked, each with the same requirement."""
+    checked: list[tuple[list[Path], int]] = []
+
+    def record(paths: Sequence[Path], required: int, **_: object) -> None:
+        checked.append((list(paths), required))
+
+    monkeypatch.setattr(create_ops, "check_free_paths", record)
+    create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert checked == [
+        ([env.paths.podman_root, env.paths.homes], required_bytes(trust.load().entry("debian")))
+    ]
+
+
+@pytest.mark.fr("FR-121")
+def test_the_base_requirement_is_the_estimate_rounded_up_after_the_factor() -> None:
+    entry = trust.load().entry("debian")
+    estimate = entry.compressed_size_bytes + entry.estimated_installed_bytes
+    assert required_bytes(entry) == estimate_required(estimate)
+    assert required_bytes(entry) == (estimate * 110 + 99) // 100
+
+
+KALI_LISTING = (
+    "kali-linux-everything\n"
+    "  Depends: alpha\n"
+    "  Depends: <virtual-thing>\n"
+    "alpha\n"
+    "  Depends: beta\n"
+    "<virtual-thing>\n"
+    "beta\n"
+)
+"""An `apt-cache depends --recurse` listing: names at column 0, the dependency lines indented, and
+a virtual package in angle brackets."""
+KALI_SHOW = (
+    "Package: kali-linux-everything\nVersion: 2026.3\nSize: 1000\nInstalled-Size: 1\n\n"
+    "Package: alpha\nVersion: 1.0\nSize: 2000\nInstalled-Size: 2\n\n"
+    "Package: beta\nVersion: 1.0\nSize: 3000\nInstalled-Size: 3\n"
+)
+"""The `apt-cache show` stanzas of that closure. Size is in bytes and Installed-Size in KiB."""
+EVERYTHING_DOWNLOAD = 1000 + 2000 + 3000
+EVERYTHING_INSTALLED = (1 + 2 + 3) * 1024
+EVERYTHING_TOTAL = EVERYTHING_DOWNLOAD + EVERYTHING_INSTALLED
+
+
+def _everything_request(home: Path, **kwargs: Any) -> CreateRequest:
+    return request(home, name="kali", distro="kali", everything=True, **kwargs)
+
+
+def _kali_everything_answers(fake: ScriptedPodman) -> None:
+    """The realm's package-list answers for the Kali everything closure (one chunk)."""
+    kali = load_distro("kali")
+    fake.exec_results[tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))] = ExecResult(
+        0, KALI_LISTING, ""
+    )
+    fake.exec_results[
+        tuple(kali.argv(Verb.ESTIMATE, ["kali-linux-everything", "alpha", "beta"]))
+    ] = ExecResult(0, KALI_SHOW, "")
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+def test_a_kali_realm_runs_on_pasta_and_adds_only_net_raw(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    result = create_realm(
+        env,
+        fake,
+        request(home, name="kali", distro="kali"),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    assert result.record.state is RealmState.STOPPED
+    (spec,) = fake.created_specs
+    argv = spec.to_argv()
+    assert argv[argv.index("--network") + 1] == "pasta"
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--cap-add"] == ["NET_RAW"]
+    assert "--privileged" not in argv
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-121")
+def test_the_everything_set_is_estimated_then_confirmed_then_installed(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    _kali_everything_answers(fake)
+    prompts: list[str] = []
+    steps: list[str] = []
+
+    def answer_yes(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, confirm=answer_yes, on_step=steps.append)
+    result = create_realm(env, fake, _everything_request(home), hooks=hooks)
+    assert result.estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    (prompt,) = prompts
+    assert "kali-linux-everything" in prompt and "3 packages" in prompt
+    kali = load_distro("kali")
+    assert kali.argv(Verb.INSTALL, ["kali-linux-everything"]) in execs(fake)
+    assert steps.index("integrated") < steps.index("estimated")
+    assert steps.index("estimated") < steps.index("everything") < steps.index("packages")
+    (name,) = RealmStore(env.paths).list_names()
+    record = RealmStore(env.paths).load(name)
+    assert record.manifest == [
+        ManifestEntry(
+            name="kali-linux-everything", source=InstallSource.REPO, method=InstallMethod.GINN
+        )
+    ]
+    assert record.settings.everything is True
+
+
+def _no(_prompt: str) -> bool:
+    return False
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize("confirm", [None, _no], ids=["no-confirm-hook", "answered-no"])
+def test_without_a_yes_the_everything_set_is_not_installed_and_the_realm_is_rolled_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    confirm: Callable[[str], bool] | None,
+) -> None:
+    _kali_everything_answers(fake)
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            _everything_request(home),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=confirm),
+        )
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    kali = load_distro("kali")
+    assert kali.argv(Verb.INSTALL, ["kali-linux-everything"]) not in execs(fake)
+    assert_nothing_left(env, fake, name="kali")
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("FR-014")
+def test_a_short_disk_for_the_everything_set_is_refused_before_the_prompt(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The base image fits, then the disk fills while the realm is refreshed: the estimate of the
+    everything set is checked against what is left, before anyone is asked."""
+    _kali_everything_answers(fake)
+    free = [AMPLE]
+
+    def fill_after_integration(step: str) -> None:
+        if step == "integrated":
+            free[0] = estimate_required(EVERYTHING_TOTAL) - 1
+
+    prompts: list[str] = []
+
+    def answer_yes(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
+    hooks = hooks_for(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        statvfs=lambda _path: _Vfs(free[0]),
+        on_step=fill_after_integration,
+        confirm=answer_yes,
+    )
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, _everything_request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{estimate_required(EVERYTHING_TOTAL)} bytes"
+    assert prompts == []
+    assert_nothing_left(env, fake, name="kali")
+
+
+@pytest.mark.fr("FR-014")
+def test_the_everything_closure_is_read_in_chunks_and_the_totals_add_up(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(create_ops, "EVERYTHING_CHUNK", 2)
+    kali = load_distro("kali")
+    fake.exec_results[tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))] = ExecResult(
+        0, KALI_LISTING, ""
+    )
+    for chunk in (["kali-linux-everything", "alpha"], ["beta"]):
+        fake.exec_results[tuple(kali.argv(Verb.ESTIMATE, chunk))] = ExecResult(0, KALI_SHOW, "")
+    result = create_realm(
+        env,
+        fake,
+        _everything_request(home),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=lambda _prompt: True),
+    )
+    assert result.estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    assert kali.argv(Verb.ESTIMATE, ["beta"]) in execs(fake)
+
+
+@pytest.mark.fr("FR-014")
+def test_everything_on_a_services_on_realm_is_refused_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    _kali_everything_answers(fake)
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            _everything_request(home, services=True),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=_no),
+        )
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert fake.calls == []
+    assert create_entries(env, "kali") == []
+
+
+@pytest.mark.fr("FR-014")
+def test_the_closure_names_are_the_column_zero_packages_once_in_order() -> None:
+    pattern = load_distro("kali").name_pattern
+    names = _create_plan.closure_names(KALI_LISTING, pattern, realm="kali", step="estimate")
+    assert names == ["kali-linux-everything", "alpha", "beta"]
+
+
+@pytest.mark.fr("FR-014")
+def test_a_closure_name_the_pattern_rejects_and_an_empty_listing_are_refused() -> None:
+    pattern = load_distro("kali").name_pattern
+    with pytest.raises(GinnError) as caught:
+        _create_plan.closure_names("Bad_Name\n", pattern, realm="kali", step="estimate")
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    with pytest.raises(GinnError) as empty:
+        _create_plan.closure_names("", pattern, realm="kali", step="estimate")
+    assert empty.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-014")
+def test_size_is_bytes_and_installed_size_is_kib_and_each_package_counts_once() -> None:
+    names = ["kali-linux-everything", "alpha", "beta"]
+    estimate = _create_plan.size_totals(KALI_SHOW, names, realm="kali", step="estimate")
+    assert estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    repeated = KALI_SHOW + "\nPackage: alpha\nSize: 9\nInstalled-Size: 9\n"
+    again = _create_plan.size_totals(repeated, ["alpha"], realm="kali", step="estimate")
+    assert again == SizeEstimate(packages=1, download_bytes=2000, installed_bytes=2 * 1024)
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Package: alpha\nSize: 2000\n",
+        "Package: alpha\nSize: 2000\nInstalled-Size: many\n",
+        "Package: beta\nSize: 3000\nInstalled-Size: 3\n",
+    ],
+    ids=["no-installed-size", "bad-installed-size", "no-stanza-for-the-name"],
+)
+def test_a_missing_size_is_refused_and_never_counted_as_zero(text: str) -> None:
+    with pytest.raises(GinnError) as caught:
+        _create_plan.size_totals(text, ["alpha"], realm="kali", step="estimate")
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize(
+    ("count", "text"),
+    [
+        (0, "0 bytes"),
+        (1023, "1023 bytes"),
+        (1024, "1.0 KiB"),
+        (1536 * 1024, "1.5 MiB"),
+        (2 * 1024**3, "2.0 GiB"),
+    ],
+)
+def test_human_bytes_uses_the_largest_binary_unit_that_keeps_one_or_more(
+    count: int, text: str
+) -> None:
+    assert _create_plan.human_bytes(count) == text
 
 
 @pytest.mark.fr("FR-011")

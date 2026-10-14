@@ -52,6 +52,9 @@ mirror (ADR-011). The ops layer maps a match to the remedy.
 the Arch check-updates fail closed: `arch_check_status()` returns error when a stderr line matches
 one, so a missing sync database is never read as "no updates" (ADR-011).
 
+`everything` is optional and defaults to an empty list. It names the packages of the everything
+option (FR-014, Kali only), and each one is matched with `package_name_regex`.
+
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
 distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
 """
@@ -99,7 +102,7 @@ _TOP_KEYS: Final = frozenset(
     }
 )
 # Optional top-level keys. A file may omit them, and the loader then uses the default.
-_OPTIONAL_TOP_KEYS: Final = frozenset({"check_fatal_warning_regex"})
+_OPTIONAL_TOP_KEYS: Final = frozenset({"check_fatal_warning_regex", "everything"})
 
 
 class Verb(StrEnum):
@@ -193,6 +196,9 @@ class DistroDef:
     verbs: Mapping[Verb, tuple[str, ...]]
     check_steps: tuple[tuple[str, ...], ...]
     check_fatal_warnings: tuple[re.Pattern[str], ...] = ()
+    everything: tuple[str, ...] = ()
+    """The packages of the everything option (FR-014), such as kali-linux-everything. Empty when
+    the distribution has none. Only Kali has one (DR-013)."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -469,6 +475,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
     network_error = reader.regex(raw["network_error_regex"], "network_error_regex")
     fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
+    everything = _everything(reader, raw.get("everything", []), name_pattern)
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs, check_steps = _verbs(reader, raw["verbs"])
@@ -486,6 +493,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         verbs=MappingProxyType(verbs),
         check_steps=check_steps,
         check_fatal_warnings=fatal_warnings,
+        everything=everything,
     )
 
 
@@ -495,6 +503,17 @@ def _fatal_warnings(reader: "_Reader", value: object) -> tuple[re.Pattern[str], 
     if not isinstance(value, list):
         raise reader.fail(field, "must be a list of regular expressions")
     return tuple(reader.regex(item, field) for item in value)
+
+
+def _everything(reader: "_Reader", value: object, name_pattern: re.Pattern[str]) -> tuple[str, ...]:
+    """The optional everything metapackages (FR-014): a list of package names, maybe empty."""
+    names = reader.strings(value, "everything")
+    for name in names:
+        if name_pattern.fullmatch(name) is None:
+            raise reader.fail("everything", f"{name!r} does not match package_name_regex")
+    if len(set(names)) != len(names):
+        raise reader.fail("everything", "must not repeat a package")
+    return names
 
 
 def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:

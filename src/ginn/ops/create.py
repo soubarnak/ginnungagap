@@ -6,7 +6,8 @@
 journal step. `CreateHooks.on_step` runs after each step is recorded.
 
 - checked: the realm name is free. Neither a record nor a Realm Home exists (FR-010 AC-3).
-- space-checked: free space in Owned Paths covers the base estimate times 1.10 (FR-121).
+- space-checked: free space in the podman root and the Realm Home filesystems covers the base
+  estimate times 1.10, rounded up (FR-121, ops/disk.py).
 - recorded: the record is saved as `creating` (DR-020), with the pinned reference and digest. It is
   saved before the pull, so an interrupted create leaves a record that recovery can find (FR-122).
 - homed: the Realm Home is made, mode 0700 (Owned Paths, DR-010, FR-048). A realm with nested
@@ -30,6 +31,11 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
 - integrated: `refresh` runs once, then the Integration Package Set and its steps (FR-013,
   ADR-011, CL-9). The refresh is not conditional on `refresh_before`, because creation always
   refreshes (ADR-011).
+- everything: only with `--everything` (Kali, FR-014). `resolve` and `estimate` read the closure
+  of the everything metapackage from the refreshed lists. Then the space check runs, with the
+  estimate times 1.10. Then `confirm` answers the prompt, and only a yes installs the set. A short
+  disk or a no raises, and the rollback removes the realm. The step is `estimated` before the
+  install and `everything` after it.
 - packages: the `--with` packages are installed (FR-010 AC-2). Signature checks stay on (FR-012).
 - stopped: the container stops. Then the final record is saved as `stopped` (FR-010 AC-1).
 
@@ -56,13 +62,11 @@ removes an image must take the same lock first.
 Retries. `podman pull` retries a GINN-E-NETWORK itself (adapter `with_network_retry`). A package
 step is retried the same way, but only when `podman exec` raises GINN-E-NETWORK, which is podman's
 own failure (exit 125). A package manager's own download failure (apt exit 100, pacman and dnf
-exit 1) is GINN-E-PKG-MANAGER and is not retried. Classifying those is T8.1. Each retry waits 5,
-15 and 45 s (FR-120, AS-023).
+exit 1) is GINN-E-PKG-MANAGER and is not retried. Each retry waits 5, 15 and 45 s (FR-120,
+AS-023). The waits and the hook are ops/retry.py's (`network_retry_hook`, T8.1).
 
-Not in this module: `--resume` (T2.8), the network classifier for package managers (T8.1), the
-disk module (T8.2), the `--with` closure and size estimate (the install verb resolves the closure
-natively, and the output formats are not verified until M4), the Install Manifest (M5), and a CLI
-command, since T4.4 has no CLI task.
+Not in this module: `--resume` (T2.8), the classifier of package-manager output (ops/retry.py and
+packages/manager.py), the Install Manifest (M5), and a CLI command, since T4.4 has no CLI task.
 """
 
 import contextlib
@@ -83,15 +87,24 @@ from ginn.domain.permissions import Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._create_plan import (
+    EVERYTHING_CHUNK,
+    EVERYTHING_CHUNK_MAX,
+    EVERYTHING_LISTING_MAX,
     CreateHooks,
     CreateRequest,
+    SizeEstimate,
     _Plan,
     _validate,
+    closure_names,
     estimate_bytes,
+    human_bytes,
     required_bytes,
+    size_totals,
 )
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops._rollback import Rollback
+from ginn.ops.disk import check_free_paths, estimate_required
+from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
@@ -115,8 +128,6 @@ from ginn.store.locks import image_lock
 from ginn.store.paths import OWNED_DIR_MODE
 from ginn.store.records import RealmRecord, RealmStore
 
-RETRY_DELAYS: Final[tuple[float, ...]] = (5.0, 15.0, 45.0)
-"""Seconds before retries 1 to 3 of a network failure (FR-120, AS-023)."""
 STOP_TIMEOUT_S: Final = 30
 """Seconds `podman stop` waits before it kills the realm (FR-016, AS-023)."""
 ROLLBACK_STOP_TIMEOUT_S: Final = 0
@@ -129,12 +140,14 @@ class CreateResult:
 
     `warnings` holds GINN-W-HOST-CHANGED from the after-check (FR-006). `locale_note` is set when
     the host LANG cannot be used, so the realm gets C.UTF-8 instead (FR-013, distros/loader.py).
+    `estimate` is the size of the everything set that was confirmed, or None (FR-014).
     """
 
     record: RealmRecord
     warnings: list[GinnWarning]
     locale_note: str | None
     gpu_note: str | None = None
+    estimate: SizeEstimate | None = None
 
 
 def _remove_tree(path: Path) -> None:
@@ -173,10 +186,16 @@ class _Create:
         self._attached: AttachResult | None = None
         self._skips: list[str] = []
         self._locale_note: str | None = None
+        self._estimate: SizeEstimate | None = None
+        self._retry = network_retry_hook(hooks.sleep)
 
     @property
     def locale_note(self) -> str | None:
         return self._locale_note
+
+    @property
+    def estimate(self) -> SizeEstimate | None:
+        return self._estimate
 
     @property
     def gpu_note(self) -> str | None:
@@ -199,6 +218,7 @@ class _Create:
         self._attach()
         self._check_user()
         self._integrate()
+        self._everything()
         self._install_with()
         return self._finish()
 
@@ -233,12 +253,13 @@ class _Create:
         self._step("checked")
 
     def _check_space(self) -> None:
-        needed = required_bytes(self._plan.entry)
-        available = self._hooks.disk_free(self._env.paths.data)
-        if available < needed:
-            raise make(
-                "GINN-E-DISK-SPACE", needed=f"{needed} bytes", available=f"{available} bytes"
-            )
+        """FR-121: the base estimate times 1.10 must fit on each filesystem the create fills."""
+        paths = self._env.paths
+        check_free_paths(
+            [paths.podman_root, paths.homes],
+            required_bytes(self._plan.entry),
+            statvfs=self._hooks.statvfs,
+        )
         self._step("space-checked")
 
     def _save_creating(self) -> None:
@@ -298,7 +319,7 @@ class _Create:
         if pulled_here:
             # Registered before the pull, so an interrupt inside the pull still finds the image.
             self._rollback.add("image", self._remove_image)
-        image = self._podman.pull(ref, retry_hook=self._retry_hook)
+        image = self._podman.pull(ref, retry_hook=self._retry)
         if image.digest != self._plan.entry.digest:
             # The image goes whatever other users it has: a digest that does not match its pin is
             # not trusted. A non-forced rmi still refuses while a container uses it. That is noted.
@@ -435,6 +456,76 @@ class _Create:
             self._exec(list(step), step="locale")
         self._step("integrated")
 
+    def _everything(self) -> None:
+        """Estimate, check, confirm and install the Kali everything set (FR-014, FR-121).
+
+        Only a request with `--everything` runs this. The estimate reads the realm's package lists,
+        so it comes after the refresh, and the base image is downloaded before it. Nothing is
+        installed until the space check and the confirmation both pass. A short disk, or no answer
+        to the prompt, raises, and the rollback removes the realm.
+        """
+        names = self._plan.everything
+        if not names:
+            return
+        estimate = self._estimate_everything()
+        self._estimate = estimate
+        paths = self._env.paths
+        check_free_paths(
+            [paths.podman_root, paths.homes],
+            estimate_required(estimate.total_bytes),
+            statvfs=self._hooks.statvfs,
+        )
+        prompt = (
+            f"Install {', '.join(names)} ({estimate.packages} packages): download "
+            f"{human_bytes(estimate.download_bytes)}, installed "
+            f"{human_bytes(estimate.installed_bytes)}. Continue?"
+        )
+        if self._hooks.confirm is None or not self._hooks.confirm(prompt):
+            cancelled = make("GINN-E-INTERRUPTED")
+            cancelled.add_note("the everything install was not confirmed, so nothing was installed")
+            raise cancelled
+        self._step("estimated")
+        self._exec(self._plan.definition.argv(Verb.INSTALL, names), step="everything")
+        self._step("everything")
+
+    def _estimate_everything(self) -> SizeEstimate:
+        """The size of the everything closure, read from the realm's package lists (FR-014 AC-1).
+
+        `resolve` lists the closure, and `estimate` reads each package's sizes in chunks, so no call
+        prints more than EVERYTHING_CHUNK_MAX bytes. Both run as container root, after the refresh.
+        """
+        definition = self._plan.definition
+        realm = self._request.name.value
+        cid = self._container_id()
+        listing = run_step(
+            self._podman,
+            cid,
+            definition,
+            definition.argv(Verb.RESOLVE, self._plan.everything),
+            realm=realm,
+            step="estimate",
+            retry_hook=self._retry,
+            max_output=EVERYTHING_LISTING_MAX,
+        )
+        names = closure_names(listing.stdout, definition.name_pattern, realm=realm, step="estimate")
+        download = installed = 0
+        for start in range(0, len(names), EVERYTHING_CHUNK):
+            chunk = names[start : start + EVERYTHING_CHUNK]
+            result = run_step(
+                self._podman,
+                cid,
+                definition,
+                definition.argv(Verb.ESTIMATE, chunk),
+                realm=realm,
+                step="estimate",
+                retry_hook=self._retry,
+                max_output=EVERYTHING_CHUNK_MAX,
+            )
+            part = size_totals(result.stdout, chunk, realm=realm, step="estimate")
+            download += part.download_bytes
+            installed += part.installed_bytes
+        return SizeEstimate(packages=len(names), download_bytes=download, installed_bytes=installed)
+
     def _install_with(self) -> None:
         packages = self._plan.packages
         if packages:
@@ -474,7 +565,7 @@ class _Create:
             restart_required=False,
             manifest=installed(
                 record.manifest,
-                list(self._plan.packages),
+                [*self._plan.everything, *self._plan.packages],
                 source=InstallSource.REPO,
                 method=InstallMethod.GINN,
             ),
@@ -512,13 +603,6 @@ class _Create:
         if self._hooks.on_step is not None:
             self._hooks.on_step(name)
 
-    def _retry_hook(self, attempt: int, err: GinnError) -> bool:
-        """Wait the FR-120 delay for failed attempt `attempt`, then retry (AS-023)."""
-        if attempt > len(RETRY_DELAYS):
-            return False
-        self._hooks.sleep(RETRY_DELAYS[attempt - 1])
-        return True
-
     def _container_id(self) -> str:
         if self._cid is None:
             raise RuntimeError("the container exists before any step that runs in it")
@@ -548,7 +632,7 @@ class _Create:
             argv,
             realm=self._request.name.value,
             step=step,
-            retry_hook=self._retry_hook,
+            retry_hook=self._retry,
         )
 
 
@@ -571,6 +655,7 @@ def create_realm(
         "tier": request.tier.value,
         "services": request.services,
         "with": list(plan.packages),
+        "everything": list(plan.everything),
     }
     image = f"create of {plan.definition.id} image"
     with (
@@ -594,14 +679,18 @@ def create_realm(
         warnings=list(mutation.warnings),
         locale_note=create.locale_note,
         gpu_note=create.gpu_note,
+        estimate=create.estimate,
     )
 
 
 __all__ = [
+    "RETRY_DELAYS",
     "CreateHooks",
     "CreateRequest",
     "CreateResult",
+    "SizeEstimate",
     "create_realm",
     "estimate_bytes",
+    "human_bytes",
     "required_bytes",
 ]

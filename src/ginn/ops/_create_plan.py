@@ -8,12 +8,13 @@ validated `--with` names, the host session, the permissions of the tier, and the
 a realm with nested containers. It runs no podman and writes nothing (NFR-SEC-005). It reads the
 profile source, so a missing source is refused before any write (ADR-006). ops/create.py runs the
 plan.
-FR-121's space estimate is here too, so ops/disk.py (T8.2) can replace it in one place.
+FR-121's space estimates are here too: the base image's, and the Kali everything set's, read from
+the package lists inside the realm (`size_estimate`). ops/disk.py applies the 1.10 factor and does
+the free-space check.
 """
 
 import os
 import re
-import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -32,7 +33,9 @@ from ginn.domain import (
 from ginn.domain.permissions import Permissions, Toggle, effective_toggles, initial_permissions
 from ginn.errors import make
 from ginn.ops._mutating import OpEnv
+from ginn.ops.disk import StatVfs, estimate_required
 from ginn.ops.security_ops import nvidia_plan
+from ginn.packages.manager import refused
 from ginn.runtime.attach import MOUNTINFO
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.mounts import Exists
@@ -51,34 +54,115 @@ from ginn.services.runit_user import conmon_pidfile, journald_dropin
 from ginn.trust import manifest as trust
 from ginn.trust.manifest import TrustEntry, TrustManifest
 
-DISK_MARGIN_PERCENT: Final = 110
-"""The FR-121 factor: free space must cover the estimate times 110 percent."""
 USER_NAME: Final = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 """The `<user>` field of the realm's passwd entry (T4.9b, ADR-006 amendment). The entry is one
 field, so there is no `:`, `$`, newline or leading `-`. The name is a lowercase login name: a
 letter or `_` first, then up to 31 letters, digits, `_` or `-`."""
+EVERYTHING_LISTING_MAX: Final = 32 * 1024 * 1024
+"""Bytes the closure listing of the everything metapackage (`resolve`) may print (FR-014)."""
+EVERYTHING_CHUNK: Final = 200
+"""Package names per `estimate` call, so each call's listing stays under EVERYTHING_CHUNK_MAX."""
+EVERYTHING_CHUNK_MAX: Final = 8 * 1024 * 1024
+"""Bytes one `estimate` call may print: the stanzas of at most EVERYTHING_CHUNK packages."""
+_KIB: Final = 1024
+"""apt states Installed-Size in KiB (deb-control(5)), and Size in bytes."""
 
 
-def _free_bytes(path: Path) -> int:
-    """Free bytes on the filesystem that holds `path`. A missing path is probed at its parent."""
-    probe = path
-    while not probe.exists() and probe.parent != probe:
-        probe = probe.parent
-    return shutil.disk_usage(probe).free
+@dataclass(frozen=True)
+class SizeEstimate:
+    """The size of a package set, as FR-014 shows it before a download: download and installed.
+
+    `download_bytes` is the sum of the packages' `Size` fields (the archives), and
+    `installed_bytes` the sum of their `Installed-Size` fields in bytes.
+    """
+
+    packages: int
+    download_bytes: int
+    installed_bytes: int
+
+    @property
+    def total_bytes(self) -> int:
+        """What FR-121 checks: the download and the installed size, before the 1.10 factor."""
+        return self.download_bytes + self.installed_bytes
 
 
 def estimate_bytes(entry: TrustEntry) -> int:
     """The base image's size estimate: compressed download plus installed size (FR-121).
 
     It covers the official image only. The Integration Package Set and `--with` closures are not
-    counted (see the module docstring). ops/disk.py (T8.2) replaces this estimate.
+    counted (see the module docstring).
     """
     return entry.compressed_size_bytes + entry.estimated_installed_bytes
 
 
 def required_bytes(entry: TrustEntry) -> int:
-    """The free space FR-121 requires: the estimate times 1.10, in whole bytes."""
-    return estimate_bytes(entry) * DISK_MARGIN_PERCENT // 100
+    """The free space FR-121 requires: the base estimate times 1.10, rounded up (ops/disk.py)."""
+    return estimate_required(estimate_bytes(entry))
+
+
+def closure_names(
+    listing: str, name_pattern: re.Pattern[str], *, realm: str, step: str
+) -> list[str]:
+    """The packages of an `apt-cache depends --recurse` listing, in order, each once.
+
+    A package starts its line at column 0, and its dependency lines below it are indented. A
+    virtual package is written `<name>`, and nothing is downloaded for it, so both are skipped. A
+    name the distribution's pattern does not accept is refused, since it is not read as a package.
+    """
+    names: dict[str, None] = {}
+    for line in listing.splitlines():
+        if not line or line[0].isspace() or line.startswith("<"):
+            continue
+        name = line.strip()
+        if name_pattern.fullmatch(name) is None:
+            raise refused(realm, step, f"a package name in the listing is not valid: {name[:64]!r}")
+        names.setdefault(name, None)
+    if not names:
+        raise refused(realm, step, "the listing names no package")
+    return list(names)
+
+
+def size_totals(text: str, names: Sequence[str], *, realm: str, step: str) -> SizeEstimate:
+    """The download and installed bytes of `names`, from an `apt-cache show` listing.
+
+    Each stanza is one package's record, made of `Key: value` lines. A package must have both
+    `Size` and `Installed-Size`, or the listing is refused, so a missing field never counts as zero.
+    A stanza for a name that is not in `names`, or a repeated one, is not counted again.
+    """
+    sizes: dict[str, tuple[int, int]] = {}
+    for stanza in text.split("\n\n"):
+        values: dict[str, str] = {}
+        for line in stanza.splitlines():
+            key, sep, value = line.partition(": ")
+            if sep and key in ("Package", "Size", "Installed-Size"):
+                values[key] = value.strip()
+        package = values.get("Package")
+        if package is None or package in sizes:
+            continue
+        size, installed = values.get("Size", ""), values.get("Installed-Size", "")
+        if not size.isdigit() or not installed.isdigit():
+            raise refused(realm, step, f"package {package!r} has no usable Size or Installed-Size")
+        sizes[package] = (int(size), int(installed) * _KIB)
+    missing = [name for name in names if name not in sizes]
+    if missing:
+        raise refused(realm, step, f"no size for {len(missing)} package(s), e.g. {missing[0]!r}")
+    return SizeEstimate(
+        packages=len(names),
+        download_bytes=sum(sizes[name][0] for name in names),
+        installed_bytes=sum(sizes[name][1] for name in names),
+    )
+
+
+def human_bytes(count: int) -> str:
+    """A size for a person, in the largest binary unit that keeps the figure at one or more."""
+    if count < _KIB:
+        return f"{count} bytes"
+    value, unit = count / _KIB, "KiB"
+    for larger in ("MiB", "GiB", "TiB"):
+        if value < _KIB:
+            break
+        value, unit = value / _KIB, larger
+    return f"{value:.1f} {unit}"
 
 
 @dataclass(frozen=True)
@@ -106,17 +190,21 @@ class CreateRequest:
 class CreateHooks:
     """The seams for the parts that touch the host or wait. The defaults are the real ones.
 
-    `disk_free` reports free bytes for a path (FR-121). `sleep` waits between retries (FR-120).
-    `exists`, `mountinfo` and `helper` are the probes and paths that runtime/ reads. `manifest`
-    replaces the packaged Trust Manifest. `on_step` runs after each journal step, so a caller can
-    show progress (AS-018), or a test can inject a failure there.
+    `statvfs` is the filesystem probe of the FR-121 check (ops/disk.py). `sleep` waits between
+    retries (FR-120). `exists`, `mountinfo` and `helper` are the probes and paths that runtime/
+    reads. `manifest` replaces the packaged Trust Manifest. `on_step` runs after each journal step,
+    so a caller can show progress (AS-018), or a test can inject a failure there.
+
+    `confirm` answers the prompt of the Kali everything install (FR-014). It gets the prompt text
+    and returns True to go on. Without it, or when it answers no, the install does not run and the
+    create is rolled back.
 
     `integrate` False skips the refresh, the Integration Package Set and its steps, and records the
     `integrated` step with nothing run. Only the host gate sets it (T4.9, Gate 3: no package
     install and no refresh in a test realm). The CLI never sets it, so every real create refreshes.
     """
 
-    disk_free: Callable[[Path], int] = _free_bytes
+    statvfs: StatVfs = os.statvfs
     sleep: Callable[[float], None] = time.sleep
     exists: Exists = os.path.exists
     mountinfo: Path = MOUNTINFO
@@ -132,6 +220,8 @@ class CreateHooks:
     """The NVIDIA probe and the other security seams of the create (FR-069, ADR-012)."""
     program: str | None = None
     """The absolute ginn command that a services-on realm's run and finish scripts execute."""
+    confirm: Callable[[str], bool] | None = None
+    """Answers the Kali everything prompt (FR-014). None declines, as delete does without one."""
 
 
 @dataclass(frozen=True)
@@ -149,6 +239,8 @@ class _Plan:
     spec: RealmSpec
     entry: TrustEntry
     packages: tuple[str, ...]
+    everything: tuple[str, ...]
+    """The Kali everything metapackages (FR-014), empty unless the request asks for them."""
     session: SessionEnv
     owned: list[Path]
     user: str
@@ -179,9 +271,9 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
     Raises GINN-E-USAGE for an unknown distribution, GINN-E-OPTION-INVALID for a bad setting and
     GINN-E-PKG-NAME-INVALID for a bad package name. A host home or user name that the passwd entry
     cannot carry is refused with GINN-E-REALM-USER (T4.9b). A services-on create with `--with`
-    packages is refused with GINN-E-NOT-SUPPORTED-YET (T7.4), since their install needs a running
-    container. A distribution that the code does not support yet (T10.1) is refused by RealmSpec,
-    as NotImplementedError.
+    packages or `--everything` is refused with GINN-E-NOT-SUPPORTED-YET (T7.4), since their install
+    needs a running container. `--everything` on a distribution without an everything set is
+    GINN-E-OPTION-INVALID (FR-014 AC-3).
     """
     distro = DistroId(request.distro)
     definition = load_distro(distro.value)
@@ -209,6 +301,17 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
             "GINN-E-NOT-SUPPORTED-YET",
             realm=request.name.value,
             feature="--with packages on a services-on realm",
+            milestone="T7.4",
+        )
+    everything = definition.everything if request.everything else ()
+    if request.everything and not everything:
+        raise make("GINN-E-OPTION-INVALID", option="--everything", distro=distro.value)
+    if request.services and everything:
+        # The everything set installs the same way as --with, so it waits for the same task.
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=request.name.value,
+            feature="--everything on a services-on realm",
             milestone="T7.4",
         )
     owned = env.paths.all_owned_roots()
@@ -248,7 +351,7 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
         extras=extras_for_spec,
     )
     # realm_spec takes the tier. Replaying only the services flag sets it on the spec, and RealmSpec
-    # checks the result (the Kali refusal, M10).
+    # checks the result.
     spec = replace(spec, services=request.services)
     if request.services:
         # The services-on fields come after `services`, which RealmSpec checks (ADR-003, ADR-007).
@@ -272,6 +375,7 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
         spec=spec,
         entry=manifest.entry(distro.value),
         packages=packages,
+        everything=everything,
         session=session,
         owned=owned,
         user=env.user,

@@ -9,8 +9,8 @@
 # Image: trust_key names [distro.kali] in src/ginn/trust/data/trust.toml (DR-040). The channel is
 # kali-rolling, a proposal (S-10 section 2; AS-024 does not cover Kali). The Integration packages
 # and the locale step are the same as Debian. Not verified on a host (M4), and not tested with
-# network. Kali network and capability settings, and the --everything option, are not here
-# (T8.7, T10.1).
+# network. The network (pasta) and NET_RAW settings are not here: runtime/spec.py sets them for
+# this distribution only (FR-026, FR-027).
 schema = 1
 id = "kali"
 trust_key = "kali"
@@ -29,6 +29,10 @@ network_error_regex = 'Temporary failure resolving|Could not resolve|Connection 
 # ADR-011: apt-get update refreshes the package lists only and never upgrades, so these verbs run it
 # first. remove and list-explicit need no lists.
 refresh_before = ["install", "upgrade", "check-updates", "resolve", "estimate"]
+# FR-014: the metapackage of the --everything option. Its closure is the download and the
+# installed size that `ginn create kali --everything` estimates (resolve, then estimate, inside the
+# realm after the refresh). Not verified on a host (M4), and only Kali has one (DR-013).
+everything = ["kali-linux-everything"]
 
 [integration]
 packages = ["ca-certificates", "locales"]

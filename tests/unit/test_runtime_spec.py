@@ -167,6 +167,7 @@ def _present(paths: Iterable[str]) -> Callable[[str], bool]:
 def make_spec(
     distro: str = "arch",
     *,
+    name: str = "arch",
     present: Iterable[str] = STABLE_PATHS,
     uid: int = UID,
     gid: int = GID,
@@ -180,13 +181,13 @@ def make_spec(
         Tier.BASIC,
         host_home=HOME,
         uid=uid,
-        realm_home=REALM_HOME,
+        realm_home=OWNED / "homes" / name,
         owned_paths=[OWNED],
         env={},
         exists=_present(present),
     )
     return RealmSpec(
-        name=RealmName("arch"),
+        name=RealmName(name),
         distro=DistroId(distro),
         image=image,
         uid=uid,
@@ -197,7 +198,7 @@ def make_spec(
         binds=binds,
         tier=tier,
         services=services,
-        conmon_pidfile=f"/run/ginn/{uid}/services/arch.conmon.pid" if services else None,
+        conmon_pidfile=f"/run/ginn/{uid}/services/{name}.conmon.pid" if services else None,
         generation=generation,
     )
 
@@ -435,18 +436,53 @@ def test_create_spec_is_the_adapter_spec_that_renders_the_same_argv() -> None:
     assert rendered.command == ["infinity"]
 
 
-@pytest.mark.fr("FR-010")
-def test_kali_is_refused_until_its_network_and_capability_overlay_exist() -> None:
-    with pytest.raises(NotImplementedError, match="M10"):
-        make_spec("kali")
+KALI_NAME = "kali"
 
 
-def assert_services_on_argv(argv: list[str], *, distro: str = "arch") -> None:
-    """The invariants every services-on argv holds, whatever its distribution (ADR-003, FR-080)."""
+def kali_golden(golden: list[str], image: str) -> list[str]:
+    """The Kali argv from a non-Kali golden argv. The realm name `arch` becomes `kali` wherever it
+    is a word (the container name, the label, the Realm Home path and the cgroup), and the image is
+    Kali's pin. Then `--network pasta` replaces `--network host`, and one `--cap-add NET_RAW` goes
+    where the argv builder puts capabilities, before the entrypoint or the image (adapter
+    `CreateSpec.to_argv`). Nothing else differs (FR-026, FR-027)."""
+    argv = [re.sub(r"\barch\b", KALI_NAME, arg) for arg in golden]
+    argv[next(index for index, arg in enumerate(argv) if "@sha256:" in arg)] = image
+    argv[argv.index("--network") + 1] = "pasta"
+    digest = argv.index(image)
+    before = argv.index("--entrypoint") if "--entrypoint" in argv else digest
+    return [*argv[:before], "--cap-add", "NET_RAW", *argv[before:]]
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+def test_kali_services_off_golden_argv_is_pasta_and_net_raw_only() -> None:
+    image = pull_reference("kali")
+    argv = create_argv(make_spec("kali", name=KALI_NAME, image=image))
+    assert argv == kali_golden(GOLDEN_ARCH, image)
+    assert option_values(argv, "--cap-add") == ["NET_RAW"]
+    assert option_values(argv, "--network") == ["pasta"]
+    assert "--privileged" not in argv
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+@pytest.mark.parametrize("distro", NON_KALI)
+def test_only_kali_gets_pasta_and_net_raw(distro: str) -> None:
+    argv = create_argv(make_spec(distro))
+    assert option_values(argv, "--network") == ["host"]
+    assert option_values(argv, "--cap-add") == []
+
+
+def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str = "arch") -> None:
+    """The invariants every services-on argv holds, whatever its distribution (ADR-003, FR-080).
+
+    Kali is the one distribution with pasta and NET_RAW (FR-026, FR-027), so only it differs here.
+    """
     assert all(isinstance(arg, str) for arg in argv)
     assert argv[0] == "create"
     assert not any(arg == "--privileged" or arg.startswith("--privileged=") for arg in argv)
-    assert "--cap-add" not in argv
+    kali = distro == "kali"
+    assert option_values(argv, "--cap-add") == (["NET_RAW"] if kali else [])
     assert "--security-opt" not in argv
     assert "--init" not in argv
     assert "--init-path" not in argv
@@ -455,16 +491,16 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch") -> None:
     assert "--systemd=always" in argv
     assert option_values(argv, "--user") == ["0:0"]
     assert option_values(argv, "--userns") == ["keep-id"]
-    assert option_values(argv, "--network") == ["host"]
+    assert option_values(argv, "--network") == (["pasta"] if kali else ["host"])
     assert "--http-proxy=false" in argv
     assert option_values(argv, "--cgroupns") == ["private"]
-    assert option_values(argv, "--cgroup-parent") == [f"/ginn/{UID}/arch"]
+    assert option_values(argv, "--cgroup-parent") == [f"/ginn/{UID}/{name}"]
     assert option_values(argv, "--stop-signal") == ["SIGRTMIN+3"]
     assert option_values(argv, "--stop-timeout") == ["30"]
     assert option_values(argv, "--env") == ["SYSTEMD_LOG_LEVEL=warning"]
     entry = argv[argv.index("--passwd-entry") + 1]
     assert entry.endswith(f":alice:/home/alice:{load_distro(distro).shell}")
-    assert argv[-2:] == [DIGEST, "/sbin/init"]
+    assert argv[-2:] == [pull_reference(distro) if distro == "kali" else DIGEST, "/sbin/init"]
 
 
 @pytest.mark.fr("FR-080")
@@ -507,11 +543,16 @@ def test_services_off_has_catatonit_and_no_systemd_and_services_on_is_the_revers
     assert "--systemd=always" in on
 
 
-@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
 @pytest.mark.fr("FR-080")
-def test_kali_services_on_is_still_refused_by_the_kali_rule() -> None:
-    with pytest.raises(NotImplementedError, match="M10"):
-        make_spec("kali", services=True)
+def test_kali_services_on_golden_argv_keeps_pasta_and_net_raw() -> None:
+    image = pull_reference("kali")
+    argv = create_argv(make_spec("kali", name=KALI_NAME, image=image, services=True))
+    assert argv == kali_golden(GOLDEN_ARCH_SERVICES_ON, image)
+    assert option_values(argv, "--cap-add") == ["NET_RAW"]
+    assert option_values(argv, "--network") == ["pasta"]
+    assert_services_on_argv(argv, distro="kali", name=KALI_NAME)
 
 
 @pytest.mark.fr("NFR-SEC-001")

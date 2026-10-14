@@ -21,8 +21,10 @@ Basic table, unless a row says otherwise):
   entry for the realm user, verbatim (T4.9b measurement). The realm user is that entry: ginn runs
   no `useradd`, and ops/create.py checks the entry with `getent passwd` (ADR-006 amendment of
   2026-10-13). The shell is the distribution's login shell, the one `enter` runs (FR-048).
-- `--network host`. Non-Kali realms share the host network namespace (AS-006). Kali is refused
-  here, because it needs pasta and NET_RAW (FR-026, FR-027, T10.1).
+- `--network host`. Non-Kali realms share the host network namespace (AS-006). A Kali realm has
+  `--network pasta` in its own namespace instead, and `--cap-add NET_RAW`, the only capability
+  added beyond Basic (FR-026, FR-027, docs/capabilities.md Kali table). `network_of` and
+  `cap_add_of` give these by distribution, so no other distribution can receive them.
 - `--http-proxy=false`. Podman does not copy the host's proxy variables into the realm. The proxy
   names reach an exec or a launch as `--env NAME` (ADR-004 amendment, T4.6).
 - `--init`, with no `--init-path`. Services-off realms run catatonit as PID 1 (FR-082, ADR-004).
@@ -48,7 +50,8 @@ Basic table, unless a row says otherwise):
   is `/dev/dri`.
 
 What the argv does not carry:
-- No `--privileged` and no `--cap-add`. Basic adds no capability (NFR-SEC-001, NFR-SEC-002).
+- No `--privileged`. Basic adds no capability (NFR-SEC-001, NFR-SEC-002). The one `--cap-add` is
+  Kali's NET_RAW, above.
 - No `--cgroups=split`. Podman 5.8.8 refuses it with `--cgroup-parent` (ADR-003).
 - No `--env`. The session environment is set at exec and launch, not at create (capabilities.md,
   Session environment row, T4.3).
@@ -111,6 +114,22 @@ SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
 unit path under /etc/systemd/system. The list is spikes/s05/masks-base.txt (tests pin it)."""
 UNIT_DIR: Final = "/etc/systemd/system"
 KALI: Final = "kali"
+HOST_NETWORK: Final = "host"
+KALI_NETWORK: Final = "pasta"
+"""Kali's own network namespace, with outbound access (FR-026). Podman runs pasta for it."""
+KALI_CAPS: Final[tuple[str, ...]] = ("NET_RAW",)
+"""Kali's capability, raw sockets inside its own namespace only (FR-027). NET_ADMIN is not added:
+the stock nmap does not need it (docs/capabilities.md)."""
+
+
+def network_of(distro: DistroId) -> str:
+    """The podman `--network` value of a distribution: pasta for Kali, host for the others."""
+    return KALI_NETWORK if distro.value == KALI else HOST_NETWORK
+
+
+def cap_add_of(distro: DistroId) -> tuple[str, ...]:
+    """The capabilities a distribution's realm adds with `--cap-add`: NET_RAW for Kali only."""
+    return KALI_CAPS if distro.value == KALI else ()
 
 
 @dataclass(frozen=True)
@@ -166,8 +185,6 @@ class RealmSpec:
             raise ValueError(
                 "a Basic realm adds no create-time option but its GPU grant (NFR-SEC-002)"
             )
-        if self.distro.value == KALI:
-            raise NotImplementedError("kali needs pasta and NET_RAW, arriving in M10 (T10.1)")
         if self.uid == 0:
             raise ValueError("CR-003, OOS-3: a realm never runs as the host root user, uid 0")
         if self.uid < 0 or self.gid < 0:
@@ -334,7 +351,7 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
     base = CreateSpec(
         name=spec.container_name,
         image_digest_ref=spec.image,
-        network="host",
+        network=network_of(spec.distro),
         user=f"{spec.uid}:{spec.gid}",
         userns="keep-id",
         passwd_entry=spec.passwd_entry,
@@ -347,6 +364,7 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         devices=[*spec.binds.devices, *spec.options.devices],
         cdi_devices=[] if spec.options.cdi is None else [spec.options.cdi.device],
         cdi_spec_dir=None if spec.options.cdi is None else str(spec.options.cdi.spec_dir),
+        caps_add=list(cap_add_of(spec.distro)),
         security_opts=list(spec.options.security_opts),
         group_add=list(spec.options.group_add),
         tmpfs=list(spec.binds.tmpfs),

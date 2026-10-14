@@ -7,7 +7,10 @@ package step runs. The refusals of options that are not built yet are checked be
 
 from __future__ import annotations
 
+import io
 import json
+import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +21,16 @@ from ginn.cli import _context
 from ginn.cli.commands import create as create_cmd
 from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
-from ginn.ops.create import CreateRequest, CreateResult
+from ginn.ops.create import CreateRequest, CreateResult, SizeEstimate
 from ginn.podman.models import ContainerState
 from ginn.store.records import RealmStore
 from tests.unit.realm_cli_support import World, record_of
+
+
+def _recorded_result(request: CreateRequest) -> CreateResult:
+    """The result of a create that stopped its realm, with no notice and no estimate."""
+    record = record_of(request.name.value, RealmState.STOPPED, "c" * 64)
+    return CreateResult(record=record, warnings=[], locale_note=None)
 
 
 def _recorded(monkeypatch: pytest.MonkeyPatch) -> list[CreateRequest]:
@@ -30,8 +39,7 @@ def _recorded(monkeypatch: pytest.MonkeyPatch) -> list[CreateRequest]:
 
     def fake_create(env: Any, podman: Any, request: CreateRequest, *, hooks: Any) -> CreateResult:
         requests.append(request)
-        record = record_of(request.name.value, RealmState.STOPPED, "c" * 64)
-        return CreateResult(record=record, warnings=[], locale_note=None)
+        return _recorded_result(request)
 
     monkeypatch.setattr(create_cmd, "create_realm", fake_create)
     return requests
@@ -95,8 +103,6 @@ def test_a_bad_realm_name_is_an_argument_error_before_anything_runs(
     ("argv", "feature", "milestone"),
     [
         (["create", "arch", "--resume"], "create --resume", "M8"),
-        (["create", "kali", "--everything"], "create --everything", "M8"),
-        (["create", "kali"], "create of a kali realm", "M10"),
     ],
 )
 def test_options_not_built_yet_are_refused_with_their_milestone(
@@ -127,18 +133,120 @@ def test_everything_on_a_non_kali_distro_is_option_invalid(
     assert "--everything" in err
 
 
-@pytest.mark.fr("IR-011")
-def test_a_refusal_from_the_spec_is_mapped_to_not_supported_yet(
+@pytest.mark.fr("FR-014")
+def test_everything_without_a_terminal_or_yes_is_refused_before_any_write(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def refuse(env: Any, podman: Any, request: CreateRequest, *, hooks: Any) -> CreateResult:
-        raise NotImplementedError("kali needs pasta and NET_RAW, arriving in M10 (T10.1)")
-
-    monkeypatch.setattr(create_cmd, "create_realm", refuse)
-    assert main(["create", "debian"]) == 2
+    requests = _recorded(monkeypatch)
+    monkeypatch.setattr(create_cmd, "_can_prompt", lambda: False)
+    assert main(["create", "kali", "--everything"]) == 2
+    assert requests == []
+    assert world.fake.containers == {}
     err = capsys.readouterr().err
-    assert err.startswith("GINN-E-NOT-SUPPORTED-YET: ")
-    assert "kali needs pasta" in err
+    assert err.startswith("GINN-E-USAGE: ")
+    assert "--yes" in err
+
+
+@pytest.mark.fr("FR-014")
+def test_everything_with_json_needs_yes_because_a_json_run_does_not_prompt(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requests = _recorded(monkeypatch)
+    monkeypatch.setattr(create_cmd, "_can_prompt", lambda: True)
+    assert main(["--json", "create", "kali", "--everything"]) == 2
+    assert requests == []
+    assert "a JSON run does not prompt" in capsys.readouterr().err
+
+
+@pytest.mark.fr("FR-014")
+def test_everything_with_yes_is_confirmed_without_a_prompt(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requests: list[CreateRequest] = []
+    hooks_seen: list[Any] = []
+
+    def capture(env: Any, podman: Any, request: CreateRequest, *, hooks: Any) -> CreateResult:
+        requests.append(request)
+        hooks_seen.append(hooks)
+        return _recorded_result(request)
+
+    monkeypatch.setattr(create_cmd, "create_realm", capture)
+    monkeypatch.setattr(create_cmd, "_can_prompt", lambda: False)
+    assert main(["create", "kali", "--everything", "--yes"]) == 0
+    (request,) = requests
+    assert request.everything is True
+    assert hooks_seen[0].confirm("any prompt") is True
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.fr("FR-014")
+def test_the_estimate_of_a_confirmed_everything_install_is_shown_in_text_and_json(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def with_estimate(env: Any, podman: Any, request: CreateRequest, *, hooks: Any) -> CreateResult:
+        estimate = SizeEstimate(packages=3, download_bytes=6000, installed_bytes=6144)
+        return replace(_recorded_result(request), estimate=estimate)
+
+    monkeypatch.setattr(create_cmd, "create_realm", with_estimate)
+    assert main(["create", "kali", "--everything", "--yes"]) == 0
+    assert "everything: 3 packages, download 5.9 KiB, installed 6.0 KiB" in capsys.readouterr().out
+    assert main(["--json", "create", "kali", "--everything", "--yes"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["everything"] == {"packages": 3, "download_bytes": 6000, "installed_bytes": 6144}
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize(
+    ("answer", "confirmed"), [("y\n", True), ("yes\n", True), ("n\n", False), ("", False)]
+)
+def test_the_typed_answer_at_the_everything_prompt_decides_the_install(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    answer: str,
+    confirmed: bool,
+) -> None:
+    requests: list[CreateRequest] = []
+    hooks_seen: list[Any] = []
+
+    def capture(env: Any, podman: Any, request: CreateRequest, *, hooks: Any) -> CreateResult:
+        requests.append(request)
+        hooks_seen.append(hooks)
+        return _recorded_result(request)
+
+    monkeypatch.setattr(create_cmd, "create_realm", capture)
+    monkeypatch.setattr(create_cmd, "_can_prompt", lambda: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
+    assert main(["create", "kali", "--everything"]) == 0
+    assert len(requests) == 1
+    assert hooks_seen[0].confirm("Install kali-linux-everything?") is confirmed
+    assert "Install kali-linux-everything?" in capsys.readouterr().err
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+def test_a_kali_realm_is_created_like_any_other_distribution(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    requests = _recorded(monkeypatch)
+    assert main(["create", "kali"]) == 0
+    (request,) = requests
+    assert request.distro == "kali"
+    assert request.everything is False
+    assert capsys.readouterr().out == "realm kali created: state stopped\n"
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+@pytest.mark.fr("FR-014")
+def test_the_kali_help_states_the_limits_of_oos_9(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["create", "--help"]) == 0
+    out = " ".join(capsys.readouterr().out.split())  # argparse wraps the epilog
+    assert "kali" in out
+    assert "Wi-Fi monitor mode" in out
+    assert "raw-socket or ARP scans of physical networks" in out
+    assert "authorized testing" in out
+    assert "--everything" in out and "--yes" in out
 
 
 @pytest.mark.fr("FR-010")
@@ -233,6 +341,7 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
         "image_digest": payload["image_digest"],
         "locale_note": payload["locale_note"],
         "gpu_note": payload["gpu_note"],
+        "everything": None,
     }
     record = RealmStore(world.paths).load(RealmName("debian"))
     assert record.state is RealmState.STOPPED
