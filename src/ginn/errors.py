@@ -12,8 +12,9 @@ GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH
 (ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
 GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
-(FR-081, AS-028), and GINN-E-NO-INIT (FR-080, F3). `source` cites
-the requirement that defines the failure.
+(FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
+GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014), and
+GINN-W-RELAY-ORPHAN (FR-123, ADR-014). `source` cites the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
 appear there; tools/gen_errors_doc.py renders the table into docs/errors.md.
@@ -522,6 +523,58 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-080, ADR-003, F3 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-RELAY-UNAVAILABLE",
+        exit_code=1,
+        summary="the exec relay of realm '{realm}' does not answer after 'sv up': {detail}",
+        remedy="run 'ginn doctor' and follow its runsvdir checks; if the '_exec' service is "
+        "missing, run 'ginn services {realm} on' to install it (or 'ginn start {realm}' when the "
+        "realm is stopped); then run the command again",
+        source="FR-049, FR-083, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-RELAY-REJECTED",
+        exit_code=1,
+        summary="the exec relay of realm '{realm}' refused the request: {reason}",
+        remedy="this is a bug or a mismatch between the ginn CLI and the exec relay, not a fault "
+        "in your command; report it with this message, and reinstall or update ginn so both parts "
+        "match, then run the command again",
+        source="FR-049, NFR-SEC-005, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-RELAY-TIMEOUT",
+        exit_code=1,
+        summary="the exec relay of realm '{realm}' did not confirm the start in {seconds} s",
+        remedy="run 'ginn status {realm}'; if the command may have started, check its result "
+        "before you run it again, then retry",
+        source="FR-049, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-RELAY-LOST",
+        exit_code=1,
+        summary="the exec relay of realm '{realm}' lost the command before its exit status "
+        "arrived, so the exit status is unknown",
+        remedy="the command may still be running in the realm: wait for it to finish, run 'ginn "
+        "status {realm}', and check what the command did before you run it again",
+        source="FR-049, FR-124, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-RELAY-BUSY",
+        exit_code=75,
+        summary="the exec relay is at its limit of {limit} running commands, so realm '{realm}' "
+        "got no worker",
+        remedy="wait for a running 'ginn exec' or 'ginn enter' to finish, then retry the command",
+        source="FR-049, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-RELAY-ORPHAN",
+        exit_code=0,
+        summary="processes of a command in realm '{realm}' survived the kill after its client was "
+        "lost: pids {pids}",
+        remedy="the exec lock is released, so other commands can run; check the listed pids with "
+        "'ps -p {pids}' and stop any that the interrupted command left running with 'kill'",
+        source="FR-123, FR-124, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-RECOVERED",
         exit_code=0,
         summary="recovery settled an interrupted {op} of realm '{realm}' as {outcome}: {reason}",
@@ -695,7 +748,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, "
         "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
         "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, "
-        "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT",
+        "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT, "
+        "GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
@@ -712,8 +766,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
     (73, "not enough disk space"),
     (
         75,
-        "realm, subordinate ID file or Host Setup busy, or a service still running at undo "
-        "(EX_TEMPFAIL)",
+        "realm, subordinate ID file or Host Setup busy, the exec relay at its worker limit "
+        "(GINN-E-RELAY-BUSY), or a service still running at undo (EX_TEMPFAIL)",
     ),
     (
         77,
