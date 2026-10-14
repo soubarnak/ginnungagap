@@ -9,7 +9,7 @@ build_style=python3-pep517
 # The release tarball has no git metadata, so the repo hygiene test cannot run here.
 # CI runs it on the checkout.
 make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
-# gcc and make build the five native helpers in native/ (post_install).
+# gcc and make build the nine native helpers in native/ (post_install).
 hostmakedepends="python3-setuptools python3-wheel gcc make"
 # containers-common ships /usr/share/containers/seccomp.json. ginn generates its seccomp profile
 # from that file and fails closed without it (ADR-006).
@@ -26,10 +26,10 @@ distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
 checksum=@CHECKSUM@
 
 post_install() {
-	# native/Makefile builds the five helpers (HELPERS) and installs them to LIBEXECDIR, the path
-	# that runtime code calls (FR-081, ADR-008). make install builds them first.
+	# native/Makefile builds the nine helpers (HELPERS) and installs them to LIBEXECDIR, the path
+	# that runtime code calls (FR-081, ADR-008, ADR-014). make install builds them first.
 	make -C native install DESTDIR="${DESTDIR}" LIBEXECDIR=/usr/libexec/ginn
-	for helper in ginn-wait ginn-rebind ginn-watch ginn-agent-filter ginn-idle; do
+	for helper in ginn-wait ginn-rebind ginn-watch ginn-agent-filter ginn-idle ginn-exec-relay ginn-exec-worker ginn-exec-run ginn-exec-kill; do
 		test -x "${DESTDIR}/usr/libexec/ginn/${helper}" || return 1
 	done
 	# The desktop entry and icon are not in the wheel. They are staged here, from the source

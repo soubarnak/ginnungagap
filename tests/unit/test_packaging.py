@@ -29,9 +29,20 @@ CHECKSUM_VALUE = re.compile(r"^(@CHECKSUM@|[0-9a-f]{64})$")
 MAKEFILE_HELPERS = re.compile(r"^HELPERS := (.+)$", re.MULTILINE)
 HELPER_LOOP = re.compile(r"^for helper in (.+); do$")
 
-# The five helpers of native/Makefile (AS-003 installs them to LIBEXECDIR, the runtime path).
+# The nine helpers of native/Makefile (AS-003 installs them to LIBEXECDIR, the runtime path; the
+# four exec relay helpers are ADR-014).
 NATIVE_HELPERS = frozenset(
-    {"ginn-wait", "ginn-rebind", "ginn-watch", "ginn-agent-filter", "ginn-idle"}
+    {
+        "ginn-wait",
+        "ginn-rebind",
+        "ginn-watch",
+        "ginn-agent-filter",
+        "ginn-idle",
+        "ginn-exec-relay",
+        "ginn-exec-worker",
+        "ginn-exec-run",
+        "ginn-exec-kill",
+    }
 )
 # The runtime depends of T0.6 (docs/roadmap.md). The template adds python3 on top, because the
 # CLI is Python.
@@ -193,12 +204,12 @@ def test_template_installs_the_native_helpers_to_libexec_with_make() -> None:
 
 
 @pytest.mark.fr("AS-003")
-def test_template_lists_the_five_native_helpers_it_checks() -> None:
+def test_template_lists_the_nine_native_helpers_it_checks() -> None:
     body = _function_body("post_install() {")
     loops = [m.group(1) for line in body if (m := HELPER_LOOP.match(line))]
     assert len(loops) == 1, "post_install must check the helpers in one loop"
     listed = loops[0].split()
-    assert len(listed) == 5
+    assert len(listed) == 9
     assert set(listed) == NATIVE_HELPERS
     assert _makefile_helpers() == NATIVE_HELPERS, "native/Makefile HELPERS drifted"
     assert 'test -x "${DESTDIR}/usr/libexec/ginn/${helper}" || return 1' in body

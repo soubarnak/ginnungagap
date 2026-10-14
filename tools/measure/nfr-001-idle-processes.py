@@ -3,10 +3,13 @@
 """NFR-001 (T10.4): no ginn process runs while no realm runs. A read-only /proc scan, no podman.
 
 Counts the processes of the invoking user whose command name starts with `ginn`: the CLI and the
-ginn-wait, ginn-watch and ginn-rebind helpers. The runit user supervisor (a `runsvdir` whose
-command line names ginn) is not in that count. It has its own bound, 1 MiB RSS. The rootless
-podman pause process (`catatonit`) is shared by all of the user's containers, so it is reported on
-stderr and not counted. Run the script after every realm has stopped.
+ginn-wait, ginn-watch and ginn-rebind helpers, and the exec relay helpers. ginn-exec-relay is
+resident while a services-on realm is running, rebuilding or updating (ADR-014); ginn-exec-worker,
+ginn-exec-run and ginn-exec-kill live for one request each.
+The runit user supervisor (a `runsvdir` whose command line names ginn) is not in that count. It has
+its own bound, 1 MiB RSS. The rootless podman pause process (`catatonit`) is shared by all of the
+user's containers, so it is reported on stderr and not counted. Run the script after every realm has
+stopped.
 
 Usage: python3 -I tools/measure/nfr-001-idle-processes.py [--proc DIR]
   --proc DIR   the proc filesystem to read (default /proc; tests pass a fake tree)
