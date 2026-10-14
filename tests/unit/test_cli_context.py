@@ -18,9 +18,10 @@ from ginn.cli import _context
 from ginn.cli.output import Output
 from ginn.domain import RealmState
 from ginn.errors import EXEC_GINN_FAILURE, make
+from ginn.ops.recovery import OUTCOME_BLOCKED, RecoveryOutcome
 from ginn.podman.cli import PodmanCli
 from ginn.store.journal import Journal
-from tests.unit.realm_cli_support import World, make_realm, stored
+from tests.unit.realm_cli_support import World, make_realm, seed_killed_estimate, stored
 from tests.unit.test_ops_recovery import _dead, _entry, _write_journal
 
 REAL_PODMAN = _context.podman
@@ -82,6 +83,28 @@ def test_a_settled_interrupted_create_is_a_warning_with_its_remedy(
     )
     assert "  fix: run 'ginn status debian'" in captured.err
     assert "realm debian is broken" in captured.out
+
+
+@pytest.mark.fr("FR-122")
+def test_a_sweep_of_a_killed_estimate_is_a_verbose_line_even_when_it_is_blocked(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    blocked = RecoveryOutcome(
+        realm="estimate:kali",
+        op="estimate",
+        op_id=None,
+        outcome=OUTCOME_BLOCKED,
+        reason="the sweep stopped (GINN-E-INTERNAL); the leftovers are kept for the next command",
+        path="containers labelled io.ginn.estimate=kali",
+    )
+
+    _context._report(blocked, Output(json_mode=False, verbose=False))
+    assert capsys.readouterr().err == ""  # no warning, and nothing without --verbose
+
+    _context._report(blocked, Output(json_mode=False, verbose=True))
+    err = capsys.readouterr().err
+    assert err.startswith("recovery: containers labelled io.ginn.estimate=kali: blocked: ")
+    assert "GINN-W" not in err
 
 
 @pytest.mark.fr("FR-122")
@@ -306,3 +329,52 @@ def test_a_bare_lifecycle_hooks_call_looks_up_the_ginn_command_for_the_paths_of_
     assert seen == [paths]
     assert hooks.rebuild is not None
     assert hooks.rebuild.program == "/usr/bin/ginn"
+
+
+SWEEPING_COMMANDS = [
+    ["create", "--resume", "nope"],
+    ["delete", "nope"],
+    ["rebuild", "nope"],
+    ["update", "nope"],
+]
+"""The commands that touch the Kali image, so each sweeps a killed estimate before its own work."""
+LAUNCH_COMMANDS = [["enter", "nope"], ["start", "nope"], ["install", "nope", "htop"]]
+"""The app launch, the start and the install, which run no sweep (NFR-004)."""
+READ_ONLY_COMMANDS = [["list"], ["status", "nope"], ["update", "--check"]]
+"""The commands that write no state, which run no sweep."""
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize("argv", SWEEPING_COMMANDS, ids=" ".join)
+def test_create_delete_rebuild_and_update_sweep_a_killed_estimate_before_their_work(
+    world: World, argv: list[str]
+) -> None:
+    seed_killed_estimate(world)
+
+    main(argv)  # refused for the unknown realm, after the sweep has run
+
+    assert world.fake.containers == {}
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("NFR-004")
+@pytest.mark.parametrize("argv", LAUNCH_COMMANDS, ids=" ".join)
+def test_an_app_launch_a_start_and_an_install_leave_a_killed_estimate_alone(
+    world: World, argv: list[str]
+) -> None:
+    seed_killed_estimate(world)
+
+    main(argv)  # refused for the unknown realm, with no sweep before it
+
+    assert len(world.fake.containers) == 1
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize("argv", READ_ONLY_COMMANDS, ids=" ".join)
+def test_a_read_only_command_leaves_a_killed_estimate_alone(world: World, argv: list[str]) -> None:
+    seed_killed_estimate(world)
+
+    main(argv)
+
+    assert len(world.fake.containers) == 1

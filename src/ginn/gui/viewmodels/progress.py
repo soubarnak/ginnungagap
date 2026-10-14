@@ -31,6 +31,8 @@ class ProgressModel:
     title: str
     phase: Phase = Phase.RUNNING
     failure: Failure | None = None
+    results: tuple[CliResult, ...] = ()
+    """The results of the run's commands, in order, once it has finished."""
     _lines: list[str] = field(default_factory=list)
 
     @property
@@ -84,6 +86,7 @@ class ProgressModel:
         `cancelled` is True when the run was stopped between two of its commands. A cancel that
         interrupted a command shows in that command's result.
         """
+        self.results = tuple(results)
         if error is not None:
             self.phase = Phase.FAILED
             self.failure = Failure(

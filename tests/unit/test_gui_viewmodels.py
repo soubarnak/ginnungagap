@@ -37,7 +37,13 @@ from ginn.gui.viewmodels.dashboard import Badge, DashboardViewModel, badge_for
 from ginn.gui.viewmodels.health import ACKNOWLEDGE_ARGS, HealthBadge, HealthViewModel
 from ginn.gui.viewmodels.labels import failure_of, format_bytes
 from ginn.gui.viewmodels.permissions import PermissionsEditor, Share
-from ginn.gui.viewmodels.wizard import SERVICES_CONFLICT_TEXT, CreateWizard
+from ginn.gui.viewmodels.progress import Phase, ProgressModel
+from ginn.gui.viewmodels.wizard import (
+    SERVICES_CONFLICT_TEXT,
+    CreateWizard,
+    EverythingSizes,
+    sizes_of,
+)
 
 
 def _realm(name: str, **fields: object) -> RealmView:
@@ -577,3 +583,112 @@ def test_the_changing_actions_stay_blocked_until_the_host_change_is_acknowledged
 
     vm.apply_integrity(IntegrityState(status="acknowledged", changed=(), pending=None, warnings=()))
     assert vm.blocks_mutations is False
+
+
+# Kali everything estimate (FR-014 AC-1, FR-101 AC-1) ----------------------------------------------
+
+ESTIMATE_PAYLOAD: dict[str, object] = {
+    "distro": "kali",
+    "everything": ["kali-linux-everything"],
+    "packages": 3,
+    "download_bytes": 6000,
+    "installed_bytes": 6144,
+    "required_bytes": 13359,
+}
+
+
+def _result(payload: dict[str, object] | None, *, exit_code: int = 0) -> CliResult:
+    return CliResult(
+        argv=("--json", "create", "kali", "--everything", "--estimate"),
+        exit_code=exit_code,
+        payload=payload,
+        error=None,
+        warnings=(),
+        stderr="",
+        cancelled=False,
+    )
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+@pytest.mark.fr("IR-002")
+def test_the_kali_estimate_is_the_first_step_and_names_no_realm_or_package() -> None:
+    wizard = CreateWizard(available())
+    wizard.choose_distro("kali")
+    wizard.set_everything(True)
+    wizard.add_package("htop")
+
+    args = wizard.estimate_args()
+
+    assert args == ("--json", "create", "kali", "--everything", "--estimate")
+    _cli_parses(args)
+    assert "--yes" not in args and "--with" not in args
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+def test_the_estimate_is_refused_unless_the_kali_everything_option_is_on() -> None:
+    wizard = CreateWizard(available())
+    wizard.choose_distro("kali")
+    with pytest.raises(ValueError):
+        wizard.estimate_args()
+    wizard.choose_distro("debian")
+    wizard.set_everything(True)
+    with pytest.raises(ValueError):
+        wizard.estimate_args()
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+def test_the_confirmed_create_passes_yes_only_after_the_estimate_step() -> None:
+    wizard = CreateWizard(available())
+    wizard.choose_distro("kali")
+    wizard.set_everything(True)
+
+    assert wizard.estimate_args()[-1] == "--estimate"
+    args = wizard.create_args()
+    assert args[-2:] == ("--everything", "--yes")
+    _cli_parses(args)
+
+
+@pytest.mark.fr("FR-014")
+def test_the_estimate_payload_is_read_into_sizes_and_the_confirmation_shows_them() -> None:
+    sizes = EverythingSizes.from_payload(ESTIMATE_PAYLOAD)
+
+    assert sizes == EverythingSizes(
+        packages=3, download_bytes=6000, installed_bytes=6144, required_bytes=13359
+    )
+    body = sizes.confirmation_body()
+    assert "3 packages" in body
+    assert "download 5.9 KiB, installed 6.0 KiB" in body
+    assert "13.0 KiB free" in body
+    assert "Nothing of the set is installed until you confirm" in body
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize("key", ["packages", "download_bytes", "installed_bytes", "required_bytes"])
+@pytest.mark.parametrize("value", [None, "6000", True, -1, 1.5])
+def test_a_size_that_is_not_a_whole_number_is_refused(key: str, value: object) -> None:
+    payload = {**ESTIMATE_PAYLOAD, key: value}
+
+    with pytest.raises(ValueError):
+        EverythingSizes.from_payload(payload)
+
+
+@pytest.mark.fr("FR-014")
+def test_sizes_of_reads_the_last_result_and_refuses_a_run_without_a_payload() -> None:
+    assert sizes_of([_result(ESTIMATE_PAYLOAD)]) == EverythingSizes.from_payload(ESTIMATE_PAYLOAD)
+    assert sizes_of([]) is None
+    assert sizes_of([_result(None)]) is None
+    assert sizes_of([_result({"packages": 1})]) is None
+
+
+@pytest.mark.fr("FR-107")
+def test_the_progress_model_keeps_the_results_of_a_finished_run() -> None:
+    model = ProgressModel(title="Sizing")
+    result = _result(ESTIMATE_PAYLOAD)
+
+    model.finish([result], None)
+
+    assert model.phase is Phase.DONE
+    assert model.results == (result,)

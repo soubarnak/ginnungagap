@@ -130,7 +130,7 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
         raise make("GINN-E-USAGE", detail="update needs a REALM, --all or --check")
     names = None if realm is None else [RealmName(realm)]
     realms = _context.realms(ctx.output)
-    _context.settle_interrupted(realms, ctx.output, read_only=check)
+    _context.settle_interrupted(realms, ctx.output, read_only=check, sweep=True)
     hooks = _context.package_hooks(realms.paths)
     if check:
         checks = check_realms(realms.env, realms.podman, names, hooks=hooks)

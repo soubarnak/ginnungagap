@@ -89,7 +89,7 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
                 "or pass --yes",
             )
     realms = _context.realms(ctx.output)
-    _context.settle_interrupted(realms, ctx.output)
+    _context.settle_interrupted(realms, ctx.output, sweep=True)
     if purge:
         check_purge(realms.env, name, hooks=_context.delete_hooks())
     confirm = (lambda _prompt: True) if args.yes else _ask

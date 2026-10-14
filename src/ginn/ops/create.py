@@ -94,23 +94,20 @@ from ginn.domain.permissions import Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._create_plan import (
-    EVERYTHING_CHUNK,
-    EVERYTHING_CHUNK_MAX,
-    EVERYTHING_LISTING_MAX,
     CreateHooks,
     CreateRequest,
     SizeEstimate,
     _Plan,
     _validate,
-    closure_names,
     estimate_bytes,
     human_bytes,
     required_bytes,
-    size_totals,
 )
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops._rollback import Rollback
 from ginn.ops.disk import check_free_paths, estimate_required
+from ginn.ops.estimate import measure_everything
+from ginn.ops.images import image_names, uses_image
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
@@ -522,40 +519,17 @@ class _Create:
     def _estimate_everything(self) -> SizeEstimate:
         """The size of the everything closure, read from the realm's package lists (FR-014 AC-1).
 
-        `resolve` lists the closure, and `estimate` reads each package's sizes in chunks, so no call
-        prints more than EVERYTHING_CHUNK_MAX bytes. Both run as container root, after the refresh.
+        The reading is ops/estimate.py's `measure_everything`, shared with the estimate that runs
+        before any create (FR-014 AC-1). It runs after the refresh, inside the realm.
         """
-        definition = self._plan.definition
-        realm = self._request.name.value
-        cid = self._container_id()
-        listing = run_step(
+        return measure_everything(
             self._podman,
-            cid,
-            definition,
-            definition.argv(Verb.RESOLVE, self._plan.everything),
-            realm=realm,
-            step="estimate",
+            self._container_id(),
+            self._plan.definition,
+            self._plan.everything,
+            realm=self._request.name.value,
             retry_hook=self._retry,
-            max_output=EVERYTHING_LISTING_MAX,
         )
-        names = closure_names(listing.stdout, definition.name_pattern, realm=realm, step="estimate")
-        download = installed = 0
-        for start in range(0, len(names), EVERYTHING_CHUNK):
-            chunk = names[start : start + EVERYTHING_CHUNK]
-            result = run_step(
-                self._podman,
-                cid,
-                definition,
-                definition.argv(Verb.ESTIMATE, chunk),
-                realm=realm,
-                step="estimate",
-                retry_hook=self._retry,
-                max_output=EVERYTHING_CHUNK_MAX,
-            )
-            part = size_totals(result.stdout, chunk, realm=realm, step="estimate")
-            download += part.download_bytes
-            installed += part.installed_bytes
-        return SizeEstimate(packages=len(names), download_bytes=download, installed_bytes=installed)
 
     def _install_with(self) -> None:
         packages = self._plan.packages
@@ -607,12 +581,19 @@ class _Create:
     # Rollback callables. Each one undoes exactly one artifact.
 
     def _remove_image(self) -> None:
-        """Remove the image this create pulled. Absent, or in use by a container, is a no-op."""
+        """Remove the image this create pulled. Absent, or in use by a container, is a no-op.
+
+        A container uses the image by the alias-aware match of ops/images.py (`uses_image`), since
+        podman may show the image by name, digest or id. A container with no image string is not
+        compared, as delete and the estimate do.
+        """
         ref = self._plan.spec.image
         if not self._podman.image_exists(ref):
             return
-        if any(info.image == ref for info in self._podman.ps()):
-            return  # another container still uses the image, so it stays
+        names = image_names(self._podman, ref)
+        for info in self._podman.ps():
+            if info.image != "" and uses_image(info.image, names):
+                return  # another container still uses the image, so it stays
         self._podman.rmi(ref)
 
     def _remove_container(self) -> None:

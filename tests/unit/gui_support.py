@@ -71,6 +71,26 @@ REALMS = {
     "fedora": status("fedora", "broken", "basic", False, None),
 }
 
+def hold_until_interrupted():
+    # Mimics a podman step: ginn ignores SIGINT while a helper runs, and the helper shares the
+    # process group. Both record their pid and pgid, so the test can check the group.
+    def ignore(signum, frame):
+        return None
+
+    signal.signal(signal.SIGINT, ignore)
+    helper = subprocess.Popen([sys.executable, os.environ["FAKE_GINN_HELPER"], str(STATE)])
+    (STATE / "group-parent").write_text(f"{os.getpid()} {os.getpgrp()}", encoding="utf-8")
+    deadline = time.monotonic() + 10
+    while not (STATE / "group-helper").exists():
+        if time.monotonic() > deadline or helper.poll() is not None:
+            fail("GINN-E-INTERNAL", "helper did not start", "see the fake", 70)
+        time.sleep(0.01)
+    err({"progress": {"step": "ready", "message": "ready"}})
+    helper.wait()
+    fail("GINN-E-INTERRUPTED", "operation interrupted",
+         "the partial realm was rolled back", 130)
+
+
 argv = sys.argv[1:]
 record(argv)
 if not argv or argv[0] != "--json":
@@ -121,6 +141,18 @@ elif command == "integrity":
              "warnings": [{"code": "GINN-W-HOST-CHANGED",
                            "message": "host files changed since baseline: " + ", ".join(paths),
                            "remedy": "review the listed paths, then run 'ginn integrity --ack'"}]})
+elif command == "create" and "--estimate" in args:
+    # A file named estimate-fails in the state directory makes the estimate refuse, as a short disk
+    # would (FR-121). The test writes it, so the fake's environment is never changed.
+    if (STATE / "estimate-fails").exists():
+        fail("GINN-E-DISK-SPACE", "not enough free space for the everything set",
+             "free some space and try again", 2, {"needed": "13359 bytes"})
+    # A file named estimate-blocks holds the estimate until the user cancels it (FR-107).
+    if (STATE / "estimate-blocks").exists():
+        hold_until_interrupted()
+    err({"progress": {"step": "estimated", "message": "estimate: step estimated done"}})
+    out({"distro": "kali", "everything": ["kali-linux-everything"], "packages": 3,
+         "download_bytes": 6000, "installed_bytes": 6144, "required_bytes": 13359})
 elif command == "create":
     if verbose:
         err({"verbose": "create: verbose detail"})
@@ -135,23 +167,7 @@ elif command == "delete":
 elif command in ("start", "stop", "services", "autostart", "update"):
     out({"realm": args[0], "action": command, "argv": args[1:]})
 elif command == "group":
-    # Mimics a podman step: ginn ignores SIGINT while a helper runs, and the helper shares the
-    # process group. Both record their pid and pgid, so the test can check the group.
-    def ignore(signum, frame):
-        return None
-
-    signal.signal(signal.SIGINT, ignore)
-    helper = subprocess.Popen([sys.executable, os.environ["FAKE_GINN_HELPER"], str(STATE)])
-    (STATE / "group-parent").write_text(f"{os.getpid()} {os.getpgrp()}", encoding="utf-8")
-    deadline = time.monotonic() + 10
-    while not (STATE / "group-helper").exists():
-        if time.monotonic() > deadline or helper.poll() is not None:
-            fail("GINN-E-INTERNAL", "helper did not start", "see the fake", 70)
-        time.sleep(0.01)
-    err({"progress": {"step": "ready", "message": "ready"}})
-    helper.wait()
-    fail("GINN-E-INTERRUPTED", "operation interrupted",
-         "the partial realm was rolled back", 130)
+    hold_until_interrupted()
 elif command == "ghost":
     sys.exit(4)
 elif command == "bare":

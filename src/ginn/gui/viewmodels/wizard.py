@@ -10,15 +10,20 @@ packages or the everything set is refused here, before any argv is built (ADR-00
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Final
 
 from ginn.domain import DistroId, PackageName, RealmName, Tier
 from ginn.errors import GinnError
-from ginn.gui.viewmodels.labels import Failure, failure_of_error
+from ginn.gui.backend import CliResult
+from ginn.gui.viewmodels.labels import Failure, failure_of_error, format_bytes
 
 KALI: Final = "kali"
 """The only distribution that offers the "everything" option (FR-014, FR-101 AC-2)."""
+
+_SIZE_KEYS: Final = ("packages", "download_bytes", "installed_bytes", "required_bytes")
+"""The integer fields of the estimate's JSON object (ops/estimate.py, `create --estimate`)."""
 
 SERVICES_CONFLICT_TEXT: Final = (
     "A services-on realm is created stopped, and ginn does not start it from a create, so its "
@@ -26,6 +31,51 @@ SERVICES_CONFLICT_TEXT: Final = (
     "or add packages later with 'ginn install' (ADR-003)."
 )
 """Why a services-on create cannot carry packages or the everything set (FR-101 AC-1)."""
+
+
+@dataclass(frozen=True)
+class EverythingSizes:
+    """The sizes of the Kali everything set, as `create --estimate` reports them (FR-014 AC-1).
+
+    The Control Plane shows them in the confirmation before it runs the create. `required_bytes` is
+    the free space that FR-121 asks for: the estimate times 1.10.
+    """
+
+    packages: int
+    download_bytes: int
+    installed_bytes: int
+    required_bytes: int
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> EverythingSizes:
+        """Read the estimate's JSON object. A field that is missing or not a whole number raises."""
+        values: list[int] = []
+        for key in _SIZE_KEYS:
+            value = payload.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"the estimate has no usable {key}")
+            values.append(value)
+        return cls(*values)
+
+    def confirmation_body(self) -> str:
+        """The confirmation text: the sizes, the free space, and that nothing is installed."""
+        return (
+            f"The Kali everything set has {self.packages} packages: download "
+            f"{format_bytes(self.download_bytes)}, installed {format_bytes(self.installed_bytes)}. "
+            f"ginn needs {format_bytes(self.required_bytes)} free on the podman and Realm Home "
+            "filesystems, which is the estimate plus 10 percent, and checks it again before it "
+            "installs. Nothing of the set is installed until you confirm. Continue?"
+        )
+
+
+def sizes_of(results: Sequence[CliResult]) -> EverythingSizes | None:
+    """The sizes in the last result of an estimate run, or None when there is no usable payload."""
+    if not results or results[-1].payload is None:
+        return None
+    try:
+        return EverythingSizes.from_payload(results[-1].payload)
+    except ValueError:
+        return None
 
 
 class CreateWizard:
@@ -150,6 +200,17 @@ class CreateWizard:
             and self.services_conflict() is None
         )
 
+    def estimate_args(self) -> tuple[str, ...]:
+        """The argv of the Kali everything estimate, the first step of that create (FR-014 AC-1).
+
+        `ginn --json create kali --everything --estimate` names no realm and takes no package, and
+        it changes nothing. The sizes it prints go into the confirmation, and `create_args` runs
+        only after that. Raises ValueError unless the everything option is on for Kali.
+        """
+        if not self._everything or not self.show_everything:
+            raise ValueError("the estimate is for the Kali everything option")
+        return ("--json", "create", KALI, "--everything", "--estimate")
+
     def create_args(self) -> tuple[str, ...]:
         """The argv of `ginn --json create`, for example `--json create arch --name arch ...`.
 
@@ -171,8 +232,8 @@ class CreateWizard:
         if self._packages:
             args.extend(["--with", *self._packages])
         if self._everything:
-            # The wizard's confirmation has no size estimate, because the CLI computes it inside
-            # create. --yes skips the CLI's prompt, which would have shown that size (FR-014 AC-1).
+            # The sizes were shown in the confirmation after the estimate, so --yes answers the
+            # CLI's own prompt for the same set (FR-014 AC-1).
             args.extend(["--everything", "--yes"])
         return tuple(args)
 

@@ -7,9 +7,9 @@ proves the argv is well formed for the parser, and nothing more: it does not run
 control that runs a command the parser does not know yet is listed with its missing milestone, so
 the parity test records it as expected to fail and does not skip it.
 
-The wizard's Kali "everything" argv carries `--yes`, which skips the CLI's own size prompt. The
-wizard shows no size either, so that confirmation is not the one FR-014 AC-1 asks for. The gap is
-recorded in docs/traceability-deferred.toml under FR-101.
+The Kali "everything" create runs in two steps. The first control's argv, `--everything --estimate`,
+changes nothing and prints the sizes that the confirmation shows (FR-014 AC-1, FR-101 AC-1). The
+second is `--everything --yes`, which runs only after that confirmation.
 
 Realm names and values are passed as argv items only. No function here builds a shell string
 (NFR-SEC-005).
@@ -68,6 +68,14 @@ def create_args() -> Argv:
     return wizard.create_args()
 
 
+def kali_estimate_args() -> Argv:
+    """The argv the wizard builds for the Kali everything estimate, its first step (FR-014 AC-1)."""
+    wizard = CreateWizard(("kali",))
+    wizard.choose_distro("kali")
+    wizard.set_everything(True)
+    return wizard.estimate_args()
+
+
 def kali_everything_args() -> Argv:
     """The argv the wizard builds for Kali with the everything set and one package (FR-014, FR-101).
 
@@ -121,6 +129,7 @@ CONTROLS: Final[Mapping[str, Callable[[], Argv]]] = {
     "detail.delete": lambda: delete_args(SAMPLE_REALM, purge_home=False),
     "detail.delete-purge-home": lambda: delete_args(SAMPLE_REALM, purge_home=True),
     "wizard.create": create_args,
+    "wizard.create-kali-estimate": kali_estimate_args,
     "wizard.create-kali-everything": kali_everything_args,
     "permissions.tier": lambda: tier_args(SAMPLE_REALM, "custom"),
     "permissions.perms": lambda: ("--json", "perms", SAMPLE_REALM, "--enable", "gpu"),
@@ -132,7 +141,11 @@ CONTROLS: Final[Mapping[str, Callable[[], Argv]]] = {
 
 PARITY: Final[Mapping[str, Mapping[str, str]]] = {
     "IR-001": {"dashboard.refresh": "list", "dashboard.open": "status"},
-    "IR-002": {"wizard.create": "create", "wizard.create-kali-everything": "create"},
+    "IR-002": {
+        "wizard.create": "create",
+        "wizard.create-kali-estimate": "create",
+        "wizard.create-kali-everything": "create",
+    },
     "IR-003": {
         "detail.refresh": "status",
         "detail.start": "start",

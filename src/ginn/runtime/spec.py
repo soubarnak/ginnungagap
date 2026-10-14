@@ -78,6 +78,9 @@ from ginn.trust.manifest import TrustManifest, pull_reference
 LABEL_REALM: Final = "io.ginn.realm"
 LABEL_DISTRO: Final = "io.ginn.distro"
 LABEL_GENERATION: Final = "io.ginn.generation"
+LABEL_ESTIMATE: Final = "io.ginn.estimate"
+"""The label of a Kali everything estimate's throwaway container, valued with the distribution ID
+(ops/estimate.py). It is not a realm label, so no realm lookup (`LABEL_REALM`) finds it."""
 NAME_PREFIX: Final = "ginn-"
 KEEP_ALIVE_ENTRYPOINT: Final[tuple[str, ...]] = ("sleep",)
 KEEP_ALIVE_COMMAND: Final[tuple[str, ...]] = ("infinity",)

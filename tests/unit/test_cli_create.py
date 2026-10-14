@@ -19,12 +19,15 @@ import pytest
 from ginn.__main__ import main
 from ginn.cli import _context
 from ginn.cli.commands import create as create_cmd
+from ginn.distros import Verb
+from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
 from ginn.ops.create import CreateRequest, CreateResult, SizeEstimate
-from ginn.podman.models import ContainerState
+from ginn.ops.disk import estimate_required
+from ginn.podman.models import ContainerState, ExecResult
 from ginn.store.records import RealmStore
-from tests.unit.realm_cli_support import World, record_of
+from tests.unit.realm_cli_support import World, record_of, seed_killed_estimate
 
 
 def _recorded_result(request: CreateRequest) -> CreateResult:
@@ -421,3 +424,132 @@ def test_the_default_hooks_run_the_package_steps_and_no_test_seam(
     assert hooks.integrate is True
     assert hooks.helper is None
     assert hooks.mountinfo == Path("/proc/self/mountinfo")
+
+
+KALI_LISTING = "kali-linux-everything\n  Depends: alpha\nalpha\n  Depends: beta\nbeta\n"
+KALI_SHOW = (
+    "Package: kali-linux-everything\nVersion: 2026.3\nSize: 1000\nInstalled-Size: 1\n\n"
+    "Package: alpha\nVersion: 1.0\nSize: 2000\nInstalled-Size: 2\n\n"
+    "Package: beta\nVersion: 1.0\nSize: 3000\nInstalled-Size: 3\n"
+)
+"""The closure of the everything metapackage, and its sizes: 6000 bytes to download and 6144
+installed (`Installed-Size` is in KiB)."""
+
+
+def _kali_answers(world: World) -> None:
+    """The package-list answers that the Kali closure reads inside the throwaway container."""
+    kali = load_distro("kali")
+    names = ["kali-linux-everything", "alpha", "beta"]
+    resolve = tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))
+    world.fake.exec_results[resolve] = ExecResult(0, KALI_LISTING, "")
+    world.fake.exec_results[tuple(kali.argv(Verb.ESTIMATE, names))] = ExecResult(0, KALI_SHOW, "")
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-121")
+def test_the_estimate_prints_the_sizes_as_json_and_leaves_no_realm_or_container(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _kali_answers(world)
+    assert main(["--json", "create", "kali", "--everything", "--estimate"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "distro": "kali",
+        "metapackages": ["kali-linux-everything"],
+        "packages": 3,
+        "download_bytes": 6000,
+        "installed_bytes": 6144,
+        "required_bytes": estimate_required(6000 + 6144),
+    }
+    assert world.fake.containers == {}
+    assert world.fake.images == {}
+    assert not (world.paths.homes / "kali").exists()
+    assert RealmStore(world.paths).exists(RealmName("kali")) is False
+
+
+@pytest.mark.fr("FR-014")
+def test_the_estimate_text_is_human_readable_and_needs_no_terminal(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _kali_answers(world)
+    assert main(["create", "kali", "--everything", "--estimate"]) == 0
+    out = capsys.readouterr().out
+    assert "kali everything: 3 packages, download 5.9 KiB, installed 6.0 KiB" in out
+    assert "required free space: " in out and "(estimate x 1.10)" in out
+    assert "estimate only: no realm was made, and nothing was installed" in out
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize(
+    ("argv", "code"),
+    [
+        (["create", "kali", "--estimate"], "GINN-E-USAGE"),
+        (["create", "debian", "--everything", "--estimate"], "GINN-E-OPTION-INVALID"),
+        (["create", "kali", "--everything", "--estimate", "--yes"], "GINN-E-USAGE"),
+        (["create", "kali", "--everything", "--estimate", "--with", "htop"], "GINN-E-USAGE"),
+        (["create", "kali", "--everything", "--estimate", "--name", "work"], "GINN-E-USAGE"),
+        (["create", "kali", "--everything", "--estimate", "--tier", "basic"], "GINN-E-USAGE"),
+        (["create", "kali", "--everything", "--estimate", "--services", "on"], "GINN-E-USAGE"),
+        (["create", "--resume", "kali", "--estimate"], "GINN-E-USAGE"),
+    ],
+)
+def test_the_estimate_refuses_any_other_option_before_any_podman_call(
+    world: World, capsys: pytest.CaptureFixture[str], argv: list[str], code: str
+) -> None:
+    assert main(argv) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"{code}: ")
+    assert world.fake.calls == []
+    assert world.fake.containers == {}
+
+
+@pytest.mark.fr("FR-107")
+def test_the_estimate_prints_one_progress_line_per_step_in_json_mode(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _kali_answers(world)
+    assert main(["--json", "create", "kali", "--everything", "--estimate"]) == 0
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith('{"progress"')
+    ]
+    assert [line["progress"]["step"] for line in lines] == [
+        "space-checked",
+        "pulled",
+        "created",
+        "refreshed",
+        "estimated",
+    ]
+    assert lines[1] == {"progress": {"message": "estimate: step pulled done", "step": "pulled"}}
+
+
+@pytest.mark.fr("FR-006")
+@pytest.mark.fr("FR-014")
+def test_the_estimate_is_refused_by_a_changed_host_before_any_podman_call(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _kali_answers(world)
+    assert main(["--json", "create", "kali", "--everything", "--estimate"]) == 0  # the baseline
+    capsys.readouterr()
+    (world.host / "etc" / "hosts").write_text("10.0.0.1 changed\n", encoding="utf-8")
+    world.fake.calls.clear()
+
+    assert main(["create", "kali", "--everything", "--estimate"]) == 4
+    assert capsys.readouterr().err.startswith("GINN-E-HOST-UNACKED: ")
+    assert world.fake.calls == []
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-014")
+def test_the_estimate_sweeps_a_killed_estimate_after_its_own_work_and_the_list_does_not(
+    world: World,
+) -> None:
+    _kali_answers(world)
+    seed_killed_estimate(world)
+
+    assert main(["list"]) == 0
+    assert len(world.fake.containers) == 1  # a read-only command writes no podman state
+
+    assert main(["--json", "create", "kali", "--everything", "--estimate"]) == 0
+    assert world.fake.containers == {}  # the sweep runs after the estimate, so its gate comes first

@@ -25,7 +25,7 @@ from ginn.cli.commands.rebuild import SPEC
 from ginn.domain import RealmName, RealmState
 from ginn.errors import warn
 from ginn.ops.rebuild import RebuildResult
-from tests.unit.realm_cli_support import World, make_realm, record_of, stored
+from tests.unit.realm_cli_support import World, make_realm, operation_calls, record_of, stored
 
 
 def _result(
@@ -214,7 +214,7 @@ def test_an_unknown_realm_is_not_found_before_any_podman_call(
 ) -> None:
     assert main(["--json", "rebuild", "nosuch"]) == 3
     assert json.loads(capsys.readouterr().err)["error"]["code"] == "GINN-E-NO-SUCH-REALM"
-    assert world.fake.calls == []
+    assert operation_calls(world) == []
 
 
 @pytest.mark.fr("FR-021")
@@ -228,4 +228,4 @@ def test_a_realm_that_cannot_rebuild_is_refused_before_any_write(
     error = json.loads(capsys.readouterr().err)["error"]
     assert error["code"] == "GINN-E-REALM-STATE"
     assert stored(world, "arch") == before
-    assert world.fake.calls == []
+    assert operation_calls(world) == []

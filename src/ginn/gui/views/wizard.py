@@ -4,8 +4,10 @@
 
 The wizard viewmodel checks every input and builds the argv. This view renders its state and
 forwards each change to it. The name is checked as it is typed (FR-101 AC-1), and Create stays off
-until the wizard can create. The Kali "everything" option is offered for Kali only (FR-101 AC-2),
-and it asks before the run, because the install is large. The run uses the progress dialog.
+until the wizard can create. The Kali "everything" option is offered for Kali only (FR-101 AC-2).
+With that option, Create first sizes the set with `create --everything --estimate`, which changes
+nothing, and then asks with the sizes shown (FR-014 AC-1, FR-101 AC-1). Only a yes runs the create,
+with `--yes`. Both steps use the progress dialog.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 from ginn.domain import Tier
 from ginn.gui.viewmodels.health import BLOCKED_TEXT
 from ginn.gui.viewmodels.progress import Phase, ProgressModel
-from ginn.gui.viewmodels.wizard import CreateWizard
+from ginn.gui.viewmodels.wizard import CreateWizard, sizes_of
 from ginn.gui.views import common
 from ginn.gui.views._gtk import Adw, Gtk
 from ginn.gui.views.progress import present_progress
@@ -28,9 +30,9 @@ if TYPE_CHECKING:
 
 TIER_NAMES: tuple[str, ...] = tuple(tier.value for tier in Tier)
 MODE_NAMES: tuple[str, ...] = ("ro", "rw")
-EVERYTHING_BODY = (
-    "The Kali everything set is large. ginn checks the free disk space before it installs, "
-    "and the progress shows each step. Continue?"
+ESTIMATE_TITLE = "Sizing the Kali everything set"
+ESTIMATE_MISSING_TEXT = (
+    "ginn did not report the size of the everything set, so nothing was created."
 )
 
 
@@ -68,8 +70,9 @@ class WizardPage:
 
         self._everything = Adw.SwitchRow()
         self._everything.set_title("Everything (Kali only)")
-        self._everything.set_subtitle("Install the full Kali set. It asks before it runs.")
+        self._everything.set_subtitle("Install the full Kali set. Its size is shown first.")
         self._everything.connect("notify::active", lambda *_args: self._on_everything())
+        self._estimate_error = common.label("", css=("error",), wrap=True)
 
         self._package = Adw.EntryRow()
         self._package.set_title("Add a package")
@@ -95,6 +98,7 @@ class WizardPage:
         options.add(self._services)
         options.add(self._services_error)
         options.add(self._everything)
+        options.add(self._estimate_error)
 
         packages = Adw.PreferencesGroup()
         packages.set_title("Extra packages")
@@ -219,16 +223,44 @@ class WizardPage:
         if self._session.control.host_changed:
             return
         if self._wizard.everything:
-            self.dialog = common.confirm(
-                self._session.window,
-                heading="Install the Kali everything set?",
-                body=EVERYTHING_BODY,
-                confirm_label="Create",
-                destructive=False,
-                on_confirm=lambda _checked: self._start(),
-            )
+            self._estimate()
         else:
             self._start()
+
+    def _estimate(self) -> None:
+        """Size the Kali everything set first. The estimate changes nothing (FR-014 AC-1).
+
+        Its progress dialog closes when the estimate succeeds, so the confirmation that follows is
+        the dialog the user sees next. A failed or cancelled estimate keeps its dialog open.
+        """
+        if not self._wizard.can_create() or self._session.control.host_changed:
+            return
+        self._estimate_error.set_label("")
+        present_progress(
+            self._session,
+            title=ESTIMATE_TITLE,
+            calls=(self._wizard.estimate_args(),),
+            on_done=self._estimated,
+            close_on_done=True,
+        )
+
+    def _estimated(self, model: ProgressModel) -> None:
+        """Ask with the sizes shown. Cancel here runs nothing, so the create is not started."""
+        self.last_progress = model
+        if model.phase is not Phase.DONE:
+            return
+        sizes = sizes_of(model.results)
+        if sizes is None:
+            self._estimate_error.set_label(ESTIMATE_MISSING_TEXT)
+            return
+        self.dialog = common.confirm(
+            self._session.window,
+            heading="Install the Kali everything set?",
+            body=sizes.confirmation_body(),
+            confirm_label="Create",
+            destructive=False,
+            on_confirm=lambda _checked: self._start(),
+        )
 
     def _start(self) -> None:
         if not self._wizard.can_create() or self._session.control.host_changed:

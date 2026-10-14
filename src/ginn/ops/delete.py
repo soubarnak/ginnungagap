@@ -101,7 +101,7 @@ import errno
 import os
 import re
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final
@@ -111,6 +111,7 @@ from ginn.errors import GinnError, make
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import unexport_all
 from ginn.ops._mutating import Mutation, OpEnv, mutating
+from ginn.ops.images import remove_estimate_containers, remove_image
 from ginn.ops.lifecycle import STOP_TIMEOUT_S, refuse_before_supervisor
 from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
@@ -338,6 +339,9 @@ def _delete(
     unexport_all(env.paths, name)
     _step(mutation, hooks, "exports-removed")
 
+    # The image lock is held, so an estimate container of this distribution is a leftover of a
+    # killed estimate. It would count as an image user, so it is removed before the check.
+    remove_estimate_containers(podman, record.settings.distro.value)
     image, image_code, image_notes = remove_image(podman, record.image_ref)
     notes.extend(image_notes)
     _step(mutation, hooks, "image-removed")
@@ -411,52 +415,6 @@ def _remove_containers(podman: Podman, name: RealmName) -> None:
         except GinnError:
             if any(left.id == info.id for left in _listed(podman, name)):
                 raise
-
-
-def _image_names(podman: Podman, ref: str) -> tuple[str, ...]:
-    """The strings by which podman may show this image: its reference, digest, id and repo digests.
-    When the image cannot be inspected, only the reference is known."""
-    try:
-        info = podman.image_inspect(ref)
-    except GinnError:
-        return (ref,)
-    return (ref, info.digest, info.id, *info.repo_digests)
-
-
-def _uses_image(listed: str, names: Sequence[str]) -> bool:
-    """True when a container's image string and one of the image's names contain one another.
-
-    Podman shows an image by name, digest or id, so a plain equality would miss a container. A
-    doubtful match keeps the image, which is the safe reading. An empty string is never a match:
-    the caller skips it and notes that it did.
-    """
-    return any(name != "" and (name in listed or listed in name) for name in names)
-
-
-def remove_image(podman: Podman, ref: str) -> tuple[str, str | None, list[str]]:
-    """Remove the image unless a container uses it, as ops/create.py does. Return the outcome, the
-    code of a failed rmi, and the notes that say why the image was kept or a container skipped.
-
-    A failed rmi is not fatal: the image stays, and the delete goes on. A resume that replaces an
-    older pin uses this too (ops/resume.py), so both remove an image by one rule.
-    """
-    if not podman.image_exists(ref):
-        return "absent", None, []
-    names = _image_names(podman, ref)
-    notes: list[str] = []
-    for info in podman.ps():
-        if info.image == "":
-            notes.append(f"container {info.id[:12]} shows no image name; it is not compared")
-            continue
-        if _uses_image(info.image, names):
-            notes.append(f"image kept: container {info.id[:12]} uses it")
-            return "kept", None, notes
-    try:
-        podman.rmi(ref)
-    except GinnError as exc:
-        notes.append(f"image kept: rmi failed with {exc.code}")
-        return "kept", exc.code, notes
-    return "removed", None, notes
 
 
 def _kept_or_absent(env: OpEnv, name: RealmName) -> str:

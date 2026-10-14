@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from ginn.gui.backend import CliResult
 from ginn.gui.jobs import Operation
-from ginn.gui.viewmodels.progress import ProgressModel
+from ginn.gui.viewmodels.progress import Phase, ProgressModel
 from ginn.gui.views import common
 from ginn.gui.views._gtk import SOURCE_CONTINUE, SOURCE_REMOVE, Adw, GLib, Gtk
 
@@ -30,8 +30,14 @@ def present_progress(
     title: str,
     calls: Sequence[Sequence[str]],
     on_done: Callable[[ProgressModel], None],
+    close_on_done: bool = False,
 ) -> Operation:
-    """Show the dialog and start `calls`. `on_done` runs once the run has ended."""
+    """Show the dialog and start `calls`. `on_done` runs once the run has ended.
+
+    `close_on_done` closes the dialog when the run succeeds, before `on_done` runs. A caller that
+    shows its own next dialog then does not stack it on this one (the Kali size estimate, FR-101).
+    A run that failed or was cancelled keeps its dialog open, so the user reads the outcome.
+    """
     model = ProgressModel(title=title)
     step = common.label(model.current, css=("heading",), wrap=True)
     summary = common.label("", wrap=True)
@@ -86,6 +92,8 @@ def present_progress(
         session.ended(operation)
         model.finish(results, error, cancelled)
         refresh()
+        if close_on_done and model.phase is Phase.DONE:
+            dialog.close()
         on_done(model)
 
     def cancel_run() -> None:

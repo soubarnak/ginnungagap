@@ -23,7 +23,7 @@ from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.ops.lifecycle import HostUser
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime import attach
-from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
+from ginn.runtime.spec import LABEL_DISTRO, LABEL_ESTIMATE, LABEL_GENERATION, LABEL_REALM
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from tests.unit.test_ops_lifecycle import LifecyclePodman
@@ -96,6 +96,29 @@ def build_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> World:
         lambda: HostUser(uid=os.getuid(), host_home=home, host_env={}),
     )
     return World(tmp=tmp_path, paths=paths, fake=fake, home=home, host=host)
+
+
+def operation_calls(world: World) -> list[Any]:
+    """The podman calls of a command, without the one listing of the recovery sweep.
+
+    The create, delete, rebuild and update commands run `sweep_estimates` (ops/recovery.py) before
+    their own checks, and that sweep makes one read-only `ps`. A refused command of those is right
+    to make no other call, so a test of a refusal checks this list, not the whole call log. The
+    other realm commands run no sweep, and their refusal tests check `world.fake.calls` directly.
+    """
+    return [call for call in world.fake.calls if call.op != "ps"]
+
+
+def seed_killed_estimate(world: World) -> None:
+    """The labelled container that a killed Kali estimate leaves (ops/recovery.py)."""
+    world.fake.create(
+        CreateSpec(
+            name="ginn-estimate-killed",
+            image_digest_ref=f"example.org/kali@sha256:{'ab' * 32}",
+            network="pasta",
+            labels={LABEL_ESTIMATE: "kali"},
+        )
+    )
 
 
 def record_of(

@@ -178,25 +178,121 @@ def test_create_runs_the_wizard_argv_through_the_backend(
     ]
 
 
-@pytest.mark.fr("FR-014")
-def test_kali_everything_asks_first_and_then_passes_yes(
-    gtk: Any, session: Session, fake: FakeGinn
-) -> None:
-    wizard = session.open_create(WIZARD_DISTROS)
+ESTIMATE_ARGV = ["--json", "create", "kali", "--everything", "--estimate"]
+
+
+def _open_kali_everything(wizard: Any, gtk: Any) -> None:
     wizard._distro.set_selected(WIZARD_DISTROS.index("kali"))
     wizard._everything.set_active(True)
     drain(gtk)
 
-    wizard._create.emit("clicked")
-    drain(gtk)
-    assert fake.calls() == []
-    assert wizard.dialog is not None
-    wizard.dialog.emit("response", "confirm")
-    pump_until(gtk, lambda: wizard.last_progress is not None)
 
-    (argv,) = fake.calls()
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+@pytest.mark.fr("FR-107")
+@pytest.mark.fr("IR-002")
+def test_kali_everything_sizes_the_set_first_and_confirms_with_the_sizes(
+    gtk: Any, session: Session, fake: FakeGinn
+) -> None:
+    wizard = session.open_create(WIZARD_DISTROS)
+    _open_kali_everything(wizard, gtk)
+
+    wizard._create.emit("clicked")
+    pump_until(gtk, lambda: wizard.dialog is not None)
+
+    # Only the estimate has run, and the confirmation shows its sizes (FR-014 AC-1).
+    assert fake.calls() == [ESTIMATE_ARGV]
+    # The estimate's step text reaches its dialog, as a create's does (FR-107).
+    assert wizard.last_progress.lines == ("estimate: step estimated done",)
+    body = wizard.dialog.get_body()
+    assert "download 5.9 KiB" in body
+    assert "installed 6.0 KiB" in body
+    assert "Nothing of the set is installed until you confirm" in body
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+@pytest.mark.fr("IR-002")
+def test_confirming_the_kali_sizes_runs_the_create_with_yes(
+    gtk: Any, session: Session, fake: FakeGinn
+) -> None:
+    wizard = session.open_create(WIZARD_DISTROS)
+    _open_kali_everything(wizard, gtk)
+    wizard._create.emit("clicked")
+    pump_until(gtk, lambda: wizard.dialog is not None)
+
+    estimate_model = wizard.last_progress
+    wizard.dialog.emit("response", "confirm")
+    # The create's own progress replaces the estimate's model when it has finished.
+    pump_until(
+        gtk,
+        lambda: (
+            wizard.last_progress is not estimate_model
+            and wizard.last_progress is not None
+            and wizard.last_progress.phase is Phase.DONE
+        ),
+    )
+
+    assert fake.calls()[0] == ESTIMATE_ARGV
+    (argv,) = fake.calls()[1:]
     assert argv[-2:] == ["--everything", "--yes"]
     assert argv[argv.index("--name") + 1] == "kali"
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+def test_cancelling_the_kali_confirmation_runs_nothing_further(
+    gtk: Any, session: Session, fake: FakeGinn
+) -> None:
+    wizard = session.open_create(WIZARD_DISTROS)
+    _open_kali_everything(wizard, gtk)
+    wizard._create.emit("clicked")
+    pump_until(gtk, lambda: wizard.dialog is not None)
+
+    wizard.dialog.emit("response", "cancel")
+    drain(gtk)
+
+    assert fake.calls() == [ESTIMATE_ARGV]
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-107")
+def test_cancelling_the_kali_estimate_shows_no_confirmation_and_runs_no_create(
+    gtk: Any, session: Session, fake: FakeGinn
+) -> None:
+    (fake.directory / "estimate-blocks").write_text("", encoding="utf-8")
+    wizard = session.open_create(WIZARD_DISTROS)
+    _open_kali_everything(wizard, gtk)
+    wizard._create.emit("clicked")
+    # The estimate's helper is up, so the estimate is running and its dialog is the one shown.
+    pump_until(gtk, lambda: (fake.directory / "group-helper").exists())
+    (operation,) = session._running
+
+    assert operation.cancel() is True
+    pump_until(gtk, lambda: wizard.last_progress is not None)
+    drain(gtk)
+
+    assert wizard.last_progress.phase is Phase.CANCELLED
+    assert wizard.dialog is None
+    assert fake.calls() == [ESTIMATE_ARGV]
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-121")
+def test_a_refused_kali_estimate_shows_its_failure_and_offers_no_confirmation(
+    gtk: Any, session: Session, fake: FakeGinn
+) -> None:
+    (fake.directory / "estimate-fails").write_text("", encoding="utf-8")
+    wizard = session.open_create(WIZARD_DISTROS)
+    _open_kali_everything(wizard, gtk)
+
+    wizard._create.emit("clicked")
+    pump_until(gtk, lambda: wizard.last_progress is not None)
+    drain(gtk)
+
+    assert wizard.last_progress.phase is Phase.FAILED
+    assert wizard.dialog is None
+    assert fake.calls() == [ESTIMATE_ARGV]
 
 
 @pytest.mark.fr("FR-102")

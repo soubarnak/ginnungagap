@@ -46,6 +46,7 @@ from ginn.ops.recovery import (
     OUTCOME_RECOVERED,
     RecoveryOutcome,
     recover,
+    sweep_estimates,
 )
 from ginn.ops.service import ServiceHooks
 from ginn.podman.adapter import Podman
@@ -183,10 +184,16 @@ def _step_reporter(output: Output | None, operation: str) -> Callable[[str], Non
     return report
 
 
-def create_hooks(paths: OwnedPaths | None = None, output: Output | None = None) -> CreateHooks:
+def create_hooks(
+    paths: OwnedPaths | None = None,
+    output: Output | None = None,
+    *,
+    operation: str = "create",
+) -> CreateHooks:
     """The create seams. `paths` finds the ginn command that a services-on realm's scripts run.
 
     `output` receives the progress line of each step. None means the Output of `realms()`.
+    `operation` names the operation in each line: an estimate passes "estimate" (FR-107).
     """
     s = seams()
     return CreateHooks(
@@ -195,7 +202,7 @@ def create_hooks(paths: OwnedPaths | None = None, output: Output | None = None) 
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(paths),
-        on_step=_step_reporter(output or _output, "create"),
+        on_step=_step_reporter(output or _output, operation),
     )
 
 
@@ -291,16 +298,23 @@ def realms(output: Output) -> Realms:
     )
 
 
-def settle_interrupted(realms: Realms, output: Output, *, read_only: bool = False) -> None:
+def settle_interrupted(
+    realms: Realms, output: Output, *, read_only: bool = False, sweep: bool = False
+) -> None:
     """Run ops/recovery.py before a realm command, and report each outcome (FR-122).
 
-    `read_only` is True for `status` and `list`. A failure of the recovery, a GinnError or any
-    other exception (an OSError from the journal scan included), then becomes a warning, and the
-    command goes on, so the user still sees the realms. Otherwise the exception propagates, and a
-    command that changes a realm does not run.
+    `sweep` runs first the sweep of a killed Kali estimate's leftovers (ops/recovery.py
+    `sweep_estimates`). Only the commands that touch the Kali image pass it: create and its resume,
+    delete, rebuild and update. Every other command skips it, so an app launch or a runit restart
+    pays no podman call for it (NFR-004). `read_only` is True for a command that writes no state,
+    such as `status`, `list` or an update check, and a read-only command never sweeps. A failure of
+    the recovery, a GinnError or any other exception (an OSError from the journal scan included),
+    then becomes a warning, and the command goes on, so the user still sees the realms. Otherwise
+    the exception propagates, and a command that changes a realm does not run.
     """
     try:
-        outcomes = recover(realms.env, realms.podman)
+        swept = sweep_estimates(realms.env, realms.podman) if sweep and not read_only else []
+        outcomes = [*swept, *recover(realms.env, realms.podman)]
     except Exception as exc:
         if not read_only:
             raise
@@ -311,11 +325,30 @@ def settle_interrupted(realms: Realms, output: Output, *, read_only: bool = Fals
         _report(outcome, output)
 
 
+def sweep_leftovers(realms: Realms, output: Output) -> None:
+    """Run only the sweep of a killed Kali estimate's leftovers, and report it (FR-122, FR-014).
+
+    The Kali estimate calls this after its own work (cli/commands/create.py `_estimate`). The
+    estimate reads no realm state, so `recover` does not run, and the host gate of the estimate
+    still refuses before any podman call (FR-006). A non-GinnError exception propagates, as in
+    `settle_interrupted` for a command that changes state.
+    """
+    for outcome in sweep_estimates(realms.env, realms.podman):
+        _report(outcome, output)
+
+
 def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
 def _report(outcome: RecoveryOutcome, output: Output) -> None:
+    if outcome.op == "estimate":
+        # A sweep of a killed Kali estimate's leftovers (ops/recovery.py sweep_estimates). The
+        # leftovers hold no realm, and the next command tries again. So every outcome is a verbose
+        # line, a blocked one too: a warning would name a journal file and a realm that do not
+        # exist.
+        output.verbose_line(f"recovery: {outcome.path}: {outcome.outcome}: {outcome.reason}")
+        return
     if outcome.outcome in _SETTLED:
         output.warn(
             warn(

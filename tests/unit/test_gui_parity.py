@@ -161,3 +161,18 @@ def test_the_kali_everything_argv_carries_its_package_and_yes_and_parses() -> No
     assert parsed.everything is True
     assert parsed.yes is True
     assert parsed.with_packages == ["htop"]
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-101")
+@pytest.mark.fr("IR-002")
+def test_the_kali_estimate_argv_is_the_first_step_and_parses_as_an_estimate() -> None:
+    assert actions.PARITY["IR-002"]["wizard.create-kali-estimate"] == "create"
+    argv = actions.kali_estimate_args()
+
+    assert argv == ("--json", "create", "kali", "--everything", "--estimate")
+    parsed = build_parser().parse_args(list(argv))
+    assert parsed.estimate is True
+    assert parsed.everything is True
+    assert parsed.yes is False
+    assert parsed.with_packages is None

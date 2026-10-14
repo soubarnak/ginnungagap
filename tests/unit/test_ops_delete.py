@@ -33,7 +33,7 @@ from ginn.ops.security_ops import agent_state_path, proxy_state_path, read_agent
 from ginn.ops.service import set_services_mode
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState
-from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
+from ginn.runtime.spec import LABEL_DISTRO, LABEL_ESTIMATE, LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
 from ginn.services import supervisor
 from ginn.services.runit_user import service_dir, write_service_dir
@@ -1522,3 +1522,26 @@ def test_a_delete_removes_the_realms_idle_watcher_record_and_log(
     assert not (directory / "lab.json").exists()
     assert not (directory / "lab.log").exists()
     assert (directory / "other.json").exists(), "another realm's watcher is not touched"
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-014")
+def test_a_killed_estimates_container_of_the_same_distribution_is_removed_before_the_image_check(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    fake.create(
+        CreateSpec(
+            name="ginn-estimate-killed",
+            image_digest_ref=DIGEST,
+            network="pasta",
+            labels={LABEL_ESTIMATE: "debian"},
+        )
+    )
+
+    result = delete_realm(env, fake, RealmName("lab"))
+
+    # The estimate's container would count as an image user, so it is removed before the check.
+    assert result.image == "removed"
+    assert DIGEST not in fake.images
+    assert not any(LABEL_ESTIMATE in c.labels for c in fake.containers.values())

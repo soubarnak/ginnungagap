@@ -109,6 +109,13 @@ state. Recovery's finished rule is `is_finished` from ops/_mutating.py, which co
 Idempotent. Once a file is removed, a later run finds nothing for that operation. A record move is
 skipped when the record already has its target state, and a second podman stop is never needed,
 because a container that is already stopped is not running.
+
+Killed estimates. A Kali estimate writes no journal entry (ops/estimate.py), so `sweep_estimates`
+settles its leftovers instead: the labelled containers and the base image it pulled, under the
+image lock of the distribution, which it takes without waiting. `settle_interrupted`
+(cli/_context.py) runs it before `recover()` for create and its resume, delete, rebuild and update,
+and never for a read-only command. The Kali estimate runs it after its own work (`sweep_leftovers`).
+No other command runs it, so an app launch or a runit restart makes no podman call for it (NFR-004).
 """
 
 import contextlib
@@ -130,21 +137,23 @@ from ginn.domain import (
 )
 from ginn.errors import GinnError
 from ginn.ops._mutating import OpEnv, is_finished
+from ginn.ops.images import remove_estimate_containers, remove_image
 from ginn.ops.security_ops import leave_agent
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS, parse_names, shown
 from ginn.packages.manifest import installed, removed
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
+from ginn.runtime.spec import LABEL_ESTIMATE, LABEL_GENERATION, LABEL_REALM
 from ginn.services.runit_user import remove_service, service_dir
 from ginn.services.supervise import signal_runsv_down
 from ginn.store._time import utc_from_epoch
 from ginn.store.audit import AuditEntry, AuditIndex
 from ginn.store.journal import PARAMS_OVERFLOW, JournalEntry, JournalFile, damaged_reason
-from ginn.store.locks import realm_lock
+from ginn.store.locks import image_lock, realm_lock
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
+from ginn.trust import pull_reference
 
 OP_CREATE: Final = "create"
 OP_START: Final = "start"
@@ -197,6 +206,7 @@ OUTCOME_LIVE: Final = "live"
 OUTCOME_BUSY: Final = "busy"
 OUTCOME_BLOCKED: Final = "blocked"
 OUTCOME_CORRUPT: Final = "corrupt"
+OUTCOME_SWEPT: Final = "swept"
 
 _REALM_BUSY: Final = "GINN-E-REALM-BUSY"
 _LIVE_REASON: Final = "its process is still running; the entry is left untouched"
@@ -210,8 +220,9 @@ _BY_PODMAN_FROM: Final = frozenset({RealmState.STOPPED, RealmState.RUNNING, Real
 class RecoveryOutcome:
     """What recovery did with one journal file. `outcome` is one of the OUTCOME_* values.
 
-    `reason` says why, in a sentence. `path` is the journal file. `warnings` lists the damaged
-    audit lines that the lookup skipped, so an outcome says when its lookup was incomplete.
+    `reason` says why, in a sentence. `path` is the journal file, or for a sweep (`sweep_estimates`)
+    the containers it looked at. `warnings` lists the damaged audit lines that the lookup skipped,
+    so an outcome says when its lookup was incomplete.
     """
 
     realm: str
@@ -282,6 +293,56 @@ def recover(
         else:
             outcomes.append(_recover_realm(env, podman, RealmName(file.realm), file, lookup))
     return outcomes
+
+
+def sweep_estimates(env: OpEnv, podman: Podman) -> list[RecoveryOutcome]:
+    """Remove what a killed Kali estimate left: its containers and the base image it pulled.
+
+    An estimate writes no journal entry (ops/estimate.py), so the journal scan does not see it. The
+    containers are found by their label (LABEL_ESTIMATE) and grouped by distribution. Each group
+    takes the image lock of its distribution without waiting. A held lock means that a create,
+    delete, rebuild, resume or another estimate of the distribution runs, and it owns those
+    containers, so the group is left as it is and reported busy. Under the lock the containers are
+    removed, and the pinned image goes when no container uses it (ops/images.py). There is one
+    outcome per distribution. A step that podman refuses is reported as blocked, not raised.
+    """
+    try:
+        listed = podman.ps()
+    except GinnError as exc:
+        reason = f"the containers of a killed estimate cannot be listed ({exc.code})"
+        blocked = RecoveryOutcome("estimate", "estimate", None, OUTCOME_BLOCKED, reason, "podman")
+        return [blocked]
+    labels = {info.labels[LABEL_ESTIMATE] for info in listed if LABEL_ESTIMATE in info.labels}
+    return [_sweep_distro(env, podman, distro) for distro in sorted(labels)]
+
+
+def _sweep_distro(env: OpEnv, podman: Podman, distro: str) -> RecoveryOutcome:
+    """The sweep of one distribution's leftovers, under its image lock (see sweep_estimates)."""
+    realm = f"estimate:{distro}"
+    path = f"containers labelled {LABEL_ESTIMATE}={distro}"
+    try:
+        with image_lock(env.paths, distro, "estimate sweep"):
+            remove_estimate_containers(podman, distro)
+            image, code, _notes = remove_image(podman, pull_reference(distro))
+    except GinnError as exc:
+        if exc.code == _REALM_BUSY:
+            reason = "another operation holds the image lock of this distribution; it owns them"
+            return RecoveryOutcome(realm, "estimate", None, OUTCOME_BUSY, reason, path)
+        reason = f"the sweep stopped ({exc.code}); the leftovers are kept for the next command"
+        return RecoveryOutcome(realm, "estimate", None, OUTCOME_BLOCKED, reason, path)
+    except OSError as exc:
+        reason = f"the image lock cannot be taken ({exc.strerror or exc})"
+        return RecoveryOutcome(realm, "estimate", None, OUTCOME_BLOCKED, reason, path)
+    if code is not None:
+        reason = f"the containers are removed, but the base image was not ({code})"
+        return RecoveryOutcome(realm, "estimate", None, OUTCOME_BLOCKED, reason, path)
+    if image == "removed":
+        reason = "the containers and the base image are removed"
+    elif image == "kept":
+        reason = "the containers are removed; the base image stays, as a container uses it"
+    else:
+        reason = "the containers are removed"
+    return RecoveryOutcome(realm, "estimate", None, OUTCOME_SWEPT, reason, path)
 
 
 def _lookup(env: OpEnv) -> AuditIndex | OSError:

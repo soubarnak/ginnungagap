@@ -242,7 +242,7 @@ reason = "unit tests run; the view and host proofs are deferred to M9"
 id = "FR-101"
 milestone = "M9"
 partial = true
-reason = "unit tests run (tests/unit/test_gui_viewmodels.py, test_gui_parity.py) and the Xvfb smoke test runs the wizard; the view and host proofs are deferred to M9. FR-014 AC-1 is not met in the Control Plane: the Kali everything confirmation (views/wizard.py) shows no size estimate, because the CLI computes it inside create (T8.7) and --yes skips its prompt. FR-014 is Should, so it has no entry here; this note is its record. Fix: a two-step --json flow that prints the estimate and then confirms"
+reason = "unit tests run (tests/unit/test_gui_viewmodels.py, test_gui_parity.py) and the Xvfb smoke test runs the wizard, its Kali estimate step and the confirmation that shows the sizes (T8.8); the view and host proofs are deferred to M9."
 
 [[deferred]]
 id = "FR-102"
@@ -282,7 +282,7 @@ reason = "the create precheck refuses before any download when free space on the
 id = "FR-122"
 milestone = "M8"
 partial = true
-reason = "the create rollback, the creating record kept after a crash mid-pull, the broken record when a rollback step fails, and the journal entry kept after an unexpected exception are unit-tested (T4.4). Recovery (T2.8, ops/recovery.py) is unit-tested on dead, live and damaged journal files (FIFOs, symlinks, oversized and deeply nested files), the realm lock, the start step rule, the podman fallback, the create, delete, install, update, stop and rebuild verdicts, and a second run (test_ops_recovery.py). Since T8.5 and T8.6, --resume is unit-tested (ops/resume.py, test_ops_create_resume.py), and the in-process SIGKILL sweep covers every journal step of every operation, resume included (test_crash_safety.py). Not yet covered: a real SIGKILL on a host (M10). Recovery runs at the start of each realm command (T4.11, cli/_context.py settle_interrupted; tests/unit/test_cli_lifecycle.py, test_cli_context.py), and the broken state of AC-1 is shown with both recovery commands (create --resume is ops/resume.py)"
+reason = "the create rollback, the creating record kept after a crash mid-pull, the broken record when a rollback step fails, and the journal entry kept after an unexpected exception are unit-tested (T4.4). Recovery (T2.8, ops/recovery.py) is unit-tested on dead, live and damaged journal files (FIFOs, symlinks, oversized and deeply nested files), the realm lock, the start step rule, the podman fallback, the create, delete, install, update, stop and rebuild verdicts, and a second run (test_ops_recovery.py). Since T8.5 and T8.6, --resume is unit-tested (ops/resume.py, test_ops_create_resume.py), and the in-process SIGKILL sweep covers every journal step of every operation, resume included (test_crash_safety.py). A killed Kali estimate's leftovers are swept by ops/recovery.py `sweep_estimates` at the next create, resume, delete, rebuild or update, and after the next Kali estimate's own work, and tested in tests/unit/test_ops_estimate.py and tests/unit/test_cli_context.py. Not yet covered: a real SIGKILL on a host (M10). Recovery runs at the start of each realm command (T4.11, cli/_context.py settle_interrupted; tests/unit/test_cli_lifecycle.py, test_cli_context.py), and the broken state of AC-1 is shown with both recovery commands (create --resume is ops/resume.py)"
 [[deferred]]
 id = "FR-123"
 milestone = "M8"

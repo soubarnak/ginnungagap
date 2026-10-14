@@ -39,6 +39,7 @@ from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make
 from ginn.ops import _create_plan
 from ginn.ops import create as create_ops
+from ginn.ops import estimate as estimate_ops
 from ginn.ops._create_plan import SizeEstimate
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import (
@@ -1025,7 +1026,8 @@ def test_the_everything_closure_is_read_in_chunks_and_the_totals_add_up(
     mountinfo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(create_ops, "EVERYTHING_CHUNK", 2)
+    # The closure is read by ops/estimate.py, which the create and the estimate share.
+    monkeypatch.setattr(estimate_ops, "EVERYTHING_CHUNK", 2)
     kali = load_distro("kali")
     fake.exec_results[tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))] = ExecResult(
         0, KALI_LISTING, ""
@@ -1361,6 +1363,38 @@ def test_an_image_that_was_already_present_is_kept_when_the_create_fails(
     )
 
     def fail_at(step: str) -> None:
+        if step == "created":
+            raise make("GINN-E-INTERNAL")
+
+    with pytest.raises(GinnError):
+        create_realm(
+            env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at)
+        )
+    assert "rmi" not in ops_of(fake)
+    assert ref in fake.images
+
+
+@pytest.mark.fr("FR-010")
+def test_a_container_that_names_the_pulled_image_by_its_digest_keeps_it_on_rollback(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The rollback of a create removes the image it pulled, unless a container uses it. Podman
+    shows an image by name, digest or id, so a container that names only the pinned digest uses it
+    (ops/images.py `uses_image`). An equality test would miss it and remove the image."""
+    ref = trust.pull_reference("debian")
+    digest = trust.load().entry("debian").digest
+    stray = f"mirror.example.org/debian@{digest}"
+
+    def fail_at(step: str) -> None:
+        if step == "pulled":
+            fake.create(
+                CreateSpec(name="stray-user", image_digest_ref=stray, network="pasta", labels={})
+            )
         if step == "created":
             raise make("GINN-E-INTERNAL")
 

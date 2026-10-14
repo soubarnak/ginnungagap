@@ -51,7 +51,7 @@ def _text(result: RebuildResult) -> str:
 def _run(args: argparse.Namespace, ctx: Context) -> int:
     name = RealmName(str(args.realm))
     realms = _context.realms(ctx.output)
-    _context.settle_interrupted(realms, ctx.output)
+    _context.settle_interrupted(realms, ctx.output, sweep=True)
     result = rebuild_realm(
         realms.env,
         realms.podman,

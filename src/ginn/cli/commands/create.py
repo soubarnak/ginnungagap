@@ -23,6 +23,12 @@ realm's package lists after the refresh, and the install waits for a yes: the pr
 or `--yes` for scripts. Without a terminal, or with --json, it needs `--yes`, and the create is
 refused before any write (GINN-E-USAGE). A no at the prompt rolls the realm back. Any other
 distribution gets GINN-E-OPTION-INVALID (FR-014 AC-3).
+
+`ginn --json create kali --everything --estimate` prints the size of the set and changes nothing:
+no realm, no Realm Home, no record, no journal entry (ops/estimate.py, FR-014 AC-1). It takes the
+distribution and `--everything` only, so `--name`, `--tier`, `--services`, `--with` and `--yes` are
+GINN-E-USAGE with it. The Control Plane runs it first, shows the sizes, and then runs the create
+with `--everything --yes` (FR-101 AC-1).
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from ginn.cli.commands import CommandSpec, Context
 from ginn.domain import RealmName, Tier
 from ginn.errors import make
 from ginn.ops.create import CreateRequest, CreateResult, create_realm, human_bytes
+from ginn.ops.estimate import EverythingEstimate, estimate_everything
 from ginn.ops.resume import resume_create
 from ginn.runtime.spec import KALI
 
@@ -93,6 +100,12 @@ def _configure(parser: argparse.ArgumentParser) -> None:
         "--yes",
         action="store_true",
         help="answer yes to the --everything prompt without asking, for scripts (FR-014)",
+    )
+    parser.add_argument(
+        "--estimate",
+        action="store_true",
+        help="print the size of the --everything set and change nothing: no realm, no Realm "
+        "Home, no record (Kali only, FR-014)",
     )
     parser.add_argument(
         "--resume",
@@ -167,12 +180,52 @@ def _refuse_with_resume(args: argparse.Namespace) -> None:
             ("--services", args.services),
             ("--with", args.with_packages),
             ("--everything", args.everything),
+            ("--estimate", args.estimate),
         )
         if value
     ]
     if given:
         detail = f"--resume takes only the realm name and --yes, not {', '.join(given)}"
         raise make("GINN-E-USAGE", detail=detail)
+
+
+def _refuse_estimate(args: argparse.Namespace, distro: str) -> None:
+    """`--estimate` sizes the Kali everything set, so it takes DISTRO and `--everything` only.
+
+    A distribution without an everything set is GINN-E-OPTION-INVALID, as a create refuses it. The
+    other create options have no part in the size, and `--yes` has no prompt to answer, so each
+    one is a usage error. The check runs before any podman call.
+    """
+    if not args.everything:
+        raise make("GINN-E-USAGE", detail="--estimate sizes the --everything set, so it needs it")
+    if distro != KALI:
+        raise make("GINN-E-OPTION-INVALID", option="--everything", distro=distro)
+    given = [
+        flag
+        for flag, value in (
+            ("--name", args.name),
+            ("--tier", args.tier),
+            ("--services", args.services),
+            ("--with", args.with_packages),
+            ("--yes", args.yes),
+        )
+        if value
+    ]
+    if given:
+        detail = f"--estimate takes only DISTRO and --everything, not {', '.join(given)}"
+        raise make("GINN-E-USAGE", detail=detail)
+
+
+def _estimate_text(result: EverythingEstimate) -> str:
+    size = result.size
+    return "\n".join(
+        [
+            f"{result.distro} everything: {size.packages} packages, download "
+            f"{human_bytes(size.download_bytes)}, installed {human_bytes(size.installed_bytes)}",
+            f"required free space: {human_bytes(result.required_bytes)} (estimate x 1.10)",
+            "estimate only: no realm was made, and nothing was installed",
+        ]
+    )
 
 
 def _text(result: CreateResult) -> str:
@@ -196,11 +249,13 @@ def _text(result: CreateResult) -> str:
 def _run(args: argparse.Namespace, ctx: Context) -> int:
     if args.resume:
         return _resume(args, ctx)
+    if args.estimate:
+        return _estimate(args, ctx)
     distro = str(args.distro)
     name = RealmName(str(args.name or distro))
     _refuse_unbuilt(args, distro, json_mode=ctx.output.json_mode)
     realms = _context.realms(ctx.output)
-    _context.settle_interrupted(realms, ctx.output)
+    _context.settle_interrupted(realms, ctx.output, sweep=True)
     request = CreateRequest(
         name=name,
         distro=distro,
@@ -219,6 +274,49 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
     return _report(result, realms, ctx)
 
 
+def _estimate(args: argparse.Namespace, ctx: Context) -> int:
+    """`create kali --everything --estimate`: size the set, and change nothing (FR-014 AC-1).
+
+    The estimate names no realm, so the realm name is the distribution's, as a create's default is.
+    Its podman calls are a throwaway container and the pinned image, and both are undone before it
+    returns (ops/estimate.py). Each step is a progress line on stderr in JSON mode (FR-107). The
+    interrupted-operation check is not run, since the estimate reads no realm state. The host gate
+    is run by the estimate itself (FR-006), before any podman call. After the estimate returns, the
+    sweep of a killed estimate's leftovers runs (`sweep_leftovers`), so the gate still comes first.
+    """
+    distro = str(args.distro)
+    _refuse_estimate(args, distro)
+    realms = _context.realms(ctx.output)
+    request = CreateRequest(
+        name=RealmName(distro),
+        distro=distro,
+        uid=realms.host.uid,
+        gid=realms.gid,
+        host_home=realms.host.host_home,
+        host_env=realms.host.host_env,
+        everything=True,
+    )
+    hooks = _context.create_hooks(realms.paths, operation="estimate")
+    result = estimate_everything(realms.env, realms.podman, request, hooks=hooks)
+    _context.sweep_leftovers(realms, ctx.output)
+    _context.finish(realms, ctx.output)
+    return _report_estimate(result, ctx)
+
+
+def _report_estimate(result: EverythingEstimate, ctx: Context) -> int:
+    size = result.size
+    payload: dict[str, object] = {
+        "distro": result.distro,
+        "metapackages": list(result.everything),
+        "packages": size.packages,
+        "download_bytes": size.download_bytes,
+        "installed_bytes": size.installed_bytes,
+        "required_bytes": result.required_bytes,
+    }
+    ctx.output.emit(payload, render=lambda: _estimate_text(result))
+    return 0
+
+
 def _resume(args: argparse.Namespace, ctx: Context) -> int:
     """`create --resume REALM`: finish the realm's interrupted create (FR-122, ops/resume.py).
 
@@ -228,7 +326,7 @@ def _resume(args: argparse.Namespace, ctx: Context) -> int:
     name = RealmName(str(args.distro))
     _refuse_with_resume(args)
     realms = _context.realms(ctx.output)
-    _context.settle_interrupted(realms, ctx.output)
+    _context.settle_interrupted(realms, ctx.output, sweep=True)
     confirm: Callable[[str], bool] | None = None
     if args.yes:
         confirm = _confirmed
