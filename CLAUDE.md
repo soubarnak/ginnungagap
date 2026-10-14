@@ -20,5 +20,6 @@ Done: M0 to M6, T7.1, T7.2.
 Rules for parallel agents:
 
 - Shared files are `src/ginn/errors.py`, `docs/errors.md`, `docs/roadmap.md`, `docs/traceability-deferred.toml` and `src/ginn/cli/commands/__init__.py`. Only one agent in a wave edits each of them. The other agents report the error codes and roadmap notes they need, and the owner merges them.
+- No two agents in a wave edit the same file. Every brief lists the files the agent may edit, and the main session checks the lists for overlap before it launches the wave. All agents share one working tree and one branch, so no merge is ever needed.
 - Host gates (`GINN_INTEGRATION=1`) never run in parallel with each other.
 - Agents do not commit. The main session commits one task at a time with `git add <paths>`.
