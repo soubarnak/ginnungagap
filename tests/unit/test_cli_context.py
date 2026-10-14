@@ -198,3 +198,52 @@ def test_a_realm_command_that_changes_state_stops_when_the_journal_scan_raises(
     assert main(["start", "arch"]) == 70
     assert capsys.readouterr().err.startswith("GINN-E-INTERNAL: ")
     assert stored(world, "arch").state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-107")
+def test_create_hooks_report_each_step_on_the_output_of_realms(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = Output(json_mode=True, verbose=False)
+    _context.realms(out)
+
+    hooks = _context.create_hooks(world.paths)
+
+    assert hooks.on_step is not None
+    hooks.on_step("pulled")
+    lines = capsys.readouterr().err.splitlines()
+    assert [json.loads(line) for line in lines] == [
+        {"progress": {"step": "pulled", "message": "create: step pulled done"}}
+    ]
+
+
+@pytest.mark.fr("FR-107")
+def test_delete_hooks_report_each_step_on_an_explicit_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    hooks = _context.delete_hooks(Output(json_mode=True, verbose=False))
+
+    assert hooks.on_step is not None
+    hooks.on_step("container-removed")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "progress": {"step": "container-removed", "message": "delete: step container-removed done"}
+    }
+
+
+@pytest.mark.fr("FR-107")
+def test_text_mode_hooks_print_nothing_by_default(capsys: pytest.CaptureFixture[str]) -> None:
+    hooks = _context.delete_hooks(Output(json_mode=False, verbose=False))
+
+    assert hooks.on_step is not None
+    hooks.on_step("home")
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.fr("FR-107")
+def test_hooks_have_no_progress_without_an_output() -> None:
+    _context._output = None
+
+    assert _context.create_hooks(None, None).on_step is None
+    assert _context.delete_hooks().on_step is None

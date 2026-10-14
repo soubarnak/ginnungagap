@@ -18,7 +18,7 @@ gi.require_version("GLib", "2.0")
 from gi.repository import GLib  # noqa: E402
 
 from ginn.gui._gio import GioRefreshSource  # noqa: E402
-from ginn.gui.refresh import RefreshSource  # noqa: E402
+from ginn.gui.watch import RefreshSource  # noqa: E402
 
 
 def _pump_until(condition: Callable[[], bool], timeout: float) -> bool:

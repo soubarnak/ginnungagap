@@ -9,13 +9,15 @@ list and no shell (NFR-SEC-005). It reads the child's output and returns a typed
 The CLI JSON contract is in src/ginn/cli/output.py. In JSON mode:
 - stdout holds one JSON object, the result. It is empty on failure, except for `doctor`, which
   prints its report before it fails.
-- stderr holds JSON lines. `{"verbose": ...}` lines appear only with `--verbose`, and the runner
-  passes them to `on_progress`. `{"warning": {...}}` lines come before a failure. The last line
-  is `{"error": {...}}` on failure, and it carries the GINN-E-* code, the remedy and exit_code.
+- stderr holds JSON lines. `{"progress": {"step", "message"}}` lines come after each finished step
+  of a long operation, and the runner passes their message to `on_progress`. `{"verbose": ...}`
+  lines appear only when the caller passes `--verbose`, and they reach `on_progress` too.
+  `{"warning": {...}}` lines come before a failure. The last line is `{"error": {...}}` on
+  failure, and it carries the GINN-E-* code, the remedy and exit_code.
 
 The GUI never starts a server. Nothing here listens on a socket, so no peer from another user
-can connect (NFR-SEC-009). The runner's callbacks run on the thread that called `run`, or
-`cancel` for SIGINT. The views move them onto their own main loop.
+can connect (NFR-SEC-009). The runner's `on_progress` callback runs on a stderr reader thread of
+the runner. The views move each update onto their own main loop.
 """
 
 from __future__ import annotations
@@ -93,8 +95,8 @@ class CliResult:
 def _progress_text(line: str) -> str | None:
     """The text of a progress line on stderr, or None for any other line.
 
-    `{"verbose": text}` is what `--verbose` prints today. `{"progress": {"message": text}}` is the
-    shape the CLI needs for long operations (see the report that accompanies T9.1).
+    `{"progress": {"step", "message"}}` is written by the CLI after each step of a create or a
+    delete (FR-107). `{"verbose": text}` is written only when the caller asks for --verbose.
     """
     obj = _json_object(line)
     if obj is None:
@@ -197,8 +199,8 @@ class CliRunner:
     environment when given, and inherits the GUI's environment when None.
 
     `run` blocks until the child exits. Only one run may be active at a time on a runner. `cancel`
-    may be called from another thread. A progress callback is called on the thread that calls
-    `run`, so a view must hand its updates to its own main loop.
+    may be called from another thread. `run` calls `on_progress` from a reader thread that it
+    starts for stderr, so a view must hand its updates to its own main loop.
     """
 
     def __init__(
@@ -217,13 +219,14 @@ class CliRunner:
     ) -> CliResult:
         """Run one command and return its typed result.
 
-        With `on_progress`, the runner adds `--verbose`, so the CLI streams its progress lines on
-        stderr. Raises CliLaunchError when the program cannot start. An exception raised by
-        `on_progress` is re-raised here after the child has exited.
+        The argv is the program and `args`, unchanged. The CLI prints a progress line for each
+        finished step without any flag (FR-107), so no `--verbose` is added. Raises
+        CliLaunchError when the program cannot start. An exception raised by `on_progress` is
+        re-raised here after the child has exited.
         """
         if not args or args[0] != "--json":
             raise ValueError("the Control Plane runs ginn only in --json mode")
-        argv = self._program + (tuple(args) if on_progress is None else _verbose(args))
+        argv = self._program + tuple(args)
         with self._lock:
             if self._child is not None:
                 raise RuntimeError("a ginn command is already running on this runner")
@@ -300,11 +303,6 @@ class CliRunner:
                 self._cancel_requested = False
                 return False
             return True
-
-
-def _verbose(args: Sequence[str]) -> tuple[str, ...]:
-    """`--json` followed by `--verbose`, then the rest of `args`."""
-    return ("--json", "--verbose", *args[1:])
 
 
 @dataclass(frozen=True)
@@ -617,7 +615,8 @@ def watch_directories(paths: OwnedPaths) -> tuple[Path, ...]:
     """The directories whose changes should trigger a refresh (DR-030, FR-124).
 
     Realm records are the files under `realms`, and the Audit Log is `audit.log` in `state`. A
-    monitor does not see files in a subdirectory, so both directories are watched. Either one may
-    be missing before the first realm exists. The watcher skips a missing directory.
+    monitor does not see files in a subdirectory, so both directories are watched. `realms` is a
+    child of `state`, so the watch on `state` also sees the first create make `realms`. Either one
+    may be missing; the watcher skips a missing directory.
     """
     return (paths.realms, paths.state)

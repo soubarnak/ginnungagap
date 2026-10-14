@@ -8,11 +8,14 @@ Stream contract:
   the one exception to "stdout is empty on failure": it prints its report and then fails with
   GINN-E-DOCTOR-FAILED, because FR-007 AC-1 needs the fix command in the output.
 - stderr in text mode: a failure or warning is `CODE: message` then `  fix: remedy`; a failure
-  then has one `  note: text` line for each note it collected; verbose lines are plain text.
+  then has one `  note: text` line for each note it collected; verbose lines are plain text. A
+  progress step is a verbose line in text mode, so the default text run prints nothing extra.
 - stderr in JSON mode: every line is one JSON object. Verbose lines are `{"verbose": "..."}`.
-  Warnings that cannot ride in a result are `{"warning": {code, message, remedy}}`. On failure the
-  error object `{"error": {code, message, remedy, exit_code, details, notes}}` is always the last
-  line. `notes` is a list, empty when the failure collected none.
+  Each finished step of a long operation is `{"progress": {"step", "message"}}` (FR-107), and it
+  is written whether or not --verbose is on. Warnings that cannot ride in a result are
+  `{"warning": {code, message, remedy}}`. On failure the error object
+  `{"error": {code, message, remedy, exit_code, details, notes}}` is always the last line. `notes`
+  is a list, empty when the failure collected none.
 
 Warnings (GINN-W-*) do not fail a command. In JSON mode `warn()` queues them and `emit()` adds
 them to a dict result as `"warnings": [{code, message, remedy}]`. A non-dict result, or a failure,
@@ -103,6 +106,19 @@ class Output:
             sys.stderr.write(json.dumps({"verbose": text.rstrip("\n")}, sort_keys=True) + "\n")
         else:
             sys.stderr.write(_line(text))
+
+    def progress(self, step: str, message: str) -> None:
+        """Report one finished step of a long operation (FR-107).
+
+        JSON mode writes `{"progress": {"step", "message"}}` to stderr at once, whether or not
+        verbose is on, because the Control Plane reads these lines. Text mode shows `message` as a
+        verbose line only, so a text run stays quiet by default.
+        """
+        if self.json_mode:
+            payload = {"progress": {"step": step, "message": message}}
+            sys.stderr.write(json.dumps(payload, sort_keys=True) + "\n")
+        else:
+            self.verbose_line(message)
 
     def flush_warnings(self) -> None:
         """Write the queued warnings to stderr now. For a command whose stdout is not its result.

@@ -23,6 +23,8 @@ from ginn.store.paths import OwnedPaths
 from tests.unit.gui_support import FakeGinn, make_fake_ginn
 
 GUI_DIR = Path(backend.__file__).resolve().parent
+GI_MODULES = frozenset({"_gio.py"})
+"""The only gui module that may import gi: the change source of the Control Plane."""
 
 
 @pytest.fixture
@@ -113,21 +115,22 @@ def test_a_failure_without_an_error_object_has_no_error(fake: FakeGinn) -> None:
 
 
 @pytest.mark.fr("FR-107")
-def test_progress_lines_reach_the_callback_with_verbose_on(fake: FakeGinn) -> None:
+def test_progress_lines_reach_the_callback_without_any_flag(fake: FakeGinn) -> None:
     seen: list[str] = []
 
     result = fake.runner().run(("--json", "create", "arch"), on_progress=seen.append)
 
     assert result.ok
-    assert seen == ["step: pull image", "step: install integration set"]
-    assert fake.calls() == [["--json", "--verbose", "create", "arch"]]
+    assert seen == ["create: step pulled done", "create: step integrated done"]
+    assert fake.calls() == [["--json", "create", "arch"]]
 
 
 @pytest.mark.fr("FR-107")
-def test_without_a_callback_the_runner_adds_no_verbose_flag(fake: FakeGinn) -> None:
+def test_the_runner_passes_the_argv_unchanged_with_or_without_a_callback(fake: FakeGinn) -> None:
     result = fake.runner().run(("--json", "create", "arch"))
 
     assert result.ok
+    assert result.argv[-3:] == ("--json", "create", "arch")
     assert fake.calls() == [["--json", "create", "arch"]]
 
 
@@ -176,7 +179,7 @@ def test_an_error_in_the_progress_callback_is_raised_after_the_child_exits(
     with pytest.raises(RuntimeError, match="view failed"):
         fake.runner().run(("--json", "create", "arch"), on_progress=broken)
 
-    assert fake.calls() == [["--json", "--verbose", "create", "arch"]]
+    assert fake.calls() == [["--json", "create", "arch"]]
 
 
 @pytest.mark.fr("IR-011")
@@ -268,6 +271,8 @@ def test_gui_code_opens_no_socket_and_reaches_no_ops_or_runtime_module() -> None
                 name == root or name.startswith(root + ".") for root in never_imported
             ), f"{source.name} imports {name}"
             if name == "gi" or name.startswith("gi."):
-                assert source.name == "_gio.py", f"{source.name} imports gi"
+                assert source.relative_to(GUI_DIR).as_posix() in GI_MODULES, (
+                    f"{source.name} imports gi"
+                )
             if name == "subprocess":
                 assert source.name == "backend.py", f"{source.name} starts processes"

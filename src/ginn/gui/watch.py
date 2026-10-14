@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Refresh trigger interface for the Control Plane.
+"""Change source interface for the Control Plane.
 
 A RefreshSource calls back when realm records or the Audit Log change on disk,
 so the Control Plane re-reads state through the backend (DR-030). The interface

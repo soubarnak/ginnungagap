@@ -2,8 +2,9 @@
 """Fake `ginn` executable for the Control Plane backend tests (FR-100..107).
 
 The fake is a standalone Python script that the tests write into a temporary directory. It
-prints canned `--json` output in the shapes that src/ginn/cli/output.py documents. It also streams
-progress lines when `--verbose` is set, traps SIGINT, and records every argv it receives in
+prints canned `--json` output in the shapes that src/ginn/cli/output.py documents. Like the CLI, it
+prints a `progress` line after each step of create and delete (FR-107) without any flag, and a
+`verbose` line only with `--verbose`. It traps SIGINT, and records every argv it receives in
 `calls.jsonl`. Nothing imports the ginn package, so the fake never touches a container runtime.
 """
 
@@ -122,11 +123,17 @@ elif command == "integrity":
                            "remedy": "review the listed paths, then run 'ginn integrity --ack'"}]})
 elif command == "create":
     if verbose:
-        err({"verbose": "step: pull image"})
-        err({"progress": {"message": "step: install integration set"}})
+        err({"verbose": "create: verbose detail"})
+    err({"progress": {"step": "pulled", "message": "create: step pulled done"}})
+    err({"progress": {"step": "integrated", "message": "create: step integrated done"}})
     out({"name": "arch", "distro": "arch", "state": "stopped", "tier": "basic",
          "services": False, "generation": 1, "image_digest": "sha256:abc",
          "locale_note": None, "gpu_note": None})
+elif command == "delete":
+    err({"progress": {"step": "deleting", "message": "delete: step deleting done"}})
+    out({"realm": args[0], "home": "kept", "purge_declined": False, "warnings": []})
+elif command in ("start", "stop", "services", "autostart", "update"):
+    out({"realm": args[0], "action": command, "argv": args[1:]})
 elif command == "group":
     # Mimics a podman step: ginn ignores SIGINT while a helper runs, and the helper shares the
     # process group. Both record their pid and pgid, so the test can check the group.
@@ -141,8 +148,7 @@ elif command == "group":
         if time.monotonic() > deadline or helper.poll() is not None:
             fail("GINN-E-INTERNAL", "helper did not start", "see the fake", 70)
         time.sleep(0.01)
-    if verbose:
-        err({"verbose": "ready"})
+    err({"progress": {"step": "ready", "message": "ready"}})
     helper.wait()
     fail("GINN-E-INTERRUPTED", "operation interrupted",
          "the partial realm was rolled back", 130)

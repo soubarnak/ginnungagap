@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import pwd
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -162,8 +163,27 @@ def op_env(paths: OwnedPaths) -> OpEnv:
     return OpEnv.for_paths(paths, account_name(), root_dir=seams().root_dir)
 
 
-def create_hooks(paths: OwnedPaths | None = None) -> CreateHooks:
-    """The create seams. `paths` finds the ginn command that a services-on realm's scripts run."""
+_output: Output | None = None
+"""The Output of the command that runs now. `realms()` sets it, because the commands call
+`realms(ctx.output)` before they ask for a hook. The hook builders fall back to it."""
+
+
+def _step_reporter(output: Output | None, operation: str) -> Callable[[str], None] | None:
+    """The on_step hook of an operation: one progress line per finished journal step (FR-107)."""
+    if output is None:
+        return None
+
+    def report(step: str) -> None:
+        output.progress(step, f"{operation}: step {step} done")
+
+    return report
+
+
+def create_hooks(paths: OwnedPaths | None = None, output: Output | None = None) -> CreateHooks:
+    """The create seams. `paths` finds the ginn command that a services-on realm's scripts run.
+
+    `output` receives the progress line of each step. None means the Output of `realms()`.
+    """
     s = seams()
     return CreateHooks(
         helper=s.helper,
@@ -171,6 +191,7 @@ def create_hooks(paths: OwnedPaths | None = None) -> CreateHooks:
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(paths),
+        on_step=_step_reporter(output or _output, "create"),
     )
 
 
@@ -197,8 +218,12 @@ def enter_hooks() -> EnterHooks:
     return EnterHooks(lifecycle=lifecycle_hooks())
 
 
-def delete_hooks() -> DeleteHooks:
-    return DeleteHooks()
+def delete_hooks(output: Output | None = None) -> DeleteHooks:
+    """The delete seams. `output` receives the progress line of each step (FR-107).
+
+    None means the Output of `realms()`.
+    """
+    return DeleteHooks(on_step=_step_reporter(output or _output, "delete"))
 
 
 def package_hooks(paths: OwnedPaths) -> PackageHooks:
@@ -220,6 +245,8 @@ class Realms:
 
 def realms(output: Output) -> Realms:
     """Build the objects of one realm command from the builders above."""
+    global _output
+    _output = output
     paths = owned_paths()
     return Realms(
         paths=paths,

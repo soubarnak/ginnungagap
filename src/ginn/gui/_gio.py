@@ -17,7 +17,7 @@ import gi  # type: ignore[import-untyped]
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio  # type: ignore[import-untyped]  # noqa: E402
 
-from ginn.gui.refresh import RefreshSource  # noqa: E402
+from ginn.gui.watch import RefreshSource  # noqa: E402
 
 
 class GioRefreshSource(RefreshSource):

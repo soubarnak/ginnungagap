@@ -12,5 +12,5 @@ channel satisfies IR-031 and FR-105. ADR-009, which should record this decision,
 yet.
 
 The package keeps GTK out of the logic. `backend.py` and `viewmodels/` import no gi module.
-`refresh.py` defines the refresh interface, and `_gio.py` is the only file that imports gi.
+`watch.py` defines the change-source interface, and `_gio.py` is the only file that imports gi.
 """
