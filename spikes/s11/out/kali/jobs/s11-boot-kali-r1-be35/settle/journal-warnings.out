@@ -1,0 +1,3 @@
+Oct 14 18:56:46 xserve systemd-sysusers[16]: Failed to connect to audit log, ignoring: Invalid argument
+Oct 14 18:56:46 xserve systemd[1]: systemd-logind-varlink.socket: Socket service systemd-logind.service not loaded, refusing.
+Oct 14 18:56:46 xserve systemd[1]: Failed to listen on systemd-logind-varlink.socket - User Login Management Varlink Socket.

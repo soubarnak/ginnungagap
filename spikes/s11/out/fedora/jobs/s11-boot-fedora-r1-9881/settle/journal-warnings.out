@@ -1,0 +1,4 @@
+Oct 14 18:52:00 xserve (systemd-userdbd)[20]: systemd-userdbd.service: ProtectHostname=yes is configured, but UTS namespace setup is prohibited (container manager?), ignoring namespace setup.
+Oct 14 18:52:00 xserve systemd-update-utmp[25]: Failed to connect to audit log, ignoring: Invalid argument
+Oct 14 18:52:00 xserve systemd[1]: systemd-logind-varlink.socket: Socket service systemd-logind.service not loaded, refusing.
+Oct 14 18:52:00 xserve systemd[1]: Failed to listen on systemd-logind-varlink.socket - User Login Management Varlink Socket.

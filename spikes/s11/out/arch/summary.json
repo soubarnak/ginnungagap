@@ -1,0 +1,696 @@
+{
+  "argv": {
+    "clean": [
+      [
+        "pacman",
+        "--sync",
+        "--clean",
+        "--clean",
+        "--noconfirm"
+      ]
+    ],
+    "init": [],
+    "ips_packages": [
+      "ca-certificates"
+    ],
+    "ips_steps": [
+      [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ]
+    ],
+    "lang": "en_US.UTF-8",
+    "locale_note": null,
+    "refresh": [
+      "pacman",
+      "--sync",
+      "--refresh",
+      "--sysupgrade",
+      "--noconfirm"
+    ]
+  },
+  "base": {
+    "cmd": [
+      "/usr/bin/bash"
+    ],
+    "digest": "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "LANG=C.UTF-8"
+    ],
+    "id": "7949b53cace4669c7312f743654e9a1bc981a7031532dae72366bc5b8f1cdcfc",
+    "labels": {
+      "io.buildah.version": "1.45.1",
+      "org.opencontainers.image.authors": "Santiago Torres-Arias <santiago@archlinux.org> (@SantiagoTorres), Christian Rebischke <Chris.Rebischke@archlinux.org> (@shibumi), Justin Kromlinger <hashworks@archlinux.org> (@hashworks)",
+      "org.opencontainers.image.created": "2026-10-11T09:09:14+00:00",
+      "org.opencontainers.image.description": "Official containerd image of Arch Linux, a simple, lightweight Linux distribution aimed for flexibility.",
+      "org.opencontainers.image.documentation": "https://wiki.archlinux.org/title/Docker#Arch_Linux",
+      "org.opencontainers.image.licenses": "GPL-3.0-or-later",
+      "org.opencontainers.image.revision": "34b87485162b028c8d957bdcd2674359d883cd21",
+      "org.opencontainers.image.source": "https://gitlab.archlinux.org/archlinux/archlinux-docker",
+      "org.opencontainers.image.title": "Arch Linux base Image",
+      "org.opencontainers.image.url": "https://gitlab.archlinux.org/archlinux/archlinux-docker/-/blob/master/README.md",
+      "org.opencontainers.image.version": "20261011.0.609834"
+    },
+    "repo_digests": [
+      "quay.io/archlinux/archlinux@sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93"
+    ],
+    "size": 410385305,
+    "user": null
+  },
+  "boot": [
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 14.0,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "8685:systemd",
+        "8802:systemd-journal",
+        "9144:dbus-broker-lau",
+        "9159:dbus-broker"
+      ],
+      "container_procs": 4,
+      "diag": {
+        "failed-full": "  UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\n",
+        "journal-warnings": "Oct 14 19:01:09 xserve systemd-sysusers[31]: Failed to connect to audit log, ignoring: Invalid argument\nOct 14 19:01:09 xserve systemd-update-utmp[40]: Failed to connect to audit log, ignoring: Invalid argument\nOct 14 19:01:09 xserve systemd[1]: systemd-logind-varlink.socket: Socket service systemd-logind.service not loaded, refusing.\nOct 14 19:01:09 xserve systemd[1]: Failed to listen on User Login Management Varlink Socket.\n",
+        "machine-id-ls": "-rw-r--r-- 1 root root 33 Oct 14 19:01 /etc/machine-id\n",
+        "procs": "      1 cat\n      1 dbus-broker\n      1 dbus-broker-lau\n      1 sh\n      1 systemd\n      1 systemd-journal\n",
+        "version": "systemd 262 (262-1-arch)\n+PAM +AUDIT -SELINUX +APPARMOR -IMA +IPE +SMACK +SECCOMP +GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +BTF +XKBCOMMON +UTMP +LIBARCHIVE\n"
+      },
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          8679
+        ],
+        "ginn-wait": [
+          4908
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          4905
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8142468
+      },
+      "idle_s": 60,
+      "index": 1,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "2bc1a2cfc632df4a896ef5e7fd44891c",
+      "machine_id_in_container": "2bc1a2cfc632df4a896ef5e7fd44891c",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-arch-r1-8a32",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 19.44,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 457430679,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "failed-full": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "machine-id-ls": 0,
+        "pid1": 0,
+        "procs": 0,
+        "state": 0,
+        "version": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 33.98,
+      "writable_layer_bytes": 14227989
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 8.0,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "17009:systemd",
+        "17034:systemd-journal",
+        "17071:dbus-broker-lau",
+        "17073:dbus-broker"
+      ],
+      "container_procs": 4,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          17006
+        ],
+        "ginn-wait": [
+          16901
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          16900
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 6563048
+      },
+      "idle_s": 60,
+      "index": 2,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "d3aa222b164618157c24e406cd3ceca2",
+      "machine_id_in_container": "d3aa222b164618157c24e406cd3ceca2",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-arch-r2-4d2d",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 19.47,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 457430680,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 34.27,
+      "writable_layer_bytes": 14227990
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 12.5,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "26222:systemd",
+        "26244:systemd-journal",
+        "26271:dbus-broker-lau",
+        "26272:dbus-broker"
+      ],
+      "container_procs": 4,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          26219
+        ],
+        "ginn-wait": [
+          26119
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          26118
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8864872
+      },
+      "idle_s": 60,
+      "index": 3,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "dd006c321a3c7fed471f7302014cd603",
+      "machine_id_in_container": "dd006c321a3c7fed471f7302014cd603",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-arch-r3-04c5",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 7.45,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 457430680,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 12.21,
+      "writable_layer_bytes": 14227990
+    }
+  ],
+  "compare": {
+    "cmd": null,
+    "entrypoint": null,
+    "env_extra_in_derived": [
+      "container=podman"
+    ],
+    "env_missing_in_derived": [],
+    "labels_changed": {},
+    "labels_extra": {
+      "io.ginn.base-digest": "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+      "io.ginn.init-set": "40c4f646521566f7acd1179dc2b39cccb98e53c4be870a788d7505f5fc9cfd92",
+      "io.ginn.provision": ""
+    },
+    "labels_missing": [],
+    "size_base": 410385305,
+    "size_delta": 32816361,
+    "size_derived": 443201666,
+    "user": "0"
+  },
+  "derived": {
+    "cmd": null,
+    "digest": "sha256:03b1857851f30d0ffe8478db46a842a2d16b739e22f23186fec6c9b2d02d7c63",
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "container=podman",
+      "LANG=C.UTF-8"
+    ],
+    "id": "045517799197b3439b6259bbdfe7bb94bfb12b508a9b55c4d6877f1e0f0d5054",
+    "labels": {
+      "io.buildah.version": "1.45.1",
+      "io.ginn.base-digest": "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+      "io.ginn.init-set": "40c4f646521566f7acd1179dc2b39cccb98e53c4be870a788d7505f5fc9cfd92",
+      "io.ginn.provision": "",
+      "org.opencontainers.image.authors": "Santiago Torres-Arias <santiago@archlinux.org> (@SantiagoTorres), Christian Rebischke <Chris.Rebischke@archlinux.org> (@shibumi), Justin Kromlinger <hashworks@archlinux.org> (@hashworks)",
+      "org.opencontainers.image.created": "2026-10-11T09:09:14+00:00",
+      "org.opencontainers.image.description": "Official containerd image of Arch Linux, a simple, lightweight Linux distribution aimed for flexibility.",
+      "org.opencontainers.image.documentation": "https://wiki.archlinux.org/title/Docker#Arch_Linux",
+      "org.opencontainers.image.licenses": "GPL-3.0-or-later",
+      "org.opencontainers.image.revision": "34b87485162b028c8d957bdcd2674359d883cd21",
+      "org.opencontainers.image.source": "https://gitlab.archlinux.org/archlinux/archlinux-docker",
+      "org.opencontainers.image.title": "Arch Linux base Image",
+      "org.opencontainers.image.url": "https://gitlab.archlinux.org/archlinux/archlinux-docker/-/blob/master/README.md",
+      "org.opencontainers.image.version": "20261011.0.609834"
+    },
+    "repo_digests": [
+      "localhost/ginn-init-s11-arch@sha256:03b1857851f30d0ffe8478db46a842a2d16b739e22f23186fec6c9b2d02d7c63"
+    ],
+    "size": 443201666,
+    "user": "0"
+  },
+  "distro": "arch",
+  "finished": "2026-10-15T00:34:40+0530",
+  "image_id": "045517799197b3439b6259bbdfe7bb94bfb12b508a9b55c4d6877f1e0f0d5054",
+  "image_name": "localhost/ginn-init-s11-arch:g1",
+  "init_set_hash": "40c4f646521566f7acd1179dc2b39cccb98e53c4be870a788d7505f5fc9cfd92",
+  "off": {
+    "create_rc": 0,
+    "create_stderr": "",
+    "htop_after_restart": 0,
+    "htop_before_restart": 0,
+    "id_u": "1000",
+    "install_htop_rc": 0,
+    "install_refresh_rc": 0,
+    "name": "s11-off-arch",
+    "pass_services_off": true,
+    "pid1": "podman-init",
+    "restart_rc": 0,
+    "start_rc": 0,
+    "start_stderr": "",
+    "systemd_process_present": false,
+    "writable_layer_bytes_after_install": 676834
+  },
+  "phases": [
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_provision_s11-arch_g1",
+        "--user",
+        "0:0",
+        "--userns",
+        "keep-id",
+        "--network",
+        "host",
+        "--http-proxy=false",
+        "--init",
+        "--entrypoint",
+        "[\"sleep\"]",
+        "--label",
+        "io.ginn.provision=s11-arch:g1",
+        "quay.io/archlinux/archlinux@sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+        "infinity"
+      ],
+      "phase": "create",
+      "rc": 0,
+      "root_bytes": 400724992,
+      "seconds": 4.9,
+      "stderr": ""
+    },
+    {
+      "phase": "start",
+      "rc": 0,
+      "root_bytes": 400736616,
+      "seconds": 0.1,
+      "stderr": ""
+    },
+    {
+      "container_bytes": 399553675,
+      "count": 137,
+      "phase": "base-packages"
+    },
+    {
+      "argv": [
+        "pacman",
+        "--sync",
+        "--refresh",
+        "--sysupgrade",
+        "--noconfirm"
+      ],
+      "container_bytes_after_refresh": 411349491,
+      "phase": "refresh",
+      "rc": 0,
+      "root_bytes": 400736616,
+      "seconds": 2.1,
+      "tail": [
+        ":: Synchronizing package databases...",
+        " core downloading...",
+        " extra downloading...",
+        ":: Starting full system upgrade...",
+        "resolving dependencies...",
+        "looking for conflicting packages...",
+        "",
+        "Package (2)  Old Version  New Version  Net Change  Download Size",
+        "",
+        "core/sqlite  3.53.4-1     3.54.0-1       0.18 MiB       2.39 MiB",
+        "core/zlib    1:1.3.2-3    1:1.3.2-4      0.00 MiB       0.08 MiB",
+        "",
+        "Total Download Size:    2.47 MiB",
+        "Total Installed Size:  17.20 MiB",
+        "Net Upgrade Size:       0.19 MiB",
+        "",
+        ":: Proceed with installation? [Y/n] ",
+        ":: Retrieving packages...",
+        " sqlite-3.54.0-1-x86_64 downloading...",
+        " zlib-1:1.3.2-4-x86_64 downloading...",
+        "checking keyring...",
+        "checking package integrity...",
+        "loading package files...",
+        "checking for file conflicts...",
+        ":: Processing package changes...",
+        "upgrading zlib...",
+        "upgrading sqlite...",
+        ":: Running post-transaction hooks...",
+        "(1/1) Arming ConditionNeedsUpdate..."
+      ]
+    },
+    {
+      "argv": [
+        "pacman",
+        "--sync",
+        "--needed",
+        "--noconfirm",
+        "ca-certificates"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 0,
+        "new_names": [],
+        "new_packages": 0
+      },
+      "phase": "ips-install",
+      "rc": 0,
+      "root_bytes": 400736616,
+      "seconds": 0.1,
+      "tail": [
+        "there is nothing to do",
+        "warning: ca-certificates-20240618-1 is up to date -- skipping"
+      ]
+    },
+    {
+      "argv": [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ],
+      "phase": "ips-step-0",
+      "rc": 0,
+      "root_bytes": 400736616,
+      "seconds": 1.1,
+      "tail": []
+    },
+    {
+      "phase": "check-init",
+      "rc": 0,
+      "readlink": "/usr/lib/systemd/systemd",
+      "seconds": 0.1
+    },
+    {
+      "cache_du_after": "2606348\t/var/cache\n9006442\t/var/lib/pacman/sync",
+      "cache_du_before": "2606348\t/var/cache\n9006442\t/var/lib/pacman/sync",
+      "entries": [
+        {
+          "argv": [
+            "pacman",
+            "--sync",
+            "--clean",
+            "--clean",
+            "--noconfirm"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": [
+            "Cache directory: /var/cache/pacman/pkg/",
+            ":: Do you want to remove ALL files from cache? [y/N] ",
+            "",
+            "Database directory: /var/lib/pacman/",
+            ":: Do you want to remove unused repositories? [Y/n] ",
+            "removing unused sync repositories..."
+          ]
+        }
+      ],
+      "pacman_pkg_cache_entries_after": "4",
+      "phase": "clean",
+      "root_bytes_after_clean": 414414108,
+      "root_bytes_before_clean": 414414020
+    },
+    {
+      "kinds": {
+        "A": 16,
+        "C": 50,
+        "D": 3
+      },
+      "lines": 69,
+      "phase": "diff",
+      "rc": 0,
+      "stub_like": 0,
+      "top_level": {
+        "/etc": 5,
+        "/usr": 37,
+        "/var": 27
+      }
+    },
+    {
+      "phase": "stop",
+      "rc": 0
+    },
+    {
+      "change_argv": [
+        "--change",
+        "USER 0",
+        "--change",
+        "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--change",
+        "ENV LANG=C.UTF-8",
+        "--change",
+        "LABEL io.ginn.provision=",
+        "--change",
+        "LABEL io.ginn.init-set=40c4f646521566f7acd1179dc2b39cccb98e53c4be870a788d7505f5fc9cfd92",
+        "--change",
+        "LABEL io.ginn.base-digest=sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93"
+      ],
+      "image_id": "b64975e764ea050b34799f72650637afe9a3d5a7c8ff2369deb55fe38107b9bf",
+      "phase": "commit-stage",
+      "rc": 0,
+      "root_bytes": 433530719,
+      "seconds": 0.2,
+      "stderr": "Getting image source signatures\nCopying blob sha256:e0687d11c7c303b4a22ba95c627d40678fbf4789cd0c4cdf55d357b12ddebb5b\nCopying blob sha256:cdebf55e48171e95b9be6d7d81afde1bc81949f98292b84ec284784e3aeb54e1\nCopying blob sha256:1a301541a139120bbe8f959e310c3c42b2901bea27ad5497a94b33a330fd262d\nCopying config sha256:b64975e764ea050b34799f72650637afe9a3d5a7c8ff2369deb55fe38107b9bf\nWriting manifest to image destination",
+      "tmp_bytes": 643997
+    },
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_reset_s11-arch_g1",
+        "--entrypoint",
+        "[]",
+        "localhost/ginn-init-s11-arch-stage:g1"
+      ],
+      "phase": "reset-create",
+      "rc": 0,
+      "stderr": ""
+    },
+    {
+      "image_id": "045517799197b3439b6259bbdfe7bb94bfb12b508a9b55c4d6877f1e0f0d5054",
+      "phase": "commit",
+      "rc": 0,
+      "root_bytes": 433568993,
+      "seconds": 0.1,
+      "stderr": "Getting image source signatures\nCopying blob sha256:e0687d11c7c303b4a22ba95c627d40678fbf4789cd0c4cdf55d357b12ddebb5b\nCopying blob sha256:cdebf55e48171e95b9be6d7d81afde1bc81949f98292b84ec284784e3aeb54e1\nCopying blob sha256:1a301541a139120bbe8f959e310c3c42b2901bea27ad5497a94b33a330fd262d\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:045517799197b3439b6259bbdfe7bb94bfb12b508a9b55c4d6877f1e0f0d5054\nWriting manifest to image destination",
+      "tmp_bytes": 647200
+    },
+    {
+      "cmd": null,
+      "entrypoint": null,
+      "env_extra_in_derived": [
+        "container=podman"
+      ],
+      "env_missing_in_derived": [],
+      "labels_changed": {},
+      "labels_extra": {
+        "io.ginn.base-digest": "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+        "io.ginn.init-set": "40c4f646521566f7acd1179dc2b39cccb98e53c4be870a788d7505f5fc9cfd92",
+        "io.ginn.provision": ""
+      },
+      "labels_missing": [],
+      "phase": "compare",
+      "size_base": 410385305,
+      "size_delta": 32816361,
+      "size_derived": 443201666,
+      "user": "0"
+    },
+    {
+      "phase": "rm-provision",
+      "rc": 0,
+      "root_bytes_after": 433515613,
+      "root_bytes_before": 433547564
+    }
+  ],
+  "pinned_digest": "sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+  "pinned_ref": "quay.io/archlinux/archlinux@sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93",
+  "pull": {
+    "rc": 0,
+    "seconds": 14.5,
+    "stderr": "ha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93...\nGetting image source signatures\nCopying blob sha256:9a03be81bd9d798f3bd52d8fa24e6ed6bd0623aaf4e4c544c6c62dcb77fd7192\nCopying blob sha256:b47db09deb186ae7bbee75264b539568f935cae76e4d56c0ac1d53ebca93728e\nCopying config sha256:7949b53cace4669c7312f743654e9a1bc981a7031532dae72366bc5b8f1cdcfc\nWriting manifest to image destination"
+  },
+  "rmi": {
+    "base_inspect_after_id_rmi": "Error: 7949b53cace4669c7312f743654e9a1bc981a7031532dae72366bc5b8f1cdcfc: image not known",
+    "base_rmi_after_children": {
+      "rc": 1,
+      "stderr": "Error: 7949b53cace4669c7312f743654e9a1bc981a7031532dae72366bc5b8f1cdcfc: image not known",
+      "stdout": ""
+    },
+    "base_rmi_by_id_while_children": {
+      "rc": 0,
+      "stderr": "",
+      "stdout": "Untagged: quay.io/archlinux/archlinux@sha256:c556b483a8e653aa6389bb66263e1d96cd6e17c67ca5968c87495d313c4a2e93"
+    },
+    "child_run_after_base_rmi": {
+      "rc": 0,
+      "stderr": ""
+    },
+    "children_present": [
+      "localhost/ginn-init-s11-arch:g1",
+      "localhost/ginn-init-s11-arch-stage:g1"
+    ],
+    "containers_on_base": [],
+    "derived_rmi": {
+      "keep-id": {
+        "rc": 0,
+        "stderr": "",
+        "stdout": "Untagged: localhost/ginn-init-s11-arch:g1\nDeleted: 045517799197b3439b6259bbdfe7bb94bfb12b508a9b55c4d6877f1e0f0d5054"
+      },
+      "keep-id-stage": {
+        "rc": 0,
+        "stderr": "",
+        "stdout": "Untagged: localhost/ginn-init-s11-arch-stage:g1\nDeleted: b64975e764ea050b34799f72650637afe9a3d5a7c8ff2369deb55fe38107b9bf"
+      }
+    }
+  },
+  "root_bytes_after_pull": 400721796,
+  "root_bytes_after_rmi": 147735,
+  "root_bytes_before_rmi": 433516562,
+  "sampler_peak": {
+    "root": 433568993,
+    "tmp": 878234
+  },
+  "stage_name": "localhost/ginn-init-s11-arch-stage:g1",
+  "started": "2026-10-15T00:30:35+0530",
+  "user_store_after": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  },
+  "user_store_before": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  }
+}

@@ -1,0 +1,1187 @@
+{
+  "argv": {
+    "clean": [
+      [
+        "apt-get",
+        "clean"
+      ],
+      [
+        "rm",
+        "-rf",
+        "/var/lib/apt/lists"
+      ],
+      [
+        "mkdir",
+        "-p",
+        "/var/lib/apt/lists/partial"
+      ]
+    ],
+    "init": [
+      "systemd",
+      "systemd-sysv",
+      "dbus"
+    ],
+    "ips_packages": [
+      "ca-certificates",
+      "locales"
+    ],
+    "ips_steps": [
+      [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ]
+    ],
+    "lang": "en_US.UTF-8",
+    "locale_note": null,
+    "refresh": [
+      "apt-get",
+      "update"
+    ]
+  },
+  "argv-nokeep": {
+    "clean": [
+      [
+        "apt-get",
+        "clean"
+      ],
+      [
+        "rm",
+        "-rf",
+        "/var/lib/apt/lists"
+      ],
+      [
+        "mkdir",
+        "-p",
+        "/var/lib/apt/lists/partial"
+      ]
+    ],
+    "init": [
+      "systemd",
+      "systemd-sysv",
+      "dbus"
+    ],
+    "ips_packages": [
+      "ca-certificates",
+      "locales"
+    ],
+    "ips_steps": [
+      [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ]
+    ],
+    "lang": "en_US.UTF-8",
+    "locale_note": null,
+    "refresh": [
+      "apt-get",
+      "update"
+    ]
+  },
+  "base": {
+    "cmd": [
+      "bash"
+    ],
+    "digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    ],
+    "id": "787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02",
+    "labels": {},
+    "repo_digests": [
+      "docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+    ],
+    "size": 81256893,
+    "user": null
+  },
+  "boot": [
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 11.5,
+      "busctl_rc": 0,
+      "container_proc_names": [
+        "19502:systemd",
+        "19518:systemd-journal",
+        "19538:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "diag": {
+        "failed-full": "  UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\n",
+        "journal-warnings": "-- No entries --\n",
+        "machine-id-ls": "-rw-r--r-- 1 root root 33 Oct 14 18:45 /etc/machine-id\n",
+        "procs": "      1 cat\n      1 dbus-daemon\n      1 sh\n      1 systemd\n      1 systemd-journal\n",
+        "version": "systemd 257 (257.13-1~deb13u1)\n+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +BTF -XKBCOMMON -UTMP +SYSVINIT +LIBARCHIVE\n"
+      },
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          19499
+        ],
+        "ginn-wait": [
+          19367
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          19366
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8487336
+      },
+      "idle_s": 60,
+      "index": 1,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "bf2262c88b431340d4ab6aa9a4e6f028",
+      "machine_id_in_container": "bf2262c88b431340d4ab6aa9a4e6f028",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-debian-r1-beb5",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 17.99,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 160934116,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "failed-full": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "machine-id-ls": 0,
+        "pid1": 0,
+        "procs": 0,
+        "state": 0,
+        "version": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 31.84,
+      "writable_layer_bytes": 259080
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 12.5,
+      "busctl_rc": 0,
+      "container_proc_names": [
+        "6526:systemd",
+        "6645:systemd-journal",
+        "6723:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          6523
+        ],
+        "ginn-wait": [
+          3734
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          3732
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8479628
+      },
+      "idle_s": 60,
+      "index": 2,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "ad76ef279804e3181bdff054fde238e0",
+      "machine_id_in_container": "ad76ef279804e3181bdff054fde238e0",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-debian-r2-5132",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 16.8,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 160934115,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 30.09,
+      "writable_layer_bytes": 259079
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 7.5,
+      "busctl_rc": 0,
+      "container_proc_names": [
+        "13470:systemd",
+        "13527:systemd-journal",
+        "13598:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          13464
+        ],
+        "ginn-wait": [
+          13249
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          13248
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8586448
+      },
+      "idle_s": 60,
+      "index": 3,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "59c29e6bd22f866f292bb836bd6cdfba",
+      "machine_id_in_container": "59c29e6bd22f866f292bb836bd6cdfba",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-debian-r3-00af",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 18.16,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 160934116,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 32.02,
+      "writable_layer_bytes": 259080
+    }
+  ],
+  "compare": {
+    "cmd": [
+      "infinity"
+    ],
+    "entrypoint": [
+      "sleep"
+    ],
+    "env_extra_in_derived": [
+      "container=podman"
+    ],
+    "env_missing_in_derived": [],
+    "labels_changed": {},
+    "labels_extra": {
+      "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": ""
+    },
+    "labels_missing": [],
+    "size_base": 81256893,
+    "size_delta": 39708959,
+    "size_derived": 120965852,
+    "user": "0"
+  },
+  "compare-nokeep": {
+    "cmd": [
+      "infinity"
+    ],
+    "entrypoint": [
+      "sleep"
+    ],
+    "env_extra_in_derived": [
+      "container=podman"
+    ],
+    "env_missing_in_derived": [],
+    "labels_changed": {},
+    "labels_extra": {
+      "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": ""
+    },
+    "labels_missing": [],
+    "size_base": 81256893,
+    "size_delta": 39708447,
+    "size_derived": 120965340,
+    "user": "0"
+  },
+  "derived": {
+    "cmd": [
+      "infinity"
+    ],
+    "digest": "sha256:1fc5e2ec9ec9aa7e31817d00bf6546dcdd92a0207881f4b4d17556d022a2862a",
+    "entrypoint": [
+      "sleep"
+    ],
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "container=podman"
+    ],
+    "id": "45e05ba29e374fd3bedd11254bdd4dfb7c906db52f81d0c7978c6257ecd68aa9",
+    "labels": {
+      "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": ""
+    },
+    "repo_digests": [
+      "localhost/ginn-init-s11-debian@sha256:1fc5e2ec9ec9aa7e31817d00bf6546dcdd92a0207881f4b4d17556d022a2862a"
+    ],
+    "size": 120965852,
+    "user": "0"
+  },
+  "derived-nokeep": {
+    "cmd": [
+      "infinity"
+    ],
+    "digest": "sha256:ffb13fbeb814d4d3bc149ce525f533e182744b4dd126db73588d99dd9c8431ca",
+    "entrypoint": [
+      "sleep"
+    ],
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "container=podman"
+    ],
+    "id": "adc0f8bd6ed937a0185bf1d6a1f16091095db8df63b72882e0f20700f21776a0",
+    "labels": {
+      "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": ""
+    },
+    "repo_digests": [
+      "localhost/ginn-init-s11-debian-nokeep@sha256:ffb13fbeb814d4d3bc149ce525f533e182744b4dd126db73588d99dd9c8431ca"
+    ],
+    "size": 120965340,
+    "user": "0"
+  },
+  "distro": "debian",
+  "finished": "2026-10-15T00:18:57+0530",
+  "image_id": "45e05ba29e374fd3bedd11254bdd4dfb7c906db52f81d0c7978c6257ecd68aa9",
+  "image_id-nokeep": "adc0f8bd6ed937a0185bf1d6a1f16091095db8df63b72882e0f20700f21776a0",
+  "image_name": "localhost/ginn-init-s11-debian:g1",
+  "image_name-nokeep": "localhost/ginn-init-s11-debian-nokeep:g1",
+  "init_set_hash": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+  "init_set_hash-nokeep": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+  "off": {
+    "create_rc": 0,
+    "create_stderr": "",
+    "htop_after_restart": 0,
+    "htop_before_restart": 0,
+    "id_u": "1000",
+    "install_htop_rc": 0,
+    "install_refresh_rc": 0,
+    "name": "s11-off-debian",
+    "pass_services_off": true,
+    "pid1": "podman-init",
+    "restart_rc": 0,
+    "start_rc": 0,
+    "start_stderr": "",
+    "systemd_process_present": false,
+    "writable_layer_bytes_after_install": 23454481
+  },
+  "phases": [
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_provision_s11-debian_g1",
+        "--user",
+        "0:0",
+        "--userns",
+        "keep-id",
+        "--network",
+        "host",
+        "--http-proxy=false",
+        "--init",
+        "--entrypoint",
+        "[\"sleep\"]",
+        "--label",
+        "io.ginn.provision=s11-debian:g1",
+        "docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+        "infinity"
+      ],
+      "phase": "create",
+      "rc": 0,
+      "root_bytes": 79382559,
+      "seconds": 0.5,
+      "stderr": ""
+    },
+    {
+      "phase": "start",
+      "rc": 0,
+      "root_bytes": 79394168,
+      "seconds": 0.1,
+      "stderr": ""
+    },
+    {
+      "container_bytes": 78824283,
+      "count": 78,
+      "phase": "base-packages"
+    },
+    {
+      "argv": [
+        "apt-get",
+        "update"
+      ],
+      "container_bytes_after_refresh": 100400935,
+      "phase": "refresh",
+      "rc": 0,
+      "root_bytes": 79394168,
+      "seconds": 2.2,
+      "tail": [
+        "Get:1 http://deb.debian.org/debian stable InRelease [140 kB]",
+        "Get:2 http://deb.debian.org/debian stable-updates InRelease [47.3 kB]",
+        "Get:3 http://deb.debian.org/debian-security stable-security InRelease [43.4 kB]",
+        "Get:4 http://deb.debian.org/debian stable/main amd64 Packages [9678 kB]",
+        "Get:5 http://deb.debian.org/debian stable-updates/main amd64 Packages [4412 B]",
+        "Get:6 http://deb.debian.org/debian-security stable-security/main amd64 Packages [267 kB]",
+        "Fetched 10.2 MB in 2s (5959 kB/s)",
+        "Reading package lists..."
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "systemd",
+        "systemd-sysv",
+        "dbus"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 19166208,
+        "new_names": [
+          "dbus",
+          "dbus-bin",
+          "dbus-daemon",
+          "dbus-session-bus-common",
+          "dbus-system-bus-common",
+          "libapparmor1",
+          "libdbus-1-3",
+          "libexpat1",
+          "libsystemd-shared",
+          "systemd",
+          "systemd-sysv"
+        ],
+        "new_packages": 11
+      },
+      "phase": "init-install",
+      "rc": 0,
+      "root_bytes": 79394168,
+      "seconds": 2.7,
+      "tail": [
+        "Selecting previously unselected package dbus-bin.",
+        "Preparing to unpack .../2-dbus-bin_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus-bin (1.16.2-2) ...",
+        "Selecting previously unselected package dbus-session-bus-common.",
+        "Preparing to unpack .../3-dbus-session-bus-common_1.16.2-2_all.deb ...",
+        "Unpacking dbus-session-bus-common (1.16.2-2) ...",
+        "Selecting previously unselected package libexpat1:amd64.",
+        "Preparing to unpack .../4-libexpat1_2.8.3-1~deb13u1_amd64.deb ...",
+        "Unpacking libexpat1:amd64 (2.8.3-1~deb13u1) ...",
+        "Selecting previously unselected package dbus-daemon.",
+        "Preparing to unpack .../5-dbus-daemon_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus-daemon (1.16.2-2) ...",
+        "Selecting previously unselected package dbus-system-bus-common.",
+        "Preparing to unpack .../6-dbus-system-bus-common_1.16.2-2_all.deb ...",
+        "Unpacking dbus-system-bus-common (1.16.2-2) ...",
+        "Selecting previously unselected package dbus.",
+        "Preparing to unpack .../7-dbus_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus (1.16.2-2) ...",
+        "Setting up libexpat1:amd64 (2.8.3-1~deb13u1) ...",
+        "Setting up systemd-sysv (257.13-1~deb13u1) ...",
+        "Setting up libdbus-1-3:amd64 (1.16.2-2) ...",
+        "Setting up dbus-session-bus-common (1.16.2-2) ...",
+        "Setting up dbus-system-bus-common (1.16.2-2) ...",
+        "Creating group 'messagebus' with GID 997.",
+        "Creating user 'messagebus' (System Message Bus) with UID 997 and GID 997.",
+        "Setting up dbus-bin (1.16.2-2) ...",
+        "Setting up dbus-daemon (1.16.2-2) ...",
+        "Setting up dbus (1.16.2-2) ...",
+        "invoke-rc.d: could not determine current runlevel",
+        "invoke-rc.d: policy-rc.d denied execution of start.",
+        "Processing triggers for libc-bin (2.41-12+deb13u4) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 11.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "ca-certificates",
+        "locales"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 23975936,
+        "new_names": [
+          "ca-certificates",
+          "libc-l10n",
+          "locales",
+          "openssl"
+        ],
+        "new_packages": 4
+      },
+      "phase": "ips-install",
+      "rc": 0,
+      "root_bytes": 79394168,
+      "seconds": 4.6,
+      "tail": [
+        "Setting up libc-l10n (2.41-12+deb13u4) ...",
+        "Setting up locales (2.41-12+deb13u4) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Generating locales (this might take a while)...",
+        "Generation complete.",
+        "Setting up openssl (3.5.7-1~deb13u3) ...",
+        "Setting up ca-certificates (20250419) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Updating certificates in /etc/ssl/certs...",
+        "150 added, 0 removed; done.",
+        "Processing triggers for ca-certificates (20250419) ...",
+        "Updating certificates in /etc/ssl/certs...",
+        "0 added, 0 removed; done.",
+        "Running hooks in /etc/ca-certificates/update.d...",
+        "done.",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 4.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ],
+      "phase": "ips-step-0",
+      "rc": 0,
+      "root_bytes": 79394168,
+      "seconds": 1.1,
+      "tail": []
+    },
+    {
+      "phase": "check-init",
+      "rc": 0,
+      "readlink": "/usr/lib/systemd/systemd",
+      "seconds": 0.1
+    },
+    {
+      "cache_du_after": "1725353\t/var/cache\n0\t/var/lib/apt/lists",
+      "cache_du_before": "1725353\t/var/cache\n21576652\t/var/lib/apt/lists",
+      "entries": [
+        {
+          "argv": [
+            "apt-get",
+            "clean"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/var/lib/apt/lists"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "mkdir",
+            "-p",
+            "/var/lib/apt/lists/partial"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        }
+      ],
+      "pacman_pkg_cache_entries_after": "0",
+      "phase": "clean",
+      "root_bytes_after_clean": 115488819,
+      "root_bytes_before_clean": 137065471
+    },
+    {
+      "kinds": {
+        "A": 1914,
+        "C": 75,
+        "D": 1
+      },
+      "lines": 1990,
+      "phase": "diff",
+      "rc": 0,
+      "stub_like": 0,
+      "top_level": {
+        "/etc": 375,
+        "/root": 2,
+        "/run": 17,
+        "/tmp": 1,
+        "/usr": 1472,
+        "/var": 123
+      }
+    },
+    {
+      "phase": "stop",
+      "rc": 0
+    },
+    {
+      "change_argv": [
+        "--change",
+        "ENTRYPOINT []",
+        "--change",
+        "CMD []",
+        "--change",
+        "USER 0",
+        "--change",
+        "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--change",
+        "LABEL io.ginn.provision=",
+        "--change",
+        "LABEL io.ginn.init-set=2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "--change",
+        "LABEL io.ginn.base-digest=sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+      ],
+      "image_id": "45e05ba29e374fd3bedd11254bdd4dfb7c906db52f81d0c7978c6257ecd68aa9",
+      "phase": "commit",
+      "rc": 0,
+      "root_bytes": 117894513,
+      "seconds": 0.6,
+      "stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:269a6703e2cda03bce627b62245902c74332e61e5cbf148a1b5855b78587a381\nCopying config sha256:45e05ba29e374fd3bedd11254bdd4dfb7c906db52f81d0c7978c6257ecd68aa9\nWriting manifest to image destination",
+      "tmp_bytes": 20720
+    },
+    {
+      "cmd": [
+        "infinity"
+      ],
+      "entrypoint": [
+        "sleep"
+      ],
+      "env_extra_in_derived": [
+        "container=podman"
+      ],
+      "env_missing_in_derived": [],
+      "labels_changed": {},
+      "labels_extra": {
+        "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+        "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "io.ginn.provision": ""
+      },
+      "labels_missing": [],
+      "phase": "compare",
+      "size_base": 81256893,
+      "size_delta": 39708959,
+      "size_derived": 120965852,
+      "user": "0"
+    },
+    {
+      "phase": "rm-provision",
+      "rc": 0,
+      "root_bytes_after": 117875489,
+      "root_bytes_before": 117894513
+    }
+  ],
+  "phases-nokeep": [
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_provision_s11-debian-nokeep_g1",
+        "--user",
+        "0:0",
+        "--network",
+        "host",
+        "--http-proxy=false",
+        "--init",
+        "--entrypoint",
+        "[\"sleep\"]",
+        "--label",
+        "io.ginn.provision=s11-debian-nokeep:g1",
+        "docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+        "infinity"
+      ],
+      "phase": "create",
+      "rc": 0,
+      "root_bytes": 118019443,
+      "seconds": 0.0,
+      "stderr": ""
+    },
+    {
+      "phase": "start",
+      "rc": 0,
+      "root_bytes": 118030608,
+      "seconds": 0.1,
+      "stderr": ""
+    },
+    {
+      "container_bytes": 78824218,
+      "count": 78,
+      "phase": "base-packages"
+    },
+    {
+      "argv": [
+        "apt-get",
+        "update"
+      ],
+      "container_bytes_after_refresh": 100400870,
+      "phase": "refresh",
+      "rc": 0,
+      "root_bytes": 139607260,
+      "seconds": 1.8,
+      "tail": [
+        "Get:1 http://deb.debian.org/debian stable InRelease [140 kB]",
+        "Get:2 http://deb.debian.org/debian stable-updates InRelease [47.3 kB]",
+        "Get:3 http://deb.debian.org/debian-security stable-security InRelease [43.4 kB]",
+        "Get:4 http://deb.debian.org/debian stable/main amd64 Packages [9678 kB]",
+        "Get:5 http://deb.debian.org/debian stable-updates/main amd64 Packages [4412 B]",
+        "Get:6 http://deb.debian.org/debian-security stable-security/main amd64 Packages [267 kB]",
+        "Fetched 10.2 MB in 1s (8092 kB/s)",
+        "Reading package lists..."
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "systemd",
+        "systemd-sysv",
+        "dbus"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 19166208,
+        "new_names": [
+          "dbus",
+          "dbus-bin",
+          "dbus-daemon",
+          "dbus-session-bus-common",
+          "dbus-system-bus-common",
+          "libapparmor1",
+          "libdbus-1-3",
+          "libexpat1",
+          "libsystemd-shared",
+          "systemd",
+          "systemd-sysv"
+        ],
+        "new_packages": 11
+      },
+      "phase": "init-install",
+      "rc": 0,
+      "root_bytes": 156292775,
+      "seconds": 2.7,
+      "tail": [
+        "Selecting previously unselected package dbus-bin.",
+        "Preparing to unpack .../2-dbus-bin_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus-bin (1.16.2-2) ...",
+        "Selecting previously unselected package dbus-session-bus-common.",
+        "Preparing to unpack .../3-dbus-session-bus-common_1.16.2-2_all.deb ...",
+        "Unpacking dbus-session-bus-common (1.16.2-2) ...",
+        "Selecting previously unselected package libexpat1:amd64.",
+        "Preparing to unpack .../4-libexpat1_2.8.3-1~deb13u1_amd64.deb ...",
+        "Unpacking libexpat1:amd64 (2.8.3-1~deb13u1) ...",
+        "Selecting previously unselected package dbus-daemon.",
+        "Preparing to unpack .../5-dbus-daemon_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus-daemon (1.16.2-2) ...",
+        "Selecting previously unselected package dbus-system-bus-common.",
+        "Preparing to unpack .../6-dbus-system-bus-common_1.16.2-2_all.deb ...",
+        "Unpacking dbus-system-bus-common (1.16.2-2) ...",
+        "Selecting previously unselected package dbus.",
+        "Preparing to unpack .../7-dbus_1.16.2-2_amd64.deb ...",
+        "Unpacking dbus (1.16.2-2) ...",
+        "Setting up libexpat1:amd64 (2.8.3-1~deb13u1) ...",
+        "Setting up systemd-sysv (257.13-1~deb13u1) ...",
+        "Setting up libdbus-1-3:amd64 (1.16.2-2) ...",
+        "Setting up dbus-session-bus-common (1.16.2-2) ...",
+        "Setting up dbus-system-bus-common (1.16.2-2) ...",
+        "Creating group 'messagebus' with GID 997.",
+        "Creating user 'messagebus' (System Message Bus) with UID 997 and GID 997.",
+        "Setting up dbus-bin (1.16.2-2) ...",
+        "Setting up dbus-daemon (1.16.2-2) ...",
+        "Setting up dbus (1.16.2-2) ...",
+        "invoke-rc.d: could not determine current runlevel",
+        "invoke-rc.d: policy-rc.d denied execution of start.",
+        "Processing triggers for libc-bin (2.41-12+deb13u4) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 11.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "ca-certificates",
+        "locales"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 23975936,
+        "new_names": [
+          "ca-certificates",
+          "libc-l10n",
+          "locales",
+          "openssl"
+        ],
+        "new_packages": 4
+      },
+      "phase": "ips-install",
+      "rc": 0,
+      "root_bytes": 174896592,
+      "seconds": 4.5,
+      "tail": [
+        "Setting up libc-l10n (2.41-12+deb13u4) ...",
+        "Setting up locales (2.41-12+deb13u4) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Generating locales (this might take a while)...",
+        "Generation complete.",
+        "Setting up openssl (3.5.7-1~deb13u3) ...",
+        "Setting up ca-certificates (20250419) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Updating certificates in /etc/ssl/certs...",
+        "150 added, 0 removed; done.",
+        "Processing triggers for ca-certificates (20250419) ...",
+        "Updating certificates in /etc/ssl/certs...",
+        "0 added, 0 removed; done.",
+        "Running hooks in /etc/ca-certificates/update.d...",
+        "done.",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 4.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ],
+      "phase": "ips-step-0",
+      "rc": 0,
+      "root_bytes": 177959616,
+      "seconds": 1.0,
+      "tail": []
+    },
+    {
+      "phase": "check-init",
+      "rc": 0,
+      "readlink": "/usr/lib/systemd/systemd",
+      "seconds": 0.1
+    },
+    {
+      "cache_du_after": "1725353\t/var/cache\n0\t/var/lib/apt/lists",
+      "cache_du_before": "1725353\t/var/cache\n21576652\t/var/lib/apt/lists",
+      "entries": [
+        {
+          "argv": [
+            "apt-get",
+            "clean"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/var/lib/apt/lists"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "mkdir",
+            "-p",
+            "/var/lib/apt/lists/partial"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        }
+      ],
+      "pacman_pkg_cache_entries_after": "0",
+      "phase": "clean",
+      "root_bytes_after_clean": 115488689,
+      "root_bytes_before_clean": 137065341
+    },
+    {
+      "kinds": {
+        "A": 1914,
+        "C": 75,
+        "D": 1
+      },
+      "lines": 1990,
+      "phase": "diff",
+      "rc": 0,
+      "stub_like": 0,
+      "top_level": {
+        "/etc": 375,
+        "/root": 2,
+        "/run": 17,
+        "/tmp": 1,
+        "/usr": 1472,
+        "/var": 123
+      }
+    },
+    {
+      "phase": "stop",
+      "rc": 0
+    },
+    {
+      "change_argv": [
+        "--change",
+        "ENTRYPOINT []",
+        "--change",
+        "CMD []",
+        "--change",
+        "USER 0",
+        "--change",
+        "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--change",
+        "LABEL io.ginn.provision=",
+        "--change",
+        "LABEL io.ginn.init-set=2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "--change",
+        "LABEL io.ginn.base-digest=sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+      ],
+      "image_id": "adc0f8bd6ed937a0185bf1d6a1f16091095db8df63b72882e0f20700f21776a0",
+      "phase": "commit",
+      "rc": 0,
+      "root_bytes": 194883170,
+      "seconds": 0.6,
+      "stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:0d1e30751dc44e3ca5ac264e95eef4cbb7ed2d91103570274aec9299d40c2bd4\nCopying config sha256:adc0f8bd6ed937a0185bf1d6a1f16091095db8df63b72882e0f20700f21776a0\nWriting manifest to image destination",
+      "tmp_bytes": 129167
+    },
+    {
+      "cmd": [
+        "infinity"
+      ],
+      "entrypoint": [
+        "sleep"
+      ],
+      "env_extra_in_derived": [
+        "container=podman"
+      ],
+      "env_missing_in_derived": [],
+      "labels_changed": {},
+      "labels_extra": {
+        "io.ginn.base-digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+        "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "io.ginn.provision": ""
+      },
+      "labels_missing": [],
+      "phase": "compare",
+      "size_base": 81256893,
+      "size_delta": 39708447,
+      "size_derived": 120965340,
+      "user": "0"
+    },
+    {
+      "phase": "rm-provision",
+      "rc": 0,
+      "root_bytes_after": 156513011,
+      "root_bytes_before": 194883170
+    }
+  ],
+  "pinned_digest": "sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+  "pinned_ref": "docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+  "pull": {
+    "rc": 0,
+    "seconds": 4.4,
+    "stderr": "Trying to pull docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a...\nGetting image source signatures\nCopying blob sha256:90ecb15ebb389405c9fa3c6d01d1f22d7be80cbb79a2691150993046f3a23dc7\nCopying config sha256:787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02\nWriting manifest to image destination"
+  },
+  "rmi": {
+    "base_rmi_after_children": {
+      "rc": 1,
+      "stderr": "Error: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a: image not known"
+    },
+    "base_rmi_while_child": {
+      "rc": 0,
+      "stderr": "",
+      "stdout": "Untagged: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+    },
+    "containers_on_base": [],
+    "derived_rmi": {
+      "keep-id": {
+        "rc": 0,
+        "stderr": ""
+      },
+      "nokeep": {
+        "rc": 0,
+        "stderr": ""
+      }
+    }
+  },
+  "root_bytes_after_pull": 79155666,
+  "root_bytes_after_rmi": 131347,
+  "root_bytes_before_rmi": 156513011,
+  "sampler_peak": {
+    "root": 181005040,
+    "tmp": 115864
+  },
+  "started": "2026-10-15T00:14:46+0530",
+  "user_store_after": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  },
+  "user_store_before": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  }
+}

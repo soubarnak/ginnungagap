@@ -1,0 +1,43 @@
+{
+  "host_rootless": true,
+  "kernel": "7.2.10_1",
+  "podman_version": "Client:       Podman Engine\nVersion:      5.8.8\nAPI Version:  5.8.8\nGo Version:   go1.27.1\nBuilt:        Thu Jan  1 05:30:00 1970\nOS/Arch:      linux/amd64",
+  "root": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/root",
+  "runroot": "/run/user/1000/s11/rr",
+  "store": {
+    "configFile": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/xdg/config/containers/storage.conf",
+    "containerStore": {
+      "number": 0,
+      "paused": 0,
+      "running": 0,
+      "stopped": 0
+    },
+    "graphDriverName": "overlay",
+    "graphOptions": {},
+    "graphRoot": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/root",
+    "graphRootAllocated": 502392610816,
+    "graphRootUsed": 304839159808,
+    "graphStatus": {
+      "Backing Filesystem": "extfs",
+      "Native Overlay Diff": "true",
+      "Supports d_type": "true",
+      "Supports shifting": "false",
+      "Supports volatile": "true",
+      "Using metacopy": "false"
+    },
+    "imageCopyTmpDir": "/var/tmp",
+    "imageStore": {
+      "number": 0
+    },
+    "runRoot": "/run/user/1000/s11/rr",
+    "transientStore": false,
+    "volumePath": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/root/volumes"
+  },
+  "tmpdir": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/tmp",
+  "user_store_before": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  },
+  "xdg_runtime_dir": "/run/user/1000/s11/xdg"
+}

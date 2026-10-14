@@ -1,0 +1,9 @@
+NAME                      PID PROCESS USER CONNECTION    UNIT       SESSION DESCRIPTION
+:1.0                       34 busctl  root :1.0          init.scope -       -
+org.freedesktop.DBus        1 systemd root -             init.scope -       -
+org.freedesktop.hostname1   - -       -    (activatable) -          -       -
+org.freedesktop.locale1     - -       -    (activatable) -          -       -
+org.freedesktop.login1      - -       -    (activatable) -          -       -
+org.freedesktop.oom1        - -       -    (activatable) -          -       -
+org.freedesktop.systemd1    - -       -    (activatable) -          -       -
+org.freedesktop.timedate1   - -       -    (activatable) -          -       -

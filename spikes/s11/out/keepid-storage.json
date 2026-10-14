@@ -1,0 +1,61 @@
+{
+  "after_base_rmi": {
+    "root_all": 147735,
+    "root_x": 147735
+  },
+  "baseline": {
+    "root_all": 79188504,
+    "root_x": 79188504
+  },
+  "keep-id": {
+    "after_create": {
+      "root_all": 79403003,
+      "root_x": 79403003
+    },
+    "after_rm": {
+      "root_all": 79401507,
+      "root_x": 79401507
+    },
+    "after_start": {
+      "root_all": 79414612,
+      "root_x": 79414612
+    },
+    "after_write": {
+      "root_all": 79414612,
+      "root_x": 79414612
+    },
+    "create_rc": 0,
+    "mountinfo_lines_under_root": [],
+    "start_rc": 0,
+    "upper_dir": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/root/overlay/393c12f2ae0ca6adb04bca8174759b8b32be1ff9df7e599f1ef1de5b2bafc99b/diff",
+    "upper_du_all": -1,
+    "upper_du_x": -1,
+    "write_rc": 0
+  },
+  "no-keep": {
+    "after_create": {
+      "root_all": 79402466,
+      "root_x": 79402466
+    },
+    "after_rm": {
+      "root_all": 79401507,
+      "root_x": 79401507
+    },
+    "after_start": {
+      "root_all": 79413631,
+      "root_x": 79413631
+    },
+    "after_write": {
+      "root_all": 142328191,
+      "root_x": 142328191
+    },
+    "create_rc": 0,
+    "mountinfo_lines_under_root": [],
+    "start_rc": 0,
+    "upper_dir": "/home/soubarna/.cache/tmp/claude-1000/-home-soubarna-Documents-bongbetic-wip-ginnungagap/341badce-de09-4807-b1e0-7a42b356460c/scratchpad/s11/root/overlay/a6f02b87e4dfeed3bda5c736a6d57145665573553670b3e55fca7df7a403db15/diff",
+    "upper_du_all": 62914572,
+    "upper_du_x": 62914572,
+    "write_rc": 0
+  },
+  "pull": 0
+}

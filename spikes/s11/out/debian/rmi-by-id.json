@@ -1,0 +1,27 @@
+{
+  "base_id": "787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02",
+  "base_inspect_after_id_rmi": "Error: 787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02: image not known",
+  "child_commit_rc": 0,
+  "child_create_rc": 0,
+  "images_left": "",
+  "pull": 0,
+  "rmi_base_id_after_child": {
+    "rc": 1,
+    "stderr": "Error: 787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02: image not known",
+    "stdout": ""
+  },
+  "rmi_base_id_with_child": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "Untagged: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+  },
+  "rmi_base_name_with_child": {
+    "rc": 1,
+    "stderr": "Error: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a: image not known"
+  },
+  "rmi_child": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "Untagged: localhost/s11-rmi-child:1\nDeleted: 43fcab812835375514db17a780531f59522e9eb15939c3915fa4879eb3c6d370"
+  }
+}
