@@ -428,7 +428,11 @@ def test_a_services_on_create_with_packages_is_refused_before_any_write(
             hooks=hooks_for(tmp_path, sleeps, mountinfo),
         )
     assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert "--with packages on a services-on realm arrives in T7.4" in caught.value.message
+    assert (
+        "--with packages on a services-on create (the CLI cannot start a services-on container, "
+        "ADR-003) arrives in ginn install, after the realm's first supervised start"
+        in caught.value.message
+    )
     assert fake.calls == []
     assert not (env.paths.homes / "debian").exists()
     assert create_entries(env) == []

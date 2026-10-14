@@ -5,7 +5,8 @@ one conmon pid. A conmon that dies is a crash (exit 1). A SIGTERM runs `podman s
 
 Every case uses a fake conmon (a Python child whose pid goes in a pidfile) and a fake podman (a
 shell script that logs its argv and, on a call, kills the conmon named by the pidfile). Nothing
-here runs real podman, and no realm is involved. Where runit starts the helper is M7 (T7.4).
+here runs real podman, and no realm is involved. Where runit starts the helper is T7.4
+(services/runit_user.py), and its host run is T7.7.
 """
 
 from __future__ import annotations

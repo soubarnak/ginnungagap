@@ -19,9 +19,9 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   with services on (ADR-003, runtime/spec.py). The record is saved again with the container ID, so a
   crash cannot leave an unnamed container.
 - services on: the create stops after `created`. Its container is made and never started: a
-  services-on realm starts only through its runit entry (FR-081, ADR-003), which arrives in T7.3
-  and T7.4. So this create runs no `podman start`, `exec` or `stop`, attaches no grant, and runs no
-  user check, integration step or package step. The final record is saved as `stopped`, and
+  services-on realm starts only through its runit entry (FR-081, ADR-003), and the CLI never starts
+  it. So this create runs no `podman start`, `exec` or `stop`, attaches no grant, and runs no user
+  check, integration step or package step. The final record is saved as `stopped`, and
   GINN-W-SERVICES-PENDING says what this create left out (FR-010).
 - started: the container starts, and its init process is read.
 - attached: the variable grants are attached (ADR-008 amendment). A failed attach fails the create.
@@ -480,13 +480,21 @@ class _Create:
             f"{human_bytes(estimate.download_bytes)}, installed "
             f"{human_bytes(estimate.installed_bytes)}. Continue?"
         )
-        if self._hooks.confirm is None or not self._hooks.confirm(prompt):
+        if not self._confirm_everything(prompt):
             cancelled = make("GINN-E-INTERRUPTED")
             cancelled.add_note("the everything install was not confirmed, so nothing was installed")
             raise cancelled
         self._step("estimated")
-        self._exec(self._plan.definition.argv(Verb.INSTALL, names), step="everything")
+        self._install_everything(names)
         self._step("everything")
+
+    def _install_everything(self, names: tuple[str, ...]) -> None:
+        """Install the everything names, as container root (FR-014). A rebuild overrides this."""
+        self._exec(self._plan.definition.argv(Verb.INSTALL, names), step="everything")
+
+    def _confirm_everything(self, prompt: str) -> bool:
+        """Answer the everything prompt. A create asks `hooks.confirm`; None declines (FR-014)."""
+        return self._hooks.confirm is not None and self._hooks.confirm(prompt)
 
     def _estimate_everything(self) -> SizeEstimate:
         """The size of the everything closure, read from the realm's package lists (FR-014 AC-1).

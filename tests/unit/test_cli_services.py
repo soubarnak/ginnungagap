@@ -2,7 +2,8 @@
 """`ginn services <realm> on|off` (FR-083, IR-010), with the operation replaced.
 
 The command turns its arguments into a call of ops/service.py `set_services_mode`, and it prints the
-mode. A change is refused with GINN-E-NOT-SUPPORTED-YET, naming T8.3, before anything is written.
+mode. A change is recorded, and a realm that is neither stopped nor running is refused with its own
+state code before anything is written.
 The host world (tests/unit/conftest.py) pins the paths, so nothing is written.
 """
 
@@ -17,7 +18,7 @@ from ginn.__main__ import main
 from ginn.cli.commands import services as services_cmd
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.permissions import Permissions
-from ginn.errors import GinnError
+from ginn.errors import GinnError, warn
 from ginn.store.records import RealmRecord
 from tests.unit.realm_cli_support import World
 
@@ -55,7 +56,9 @@ def _recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     """Replace set_services_mode with a recorder that answers with the requested mode."""
     calls: list[tuple[str, bool]] = []
 
-    def fake_set_services_mode(env: Any, name: RealmName, *, on: bool) -> RealmRecord:
+    def fake_set_services_mode(
+        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+    ) -> RealmRecord:
         calls.append((str(name), on))
         return _record(on)
 
@@ -88,23 +91,46 @@ def test_an_unknown_mode_is_an_argument_error_before_anything_runs(
     assert calls == []
 
 
-def test_a_refused_change_prints_its_code_naming_t83_and_exits_with_the_catalogue_status(
+def test_a_refused_change_prints_its_code_and_exits_with_the_catalogue_status(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    def refuse(env: Any, name: RealmName, *, on: bool) -> RealmRecord:
+    def refuse(
+        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+    ) -> RealmRecord:
         raise GinnError(
-            "GINN-E-NOT-SUPPORTED-YET",
-            "realm 'lab' cannot be used yet: a change of services mode arrives in M8 (T8.3)",
+            "GINN-E-REALM-STATE",
+            "realm 'lab' is failed; a change of services mode needs it stopped or running",
             "",
-            2,
+            4,
         )
 
     monkeypatch.setattr(services_cmd, "set_services_mode", refuse)
 
-    assert main(["services", "lab", "off"]) == 2
+    assert main(["services", "lab", "off"]) == 4
     err = capsys.readouterr().err
-    assert err.startswith("GINN-E-NOT-SUPPORTED-YET")
-    assert "T8.3" in err
+    assert err.startswith("GINN-E-REALM-STATE")
+
+
+def test_a_change_warns_that_the_next_start_rebuilds(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A services change is a create-time change: the notice says that the next start rebuilds
+    the realm, and the command prints it (FR-083, CL-19)."""
+
+    def fake_set_services_mode(
+        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+    ) -> RealmRecord:
+        assert warnings is not None
+        warnings.append(
+            warn("GINN-W-REBUILD-PENDING", realm="lab", change="the services mode changed")
+        )
+        return _record(on)
+
+    monkeypatch.setattr(services_cmd, "set_services_mode", fake_set_services_mode)
+    assert main(["services", "lab", "on"]) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("GINN-W-REBUILD-PENDING: ")
+    assert "because the services mode changed" in err
 
 
 def test_json_output_carries_the_name_and_the_mode(

@@ -167,23 +167,16 @@ class DetailPage:
             "autostart-on": realm is not None and not blocked,
             "autostart-off": realm is not None and not blocked,
             "update": realm is not None and not blocked and model.can_update(realm),
-            "rebuild": realm is not None and not blocked and model.REBUILD_AVAILABLE,
+            "rebuild": realm is not None
+            and not blocked
+            and model.REBUILD_AVAILABLE
+            and model.can_rebuild(realm),
             "delete": realm is not None and not blocked,
         }
-        # A button that waits for a CLI command says so, and a blocked one says why.
-        unavailable: dict[str, str] = {}
-        if not model.REBUILD_AVAILABLE:
-            unavailable["rebuild"] = model.REBUILD_UNAVAILABLE_TEXT
-        if not model.SERVICES_TOGGLE_AVAILABLE:
-            unavailable["services-on"] = model.SERVICES_TOGGLE_UNAVAILABLE_TEXT
-            unavailable["services-off"] = model.SERVICES_TOGGLE_UNAVAILABLE_TEXT
         for key, enabled in states.items():
             button = self._buttons[key]
             button.set_sensitive(enabled)
-            if key in unavailable:
-                button.set_tooltip_text(unavailable[key])
-            else:
-                button.set_tooltip_text(BLOCKED_TEXT if blocked else "")
+            button.set_tooltip_text(BLOCKED_TEXT if blocked else "")
 
     def _run(self, *calls: tuple[str, ...]) -> None:
         present_progress(

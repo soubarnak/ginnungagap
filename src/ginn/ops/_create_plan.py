@@ -58,6 +58,8 @@ USER_NAME: Final = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 """The `<user>` field of the realm's passwd entry (T4.9b, ADR-006 amendment). The entry is one
 field, so there is no `:`, `$`, newline or leading `-`. The name is a lowercase login name: a
 letter or `_` first, then up to 31 letters, digits, `_` or `-`."""
+_AFTER_FIRST_START: Final = "ginn install, after the realm's first supervised start"
+"""The milestone text of the services-on refusals. The catalogue reads "arrives in <milestone>"."""
 EVERYTHING_LISTING_MAX: Final = 32 * 1024 * 1024
 """Bytes the closure listing of the everything metapackage (`resolve`) may print (FR-014)."""
 EVERYTHING_CHUNK: Final = 200
@@ -265,15 +267,28 @@ def _refuse_missing_devices(exists: Exists) -> None:
             )
 
 
-def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
+def _validate(
+    env: OpEnv,
+    request: CreateRequest,
+    hooks: CreateHooks,
+    *,
+    permissions: Permissions | None = None,
+    replay: bool = False,
+) -> _Plan:
     """Check the request and build the spec, with no side effect (NFR-SEC-005, AS-013).
 
     Raises GINN-E-USAGE for an unknown distribution, GINN-E-OPTION-INVALID for a bad setting and
     GINN-E-PKG-NAME-INVALID for a bad package name. A host home or user name that the passwd entry
     cannot carry is refused with GINN-E-REALM-USER (T4.9b). A services-on create with `--with`
-    packages or `--everything` is refused with GINN-E-NOT-SUPPORTED-YET (T7.4), since their install
-    needs a running container. `--everything` on a distribution without an everything set is
+    packages or `--everything` is refused with GINN-E-NOT-SUPPORTED-YET, since the CLI cannot start
+    a services-on container (ADR-003): the packages go in after the first supervised start, with
+    `ginn install`. `--everything` on a distribution without an everything set is
     GINN-E-OPTION-INVALID (FR-014 AC-3).
+
+    `permissions` are the realm's own permissions, as a rebuild keeps them (ops/rebuild.py). None
+    gives the tier's initial permissions, which is what a create uses. `replay` is True for a
+    rebuild. It replays the record's packages through its own start and does not take the create's
+    packages or everything set, so the services refusal does not apply to it (ADR-003).
     """
     distro = DistroId(request.distro)
     definition = load_distro(distro.value)
@@ -294,28 +309,27 @@ def _validate(env: OpEnv, request: CreateRequest, hooks: CreateHooks) -> _Plan:
     except ValueError as exc:
         raise make("GINN-E-REALM-USER", realm=request.name.value, detail=str(exc)) from exc
     packages = tuple(PackageName(raw, distro).value for raw in request.with_packages)
-    if request.services and packages:
-        # The packages install through exec in a running container, and a services-on realm starts
-        # only through its runit entry (ADR-003), which arrives in T7.4.
+    if request.services and packages and not replay:
         raise make(
             "GINN-E-NOT-SUPPORTED-YET",
             realm=request.name.value,
-            feature="--with packages on a services-on realm",
-            milestone="T7.4",
+            feature="--with packages on a services-on create (the CLI cannot start a services-on "
+            "container, ADR-003)",
+            milestone=_AFTER_FIRST_START,
         )
     everything = definition.everything if request.everything else ()
     if request.everything and not everything:
         raise make("GINN-E-OPTION-INVALID", option="--everything", distro=distro.value)
-    if request.services and everything:
-        # The everything set installs the same way as --with, so it waits for the same task.
+    if request.services and everything and not replay:
         raise make(
             "GINN-E-NOT-SUPPORTED-YET",
             realm=request.name.value,
-            feature="--everything on a services-on realm",
-            milestone="T7.4",
+            feature="--everything on a services-on create (the CLI cannot start a services-on "
+            "container, ADR-003)",
+            milestone=_AFTER_FIRST_START,
         )
     owned = env.paths.all_owned_roots()
-    permissions = initial_permissions(request.tier)
+    permissions = initial_permissions(request.tier) if permissions is None else permissions
     toggles = effective_toggles(request.tier, permissions.toggles)
     kvm_present = hooks.exists(KVM_DEVICE)
     # The profile is read here and written by the body, so a refused source writes nothing.

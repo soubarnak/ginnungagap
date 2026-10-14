@@ -4,12 +4,13 @@
 Create a stopped realm, services off by default (FR-010), Basic by default. `--tier` takes basic,
 development or custom (FR-060), and each tier's options are in security/caps.py (NFR-SEC-002).
 `--services on` creates the container and leaves it stopped (ADR-003, GINN-W-SERVICES-PENDING):
-its start goes through its runit entry, which arrives in T7.3 and T7.4. The options that the build
-does not have yet are refused before anything is written, with GINN-E-NOT-SUPPORTED-YET and the
-milestone that adds them: `--with` and `--everything` on a services-on realm (T7.4), and `--resume`
-(M8, T8.5). A failure that ops/create.py reports is raised as it is. A real services-off create runs
-its package steps; a services-on create runs none, since it starts nothing. Only the tests and the
-host gate set `CreateHooks.integrate` to False, which skips them (T4.9 Gate 3).
+its start goes through its runit entry, and the CLI never starts a services-on container. The
+options that the build does not have yet are refused before anything is written, with
+GINN-E-NOT-SUPPORTED-YET: `--with` and `--everything` on a services-on create, since the packages
+go in after the realm's first supervised start, with `ginn install`, and `--resume` (M8, T8.5). A
+failure that ops/create.py reports is raised as it is. A real services-off create runs its package
+steps; a services-on create runs none, since it starts nothing. Only the tests and the host gate
+set `CreateHooks.integrate` to False, which skips them (T4.9 Gate 3).
 
 Kali (FR-026, FR-027, FR-014). A Kali realm is created like any other, on pasta with NET_RAW
 (runtime/spec.py). `--everything` installs the Kali metapackage. Its size is estimated from the
@@ -64,7 +65,7 @@ def _configure(parser: argparse.ArgumentParser) -> None:
         "--services",
         choices=("on", "off"),
         default="off",
-        help="run systemd inside the realm (default: off; on creates the realm stopped, see T7.4)",
+        help="run systemd inside the realm (default: off; on creates it stopped, for runit)",
     )
     parser.add_argument(
         "--with",

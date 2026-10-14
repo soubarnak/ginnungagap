@@ -26,6 +26,9 @@ stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL ret
 # with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
 # failure (ADR-011). Runtime text, not verified until M4.
 network_error_regex = 'Could not resolve host|Failed to connect to|Connection timed out|Connection refused|Operation timed out|Operation too slow|Temporary failure in name resolution'
+# FR-022 AC-1: pacman's refusal of a name that no repository has, and git's refusal of an AUR name
+# with no repository (ops/rebuild.py). Runtime text, not verified until M4.
+missing_package_regex = "target not found: |repository '[^']*' not found"
 # ADR-011: a stderr line of the check-updates query that matches one of these makes the check fail
 # closed (error), whatever the exit status. Matched with search, one line at a time. Without a sync
 # database, pacman is expected to print `warning: database file for <repo> does not exist`. That

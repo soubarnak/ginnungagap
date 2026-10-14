@@ -4,7 +4,8 @@
 The wizard checks each input as it is typed, with the domain validators (DR-002 for names,
 DR-003 for packages, DR-005 for distributions). It builds the argv of `ginn --json create` only
 when every check passes. Its defaults follow FR-010: the name is the distribution ID until the
-user types a name, the tier is Basic and services are off (AS-013).
+user types a name, the tier is Basic and services are off (AS-013). A services-on create with
+packages or the everything set is refused here, before any argv is built (ADR-003).
 """
 
 from __future__ import annotations
@@ -18,6 +19,13 @@ from ginn.gui.viewmodels.labels import Failure, failure_of_error
 
 KALI: Final = "kali"
 """The only distribution that offers the "everything" option (FR-014, FR-101 AC-2)."""
+
+SERVICES_CONFLICT_TEXT: Final = (
+    "A services-on realm is created stopped, and ginn does not start it from a create, so its "
+    "packages and the Kali everything set need services off. Turn services off to include them, "
+    "or add packages later with 'ginn install' (ADR-003)."
+)
+"""Why a services-on create cannot carry packages or the everything set (FR-101 AC-1)."""
 
 
 class CreateWizard:
@@ -123,12 +131,23 @@ class CreateWizard:
     def remove_package(self, raw: str) -> None:
         self._packages = tuple(package for package in self._packages if package != raw)
 
+    def services_conflict(self) -> str | None:
+        """The reason the services-on create cannot run, or None when it can (ADR-003).
+
+        A services-on create takes no packages and no everything set: the CLI cannot start the
+        container, so the wizard refuses the combination instead of sending it (FR-101 AC-1).
+        """
+        if self._services and (self._packages or self._everything):
+            return SERVICES_CONFLICT_TEXT
+        return None
+
     def can_create(self) -> bool:
         """True when a distribution is chosen, the name is valid and no option is out of place."""
         return (
             self._distro is not None
             and self.name_failure() is None
             and (not self._everything or self.show_everything)
+            and self.services_conflict() is None
         )
 
     def create_args(self) -> tuple[str, ...]:

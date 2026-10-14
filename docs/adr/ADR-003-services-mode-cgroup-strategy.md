@@ -7,6 +7,7 @@
 - Amended: 2026-10-12 (D7). Status qualifier added. The root-owned leaf is evidenced by the unpinned runc leg only, the order of the root writes is stated, and the stale `cgroups.py` note is removed. No decision changes.
 - Amended: 2026-10-14 (per-realm service contract). The runit service directory, the run and finish scripts, the crash rule and the create-time forms of ADR-007 a, b and d are decided at the end of this file. No decision above changes.
 - Amended: 2026-10-14 (start, stop, delete and autostart through sv). The CLI requests and the supervised process records; the lock is free during the wait; the session grants of a supervised start attach at enter; the `down` file follows autostart. The decisions are at the end of this file. No decision above changes.
+- Amended: 2026-10-14 (a services change is a rebuild, T8.3). Decision 9 of the start amendment is superseded as far as `services on|off` now rebuilds, and a services-on rebuild replays through runit. The decision is at the end of this file.
 - Amended: 2026-10-12 (D9). Host Setup does not make the root writes under the subtree. The supervisor run script makes them at each start of its service, and Host Setup only captures their pre-images (ADR-013). The Context, the placement paragraph of the Decision, the Consequences and the FR-001 and R-001 rows said otherwise, and they are corrected. Undo follows ADR-013 Decision 15, not "restores the recorded value". No decision changes. Each statement was confirmed against the render template in `src/ginn/hostsetup/runit_system.py`, which is the state at the time of this amendment.
 
 ## Context
@@ -239,7 +240,8 @@ and `ops/service.py` (`set_autostart`, `set_services_mode`).
 8. **Status.** `ginn status` shows `supervision`, which is the `sv status` state with its pid and
    seconds, read without a lock and never raising. A supervisor that cannot answer is shown as
    `unavailable (<code>)` beside the record. After a give-up the record reads `failed` (FR-081 AC-3).
-9. **Services mode is refused until T8.3.** `ginn services <realm> on|off` returns the record when the
+9. **Services mode is refused until T8.3** (superseded by the 2026-10-14 services-change amendment).
+   `ginn services <realm> on|off` returns the record when the
    mode is the one the realm has. A change raises GINN-E-NOT-SUPPORTED-YET, naming T8.3, before any
    write, because the mode is fixed in the container, and a container's options change only
    with a new generation (ADR-006, the create-time toggles of ops/permissions.py).
@@ -289,10 +291,128 @@ and `ops/service.py` (`set_autostart`, `set_services_mode`).
 | ID | How this amendment bears on it |
 |---|---|
 | FR-081 | Start and stop go through `sv`; `ginn status` shows the runit state; AC-3 is the record `failed` after the give-up. AC-1 and AC-2 are host proofs in T7.7. |
-| FR-083 | `ginn services` returns the record for the same mode and refuses a change until T8.3 (decision 9). |
+| FR-083 | `ginn services` returns the record for the same mode and refuses a change until T8.3 (decision 9; superseded by the 2026-10-14 services-change amendment). |
 | FR-084 | Autostart is the `down` file, applied at each supervised start under the lock (decision 7). AC-1 is the host proof in T7.7. |
 | DR-012 | The flag needs services on, checked by the settings rule before any write (decision 7). |
 | DR-020 | A stop of a failed realm uses failed to stopped (decision 4). |
 | DR-032 | The supervised process journals and audits the start and stop, and the CLI writes nothing for them (decision 1). |
 | AS-028 | The give-up ends the start wait at once (decision 3). |
 | NFR-033 | The start and the stop are bounded by the waits in decision 3. |
+
+## Amendment 2026-10-14: a services change is a rebuild (T8.3)
+
+This amendment decides how `ginn services <realm> on|off` takes effect, and how a services-on
+rebuild replays the Install Manifest. It supersedes decision 9 of the start, stop, delete and
+autostart amendment, and only as far as `services on|off` now rebuilds: the change is no longer
+refused. Decision 2 of that amendment has one exception, decision 5 below. Nothing else above
+changes. The code is `ops/service.py` (`set_services_mode`, `start_service`, `finish_service`),
+`ops/rebuild.py`, `ops/lifecycle.py` (`start_through_sv`, `stop_through_sv`), `ops/recovery.py`
+(`_decide_rebuild`) and `store/records.py` (`set_state`).
+
+### Decision
+
+1. **The change is recorded, and the next start applies it.** `ginn services` sets the desired mode in
+   the record, under the realm lock, and turning services off also sets autostart off and writes the
+   realm's `down` file while its container is supervised. A running realm gets `restart_required`
+   (FR-083, FR-066). The start that follows rebuilds the realm into a container of the new mode
+   (ops/rebuild.py, `rebuild_for_start`), and only then starts it. The Realm Home and the Install
+   Manifest are kept, so the packages come back in the new generation (FR-021).
+2. **The container's mode is the record's `services_at_create`.** It is the mode the container was made
+   with, and the record keeps it apart from the desired `settings.services`. A stop, the idle watcher
+   and the choice between `sv` and podman follow it, so a running container that the user has asked to
+   change is still stopped through its own supervisor. A realm without a record field reads the mode of
+   its settings, which no realm could change before this amendment.
+3. **A services-on rebuild replays through runit. The CLI never starts a services-on container.** gN+1
+   is started by `sv up`, which makes runsv start `ginn _service-run`, and that process starts the
+   building container with podman. The rebuild waits for the container to run, replays the manifest with
+   `podman exec` into it, stops it with `sv down` and a wait, and then swaps. No CLI process runs
+   `podman start` or `podman run` for a services-on container. Context line 30 and Decision line 45 of
+   this ADR say so, and S-01 measured the reason: a `podman start` from the session shell fails with
+   `permission denied` on the cgroup (`spikes/results/S-01.md`, line 37), and a start from the moved
+   launcher leaf works (line 48). The placement of exec'd processes is not verified (line 37, and the
+   T4.6 check). A services-off gN+1 is started and stopped with podman, as before, because no runit
+   service runs it.
+4. **The building container is recorded before runit starts it.** While the record reads rebuilding, two
+   fields name the container being built, `building_container_id` and `building_generation` (DR-034).
+   The rebuild writes them after gN+1 is created, and before the runit directory is written and before
+   `sv up`. That is a second write of the record in REBUILDING. It is not the swap: the record still names
+   gN and its container, and only the two fields are new. A supervised start of a rebuilding record starts
+   `building_container_id` when the settings say services on, and otherwise it refuses (GINN-E-INTERNAL,
+   before podman runs). `set_state` clears both fields when the record leaves rebuilding, and the swap
+   clears them too, so a rollback and a recovery leave no container named.
+5. **The supervised start of a rebuild takes no lock and writes nothing.** The rebuild holds the realm
+   lock while its `sv up` runs `_service-run`, and `_service-run` needs that lock to record a start. So,
+   while the record reads rebuilding with a building container, `_service-run` takes no lock, journals
+   nothing and writes no record. It runs `podman start` and the pid check, and it returns the ginn-wait
+   argv, as a normal start does. This is the one exception to decision 2 of the start amendment
+   (tests/unit/test_ops_service.py, `test_a_supervised_start_during_a_rebuild_starts_the_building_container_and_writes_nothing`).
+   That start also requires a live `rebuild` journal entry for the realm (`JournalFile.is_live`, FR-122):
+   a rebuild killed before recovery leaves a dead entry, so runsv's restart of the service starts no
+   container (tests/unit/test_ops_service.py, `test_a_runsv_start_after_a_killed_rebuild_starts_nothing_before_recovery`).
+   The finish script (`_service-finish`) writes no record while the record reads rebuilding. A stop
+   and a give-up change only the supervisor's own files: the crash log, the `down` file of a give-up,
+   and the runsv control byte. The rebuild, its rollback or recovery settles the record. A lock held
+   by `rebuild` is passed over like a lock held by `stop` or `delete` (`_STOP_HOLDERS`), so the stop
+   that the rebuild's `sv down` causes writes nothing.
+6. **Rollback and recovery tell runsv to stop first.** A services-on gN+1 is stopped with `sv down`,
+   which waits for its finish script, before its container and its runit directory are removed. The
+   rollback of that stop is registered before `sv up`, so it runs first (LIFO). Recovery of an interrupted
+   rebuild writes runsv's `d` control byte (`signal_runsv_down`, which does not wait) before it removes the
+   orphan, so runsv does not restart a container that is being removed. Recovery never waits on runit,
+   because the process that runs recovery can be a runit child (`_service-run` calls `settle_interrupted`).
+7. **Create still refuses `--with` and the Kali `--everything` on a services-on realm.** The CLI cannot
+   start a services-on container (decision 3), so `ginn create --services on --with PKG` and
+   `--everything` are refused with GINN-E-NOT-SUPPORTED-YET before any write. The packages can be
+   installed after the first supervised start, with `ginn install`. The rebuild is exempt, because its
+   replay is decision 3 (`_validate(..., replay=True)`).
+
+8. **A lazy rebuild that fails starts the old container, and that container's mode picks the path.** A
+   start of a stopped realm whose record asks for a create-time change runs `rebuild_for_start` first
+   (decision 1). If the rebuild fails with an error, the start goes on with the old root and
+   GINN-W-REBUILD-DEFERRED, and the change stays pending (`restart_required`). The old container's mode,
+   `services_at_create`, picks `sv` or podman, so a deferred services-off-to-on change starts through
+   podman, and a deferred on-to-off change starts through its runit service. A cancel (GINN-E-INTERRUPTED)
+   stops the start instead. A failed realm with a pending change is stopped first, which records it
+   stopped, and then rebuilt. A rebuild's own restart never rebuilds again (`rebuild=False`).
+### Rationale
+
+The replay has to run inside a started container, and that container must be started by its runit
+service, so that it sits in the supervised cgroup (ADR-003 Decision). A rebuild that keeps the
+container's start in the supervisor, and the record writes in the rebuild, keeps both rules. The
+building container is named by the record while it is built, so `_service-run` can find it without a
+lock. Keeping the create-time state in the record and the rebuild in the start is the same rule as
+ADR-006, applied to services: the change is one container generation, and the packages are carried
+across it (FR-021).
+
+### Consequences
+
+- `ops/delete.py` dispatches its `sv down` on `services_at_create`, the container's mode, and not on the
+  desired mode. So a delete of a realm whose services change is pending stops the container through its
+  own supervisor. The earlier Consequences bullet of this amendment that said otherwise was stale, and
+  it is replaced by this one.
+- A services-on realm rebuilt while stopped keeps its runit directory as it was. Only the swap to
+  services off removes it.
+- A killed rebuild whose runsv restarts the building container before recovery runs starts nothing: the
+  live-journal check of decision 5 refuses it, and that refusal is tested on FakePodman. Its host proof,
+  and that of FR-083 AC-1 (htop stays installed and systemd is PID 1 after the toggle on), is T7.7 and
+  the M8 host gate. The services-on replay is not measured yet.
+- A stopped realm that a rebuild changed is started once after the swap, synced, and stopped again, so
+  its exported entries are those of gN+1 (FR-021 AC-1). Its runit directory is started and stopped with
+  it, and it ends as it was.
+- The fault matrix (tests/unit/test_ops_rebuild_faults.py) runs each step of a services-off and of a
+  services-on rebuild, with a fake runit, and its kill cases are settled by recovery.
+
+### Requirement IDs
+
+| ID | How this amendment bears on it |
+|---|---|
+| FR-021 | A services-on rebuild keeps the Realm Home and the manifest, and it replays the packages into gN+1 through runit (decisions 1, 3, 5). |
+| FR-066 | A tier, permission or services change is recorded, and a running realm is flagged until its next start (decision 1). |
+| FR-081 | A services-on realm is started and stopped through `sv` around the swap, and the CLI starts none (decisions 3, 6). |
+| FR-083 | `ginn services on|off` takes effect at the next start. The packages and the Realm Home are unchanged (decisions 1 to 3). |
+| DR-012 | Turning services off sets autostart off, and writes `down` for a supervised container (decision 1). |
+| DR-020 | A rebuild's record moves to rebuilding and back to its previous state, and a finish writes nothing while it reads rebuilding (decisions 4, 5). |
+| DR-034 | The rebuild writes the building fields before the start and the record at the swap. Its runit directory is written before the start and removed after the swap (decisions 4, 3). |
+| AS-028 | A supervised start of a building container that runsv gives up is a wait timeout, and the rebuild rolls back (decision 5). |
+| NFR-031 | The fault matrix covers the services-on path, and a fault at any step leaves gN usable (decisions 6 and 8). |
+| FR-122 | The building container starts only while its rebuild's journal entry is live (decision 5). |

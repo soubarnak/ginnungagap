@@ -33,9 +33,11 @@ from ginn.domain import RealmName, RealmState, can_transition
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
+from ginn.ops.lifecycle import HostUser, LifecycleHooks, pending_rebuild_notice, start_realm
+from ginn.ops.recovery import OP_REBUILD
 from ginn.ops.security_ops import leave_agent, reconcile_proxy
 from ginn.podman.adapter import Podman
+from ginn.podman.models import ContainerState
 from ginn.services import autostart
 from ginn.services.runit_user import (
     WAIT_HELPER,
@@ -59,8 +61,9 @@ from ginn.store.records import RealmRecord, RealmStore
 
 WAIT_ARG_SEPARATOR: Final = "--"
 """The separator between the global podman flags and the container in the ginn-wait argv."""
-_STOP_HOLDERS: Final = frozenset({"stop", "delete"})
-"""The operations that stop a services-on realm under the lock and record its stop themselves."""
+_STOP_HOLDERS: Final = frozenset({"stop", "delete", "rebuild"})
+"""The operations that stop a services-on realm under the lock and record its stop themselves. A
+rebuild stops its building container this way, and it writes the record itself at the swap."""
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,9 @@ def start_service(
         raise _internal("ginn-wait is not an executable at its installed path", helper=helper)
     if not global_argv or not os.path.isabs(global_argv[0]):
         raise _internal("podman is not an absolute path, so ginn-wait cannot stop the realm")
+    record = RealmStore(env.paths, env.clock).load(name)
+    if record.state is RealmState.REBUILDING:
+        return _start_building(env, podman, record, helper=helper, global_argv=global_argv)
     pidfile = conmon_pidfile(env.paths, name)
     lifecycle = replace(hooks.lifecycle, before_start=lambda: _fresh_pidfile(env.paths, name))
     record = start_realm(
@@ -125,6 +131,49 @@ def start_service(
     return [helper, str(pidfile), *global_argv, WAIT_ARG_SEPARATOR, record.container_id]
 
 
+def _start_building(
+    env: OpEnv,
+    podman: Podman,
+    record: RealmRecord,
+    *,
+    helper: str,
+    global_argv: Sequence[str],
+) -> list[str]:
+    """`ginn _service-run` while a services-on rebuild is building its container (ADR-003).
+
+    The rebuild holds the realm lock and the record, so this start takes neither and writes nothing.
+    The runit service starts the container that the rebuild names in `building_container_id`, with
+    podman, and the rebuild waits for it to run. The ginn-wait argv is the same as a normal start's,
+    so the container is supervised, and `sv down` stops it. This is the one path that starts a
+    services-on container without the record reading running. It runs only while the record reads
+    rebuilding, and only while the rebuild that names the container is alive: its journal entry
+    must be a live `rebuild` entry (FR-122). A rebuild killed before recovery therefore starts no
+    container when runsv restarts the service, and recovery removes the orphan. A rebuild whose
+    container never starts is refused by its wait (ops/rebuild.py). This start is a deliberate
+    exception to decision 2 of the start amendment (ADR-003).
+    """
+    name = record.name
+    cid = record.building_container_id
+    if not record.settings.services or cid is None:
+        raise _internal("the rebuild names no container for its supervised start", realm=name.value)
+    journal = env.journal.load(name)
+    if journal is None or journal.entry is None or journal.entry.op != OP_REBUILD:
+        raise _internal("no rebuild journal entry names the building container", realm=name.value)
+    if not journal.is_live():
+        raise _internal("the rebuild that builds the container is not running", realm=name.value)
+    pidfile = conmon_pidfile(env.paths, name)
+    _fresh_pidfile(env.paths, name)
+    podman.start(cid)
+    info = podman.inspect(cid)
+    if info.state is not ContainerState.RUNNING or info.pid < 2:
+        raise _internal(
+            "the building container is not running after start",
+            realm=name.value,
+            state=info.state.value,
+        )
+    return [helper, str(pidfile), *global_argv, WAIT_ARG_SEPARATOR, cid]
+
+
 def finish_service(
     env: OpEnv,
     name: RealmName,
@@ -139,9 +188,16 @@ def finish_service(
     `exit_code` and `signal_no` are the two arguments runsv passes to finish: the exit code of run,
     or -1 when run did not exit normally, and the signal that ended run (runsv(8)). The FR-006
     warnings of a stop are appended to `warnings` when it is given.
+
+    While a rebuild is in progress (its record reads rebuilding), the end of run writes no record:
+    the rebuild stops its building container with `sv down` and settles the record at its swap or
+    rollback, and recovery does so for an interrupted rebuild. The supervisor's own files are still
+    written (the crash log, and the `down` file on a give-up), so runsv does what it is told.
     """
+    rebuilding = _rebuilding(env, name)
     if exit_code == 0:
-        _record_stopped(env, name, exit_code, signal_no, warnings)
+        if not rebuilding:
+            _record_stopped(env, name, exit_code, signal_no, warnings)
         crash_log(env.paths, name).unlink(missing_ok=True)
         return ServiceExit.STOPPED
     log = crash_log(env.paths, name)
@@ -155,27 +211,110 @@ def finish_service(
     signal_runsv_down(service_dir(env.paths, name))
     mark_down(env.paths, name)
     log.unlink(missing_ok=True)
-    _record_failed(env, name, exit_code, signal_no)
+    if not rebuilding:
+        _record_failed(env, name, exit_code, signal_no)
     return ServiceExit.GAVE_UP
 
 
-def set_services_mode(env: OpEnv, name: RealmName, *, on: bool) -> RealmRecord:
+def _rebuilding(env: OpEnv, name: RealmName) -> bool:
+    """True while the realm's record reads rebuilding (ops/rebuild.py, DR-034). Read only."""
+    try:
+        return RealmStore(env.paths, env.clock).load(name).state is RealmState.REBUILDING
+    except GinnError:
+        return False
+
+
+_SERVICES_STATES: Final = frozenset({RealmState.STOPPED, RealmState.RUNNING})
+"""The states that a services change is recorded in (the same as a tier change, FR-066)."""
+
+
+def set_services_mode(
+    env: OpEnv,
+    name: RealmName,
+    *,
+    on: bool,
+    warnings: list[GinnWarning] | None = None,
+) -> RealmRecord:
     """`ginn services <realm> on|off`: set the services mode (FR-083, ADR-003). Return the record.
 
-    The mode is fixed in the container, and a container's options cannot change after its create
-    (ADR-003, ADR-006). So a change needs the next container generation, which T8.3 makes, and it is
-    refused with GINN-E-NOT-SUPPORTED-YET naming T8.3, before any write. Setting the mode the realm
-    already has is a no-op: the record is returned and nothing is written.
+    The mode is fixed in the container, so a change is a create-time change (ADR-006). It is
+    recorded in the settings now, under the realm lock, and the next start rebuilds the realm into a
+    container of the new mode (ops/rebuild.py, FR-021). The installed packages and the Realm Home
+    are kept by that rebuild. A running realm gets `restart_required`, as a tier change does.
+
+    Turning services off while the realm's container is supervised (its runit service exists)
+    writes that service's `down` file now. Autostart needs services on (DR-012), so the record
+    sets autostart off with it, and runit must not start the realm at boot in between. The flag it
+    displaces is kept in the record, and a change cancelled before the rebuild (services back on,
+    on the same container) restores the flag and its `down` file (FR-083). A missing service
+    directory counts as already down. The runit service directory itself is created or removed by
+    the rebuild, after its swap (ADR-003).
+
+    Setting the mode the realm already has is a no-op: the record is returned and nothing is
+    written. A realm that is neither stopped nor running is refused with GINN-E-REALM-STATE before
+    any write. The change's GINN-W-REBUILD-PENDING notice is appended to `warnings` (CL-19).
     """
-    record = RealmStore(env.paths, env.clock).load(name)
+    store = RealmStore(env.paths, env.clock)
+    current = store.load(name)  # GINN-E-NO-SUCH-REALM before any audit entry
+    if current.settings.services == on:
+        return current
+    with mutating(env, "services", name, {"services": on}) as mutation:
+        record = _services_body(env, store, name, on, mutation)
+    if warnings is not None:
+        warnings.extend(mutation.warnings)
+    return record
+
+
+def _has_service_dir(paths: OwnedPaths, name: RealmName) -> bool:
+    """True when the realm's runit service directory exists (ADR-003). Read only."""
+    return service_dir(paths, name).is_dir()
+
+
+def _services_body(
+    env: OpEnv, store: RealmStore, name: RealmName, on: bool, mutation: Mutation
+) -> RealmRecord:
+    record = store.load(name)
     if record.settings.services == on:
         return record
-    raise make(
-        "GINN-E-NOT-SUPPORTED-YET",
-        realm=name.value,
-        feature="a change of services mode",
-        milestone="M8 (T8.3)",
+    if record.state not in _SERVICES_STATES:
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=name.value,
+            state=record.state.value,
+            action="services",
+            allowed="stopped or running",
+        )
+    mutation.step("checked")
+    displaced: bool | None = None
+    autostart_flag = False
+    if not on and record.services_at_create:
+        # The autostart flag is set off (DR-012), so it is kept here: a change that is cancelled
+        # before the rebuild restores it (FR-083). A service directory that is gone is already down.
+        displaced = record.settings.autostart
+        if _has_service_dir(env.paths, name):
+            autostart.apply(env.paths, name, False)  # DR-012: services off, so no autostart
+        mutation.step("down-file")
+    elif on and record.services_at_create and record.autostart_before_off is not None:
+        # The change is cancelled: the container still runs services on, so the flag it displaced
+        # comes back, and its `down` file follows it.
+        autostart_flag = record.autostart_before_off
+        if _has_service_dir(env.paths, name):
+            autostart.apply(env.paths, name, autostart_flag)
+        mutation.step("down-file")
+    settings = replace(record.settings, services=on, autostart=autostart_flag)
+    saved = replace(
+        record,
+        settings=settings,
+        updated_at=utc_from_epoch(env.clock()),
+        restart_required=record.restart_required or record.state is RealmState.RUNNING,
+        autostart_before_off=displaced,
     )
+    store.save(saved)
+    mutation.step("saved")
+    notice = pending_rebuild_notice(saved, "the services mode changed")
+    if notice is not None:
+        mutation.warnings.append(notice)
+    return saved
 
 
 _AUTOSTART_REFUSED: Final = frozenset({RealmState.CREATING, RealmState.DELETING, RealmState.BROKEN})
@@ -215,7 +354,10 @@ def set_autostart(env: OpEnv, name: RealmName, *, on: bool) -> RealmRecord:
         record = store.load(name)
         _refuse_autostart_state(record)
         settings = replace(record.settings, autostart=on)
-        autostart.apply(env.paths, name, on)
+        if record.services_at_create:
+            # A realm whose services change is pending has no service directory yet. The rebuild
+            # that applies the change writes the `down` file from the record's autostart flag.
+            autostart.apply(env.paths, name, on)
         mutation.step("down-file")
         saved = replace(record, settings=settings, updated_at=utc_from_epoch(env.clock()))
         store.save(saved)
@@ -282,12 +424,18 @@ def _record_failed(env: OpEnv, name: RealmName, exit_code: int, signal_no: int) 
         "crash_limit": CRASH_LIMIT,
         "window_s": CRASH_WINDOW_S,
     }
-    with mutating(env, "service-exit", name, params) as mutation:
-        record = store.load(name)
-        if can_transition(record.state, RealmState.FAILED, record.previous_state):
-            store.set_state(name, RealmState.FAILED)
-        else:
-            mutation.add_params(state_kept=record.state.value)
+    try:
+        with mutating(env, "service-exit", name, params) as mutation:
+            record = store.load(name)
+            if can_transition(record.state, RealmState.FAILED, record.previous_state):
+                store.set_state(name, RealmState.FAILED)
+            else:
+                mutation.add_params(state_kept=record.state.value)
+    except GinnError as err:
+        # A rebuild that holds the lock settles the record itself (see finish_service).
+        if err.code == "GINN-E-REALM-BUSY" and err.details.get("op") == "rebuild":
+            return
+        raise
 
 
 def _release(env: OpEnv, name: RealmName, mutation: Mutation) -> None:

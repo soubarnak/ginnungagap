@@ -421,7 +421,8 @@ def _settle(
     record = start_realm(
         env, podman, name, session=session, hooks=hooks.lifecycle, warnings=notices
     )
-    if not record.settings.services:
+    if not record.services_at_create:
+        # The container's mode decides whether this start ran under runit, not the desired mode.
         return record
     after = _look_session(
         env,

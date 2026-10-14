@@ -126,7 +126,7 @@ The single-ID design adds no package, no helper file change and no setcap step. 
 Two points stay open:
 
 - The image must contain podman and its helpers. A realm can get them only as requested packages, which CR-007 allows. FR-013 AC-1 allows no other additions, so ginn does not add podman by itself. S-07e2 left the request path to the user.
-- The realm user entry is not in the Install Manifest. FR-021 names only the Install Manifest for replay. The rebuild must send the same entry by design (T8.3). The SRS does not say so.
+- The realm user entry is not in the Install Manifest. FR-021 names only the Install Manifest for replay. The rebuild sends the same entry by design (T8.3, ops/rebuild.py). The SRS does not say so.
 
 CL-8 is withdrawn for the setcap and libcap steps. See `docs/clarifications.md`.
 
@@ -154,7 +154,7 @@ Toggle names (`ginn perms --enable` and `--disable`, domain/permissions.py) and 
 
 Basic is `downloads`, `mount_roots`, `display`, `audio`, `gpu` and `fonts_timezone`. Development is every toggle. A Custom realm starts from Basic's toggles, and it keeps the toggles of the tier it came from when it is switched to Custom. A toggle that is off plans no bind, device or variable for its grant.
 
-The `gpu` and `fonts_timezone` grants are create-time. Their binds and the `/dev/dri` device are fixed at `podman create`, so they are not in the option names of `option_keys`. The record keeps the state of each toggle at create (`gpu_at_create` and `fonts_at_create`), and a change of either toggle is refused with GINN-E-NOT-SUPPORTED-YET until T8.3. The NVIDIA CDI grant is made only when `gpu` is on and the host driver is ready (`gpu_cdi`). A create-time option (`nested`, `kvm`) is refused the same way. `display` and `audio` change attach-time grants only: `ginn perms` flags the realm restart-required, and the change applies at the next start.
+The `gpu` and `fonts_timezone` grants are create-time. Their binds and the `/dev/dri` device are fixed at `podman create`, so they are not in the option names of `option_keys`. The record keeps the state of each toggle at create (`gpu_at_create` and `fonts_at_create`), and a change of either toggle is recorded at once. The next start then rebuilds the realm into a container that has the new grant (FR-066, T8.3, ops/lifecycle.py `_stale_container`). The NVIDIA CDI grant is made only when `gpu` is on and the host driver is ready (`gpu_cdi`). A create-time option (`nested`, `kvm`) is handled the same way. `display` and `audio` change attach-time grants only: `ginn perms` flags the realm restart-required, and the change applies at the next start.
 
 A stored Custom part without a `format` key (format 1) keeps the grants that format 1 always attached: `display`, `audio`, `gpu` and `fonts_timezone` are on for it, so an upgrade changes no realm's grants.
 
@@ -192,6 +192,6 @@ The M6 host test `tests/integration/test_tiers_real.py` must prove these. The sp
 - A realm created as Basic and later changed to Development. No line for the realm user is written at create time (T4.9b). A later change to the realm user is not tested.
 - The disk and speed cost of the vfs form, if it is chosen.
 - Other distributions (Arch, Fedora, Kali) and other podman versions. Tested so far: a Debian stable image with podman 5.4.2 inside, and podman 5.8.8 outside.
-- Rebuild sends the same passwd entry (T8.3).
+- Rebuild sends the same passwd entry (T8.3): ops/rebuild.py plans it through the create validation, as create does.
 - The Basic grant under crun, with and without `keep-groups`. S-06 ran on runc only (ADR-012, pending T6.6).
 - The CDI `env` field for `LD_LIBRARY_PATH` (pending T6.6, ADR-012).

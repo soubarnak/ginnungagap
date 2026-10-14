@@ -320,7 +320,10 @@ def test_services_on_with_packages_is_refused_by_the_create_before_any_write(
     assert main(["create", "debian", "--services", "on", "--with", "htop"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("GINN-E-NOT-SUPPORTED-YET: ")
-    assert "--with packages on a services-on realm arrives in T7.4" in err
+    assert (
+        "--with packages on a services-on create (the CLI cannot start a services-on container, "
+        "ADR-003) arrives in ginn install, after the realm's first supervised start" in err
+    )
     assert world.fake.containers == {}
     assert RealmStore(world.paths).list_names() == []
 

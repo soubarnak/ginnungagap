@@ -240,6 +240,7 @@ def stop_if_supervised(paths: OwnedPaths, name: RealmName, *, hooks: SupervisorH
         if err.code != "GINN-E-SUPERVISOR-DOWN":
             raise
 
+
 def status(paths: OwnedPaths, name: RealmName, *, hooks: SupervisorHooks) -> RunitStatus:
     """Read the runit state of the realm's directory with `sv status` (FR-081 AC-1).
 

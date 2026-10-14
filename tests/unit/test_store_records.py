@@ -480,6 +480,34 @@ def test_a_record_written_before_grants_existed_reads_with_an_empty_list(tmp_pat
     assert RealmRecord.from_json(older).grants == []
 
 
+@pytest.mark.fr("FR-083")
+def test_a_record_written_before_the_services_mode_was_kept_reads_it_from_its_settings(
+    tmp_path: Path,
+) -> None:
+    """No realm could change its services mode before the field existed, so the container's mode
+    is the settings' mode, for a services-off and for a services-on record alike."""
+    for services in (False, True):
+        older = _record(settings=_settings(services=services)).to_json()
+        del older["services_at_create"]
+        loaded = RealmRecord.from_json(older)
+        assert loaded.services_at_create is services
+
+
+@pytest.mark.fr("FR-083")
+def test_the_services_mode_the_container_has_is_stored_apart_from_the_settings(
+    tmp_path: Path,
+) -> None:
+    record = _record(settings=_settings(services=False))
+    assert record.services_at_create is False
+    settings = dataclasses.replace(record.settings, services=True)
+    pending = dataclasses.replace(record, settings=settings)
+    assert pending.services_at_create is False
+    stored = RealmRecord.from_json(pending.to_json())
+    assert stored.settings.services is True
+    assert stored.services_at_create is False
+    assert pending.to_json()["services_at_create"] is False
+
+
 @pytest.mark.fr("FR-066")
 def test_a_grant_that_does_not_parse_is_reported_as_internal(tmp_path: Path) -> None:
     data = _record().to_json()
@@ -568,3 +596,57 @@ def test_a_record_that_predates_the_gpg_socket_reads_as_unknown() -> None:
     restored = RealmRecord.from_json(older)
     assert restored.gpg_extra_known is False
     assert restored.gpg_extra is None
+
+
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-021")
+def test_the_building_container_round_trips_and_a_record_without_it_reads_none(
+    tmp_path: Path,
+) -> None:
+    """A rebuild records the container it builds while the record reads rebuilding (ADR-003). A
+    record written before the two fields existed has no keys, and it reads them as None."""
+    building = dataclasses.replace(
+        _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED),
+        building_container_id="b0b0",
+        building_generation=2,
+    )
+    stored = RealmRecord.from_json(building.to_json())
+    assert stored.building_container_id == "b0b0"
+    assert stored.building_generation == 2
+    older = _record().to_json()
+    del older["building_container_id"]
+    del older["building_generation"]
+    loaded = RealmRecord.from_json(older)
+    assert loaded.building_container_id is None
+    assert loaded.building_generation is None
+
+
+@pytest.mark.fr("DR-034")
+def test_a_building_container_is_refused_outside_a_rebuild() -> None:
+    with pytest.raises(ValueError, match="must not record a building container"):
+        dataclasses.replace(_record(), building_container_id="b0b0")
+    with pytest.raises(ValueError, match="must not record a building container"):
+        dataclasses.replace(_record(), building_generation=2)
+
+
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-021")
+def test_leaving_a_rebuild_clears_the_building_container_and_keeps_the_named_one(
+    tmp_path: Path,
+) -> None:
+    """A rollback or a recovery returns the record to its previous state through set_state, which
+    clears the building fields as it clears previous_state. The container the record names stays."""
+    paths = _paths(tmp_path)
+    store = RealmStore(paths, clock=FakeClock())
+    store.save(
+        dataclasses.replace(
+            _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED),
+            building_container_id="b0b0",
+            building_generation=2,
+        )
+    )
+    stopped = store.set_state(RealmName("arch"), RealmState.STOPPED)
+    assert stopped.building_container_id is None
+    assert stopped.building_generation is None
+    assert stopped.container_id == "c0ffee"
+    assert store.load(RealmName("arch")).building_container_id is None

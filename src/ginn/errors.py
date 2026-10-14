@@ -636,9 +636,27 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=0,
         summary="realm '{realm}' is created stopped with services on: its container is made, and "
         "nothing is started or installed in it",
-        remedy="a services-on realm starts only through its runit entry, which arrives in T7.3 and "
-        "T7.4; until then ginn does not start it, and its Integration Package Set is not installed",
+        remedy="a services-on realm starts through its runit entry ('ginn start'); its Integration "
+        "Package Set comes with 'ginn rebuild', which a plain start does not run",
         source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-REBUILD-DEFERRED",
+        exit_code=0,
+        summary="the pending change of realm '{realm}' is not applied: its rebuild failed "
+        "({reason}); the realm starts on its current root",
+        remedy="the change stays pending; fix the cause and run 'ginn start {realm}' to retry the "
+        "rebuild, or 'ginn rebuild {realm}' to rebuild now",
+        source="FR-021 AC-2, NFR-031 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-REBUILD-PENDING",
+        exit_code=0,
+        summary="realm '{realm}': the next start rebuilds it into a new container, because "
+        "{change}",
+        remedy="its packages and Realm Home are kept, and the rebuild pulls the pinned image and "
+        "replays the packages without a prompt (CL-19); run 'ginn rebuild {realm}' to do it now",
+        source="FR-066, FR-083, CL-19 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-IDLE-STOP",

@@ -24,6 +24,8 @@ from ginn.domain.permissions import (
     effective_toggles,
 )
 from ginn.errors import GinnError
+from ginn.ops import lifecycle
+from ginn.ops import permissions as permissions_module
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import HostUser
 from ginn.ops.permissions import read_permissions, set_permissions, set_tier
@@ -158,13 +160,19 @@ def test_a_running_realm_reports_a_restart_until_the_next_start(env: OpEnv) -> N
     assert _stored(env).restart_required is True
 
 
+@pytest.mark.fr("FR-066")
 @pytest.mark.fr("NFR-SEC-002")
-def test_a_change_that_adds_a_create_option_is_refused_and_writes_nothing(env: OpEnv) -> None:
+def test_a_change_that_adds_a_create_option_is_recorded_and_the_container_keeps_its_options(
+    env: OpEnv,
+) -> None:
+    """The new options come with the rebuild of the next start (ops/lifecycle.py). The change
+    itself writes the settings, and the container's recorded options are not touched."""
     _store(env, _realm(Tier.BASIC))
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        set_tier(env, NAME, Tier.DEVELOPMENT)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).settings.tier is Tier.BASIC
+    record = set_tier(env, NAME, Tier.DEVELOPMENT)
+    assert record.settings.tier is Tier.DEVELOPMENT
+    assert _stored(env).settings.tier is Tier.DEVELOPMENT
+    assert _stored(env).created_options == []
+    assert _ops(env) == ["tier"]
     assert env.journal.pending() == []
 
 
@@ -195,14 +203,14 @@ def test_a_tier_that_is_already_set_writes_nothing(env: OpEnv) -> None:
 
 
 @pytest.mark.fr("FR-060")
-def test_services_on_is_refused_until_t74_with_no_record_write(env: OpEnv) -> None:
+def test_a_services_on_realm_changes_its_tier_like_a_services_off_one(env: OpEnv) -> None:
     _store(env, _realm(Tier.BASIC, services=True))
-    with pytest.raises(GinnError, match="T7.4") as caught:
-        set_tier(env, NAME, Tier.CUSTOM)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).settings.tier is Tier.BASIC
+    record = set_tier(env, NAME, Tier.CUSTOM)
+    assert record.settings.tier is Tier.CUSTOM
+    assert record.settings.services is True
+    assert _stored(env).settings.tier is Tier.CUSTOM
     (entry,) = [e for e in env.audit.read() if e.op == "tier"]
-    assert entry.error_code == "GINN-E-NOT-SUPPORTED-YET"
+    assert entry.outcome == "ok"
 
 
 @pytest.mark.fr("FR-060")
@@ -304,12 +312,15 @@ def test_an_unknown_toggle_is_refused_with_no_record_write(env: OpEnv, host: Hos
 
 @pytest.mark.fr("FR-063")
 @pytest.mark.fr("NFR-SEC-002")
-def test_enabling_nested_containers_needs_a_new_container(env: OpEnv, host: HostUser) -> None:
+def test_enabling_nested_containers_is_recorded_for_the_next_start(
+    env: OpEnv, host: HostUser
+) -> None:
     _store(env, _realm(Tier.CUSTOM, permissions=Permissions(toggles=BASIC_TOGGLES)))
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        set_permissions(env, NAME, host, enable=["nested"])
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).permissions == Permissions(toggles=BASIC_TOGGLES)
+    record = set_permissions(env, NAME, host, enable=["nested"])
+    assert Toggle.NESTED in record.permissions.toggles
+    assert Toggle.NESTED in _stored(env).permissions.toggles
+    assert _stored(env).created_options == []
+    assert _stored(env).restart_required is False
 
 
 @pytest.mark.fr("FR-066")
@@ -378,10 +389,11 @@ def test_an_accepted_change_records_the_permission_diff_in_the_audit_entry(
 
 
 @pytest.mark.fr("NFR-SEC-002")
-def test_enabling_kvm_is_refused_when_the_host_had_kvm_at_create(
+def test_enabling_kvm_is_recorded_when_the_host_had_kvm_at_create(
     env: OpEnv, host: HostUser
 ) -> None:
-    """The kvm option was left out at create on a KVM host, so the container lacks it (ADR-006)."""
+    """The kvm option was left out at create on a KVM host. The toggle is recorded now, and the
+    rebuild of the next start makes the container with the device (ADR-006)."""
     _store(
         env,
         _realm(
@@ -390,10 +402,10 @@ def test_enabling_kvm_is_refused_when_the_host_had_kvm_at_create(
             kvm_at_create=True,
         ),
     )
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        set_permissions(env, NAME, host, enable=["kvm"])
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).permissions == Permissions(toggles=BASIC_TOGGLES)
+    record = set_permissions(env, NAME, host, enable=["kvm"])
+    assert Toggle.KVM in record.permissions.toggles
+    assert Toggle.KVM in _stored(env).permissions.toggles
+    assert _stored(env).created_options == []
 
 
 @pytest.mark.fr("NFR-SEC-002")
@@ -435,40 +447,35 @@ def test_a_display_or_audio_toggle_on_a_running_custom_realm_is_restart_required
 
 @pytest.mark.fr("FR-061")
 @pytest.mark.fr("FR-063")
-def test_a_gpu_toggle_change_is_refused_because_the_device_is_fixed_at_create(
-    env: OpEnv, host: HostUser
-) -> None:
-    """The GPU device and the CDI grant are made at create. A container made without them, or
-    with them, cannot take the other state (T8.3), on a stopped or a running realm."""
+def test_a_gpu_toggle_change_is_recorded_for_the_next_start(env: OpEnv, host: HostUser) -> None:
+    """The GPU device and the CDI grant are made at create. A change is recorded now, applied by
+    the rebuild of the next start, and a running realm gets the restart flag (FR-066)."""
     off = Permissions(toggles=BASIC_TOGGLES - {Toggle.GPU})
     _store(env, _realm(Tier.CUSTOM, permissions=off, gpu_at_create=False))
-    with pytest.raises(GinnError) as caught:
-        set_permissions(env, NAME, host, enable=["gpu"])
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).permissions == off
+    set_permissions(env, NAME, host, enable=["gpu"])
+    assert Toggle.GPU in _stored(env).permissions.toggles
+    assert _stored(env).gpu_at_create is False
     assert _stored(env).restart_required is False
 
     basic = Permissions(toggles=BASIC_TOGGLES)
     _store(env, _realm(Tier.CUSTOM, state=RealmState.RUNNING, permissions=basic))
-    with pytest.raises(GinnError) as caught:
-        set_permissions(env, NAME, host, disable=["gpu"])
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).permissions == basic
+    set_permissions(env, NAME, host, disable=["gpu"])
+    assert Toggle.GPU not in _stored(env).permissions.toggles
+    assert _stored(env).restart_required is True
 
 
 @pytest.mark.fr("FR-061")
 @pytest.mark.fr("FR-063")
-def test_a_fonts_timezone_toggle_change_is_refused_by_a_tier_change_too(
-    env: OpEnv, host: HostUser
-) -> None:
-    """Moving a Custom realm to Basic would bring the fonts and timezone binds back, which the
-    container made without them does not have, so the tier change is refused."""
+def test_a_tier_change_that_brings_back_the_fonts_grant_is_recorded(env: OpEnv) -> None:
+    """Moving a Custom realm to Basic brings the fonts and timezone binds back. The container made
+    without them keeps them until the rebuild of the next start (ops/lifecycle.py)."""
     off = Permissions(toggles=BASIC_TOGGLES - {Toggle.FONTS_TIMEZONE})
     _store(env, _realm(Tier.CUSTOM, permissions=off, fonts_at_create=False))
-    with pytest.raises(GinnError) as caught:
-        set_tier(env, NAME, Tier.BASIC)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _stored(env).settings.tier is Tier.CUSTOM
+    record = set_tier(env, NAME, Tier.BASIC)
+    assert record.settings.tier is Tier.BASIC
+    assert _stored(env).settings.tier is Tier.BASIC
+    assert _stored(env).permissions == Permissions()
+    assert _stored(env).fonts_at_create is False
 
 
 @pytest.mark.fr("FR-061")
@@ -520,3 +527,13 @@ def test_a_record_from_before_the_format_key_loads_and_changes_without_a_refusal
     tiered = set_tier(env, NAME, Tier.CUSTOM)
     assert tiered.permissions.toggles == BASIC_TOGGLES
     assert _stored(env).permissions.toggles == BASIC_TOGGLES
+
+
+@pytest.mark.fr("FR-066")
+def test_the_module_docstring_names_the_stale_check_that_lifecycle_defines() -> None:
+    """The docstring names `stale_container`, the function that ops/lifecycle.py defines, and not
+    a private name it does not have (FR-066)."""
+    doc = permissions_module.__doc__ or ""
+    assert "`stale_container`" in doc
+    assert "_stale_container" not in doc
+    assert callable(lifecycle.stale_container)

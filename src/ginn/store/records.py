@@ -171,8 +171,9 @@ class RealmRecord:
     gpu_cdi: bool = False
     # The state of the GPU toggle (`/dev/dri`, and the CDI grant with `gpu_cdi`) and of the fonts
     # and timezone toggle at create (FR-061, FR-063). Both are fixed at `podman create`, so a change
-    # of either toggle needs a new container (T8.3). A record without a key was made before these
-    # toggles existed, when every realm had both grants, so each reads as True.
+    # of either toggle needs a new container, which the next start makes (FR-066). A record without
+    # a key was made before these toggles existed, when every realm had both grants, so each reads
+    # as True.
     gpu_at_create: bool = True
     fonts_at_create: bool = True
     # The host gpg-agent extra socket, resolved at the last start of an Agent Proxy realm (NFR-004).
@@ -181,6 +182,25 @@ class RealmRecord:
     # a record without the key reads as unknown.
     gpg_extra: str | None = None
     gpg_extra_known: bool = False
+    # The services mode the container was made with (ADR-003, FR-083). A services change is a
+    # create-time change, so the desired mode in `settings` can differ from this until the next
+    # start rebuilds the realm (ops/rebuild.py). Added without a schema bump: a record without the
+    # key reads as the settings' mode, since no realm could change its mode before this field.
+    services_at_create: bool | None = None
+    # The container that a rebuild is building, and its generation (ADR-003, DR-034). They are set
+    # only while the record reads rebuilding: after the container is created and before the swap.
+    # A services-on rebuild starts this container through its runit service (`ginn _service-run`),
+    # not the container the record names. `set_state` clears both when the record leaves
+    # rebuilding, and the swap clears them too. Added without a schema bump: a record without the
+    # keys reads as None.
+    building_container_id: str | None = None
+    building_generation: int | None = None
+    # The autostart flag that a change turning services off displaced (DR-012, FR-083). Autostart
+    # needs services on, so that change sets the flag off, and it keeps the flag here. A change that
+    # is cancelled before the rebuild (services back on, on the same container) restores it, and
+    # the rebuild's swap clears it. Added without a schema bump: a record without the key reads as
+    # None.
+    autostart_before_off: bool | None = None
 
     def create_grants_match(self, toggles: frozenset[Toggle]) -> bool:
         """True when `toggles` asks for the GPU and fonts and timezone grants this container has.
@@ -206,6 +226,12 @@ class RealmRecord:
             raise ValueError(f"{self.state.value} must not record previous_state")
         if self.settings.tier is not Tier.CUSTOM and self.permissions != Permissions():
             raise ValueError("only a Custom realm keeps toggles or shares (FR-063)")
+        if self.state is not RealmState.REBUILDING and (
+            self.building_container_id is not None or self.building_generation is not None
+        ):
+            raise ValueError(f"{self.state.value} must not record a building container")
+        if self.services_at_create is None:
+            self.services_at_create = self.settings.services
 
     @property
     def name(self) -> RealmName:
@@ -241,6 +267,10 @@ class RealmRecord:
             "gpu_cdi": self.gpu_cdi,
             "gpu_at_create": self.gpu_at_create,
             "fonts_at_create": self.fonts_at_create,
+            "services_at_create": self.services_at_create,
+            "building_container_id": self.building_container_id,
+            "building_generation": self.building_generation,
+            "autostart_before_off": self.autostart_before_off,
         }
         if self.gpg_extra_known:
             data["gpg_extra"] = self.gpg_extra
@@ -283,6 +313,20 @@ class RealmRecord:
                 gpu_cdi=_bool(data.get("gpu_cdi", False)),
                 gpu_at_create=_bool(data.get("gpu_at_create", True)),
                 fonts_at_create=_bool(data.get("fonts_at_create", True)),
+                services_at_create=(
+                    _bool(data["services_at_create"]) if "services_at_create" in data else None
+                ),
+                building_container_id=_opt_str(data.get("building_container_id")),
+                building_generation=(
+                    None
+                    if data.get("building_generation") is None
+                    else _int(data["building_generation"])
+                ),
+                autostart_before_off=(
+                    None
+                    if data.get("autostart_before_off") is None
+                    else _bool(data["autostart_before_off"])
+                ),
                 gpg_extra=_opt_str(data.get("gpg_extra")),
                 gpg_extra_known="gpg_extra" in data,
             )
@@ -375,18 +419,23 @@ class RealmStore:
         """Move the realm to `new_state` if DR-020 allows it, then save and return the record.
 
         Entering `updating` or `rebuilding` records the current state as `previous_state`.
-        Leaving either one clears it. An illegal move raises IllegalTransition and nothing is
-        written. Removal is `delete()`, so a REMOVED target is refused here.
+        Leaving either one clears it. Leaving `rebuilding` also clears the building container, so
+        a rollback or a recovery that returns the record to stopped leaves no container named.
+        An illegal move raises IllegalTransition and nothing is written. Removal is `delete()`, so
+        a REMOVED target is refused here.
         """
         record = self.load(name)
         checked = transition(record.state, new_state, record.previous_state)
         if not isinstance(checked, RealmState):
             raise ValueError("a realm is removed with RealmStore.delete(), not set_state()")
         previous = record.state if checked in _PREVIOUS_BOUND else None
+        leaving_rebuild = checked is not RealmState.REBUILDING
         updated = replace(
             record,
             state=checked,
             previous_state=previous,
+            building_container_id=None if leaving_rebuild else record.building_container_id,
+            building_generation=None if leaving_rebuild else record.building_generation,
             updated_at=utc_from_epoch(self._clock()),
         )
         self.save(updated)

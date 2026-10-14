@@ -19,6 +19,7 @@ import pytest
 
 from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError
+from ginn.errors import Warning as GinnWarning
 from ginn.ops import delete as delete_ops
 from ginn.ops.lifecycle import HostUser, LifecycleHooks
 from ginn.ops.service import (
@@ -30,6 +31,7 @@ from ginn.ops.service import (
     start_service,
 )
 from ginn.podman.adapter import CreateSpec
+from ginn.podman.models import ContainerState
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.services.runit_user import (
     DOWN,
@@ -38,10 +40,12 @@ from ginn.services.runit_user import (
     service_dir,
     write_service_dir,
 )
+from ginn.store.journal import Journal
 from ginn.store.locks import realm_lock
 from ginn.store.records import RealmStore
 from tests.fakes.clock import FakeClock
 from tests.unit.realm_cli_support import DIGEST, World, build_world, record_of
+from tests.unit.test_ops_delete import kill_journal_owner
 
 REALM = RealmName("lab")
 GLOBAL_ARGV = [
@@ -454,7 +458,7 @@ def test_a_give_up_leaves_down_and_the_next_supervised_start_undoes_it_for_autos
 
 
 @pytest.mark.fr("FR-083")
-def test_the_same_services_mode_is_a_no_op_and_a_change_is_refused_until_t83(
+def test_the_same_services_mode_is_a_no_op_and_a_change_is_recorded_for_the_next_start(
     world: World, env
 ) -> None:  # type: ignore[no-untyped-def]
     services_realm(world, RealmState.STOPPED, running=False)
@@ -462,13 +466,98 @@ def test_the_same_services_mode_is_a_no_op_and_a_change_is_refused_until_t83(
     assert set_services_mode(env, REALM, on=True) == before
     assert audit_ops(env) == []
 
+    record = set_services_mode(env, REALM, on=False)
+    assert record.settings.services is False
+    assert record.settings.autostart is False
+    assert stored(world).settings.services is False
+    assert stored(world).services_at_create is True, "the container keeps the mode it was made with"
+    assert stored(world).restart_required is False
+    assert audit_ops(env) == ["services"]
+    assert env.journal.pending() == []
+    assert world.fake.calls == [], "a stopped realm's change calls no podman"
+
+
+@pytest.mark.fr("FR-083")
+def test_turning_services_off_with_no_service_directory_is_already_down_and_is_recorded(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    """A service directory that is gone counts as already down, so the change is recorded and no
+    GINN-E-SERVICE-MISSING is raised (FR-083)."""
+    services_realm(world, RealmState.STOPPED, running=False)
+    shutil.rmtree(service_dir(world.paths, REALM))
+
+    record = set_services_mode(env, REALM, on=False)
+
+    assert record.settings.services is False
+    assert stored(world).settings.services is False
+    assert stored(world).services_at_create is True, "the container keeps the mode it was made with"
+    assert not service_dir(world.paths, REALM).exists()
+    assert audit_ops(env) == ["services"]
+
+
+@pytest.mark.fr("FR-083")
+@pytest.mark.fr("DR-012")
+@pytest.mark.parametrize("autostart", [True, False])
+def test_turning_services_off_and_back_before_a_start_restores_autostart_and_its_down_file(
+    world: World, env, autostart: bool
+) -> None:  # type: ignore[no-untyped-def]
+    """A change cancelled before any start leaves the realm as it was: the autostart flag that
+    turning services off displaced comes back, and the `down` file follows it (FR-083, DR-012)."""
+    services_realm(world, RealmState.STOPPED, running=False)
+    set_autostart(env, REALM, on=autostart)
+    down = service_dir(world.paths, REALM) / DOWN
+    assert down.exists() is not autostart
+
+    set_services_mode(env, REALM, on=False)
+    assert stored(world).settings.autostart is False, "autostart needs services on (DR-012)"
+    assert stored(world).autostart_before_off is autostart
+    assert down.exists()
+
+    warnings: list[GinnWarning] = []
+    record = set_services_mode(env, REALM, on=True, warnings=warnings)
+
+    assert record.settings.services is True
+    assert record.settings.autostart is autostart
+    assert down.exists() is not autostart
+    assert stored(world).autostart_before_off is None
+    assert warnings == [], "a cancelled change is not pending, so it has no rebuild notice"
+    assert world.fake.calls == [], "a stopped realm's change calls no podman"
+
+
+@pytest.mark.fr("FR-083")
+def test_turning_services_off_while_running_marks_the_restart_and_writes_the_down_file(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.RUNNING, running=True)
+    set_autostart(env, REALM, on=True)
+    record = set_services_mode(env, REALM, on=False)
+    assert record.restart_required is True
+    assert record.state is RealmState.RUNNING
+    assert (service_dir(world.paths, REALM) / DOWN).is_file(), "autostart off: no boot start"
+    assert world.fake.calls == [], "the running container is left to its next stop and start"
+
+
+@pytest.mark.fr("FR-083")
+def test_turning_services_on_writes_no_runit_file_before_the_rebuild(world: World, env) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.STOPPED, running=False, services=False)
+    shutil.rmtree(service_dir(world.paths, REALM))
+    record = set_services_mode(env, REALM, on=True)
+    assert record.settings.services is True
+    assert record.services_at_create is False
+    assert not service_dir(world.paths, REALM).exists(), "the rebuild writes the directory"
+
+
+@pytest.mark.fr("FR-083")
+def test_a_services_change_is_refused_for_a_realm_that_is_not_stopped_or_running(
+    world: World, env
+) -> None:  # type: ignore[no-untyped-def]
+    services_realm(world, RealmState.CREATING, running=False)
     with pytest.raises(GinnError) as caught:
         set_services_mode(env, REALM, on=False)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert "T8.3" in caught.value.message
-    assert stored(world) == before
-    assert audit_ops(env) == []
-    assert env.journal.pending() == []
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert stored(world).settings.services is True
+    (entry,) = [e for e in env.audit.read() if e.op == "services"]
+    assert entry.error_code == "GINN-E-REALM-STATE"
 
 
 @pytest.mark.fr("FR-084")
@@ -581,12 +670,159 @@ def test_a_finish_that_finds_another_operation_holding_the_lock_is_refused_as_be
 ) -> None:  # type: ignore[no-untyped-def]
     services_realm(world, RealmState.RUNNING, running=True)
 
-    with realm_lock(world.paths, REALM, "rebuild"):
+    with realm_lock(world.paths, REALM, "update"):
         with pytest.raises(GinnError) as caught:
             finish_service(env, REALM, exit_code=0, signal_no=0, hooks=hooks_for(helper, sleeps))
 
     assert caught.value.code == "GINN-E-REALM-BUSY"
     assert stored(world).state is RealmState.RUNNING
+
+
+def rebuilding_realm(world: World, *, building: bool) -> str | None:  # type: ignore[no-untyped-def]
+    """A services-on realm that reads rebuilding (ops/rebuild.py), with the container it builds.
+
+    The building container exists and is not running, as a rebuild leaves it before the runit start.
+    With `building` False the record names no building container.
+    """
+    base = services_realm(world, RealmState.STOPPED, running=False)
+    labels = {LABEL_REALM: "lab", LABEL_DISTRO: "debian", LABEL_GENERATION: "2"}
+    spec = CreateSpec(name="ginn-lab-g2", image_digest_ref=DIGEST, network="host", labels=labels)
+    cid = world.fake.create(spec)
+    rebuilding = replace(
+        base,
+        state=RealmState.REBUILDING,
+        previous_state=RealmState.STOPPED,
+        building_container_id=cid if building else None,
+        building_generation=2 if building else None,
+    )
+    RealmStore(world.paths).save(rebuilding)
+    if building:
+        # The rebuild that builds the container is alive: its journal entry names this process.
+        Journal(world.paths).begin(
+            "rebuild", REALM, {"distro": "debian", "generation": 1, "new_generation": 2}
+        )
+    world.fake.calls.clear()
+    return cid if building else None
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-083")
+def test_a_supervised_start_during_a_rebuild_starts_the_building_container_and_writes_nothing(
+    world: World, env, helper: Path, sleeps: list[float], user: HostUser
+) -> None:  # type: ignore[no-untyped-def]
+    """The rebuild holds the realm lock and the record while its runit `up` runs `_service-run`.
+    The start takes no lock. It starts the container the rebuild is building, not the one the
+    record names, and then it writes nothing (ADR-003). That is the one exception to decision 2 of
+    the start amendment."""
+    cid = rebuilding_realm(world, building=True)
+    before = (world.paths.realms / "lab.json").read_bytes()
+    with realm_lock(world.paths, REALM, "rebuild"):
+        argv = start_service(
+            env,
+            world.fake,
+            REALM,
+            global_argv=GLOBAL_ARGV,
+            session=user,
+            hooks=hooks_for(helper, sleeps),
+        )
+    assert argv == [str(helper), str(conmon_pidfile(world.paths, REALM)), *GLOBAL_ARGV, "--", cid]
+    assert ops_of(world) == ["start", "inspect"]
+    assert world.fake.containers[cid].state is ContainerState.RUNNING
+    assert (world.paths.realms / "lab.json").read_bytes() == before
+    assert audit_ops(env) == []
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-122")
+def test_a_runsv_start_after_a_killed_rebuild_starts_nothing_before_recovery(
+    world: World, env, helper: Path, sleeps: list[float], user: HostUser
+) -> None:  # type: ignore[no-untyped-def]
+    """A killed rebuild leaves its record at rebuilding and its journal entry dead. When runsv
+    restarts the service before recovery has run, `_service-run` must not start the building
+    container, because no live rebuild stands behind it (ops/service.py)."""
+    cid = rebuilding_realm(world, building=True)
+    kill_journal_owner(env, REALM.value)
+    with pytest.raises(GinnError) as caught:
+        start_service(
+            env,
+            world.fake,
+            REALM,
+            global_argv=GLOBAL_ARGV,
+            session=user,
+            hooks=hooks_for(helper, sleeps),
+        )
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert ops_of(world) == []
+    assert world.fake.containers[cid].state is not ContainerState.RUNNING
+    assert stored(world).state is RealmState.REBUILDING
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-122")
+def test_a_runsv_start_of_a_building_container_without_a_rebuild_journal_entry_starts_nothing(
+    world: World, env, helper: Path, sleeps: list[float], user: HostUser
+) -> None:  # type: ignore[no-untyped-def]
+    cid = rebuilding_realm(world, building=True)
+    (world.paths.journal / f"{REALM.value}.json").unlink()
+    with pytest.raises(GinnError) as caught:
+        start_service(
+            env,
+            world.fake,
+            REALM,
+            global_argv=GLOBAL_ARGV,
+            session=user,
+            hooks=hooks_for(helper, sleeps),
+        )
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert ops_of(world) == []
+    assert world.fake.containers[cid].state is not ContainerState.RUNNING
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-081")
+def test_a_supervised_start_during_a_rebuild_that_names_no_container_is_refused_before_podman(
+    world: World, env, helper: Path, sleeps: list[float], user: HostUser
+) -> None:  # type: ignore[no-untyped-def]
+    rebuilding_realm(world, building=False)
+    with pytest.raises(GinnError) as caught:
+        start_service(
+            env,
+            world.fake,
+            REALM,
+            global_argv=GLOBAL_ARGV,
+            session=user,
+            hooks=hooks_for(helper, sleeps),
+        )
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert ops_of(world) == []
+    assert stored(world).state is RealmState.REBUILDING
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-081")
+def test_a_finish_during_a_rebuild_writes_no_record_for_a_stop_or_a_give_up(
+    world: World, env, helper: Path, sleeps: list[float], clock: FakeClock
+) -> None:  # type: ignore[no-untyped-def]
+    """While the record reads rebuilding, the end of run writes no record (ops/service.py). A stop
+    and a give-up leave the record alone, and the supervisor's own files still record what runsv was
+    told: a give-up writes `down`, and the rebuild, which holds the record, fails on it."""
+    rebuilding_realm(world, building=True)
+    before = (world.paths.realms / "lab.json").read_bytes()
+    stop = finish_service(env, REALM, exit_code=0, signal_no=0, hooks=hooks_for(helper, sleeps))
+    assert stop is ServiceExit.STOPPED
+    crash = crash_log(world.paths, REALM)
+    crash.parent.mkdir(parents=True, exist_ok=True)
+    crash.write_text("[]", encoding="utf-8")
+    for offset in (0.0, 10.0, 20.0, 30.0, 40.0):
+        clock.set(T0 + offset)
+        last = finish_service(
+            env, REALM, exit_code=-1, signal_no=9, hooks=hooks_for(helper, sleeps)
+        )
+    assert last is ServiceExit.GAVE_UP
+    assert (service_dir(world.paths, REALM) / DOWN).is_file()
+    assert (world.paths.realms / "lab.json").read_bytes() == before
+    assert audit_ops(env) == []
 
 
 @pytest.mark.fr("DR-012")

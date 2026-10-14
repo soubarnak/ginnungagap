@@ -16,6 +16,9 @@ The files are ginn-owned data (DR-006). The writes are atomic, and the directori
 owned mode. Nothing else in the Realm Home changes.
 """
 
+import errno
+import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -54,4 +57,63 @@ def write_config(realm_home: Path) -> list[Path]:
     return written
 
 
-__all__ = ["CONFIG_DIR", "CONTAINERS_CONF", "FILES", "STORAGE_CONF", "write_config"]
+@dataclass(frozen=True)
+class ConfigWrite:
+    """What one `write_missing_config` made: its files, and the directories it created.
+
+    `dirs` is outermost first. `undo` removes the files, then the directories that are empty, so a
+    rollback leaves the Realm Home as it was (ops/rebuild.py).
+    """
+
+    files: tuple[Path, ...] = ()
+    dirs: tuple[Path, ...] = ()
+
+    def undo(self) -> None:
+        """Remove the files this write made, then its directories, deepest first, when empty."""
+        for path in self.files:
+            path.unlink(missing_ok=True)
+        for directory in reversed(self.dirs):
+            try:
+                directory.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY):
+                    raise
+
+
+def write_missing_config(realm_home: Path) -> ConfigWrite:
+    """Write each of the two config files that is absent, and never one that is there (ADR-006).
+
+    A rebuild uses this for a realm that becomes nested. A file the user edited, or one that is
+    already there, is kept as it is, so only what this call makes is returned, for a rollback. If a
+    write fails part way, what was made is undone before the error is raised.
+    """
+    directory = realm_home / CONFIG_DIR
+    made_dirs: list[Path] = []
+    made_files: list[Path] = []
+    try:
+        for depth in range(1, len(CONFIG_DIR.parts) + 1):
+            level = realm_home.joinpath(*CONFIG_DIR.parts[:depth])
+            if not os.path.lexists(level):
+                level.mkdir(mode=OWNED_DIR_MODE)
+                made_dirs.append(level)
+        for name, text in FILES.items():
+            path = directory / name
+            if os.path.lexists(path):
+                continue
+            write_bytes_atomic(path, text.encode("utf-8"))
+            made_files.append(path)
+    except BaseException:
+        ConfigWrite(files=tuple(made_files), dirs=tuple(made_dirs)).undo()
+        raise
+    return ConfigWrite(files=tuple(made_files), dirs=tuple(made_dirs))
+
+
+__all__ = [
+    "CONFIG_DIR",
+    "CONTAINERS_CONF",
+    "FILES",
+    "STORAGE_CONF",
+    "ConfigWrite",
+    "write_config",
+    "write_missing_config",
+]

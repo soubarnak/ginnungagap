@@ -54,8 +54,10 @@ from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
 from ginn.security._proc import Proc
+from ginn.services.runit_user import service_dir
 from ginn.store import journal as journal_module
 from ginn.store.audit import AuditEntry, AuditLog
 from ginn.store.journal import PARAMS_OVERFLOW, Journal, JournalEntry, process_start_ticks
@@ -1746,3 +1748,201 @@ def test_an_interrupted_start_leaves_the_filter_it_joined_and_the_filter_stops(
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+class _Generations:
+    """A podman stand-in that lists containers by their labels, as the real `ps` does (DR-034).
+
+    `labels` maps a container id to its labels, and `states` to its state. Stops and removals are
+    recorded, so a test can read which containers recovery touched.
+    """
+
+    def __init__(
+        self, labels: dict[str, dict[str, str]], states: dict[str, ContainerState]
+    ) -> None:
+        self.labels = labels
+        self.states = states
+        self.stops: list[str] = []
+        self.removed: list[str] = []
+
+    def ps(self, label_filter: Any = None) -> list[ContainerInfo]:
+        wanted = dict(label_filter or {})
+        return [
+            replace(_info(cid, self.states[cid]), labels=dict(labels))
+            for cid, labels in self.labels.items()
+            if all(labels.get(key) == value for key, value in wanted.items())
+        ]
+
+    def inspect(self, container_id: str) -> ContainerInfo:
+        if container_id not in self.labels:
+            raise make("GINN-E-INTERNAL")
+        return _info(container_id, self.states[container_id])
+
+    def stop(self, container_id: str, timeout_s: int) -> None:
+        self.stops.append(container_id)
+        if self.states[container_id] is ContainerState.RUNNING:
+            self.states[container_id] = ContainerState.EXITED
+
+    def rm(self, container_id: str, force: bool) -> None:
+        self.removed.append(container_id)
+        del self.labels[container_id]
+        del self.states[container_id]
+
+
+def _labelled(realm: str, generation: int) -> dict[str, str]:
+    return {LABEL_REALM: realm, LABEL_GENERATION: str(generation)}
+
+
+@pytest.mark.fr("DR-034")
+def test_an_interrupted_rebuild_removes_its_orphan_new_root_and_returns_to_stopped(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    record = replace(
+        _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED), generation=1
+    )
+    _save(paths, record)
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="stopped", params={"generation": 1, "new_generation": 2}),
+    )
+    podman = _Generations(
+        {CID: _labelled("arch", 1), "orphan": _labelled("arch", 2)},
+        {CID: ContainerState.EXITED, "orphan": ContainerState.RUNNING},
+    )
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "DR-034" in outcome.reason
+    assert podman.stops == ["orphan"]
+    assert podman.removed == ["orphan"]
+    assert CID in podman.labels
+    assert _state(paths) is RealmState.STOPPED
+    assert RealmStore(paths).load(RealmName("arch")).generation == 1
+
+
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-122")
+def test_a_runit_directory_that_cannot_be_removed_blocks_an_interrupted_rebuild_before_the_swap(
+    paths: OwnedPaths, env: OpEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removal of the runit directory that fails with an OSError is a blocked outcome, as the
+    other failures of a recovery are. The journal entry is kept and the record does not move."""
+    base = _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED)
+    record = replace(base, generation=1, services_at_create=False, building_generation=2)
+    _save(paths, record)
+    journal = _write_journal(
+        paths,
+        _dead(op="rebuild", step="started", params={"generation": 1, "new_generation": 2}),
+    )
+
+    def denied(_paths: OwnedPaths, _name: RealmName) -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr("ginn.ops.recovery.remove_service", denied)
+    podman = _Generations(
+        {CID: _labelled("arch", 1), "orphan": _labelled("arch", 2)},
+        {CID: ContainerState.EXITED, "orphan": ContainerState.RUNNING},
+    )
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "runit service" in outcome.reason
+    assert journal.exists()
+    assert _state(paths) is RealmState.REBUILDING
+
+
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-122")
+def test_a_runit_directory_that_cannot_be_stopped_after_the_swap_blocks_the_entry(
+    paths: OwnedPaths, env: OpEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After the swap, a `d` that runsv cannot be sent is an OSError too, and it blocks the entry
+    the same way. The record names the new generation and stays where the swap left it."""
+    record = replace(_record(state=RealmState.STOPPED), generation=2, services_at_create=False)
+    _save(paths, record)
+    journal = _write_journal(
+        paths,
+        _dead(op="rebuild", step="swapping", params={"generation": 1, "new_generation": 2}),
+    )
+
+    def denied(_directory: Path) -> None:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr("ginn.ops.recovery.signal_runsv_down", denied)
+    podman = _Generations({CID: _labelled("arch", 2)}, {CID: ContainerState.EXITED})
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert journal.exists()
+    assert _state(paths) is RealmState.STOPPED
+    assert RealmStore(paths).load(RealmName("arch")).generation == 2
+
+
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-081")
+def test_an_interrupted_services_on_rebuild_tells_runsv_to_stop_its_orphan_before_removing_it(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """The orphan of a services-on rebuild runs under its runit service, which restarts a container
+    that exits while runsv wants it up. Recovery writes `d` to runsv's control FIFO first, and then
+    removes the orphan and returns the record to stopped (ADR-003)."""
+    base = _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED)
+    record = replace(
+        base,
+        settings=replace(base.settings, services=True),
+        building_container_id="orphan",
+        building_generation=2,
+    )
+    _save(paths, record)
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="started", params={"generation": 1, "new_generation": 2}),
+    )
+    service = service_dir(paths, RealmName("arch"))
+    (service / "supervise").mkdir(parents=True)
+    control = service / "supervise" / "control"
+    os.mkfifo(control)
+    reader = os.open(control, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        podman = _Generations(
+            {CID: _labelled("arch", 1), "orphan": _labelled("arch", 2)},
+            {CID: ContainerState.EXITED, "orphan": ContainerState.RUNNING},
+        )
+        outcome = _only(recover(env, podman))
+        assert os.read(reader, 8) == b"d"
+    finally:
+        os.close(reader)
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert podman.stops == ["orphan"]
+    assert podman.removed == ["orphan"]
+    assert _state(paths) is RealmState.STOPPED
+    stored = RealmStore(paths).load(RealmName("arch"))
+    assert stored.building_container_id is None
+    assert stored.building_generation is None
+
+
+@pytest.mark.fr("DR-034")
+def test_a_rebuild_saved_at_the_new_generation_removes_the_old_root_and_settles_by_podman(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    record = replace(_record(state=RealmState.STOPPED, container_id="new-root"), generation=2)
+    _save(paths, record)
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="swapping", params={"generation": 1, "new_generation": 2}),
+    )
+    podman = _Generations(
+        {CID: _labelled("arch", 1), "new-root": _labelled("arch", 2)},
+        {CID: ContainerState.EXITED, "new-root": ContainerState.EXITED},
+    )
+
+    outcome = _only(recover(env, podman))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert podman.removed == [CID]
+    assert list(podman.labels) == ["new-root"]
+    assert RealmStore(paths).load(RealmName("arch")) == record

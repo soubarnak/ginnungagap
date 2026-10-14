@@ -27,6 +27,8 @@ stale_metadata_regex = 'Status code: 404'
 # with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
 # failure (ADR-011). Runtime text, not verified until M4.
 network_error_regex = "Curl error \\(|Couldn't resolve host|Timeout was reached|Failed to connect to"
+# FR-022 AC-1: dnf's refusal of a name that no repository has. Runtime text, not verified until M4.
+missing_package_regex = 'No match for argument|Unable to find a match'
 # ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
 # check-updates and upgrade force a refresh, so no verb needs one first.
 refresh_before = []

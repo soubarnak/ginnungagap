@@ -70,9 +70,11 @@ def test_start_and_stop_follow_the_realm_state() -> None:
 
 
 @pytest.mark.fr("FR-021")
-def test_rebuild_stays_off_until_the_cli_has_the_command() -> None:
-    assert detail.REBUILD_AVAILABLE is False
-    assert "T8.3" in detail.REBUILD_UNAVAILABLE_TEXT
+def test_rebuild_is_offered_for_a_stopped_or_running_realm_only() -> None:
+    assert detail.REBUILD_AVAILABLE is True
+    assert detail.can_rebuild(_realm(state="stopped"))
+    assert detail.can_rebuild(_realm(state="running"))
+    assert not detail.can_rebuild(_realm(state="broken"))
 
 
 @pytest.mark.fr("FR-102")
@@ -172,19 +174,8 @@ def test_a_failed_read_keeps_the_rows_of_the_last_good_listing() -> None:
 
 
 @pytest.mark.fr("FR-083")
-def test_services_switches_stay_off_until_the_cli_has_the_command() -> None:
-    assert detail.SERVICES_TOGGLE_AVAILABLE is False
-    assert "T8.3" in detail.SERVICES_TOGGLE_UNAVAILABLE_TEXT
-    assert detail.can_services_on(_realm(services=False)) is False
-    assert detail.can_services_off(_realm(services=True)) is False
-
-
-@pytest.mark.fr("FR-083")
-def test_once_the_command_exists_only_the_switch_that_changes_the_mode_is_offered(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(detail, "SERVICES_TOGGLE_AVAILABLE", True)
-
+def test_only_the_services_switch_that_changes_the_mode_is_offered() -> None:
+    assert detail.SERVICES_TOGGLE_AVAILABLE is True
     assert detail.can_services_on(_realm(services=False))
     assert not detail.can_services_off(_realm(services=False))
     assert detail.can_services_off(_realm(services=True))

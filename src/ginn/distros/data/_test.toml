@@ -15,6 +15,7 @@ stale_metadata_regex = 'FAKE-STALE-METADATA'
 # with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
 # failure (ADR-011). Runtime text, not verified until M4.
 network_error_regex = 'FAKE-NETWORK-ERROR'
+missing_package_regex = 'FAKE-MISSING-PACKAGE'
 refresh_before = ["install"]
 
 [integration]

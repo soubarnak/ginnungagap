@@ -3,9 +3,9 @@
 
 `ginn.gui.actions` maps each IR-001..IR-006 screen to the controls it shows, and each control to
 the IR-010 command it runs. The controls build their argv with the same functions the views call.
-Here every argv goes through the real parser of `ginn.cli.main`. The one gap is `rebuild`, whose
-command arrives with T8.3. Its control is recorded as expected to fail with that milestone, not
-skipped, so the gap stays visible until the parser has the command.
+Here every argv goes through the real parser of `ginn.cli.main`. A control whose command the parser
+does not know is recorded as expected to fail with its milestone (`actions.KNOWN_MISSING`), not
+skipped, so a gap stays visible. No control is in that list now: `rebuild` is a command since T8.3.
 """
 
 from __future__ import annotations
@@ -117,10 +117,11 @@ def test_the_cli_parser_accepts_the_argv_of_every_control(control: str) -> None:
 
 
 @pytest.mark.fr("FR-106")
-def test_the_one_known_gap_is_rebuild_until_t8_3() -> None:
-    assert set(actions.KNOWN_MISSING) == {"rebuild"}
-    with pytest.raises(Exception, match="rebuild"):
-        build_parser().parse_args(list(actions.rebuild_args(actions.SAMPLE_REALM)))
+def test_no_control_is_a_known_gap_and_the_rebuild_argv_is_the_rebuild_command() -> None:
+    assert dict(actions.KNOWN_MISSING) == {}
+    parsed = build_parser().parse_args(list(actions.rebuild_args(actions.SAMPLE_REALM)))
+    assert parsed.command == "rebuild"
+    assert parsed.realm == actions.SAMPLE_REALM
 
 
 @pytest.mark.fr("FR-106")

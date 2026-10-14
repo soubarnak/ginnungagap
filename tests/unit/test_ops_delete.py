@@ -30,6 +30,7 @@ from ginn.ops._mutating import OpEnv, mutating
 from ginn.ops.delete import STEPS, DeleteHooks, check_purge, delete_realm
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.security_ops import agent_state_path, proxy_state_path, read_agent_record
+from ginn.ops.service import set_services_mode
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
@@ -1291,6 +1292,72 @@ def test_a_services_on_delete_whose_stop_times_out_writes_nothing(
     assert fake.ops() == []
     assert [entry.outcome for entry in env.audit.read() if entry.op == "delete"] == ["error"]
     assert [entry.op for entry in env.audit.read() if entry.op != "integrity"] == ["delete"]
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-083")
+def test_a_running_realm_with_a_pending_services_off_change_is_stopped_through_sv(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """The container is still supervised until its rebuild, so the delete asks runit to stop it,
+    whatever the desired mode says (ADR-003: the container's mode picks the path)."""
+    stub = SvStub()
+    hooks = _supervised_services_realm(env, fake, stub)
+    set_services_mode(env, RealmName("lab"), on=False)
+    record = RealmStore(env.paths, env.clock).load(RealmName("lab"))
+    assert record.settings.services is False
+    assert record.services_at_create is True
+    cid = containers_of(fake, "lab")[0]
+
+    def supervised_stop() -> None:
+        fake.stop(cid, 30)
+        RealmStore(env.paths, env.clock).set_state(RealmName("lab"), RealmState.STOPPED)
+
+    stub.on_down = supervised_stop
+
+    result = delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert result.image == "removed"
+    assert_gone(env, fake, "lab")
+    assert stub.argvs == [
+        [
+            "/usr/bin/sv",
+            "-w",
+            str(supervisor.DOWN_WAIT_S),
+            "down",
+            str(service_dir(env.paths, RealmName("lab"))),
+        ]
+    ]
+    assert "rm" not in stub.ops_at_down, "runit is down before the container is removed"
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-083")
+def test_a_services_off_container_with_a_pending_services_on_change_is_stopped_by_podman(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """A container made with services off has no runit service to stop, so the delete does not
+    call sv, even when the desired mode is on and a rebuild is pending."""
+    stub = SvStub()
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    stub.fake = fake
+    stub.env = env
+    hooks = DeleteHooks(
+        supervisor=SupervisorHooks(
+            sv="/usr/bin/sv", run=stub.run, clock=FakeClock(), sleep=lambda _s: None
+        )
+    )
+    set_services_mode(env, RealmName("lab"), on=True)
+    record = RealmStore(env.paths, env.clock).load(RealmName("lab"))
+    assert record.settings.services is True
+    assert record.services_at_create is False
+
+    result = delete_realm(env, fake, RealmName("lab"), hooks=hooks)
+
+    assert result.image == "removed"
+    assert_gone(env, fake, "lab")
+    assert stub.argvs == []
+    assert "stop" in fake.ops()
 
 
 @pytest.mark.fr("FR-019")

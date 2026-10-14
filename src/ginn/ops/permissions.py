@@ -9,13 +9,15 @@ record. The journal steps are `checked` (every refusal has been passed) and `sav
 written). The audit entry of an accepted change carries the tier, the toggles and the shares before
 and after (FR-124 AC-1).
 
-Tier. A change of tier is one of two kinds. The first changes only attach-time grants, and it
-applies at the next start: a running realm gets `restart_required` (FR-066). The second changes a
-create-time option (a device, a security option or a kept group, ADR-006). That container cannot
-take the option after its create, so the change is refused with GINN-E-NOT-SUPPORTED-YET, naming
-T8.3. The new container would lose the packages that the Install Manifest replay (T8.3) keeps.
-The host's `/dev/kvm` at create comes from the record's `kvm_at_create`: it is the probe that made
-the container, not a guess from its options.
+Tier and create-time options. A change of tier or of permissions is recorded in the settings at
+once, whatever it changes. A change that only moves attach-time grants applies at the next start,
+and a running realm gets `restart_required` (FR-066). A change of a create-time option (a device, a
+security option, a kept group, the GPU or the fonts grant, ADR-006) is recorded the same way, and
+the container keeps its old options until the next start. That start rebuilds the realm into a new
+container with the new options, and it keeps the Install Manifest's packages and the Realm Home
+(ops/lifecycle.py `stale_container`, ops/rebuild.py). The host's `/dev/kvm` at create comes from
+the record's `kvm_at_create`: it is the probe that made the container, not a guess from its
+options.
 
 Custom starting state. Switching to Custom from Basic or Development keeps the toggles of the tier
 the realm came from, and it has no shares. Switching to Basic or Development clears the Custom part
@@ -26,9 +28,9 @@ share is checked with `SharedPath.parse` (DR-004, FR-063 AC-2) and stored as the
 resolved, with its mode. Removing a share needs a path that the realm shares, given as named or
 resolved.
 
-Services-on realms are refused until T7.4 (ADR-003). A record that is neither stopped nor running is
-refused with GINN-E-REALM-STATE (DR-020). The record is loaded before the operation, so a missing
-realm writes no audit entry.
+A record that is neither stopped nor running is refused with GINN-E-REALM-STATE (DR-020). The
+record is loaded before the operation, so a missing realm writes no audit entry. A services-on realm
+changes its tier and permissions in the same way as a services-off one (ADR-003).
 """
 
 import os
@@ -42,8 +44,7 @@ from ginn.domain.permissions import CustomShare, Permissions, Toggle, effective_
 from ginn.errors import Warning as GinnWarning
 from ginn.errors import make
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.ops.lifecycle import HostUser
-from ginn.security.caps import option_keys
+from ginn.ops.lifecycle import HostUser, pending_rebuild_notice
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -78,16 +79,6 @@ def _checked_shares(
     return checked
 
 
-def _refuse_services(record: RealmRecord, verb: str) -> None:
-    if record.settings.services:
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=record.name.value,
-            feature=f"{verb} of a services-on realm",
-            milestone="M7 (T7.4)",
-        )
-
-
 def _refuse_state(record: RealmRecord, verb: str) -> None:
     if record.state not in _TIER_STATES:
         raise make(
@@ -99,23 +90,11 @@ def _refuse_state(record: RealmRecord, verb: str) -> None:
         )
 
 
-def _refuse_create_change(record: RealmRecord, tier: Tier, permissions: Permissions) -> None:
-    """Refuse a change whose create-time options differ from the container's (ADR-006, T8.3).
-
-    The options that the container should have are worked out from the new toggles and the probe
-    stored at create. A difference from `created_options` needs a new container, which is refused.
-    The GPU device and the fonts and timezone binds are create-time grants too, so their toggles
-    are compared with the flags stored at create (`RealmRecord.create_grants_match`).
-    """
-    toggles = effective_toggles(tier, permissions.toggles)
-    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
-    if wanted != record.created_options or not record.create_grants_match(toggles):
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=record.name.value,
-            feature="a change of tier or permissions that adds or removes a create-time option",
-            milestone="M8 (T8.3)",
-        )
+def _notice_rebuild(mutation: Mutation, record: RealmRecord, reason: str) -> None:
+    """Warn that the next start rebuilds a realm whose change needs a new container (CL-19)."""
+    notice = pending_rebuild_notice(record, reason)
+    if notice is not None:
+        mutation.warnings.append(notice)
 
 
 def _save(env: OpEnv, store: RealmStore, record: RealmRecord, **changes: Any) -> RealmRecord:
@@ -163,10 +142,11 @@ def set_tier(
 ) -> RealmRecord:
     """Change realm `name` to `tier` (FR-060). Return the record as it now stands.
 
-    A change that needs no new container is saved and applies at the next start (FR-066). An
-    unchanged tier writes nothing. Whether `/dev/kvm` was there at create is read from the record's
-    `kvm_at_create`, so no host probe is made here. The FR-006 warnings of the change are appended
-    to `warnings`, once the operation has finished.
+    The change is saved and applies at the next start (FR-066), and a create-time option that it
+    changes is applied by the rebuild of that start (ops/lifecycle.py). An unchanged tier writes
+    nothing. Whether `/dev/kvm` was there at create is read from the record's `kvm_at_create`, so
+    no host probe is made here. The FR-006 warnings of the change are appended to `warnings`, once
+    the operation has finished.
     """
     store = RealmStore(env.paths, env.clock)
     store.load(name)  # GINN-E-NO-SUCH-REALM before any audit entry
@@ -181,10 +161,8 @@ def _tier_body(
     env: OpEnv, store: RealmStore, name: RealmName, tier: Tier, mutation: Mutation
 ) -> RealmRecord:
     record = store.load(name)
-    _refuse_services(record, "tier change")
     _refuse_state(record, "tier")
     permissions = _custom_part(record, tier)
-    _refuse_create_change(record, tier, permissions)
     mutation.step("checked")
     if tier is record.settings.tier and permissions == record.permissions:
         return record
@@ -193,6 +171,7 @@ def _tier_body(
     saved = _save(env, store, record, settings=settings, permissions=permissions)
     mutation.set_permissions(before, _view(saved))
     mutation.step("saved")
+    _notice_rebuild(mutation, saved, "the tier changed")
     return saved
 
 
@@ -264,7 +243,6 @@ def _perms_body(
     switched_off = _toggles(disable)
     adds = _checked_shares(env, host, share)
     record = store.load(name)
-    _refuse_services(record, "perms")
     if record.settings.tier is not Tier.CUSTOM:
         raise make("GINN-E-TIER-NOT-CUSTOM", realm=name.value, tier=record.settings.tier.value)
     _refuse_state(record, "perms")
@@ -280,7 +258,6 @@ def _perms_body(
         shares[added.path] = added
     toggles = (set(record.permissions.toggles) | switched_on) - switched_off
     permissions = Permissions(toggles=frozenset(toggles), shares=tuple(shares.values()))
-    _refuse_create_change(record, Tier.CUSTOM, permissions)
     mutation.step("checked")
     if permissions == record.permissions:
         return record
@@ -288,6 +265,7 @@ def _perms_body(
     saved = _save(env, store, record, permissions=permissions)
     mutation.set_permissions(before, _view(saved))
     mutation.step("saved")
+    _notice_rebuild(mutation, saved, "the permissions changed")
     return saved
 
 

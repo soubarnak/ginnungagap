@@ -64,6 +64,7 @@ class WizardPage:
         self._services.set_title("Services")
         self._services.set_subtitle("Start the realm's services with the session (FR-080)")
         self._services.connect("notify::active", lambda *_args: self._on_services())
+        self._services_error = common.label("", css=("error",), wrap=True)
 
         self._everything = Adw.SwitchRow()
         self._everything.set_title("Everything (Kali only)")
@@ -92,6 +93,7 @@ class WizardPage:
         options.set_title("Options")
         options.add(self._tier)
         options.add(self._services)
+        options.add(self._services_error)
         options.add(self._everything)
 
         packages = Adw.PreferencesGroup()
@@ -190,6 +192,7 @@ class WizardPage:
         failure = self._wizard.name_failure()
         self._name_error.set_label("" if failure is None else common.error_text(failure))
         self._everything.set_visible(self._wizard.show_everything)
+        self._services_error.set_label(self._wizard.services_conflict() or "")
         blocked = self._session.control.host_changed
         self._create.set_sensitive(self._wizard.can_create() and not blocked)
         self._create.set_tooltip_text(BLOCKED_TEXT if blocked else "")

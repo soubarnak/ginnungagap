@@ -39,14 +39,23 @@ process to record `stopped`, and it stops the container itself only when the rec
 `stopped` after that (a realm given up after crashes is `failed`, DR-020). The supervised start
 takes the realm lock and journals the start and its audit entry, so this process writes nothing
 while it waits (DR-032). The supervised start runs under runit's sparse environment, so it attaches
-no session grant; enter attaches them (ADR-008 amendment). A start whose record names container
-options that its container was not made with raises GINN-E-NOT-SUPPORTED-YET, naming T8.3, before
-any write (ADR-006; a tier change needs a new container). That refusal also applies to a services-on
-start, so a supervised start does not crash-loop on it. A state that DR-020 does not allow for the
-verb raises GINN-E-REALM-STATE (exit 4). An unknown name raises
-GINN-E-NO-SUCH-REALM before any write (FR-025). A container that podman does not list is not
-running. A podman error while listing or inspecting a container is not read as "not running": it
-propagates, and nothing is written.
+no session grant; enter attaches them (ADR-008 amendment).
+
+Which path a realm takes is decided by its container, not by the desired settings.
+`services_at_create` is the services mode the container was made with, and it is the one that picks
+`sv` or podman for a start and a stop, and whether the idle watcher is armed. A create-time change
+(a tier, a permission or a services mode that needs a new container, ADR-006) is recorded in the
+settings first, and the container still has the old options. So a stop of a running realm uses its
+container's path. A start of a stopped realm whose record differs from its container
+(`stale_container`) first rebuilds the realm (ops/rebuild.py, `rebuild_for_start`, FR-066,
+FR-083), and then starts it on the new generation. A supervised start never rebuilds: runit runs
+it, and the rebuild stops and starts through runit. It starts the container the record names,
+or, while a rebuild is in progress, the container that the rebuild is building (ops/service.py). A
+realm that is not stopped and has such a difference is refused with GINN-E-REALM-STATE (exit 4),
+and `ginn stop` comes first. A state that DR-020 does not allow for the verb raises
+GINN-E-REALM-STATE (exit 4). An unknown name raises GINN-E-NO-SUCH-REALM before any write (FR-025).
+A container that podman does not list is not running. A podman error while listing or inspecting a
+container is not read as "not running": it propagates, and nothing is written.
 
 Idempotence. Start of a realm that podman runs already returns the record and writes nothing. It
 keeps `restart_required` as stored, so the caller can report a pending restart (FR-066; M6 sets
@@ -55,7 +64,9 @@ the record stays stopped; otherwise nothing is written. Neither takes a journal 
 when it writes nothing.
 
 Crash. A record that says `running` while podman does not run its container is a crash
-(DR-020, running to failed). Start then goes failed to running. Stop takes it to stopped. A
+(DR-020, running to failed). Start then goes failed to running. A stale start of a services-off
+realm settles such a record as a crash before the rebuild, since a rebuild refuses a running
+record (`_settle_crash`). Stop takes it to stopped. A
 running or failed record that names no container id is refused by start and stop with
 GINN-E-INTERNAL, before any state write. Its remedy is `ginn delete`, which finds the container by
 its labels (T4.7).
@@ -102,12 +113,13 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from ginn.domain import RealmName, RealmState, transition
 from ginn.domain.permissions import effective_toggles
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
+from ginn.export.sync import SyncHooks, sync_realm
 from ginn.export.sync import _scan_host as _host_entries
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.security_ops import (
@@ -145,6 +157,9 @@ from ginn.services.supervisor import SupervisorHooks
 from ginn.store._time import utc_from_epoch, utc_iso
 from ginn.store.locks import realm_lock
 from ginn.store.records import RealmRecord, RealmStore
+
+if TYPE_CHECKING:
+    from ginn.ops.rebuild import RebuildHooks
 
 STOP_TIMEOUT_S: Final = 30
 """Seconds `podman stop` waits before it kills the realm (FR-016, AS-023)."""
@@ -296,6 +311,9 @@ class LifecycleHooks:
     idle: IdleHooks = field(default_factory=IdleHooks)
     """The idle watcher of a services-off realm: the helper, its grace and how it is started
     (FR-018, runtime/idle.py)."""
+    rebuild: "RebuildHooks | None" = None
+    """The seams of the rebuild that a start runs when its record needs a new container (FR-066).
+    None is the rebuild's own defaults."""
 
 
 @dataclass(frozen=True)
@@ -430,25 +448,81 @@ def _save(env: OpEnv, store: RealmStore, record: RealmRecord, **changes: Any) ->
     return saved
 
 
-def _refuse_stale_options(record: RealmRecord) -> None:
-    """Refuse a start whose tier options differ from the ones the container was made with.
+def pending_rebuild_notice(record: RealmRecord, reason: str) -> GinnWarning | None:
+    """GINN-W-REBUILD-PENDING for a change that the next start rebuilds, or None (FR-066, CL-19).
 
-    A create-time option (a device, a security option or a group) is fixed at `podman create`.
-    `created_options` keeps the names of the toggle-driven options of the container (ADR-006), and
-    a tier or permission change that would change them is refused by `ginn tier` and `ginn perms`.
-    This check covers a record that was changed another way. A new container is made by T8.3, which
-    keeps the Install Manifest's packages, so the start is refused until then, before any write.
+    `reason` names the change in words, such as "the tier changed". Nothing is written here.
     """
-    kvm_present = record.kvm_at_create
+    if not stale_container(record):
+        return None
+    return warn("GINN-W-REBUILD-PENDING", realm=record.name.value, change=reason)
+
+
+def stale_container(record: RealmRecord) -> bool:
+    """True when the record asks for a create-time state that its container was not made with.
+
+    A create-time option (a device, a security option or a group, ADR-006), a GPU or fonts grant and
+    the services mode are fixed at `podman create`. A tier, permission or services change that
+    needs them is recorded in the settings at once, and it is applied by a rebuild at the next
+    start (FR-066, FR-083). This is the test for that rebuild. The options are compared the way
+    `created_options` names them (security/caps.py `option_keys`).
+    """
     toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
-    wanted = option_keys(toggles, kvm_present=kvm_present)
-    if wanted != record.created_options or not record.create_grants_match(toggles):
+    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
+    return (
+        wanted != record.created_options
+        or not record.create_grants_match(toggles)
+        or record.settings.services != record.services_at_create
+    )
+
+
+def _rebuild_stale(
+    env: OpEnv,
+    podman: Podman,
+    record: RealmRecord,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    warnings: list[GinnWarning],
+) -> RealmRecord:
+    """Rebuild a stopped realm whose container is stale, and return its record (FR-066, FR-083).
+
+    The rebuild is ops/rebuild.py, which imports this module, so it is imported here, when a start
+    needs it. A running realm keeps its container until its next stop, so it is refused before any
+    write. A services-off realm whose container is gone is settled as failed first
+    (`_settle_crash`), so it reads as a failed one here. A failed one is stopped first, which
+    records it stopped, and then rebuilt.
+
+    A rebuild that fails leaves the old root (NFR-031), and the start goes on with that root, so the
+    realm is not stranded by a pending change. The failure is GINN-W-REBUILD-DEFERRED, and the
+    change stays pending (`restart_required`, FR-021 AC-2). Only the cancel (GINN-E-INTERRUPTED)
+    stops the start, so a Ctrl-C never starts the old root by surprise.
+    """
+    if record.state is RealmState.RUNNING:
         raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
+            "GINN-E-REALM-STATE",
             realm=record.name.value,
-            feature="a start with tier options that the container was not made with",
-            milestone="M8 (T8.3)",
+            state=record.state.value,
+            action="start",
+            allowed="stopped or failed",
         )
+    store = RealmStore(env.paths, env.clock)
+    if record.state is RealmState.FAILED:
+        stop_realm(env, podman, record.name, hooks=hooks, warnings=warnings)
+        record = _load(store, record.name)
+    from ginn.ops.rebuild import RebuildHooks, rebuild_for_start
+
+    rebuild_hooks = RebuildHooks() if hooks.rebuild is None else hooks.rebuild
+    try:
+        return rebuild_for_start(
+            env, podman, record.name, session=user, hooks=rebuild_hooks, warnings=warnings
+        )
+    except GinnError as err:
+        if err.code == "GINN-E-INTERRUPTED":
+            raise
+        warnings.append(
+            warn("GINN-W-REBUILD-DEFERRED", realm=record.name.value, reason=err.message)
+        )
+        return _load(store, record.name)
 
 
 def nvidia_plan_write(env: OpEnv, hooks: LifecycleHooks) -> None:
@@ -628,6 +702,7 @@ def start_realm(
     hooks: LifecycleHooks | None = None,
     warnings: list[GinnWarning] | None = None,
     supervised: bool = False,
+    rebuild: bool = True,
 ) -> RealmRecord:
     """Start realm `name` and attach its grants. Return the record that now reads running.
 
@@ -639,44 +714,68 @@ def start_realm(
     `supervised` is True only for the start that the realm's runit service makes (`ginn
     _service-run`, FR-081). Only such a start runs a services-on realm; a services-off realm is
     refused, because its runit service does not exist. Any other start of a services-on realm goes
-    through its runit service (`_start_supervised`), and returns once the supervised start has
+    through its runit service (`start_through_sv`), and returns once the supervised start has
     recorded `running`. The FR-006 warnings of that start are written to the runit log, not here.
+
+    `rebuild` is False only for the restart that a rebuild makes itself: that start runs the root
+    the rebuild left, and never retries a lazy rebuild (ops/rebuild.py). A start that a lazy rebuild
+    changed syncs the realm's menu once it has started, so a package the rebuild dropped leaves the
+    menu (FR-044, FR-021 AC-1).
     """
     hooks = LifecycleHooks() if hooks is None else hooks
     current = _load(RealmStore(env.paths, env.clock), name)
-    if supervised and not current.settings.services:
+    if supervised and not current.services_at_create:
         raise _internal("the supervisor starts only a services-on realm", realm=name.value)
     user = _host_user(env) if session is None else session
     if not user.host_home.is_absolute():
         raise ValueError(f"host home must be absolute, not {user.host_home}")
     if current.state is RealmState.RUNNING and _running(podman, name, current.container_id):
         return current
-    if current.state is RealmState.RUNNING and not current.settings.services:
+    if current.state is RealmState.RUNNING and not current.services_at_create:
         _settle_idle_stop(env, podman, name)
         current = _load(RealmStore(env.paths, env.clock), name)
-    _refuse_stale_options(current)
-    if current.settings.services and not supervised:
+    notices: list[GinnWarning] = []
+    rebuilt = False
+    if rebuild and not supervised and stale_container(current):
+        if current.state is RealmState.RUNNING and not current.services_at_create:
+            # A container that is gone reads failed, as `_start` settles it (DR-020).
+            _settle_crash(env, podman, name)
+            current = _load(RealmStore(env.paths, env.clock), name)
+        generation = current.generation
+        current = _rebuild_stale(env, podman, current, user, hooks, notices)
+        rebuilt = current.generation != generation
+    if current.services_at_create and not supervised:
         refuse_before_supervisor(
             env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
         )
-        return _start_supervised(env, podman, name, hooks)
+        started = start_through_sv(env, podman, name, hooks)
+        if rebuilt:
+            notices.extend(_sync_rebuilt(env, podman, name, hooks))
+        if warnings is not None:
+            warnings.extend(notices)
+        return started
     params = {"generation": current.generation}
     with mutating(env, "start", name, params) as mutation:
         if supervised:
             _follow_autostart(env, name)
         record = _start(env, podman, name, user, hooks, mutation)
-        if not record.settings.services:
+        if not record.services_at_create:
             _arm_idle(env, podman, record, hooks, mutation)
+    notices.extend(mutation.warnings)
+    if rebuilt:
+        notices.extend(_sync_rebuilt(env, podman, name, hooks))
     if warnings is not None:
-        warnings.extend(mutation.warnings)
+        warnings.extend(notices)
     return record
 
 
-def _start_supervised(
+def start_through_sv(
     env: OpEnv,
     podman: Podman,
     name: RealmName,
     hooks: LifecycleHooks,
+    *,
+    container_id: str | None = None,
 ) -> RealmRecord:
     """Start a services-on realm through its runit service and wait until it runs (FR-081).
 
@@ -684,6 +783,11 @@ def _start_supervised(
     the start (DR-032). This process holds no lock while it waits, because the supervised start
     needs the lock to record `running`. The record is read without the lock. The wait gives up
     when runsv has stopped the service (after five crashes in 60 s, AS-028) or when the time is up.
+
+    `container_id` is None for the realm's own start: the wait ends when the record reads running
+    and its container runs. A rebuild (ops/rebuild.py) passes the container it is building. Its
+    record still reads rebuilding, and `_service-run` starts that container without writing, so the
+    wait ends when that container runs, and nothing is recorded here.
     """
     clock = hooks.supervisor.clock
     supervisor.up(env.paths, name, hooks=hooks.supervisor)
@@ -692,7 +796,13 @@ def _start_supervised(
     store = RealmStore(env.paths, env.clock)
     while True:
         record = _load(store, name)
-        if record.state is RealmState.RUNNING and _running(podman, name, record.container_id):
+        if container_id is None:
+            ready = record.state is RealmState.RUNNING and _running(
+                podman, name, record.container_id
+            )
+        else:
+            ready = _running(podman, name, container_id)
+        if ready:
             return record
         reason = _runit_stopped(env, name, hooks)
         if reason is not None:
@@ -700,6 +810,27 @@ def _start_supervised(
         if clock() >= deadline:
             raise _start_timeout(name, clock() - started, "the realm does not run yet")
         hooks.supervisor.sleep(hooks.start_poll_s)
+
+
+def stop_through_sv(
+    env: OpEnv,
+    podman: Podman,
+    name: RealmName,
+    hooks: LifecycleHooks,
+    *,
+    container_id: str,
+    timeout_s: int,
+) -> None:
+    """Stop the container of a services-on rebuild through the realm's runit service (ADR-003).
+
+    `sv down` makes runsv send ginn-wait its TERM, ginn-wait stops the container, and the finish
+    script returns without writing, because the rebuild holds the record (services/service.py). A
+    runsv that is proven gone is passed over, as a stop does. Podman then stops the container if it
+    still runs, so no container of the new generation outlives this call.
+    """
+    supervisor.stop_if_supervised(env.paths, name, hooks=hooks.supervisor)
+    if _running(podman, name, container_id):
+        podman.stop(container_id, timeout_s)
 
 
 def _runit_stopped(env: OpEnv, name: RealmName, hooks: LifecycleHooks) -> str | None:
@@ -775,12 +906,56 @@ def _settle_idle_stop(env: OpEnv, podman: Podman, name: RealmName) -> None:
             _release_after_stop(env, name, mutation)
 
 
+def _settle_crash(env: OpEnv, podman: Podman, name: RealmName) -> None:
+    """Record a services-off realm whose container is gone as failed (DR-020, running to failed).
+
+    `_start` settles a crash the same way, under the realm lock. A stale start needs it first: a
+    rebuild refuses a record that reads running (GINN-E-REALM-STATE), and the rebuild then starts
+    from a stopped realm. The check reads only. The write takes the realm lock and checks again
+    under it, as `_settle_idle_stop` does, and it is journaled and audited as a "crash" operation.
+    A podman error propagates, and nothing is written.
+    """
+    store = RealmStore(env.paths, env.clock)
+    record = _load(store, name)
+    cid = record.container_id
+    if record.state is not RealmState.RUNNING or cid is None or _running(podman, name, cid):
+        return
+    with mutating(env, "crash", name, {"generation": record.generation}) as mutation:
+        current = _load(store, name)
+        if (
+            current.state is RealmState.RUNNING
+            and current.container_id == cid
+            and not _running(podman, name, cid)
+        ):
+            store.set_state(name, RealmState.FAILED)
+            mutation.step("failed")
+
+
+def _sync_rebuilt(
+    env: OpEnv, podman: Podman, name: RealmName, hooks: LifecycleHooks
+) -> list[GinnWarning]:
+    """Sync the menu after a lazy rebuild has started the realm on its new generation (FR-044).
+
+    A rebuild replays the Install Manifest, and a package that the upstream no longer offers leaves
+    it, so its exported entries would stay until the next sync. The start has finished and no
+    lock is held, so the sync takes the realm lock itself. A failed sync is a GINN-W-EXPORT-SYNC
+    warning, and the start stands.
+    """
+    program = None if hooks.rebuild is None else hooks.rebuild.program
+    sync_hooks = SyncHooks() if program is None else SyncHooks(program=program)
+    try:
+        result = sync_realm(env, podman, name, hooks=sync_hooks)
+    except GinnError as err:
+        return [warn("GINN-W-EXPORT-SYNC", realm=name.value, reason=err.message)]
+    return list(result.warnings)
+
+
 def _idle_stopped_status(env: OpEnv, record: RealmRecord, container_state: str | None) -> bool:
     """True when a running services-off record's container was stopped by its idle watcher (FR-018).
 
     Read-only: podman's answer and the watcher's files. The record is not written.
     """
-    if record.state is not RealmState.RUNNING or record.settings.services:
+    if record.state is not RealmState.RUNNING or record.services_at_create:
         return False
     if record.container_id is None or _mismatch(RealmState.RUNNING, container_state) is not True:
         return False
@@ -843,9 +1018,14 @@ def _start(
     hooks: LifecycleHooks,
     mutation: Mutation,
 ) -> RealmRecord:
-    """The body of a start. It runs under the realm lock, after the journal entry is written."""
+    """The body of a start. It runs under the realm lock, after the journal entry is written.
+
+    A start that does not rebuild (a runit start, or a start after a failed lazy rebuild) runs the
+    old container, so the record keeps `restart_required` while its settings still differ from it.
+    """
     store = RealmStore(env.paths, env.clock)
     record = _load(store, name)
+    stale = stale_container(record)
     if record.container_id is None and record.state in _WITH_CONTAINER:
         # Checked before the crash write below, so no state is written for this record.
         raise _no_container(name, record.state)
@@ -909,7 +1089,7 @@ def _start(
         previous_state=None,
         grants=list(result.records),
         share_skipped=skips,
-        restart_required=False,
+        restart_required=stale,
     )
     mutation.step("running")
     return running
@@ -986,7 +1166,7 @@ def stop_realm(
     """
     hooks = LifecycleHooks() if hooks is None else hooks
     current = _load(RealmStore(env.paths, env.clock), name)
-    if current.settings.services:
+    if current.services_at_create:
         return _stop_supervised(env, podman, name, hooks, warnings)
     if current.state is RealmState.RUNNING:
         _settle_idle_stop(env, podman, name)
@@ -1173,7 +1353,7 @@ def _describe(
         container_state=container_state,
         state_mismatch=False if idle else _mismatch(record.state, container_state),
         state_reason="idle" if idle else None,
-        supervision=_supervision(env, record, hooks) if record.settings.services else None,
+        supervision=_supervision(env, record, hooks) if record.services_at_create else None,
         distro=record.settings.distro.value,
         tier=record.settings.tier.value,
         services=record.settings.services,
@@ -1182,7 +1362,7 @@ def _describe(
         image_digest=record.image_digest,
         created_at=utc_iso(record.created_at),
         updated_at=utc_iso(record.updated_at),
-        restart_required=record.restart_required,
+        restart_required=record.restart_required or stale_container(record),
         share_skipped=list(record.share_skipped),
         disk=_disk(env, record, info, hooks) if disk else None,
         exported_apps=_exported_apps(env, record.name),

@@ -2,11 +2,11 @@
 """`ginn tier <realm> [basic|development|custom]`: show or change a realm's permission tier.
 
 With a tier, the work is `ops.permissions.set_tier`. Without one, the tier and its permissions are
-printed and nothing is written (FR-060). A change that needs no new container applies at the next
-start, and a running realm reports that a restart is required. A change that adds or removes a
-create-time option is refused with GINN-E-NOT-SUPPORTED-YET, naming T8.3, before anything is
-written, because the container would have to be made again (ADR-006). `ginn perms` changes the
-Custom toggles and shares.
+printed and nothing is written (FR-060). A change applies at the next start, and a running realm
+reports that a restart is required. A change that adds or removes a create-time option is recorded
+too: the next start rebuilds the realm into a container with the new options, and keeps its packages
+and Realm Home (FR-066, ADR-006). The change prints GINN-W-REBUILD-PENDING, which says so (CL-19).
+`ginn perms` changes the Custom toggles and shares.
 """
 
 from __future__ import annotations

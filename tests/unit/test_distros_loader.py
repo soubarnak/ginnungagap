@@ -1031,6 +1031,60 @@ def test_signature_error_regex_ignores_ordinary_output(name: str, line: str) -> 
     assert load(name).signature_error.search(line) is None
 
 
+MISSING_SAMPLES: list[tuple[str, str]] = [
+    ("debian", "E: Unable to locate package gone"),
+    ("debian", "E: Package 'gone' has no installation candidate"),
+    ("kali", "E: Unable to locate package gone"),
+    ("arch", "error: target not found: gone"),
+    ("arch", "fatal: repository 'https://aur.archlinux.org/gone.git/' not found"),
+    ("fedora", "No match for argument: gone"),
+]
+"""One refusal per distribution that says a named package is not available upstream (FR-022)."""
+NOT_MISSING_SAMPLES: list[tuple[str, str]] = [
+    ("debian", "Temporary failure resolving 'deb.debian.org'"),
+    ("debian", "E: Sub-process /usr/bin/dpkg returned an error code (1)"),
+    ("kali", "E: Write error - write (28: No space left on device)"),
+    (
+        "arch",
+        "error: failed retrieving file 'curl' from mirror: The requested URL returned error: 404",
+    ),
+    ("arch", "error: failed to commit transaction (not enough free disk space)"),
+    ("fedora", "Curl error (6): Couldn't resolve host name"),
+]
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.parametrize(("name", "line"), MISSING_SAMPLES)
+def test_missing_package_regex_recognises_a_name_the_upstream_does_not_offer(
+    name: str, line: str
+) -> None:
+    pattern = load(name).missing_package
+    assert pattern is not None
+    assert pattern.search(line) is not None
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.parametrize("name", SHIPPED)
+@pytest.mark.parametrize("line", [line for _, line in NOT_MISSING_SAMPLES] + BENIGN)
+def test_missing_package_regex_ignores_network_disk_and_ordinary_output(
+    name: str, line: str
+) -> None:
+    """A network, disk or ordinary line is never evidence of a missing package (FR-022 AC-1)."""
+    pattern = load(name).missing_package
+    assert pattern is not None
+    assert pattern.search(line) is None
+
+
+@pytest.mark.fr("FR-022")
+def test_a_distribution_without_a_missing_package_regex_reads_no_refusal_as_missing() -> None:
+    """The key is optional, and without it nothing is positive evidence, so a rebuild fails
+    closed (distros/loader.py)."""
+    raw: dict[str, Any] = tomllib.loads(_shipped_text("debian"))
+    del raw["missing_package_regex"]
+    definition = loader.from_mapping(raw, "debian.toml")
+    assert definition.missing_package is None
+
+
 @pytest.mark.fr("FR-040")
 @pytest.mark.parametrize(("name", "line"), STALE_SAMPLES)
 def test_stale_metadata_regex_recognises_representative_mirror_failures(

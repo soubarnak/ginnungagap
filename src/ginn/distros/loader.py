@@ -49,6 +49,11 @@ list (NFR-SEC-005).
 `stale_metadata` matches the package manager's output when the local metadata no longer matches the
 mirror (ADR-011). The ops layer maps a match to the remedy.
 
+`missing_package_regex` matches the package manager's output when it says that a named package is
+not available upstream (FR-022 AC-1). It is optional and defaults to no pattern, and with no pattern
+no refusal is read as a missing package, so a rebuild fails closed. A match is positive evidence
+only. The rebuild also refuses to read a missing package from output that says the disk is full.
+
 `check_fatal_warning_regex` is optional and defaults to an empty list. It lists warnings that make
 the Arch check-updates fail closed: `arch_check_status()` returns error when a stderr line matches
 one, so a missing sync database is never read as "no updates" (ADR-011).
@@ -119,6 +124,7 @@ _TOP_KEYS: Final = frozenset(
 _OPTIONAL_TOP_KEYS: Final = frozenset(
     {
         "check_fatal_warning_regex",
+        "missing_package_regex",
         "everything",
         "check_updates_count",
         "check_updates_count_regex",
@@ -230,8 +236,9 @@ class DistroDef:
     check-updates step list, one argv template per step.
     `name_pattern` is matched with fullmatch, by argv() and by the Integration Package Set.
     `signature_error` and `stale_metadata` are matched with search against the package manager's
-    output (FR-012, ADR-011). `refresh_before` lists the verbs that the caller runs `refresh` before
-    (ADR-011). `check_fatal_warnings` are matched with search against each stderr line of the
+    output (FR-012, ADR-011). `missing_package` is matched the same way, and None when the data
+    omits the key (FR-022 AC-1). `refresh_before` lists the verbs that the caller runs `refresh`
+    before (ADR-011). `check_fatal_warnings` are matched with search against each stderr line of the
     check-updates query, and a match makes the check fail closed (ADR-011). It is empty when the
     data omits the key.
     """
@@ -244,6 +251,7 @@ class DistroDef:
     signature_error: re.Pattern[str]
     stale_metadata: re.Pattern[str]
     network_error: re.Pattern[str]
+    missing_package: re.Pattern[str] | None
     refresh_before: frozenset[Verb]
     integration: Integration
     verbs: Mapping[Verb, tuple[str, ...]]
@@ -567,6 +575,11 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     signature_error = reader.regex(raw["signature_error_regex"], "signature_error_regex")
     stale_metadata = reader.regex(raw["stale_metadata_regex"], "stale_metadata_regex")
     network_error = reader.regex(raw["network_error_regex"], "network_error_regex")
+    missing_package = (
+        reader.regex(raw["missing_package_regex"], "missing_package_regex")
+        if "missing_package_regex" in raw
+        else None
+    )
     fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
     everything = _everything(reader, raw.get("everything", []), name_pattern)
     refresh_before = _refresh_before(reader, raw["refresh_before"])
@@ -584,6 +597,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         signature_error=signature_error,
         stale_metadata=stale_metadata,
         network_error=network_error,
+        missing_package=missing_package,
         refresh_before=refresh_before,
         integration=integration,
         verbs=MappingProxyType(verbs),

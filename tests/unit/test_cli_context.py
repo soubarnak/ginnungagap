@@ -247,3 +247,62 @@ def test_hooks_have_no_progress_without_an_output() -> None:
 
     assert _context.create_hooks(None, None).on_step is None
     assert _context.delete_hooks().on_step is None
+    assert _context.rebuild_hooks(None, None).on_step is None
+
+
+@pytest.mark.fr("FR-021")
+def test_the_rebuild_hooks_report_each_step_as_a_rebuild_progress_line(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hooks = _context.rebuild_hooks(world.paths, Output(json_mode=True, verbose=False))
+
+    assert hooks.on_step is not None
+    hooks.on_step("swapping")
+
+    line = json.loads(capsys.readouterr().err)
+    assert line == {"progress": {"step": "swapping", "message": "rebuild: step swapping done"}}
+
+
+@pytest.mark.fr("FR-083")
+def test_the_lifecycle_hooks_carry_the_rebuild_seams_and_the_ginn_command(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A start that rebuilds a stale services-on realm writes the ginn command into its runit
+    scripts. Without a program the rebuild fails with GINN-E-INTERNAL, so the start carries it."""
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+
+    hooks = _context.lifecycle_hooks(world.paths)
+
+    rebuild = hooks.rebuild
+    assert rebuild is not None
+    assert rebuild.program == "/usr/bin/ginn"
+    assert rebuild.helper == hooks.helper
+    assert rebuild.exists is hooks.exists
+    assert rebuild.mountinfo == hooks.mountinfo
+    # The rebuild's own stop, start and runit seams are the host's, not the library defaults.
+    assert rebuild.lifecycle.helper == hooks.helper
+    assert rebuild.lifecycle.exists is hooks.exists
+    assert rebuild.lifecycle.mountinfo == hooks.mountinfo
+
+
+@pytest.mark.fr("FR-083")
+def test_a_bare_lifecycle_hooks_call_looks_up_the_ginn_command_for_the_paths_of_realms(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ginn start` calls `lifecycle_hooks()` with no paths. It uses the paths that `realms()` was
+    given, as create does, so the program is found the same way for both (FR-046, FR-083)."""
+    seen: list[object] = []
+
+    def program(paths: object = None) -> str:
+        seen.append(paths)
+        return "/usr/bin/ginn"
+
+    monkeypatch.setattr(_context, "ginn_program", program)
+    monkeypatch.setattr(_context, "_paths", None)
+    paths = _context.realms(Output(json_mode=True, verbose=False)).paths
+
+    hooks = _context.lifecycle_hooks()
+
+    assert seen == [paths]
+    assert hooks.rebuild is not None
+    assert hooks.rebuild.program == "/usr/bin/ginn"

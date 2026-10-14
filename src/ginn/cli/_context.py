@@ -26,7 +26,7 @@ import os
 import pwd
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
@@ -38,6 +38,7 @@ from ginn.ops.create import CreateHooks
 from ginn.ops.delete import DeleteHooks
 from ginn.ops.lifecycle import HostUser, LifecycleHooks
 from ginn.ops.packages import PackageHooks
+from ginn.ops.rebuild import RebuildHooks
 from ginn.ops.recovery import (
     OUTCOME_BLOCKED,
     OUTCOME_BROKEN,
@@ -166,6 +167,9 @@ def op_env(paths: OwnedPaths) -> OpEnv:
 _output: Output | None = None
 """The Output of the command that runs now. `realms()` sets it, because the commands call
 `realms(ctx.output)` before they ask for a hook. The hook builders fall back to it."""
+_paths: OwnedPaths | None = None
+"""The Owned Paths of the command that runs now. `realms()` sets it, as it sets `_output`, so
+`lifecycle_hooks()` finds the ginn command of a rebuild without a `paths` argument."""
 
 
 def _step_reporter(output: Output | None, operation: str) -> Callable[[str], None] | None:
@@ -195,9 +199,38 @@ def create_hooks(paths: OwnedPaths | None = None, output: Output | None = None) 
     )
 
 
-def lifecycle_hooks() -> LifecycleHooks:
-    s = seams()
+def _base_lifecycle(s: Seams) -> LifecycleHooks:
+    """The lifecycle seams of the host seams, without a rebuild. A rebuild gets the same ones."""
     return LifecycleHooks(helper=s.helper, exists=s.exists, mountinfo=s.mountinfo)
+
+
+def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None) -> RebuildHooks:
+    """The rebuild seams (FR-021, FR-022, ADR-003).
+
+    A services-on rebuild writes the ginn command into the runit scripts, so the rebuild needs the
+    same lookup that create uses (`ginn_program`). `paths` is that lookup's, and None takes the
+    paths that `realms()` was given. Its stop and start of a running realm, and its runit start of
+    a services-on gN+1, use the host's helper and probes, as a start does (`lifecycle`). Each
+    journal step gives one progress line (FR-107), to `output` or else the Output of `realms()`.
+    """
+    s = seams()
+    return RebuildHooks(
+        helper=s.helper,
+        exists=s.exists,
+        mountinfo=s.mountinfo,
+        program=ginn_program(_paths if paths is None else paths),
+        on_step=_step_reporter(output or _output, "rebuild"),
+        lifecycle=_base_lifecycle(s),
+    )
+
+
+def lifecycle_hooks(paths: OwnedPaths | None = None) -> LifecycleHooks:
+    """The lifecycle seams, with the seams of a rebuild that a start may run (FR-066, FR-083).
+
+    `paths` is the lookup of the ginn command for the rebuild (`rebuild_hooks`), and None takes the
+    paths that `realms()` was given. The rebuild reads the same helper and probes as the start.
+    """
+    return replace(_base_lifecycle(seams()), rebuild=rebuild_hooks(paths))
 
 
 def service_hooks() -> ServiceHooks:
@@ -245,9 +278,10 @@ class Realms:
 
 def realms(output: Output) -> Realms:
     """Build the objects of one realm command from the builders above."""
-    global _output
+    global _output, _paths
     _output = output
     paths = owned_paths()
+    _paths = paths
     return Realms(
         paths=paths,
         env=op_env(paths),

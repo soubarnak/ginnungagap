@@ -3,6 +3,8 @@
 
 Hidden from the top-level help: the realm's runit `run` script runs it, not the user. The start is
 ops.service.start_service, which starts the container and attaches its grants (FR-084, ADR-008).
+While a services-on rebuild is building its container, the same start starts that container and
+attaches nothing, and it writes nothing (ADR-003).
 On success this process execs ginn-wait, which supervises the conmon of the container (NFR-033),
 so the runit service is this process from then on. Nothing is written to stdout after the exec.
 """

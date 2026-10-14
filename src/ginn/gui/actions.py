@@ -57,7 +57,7 @@ def update_args(realm: str) -> Argv:
 
 
 def rebuild_args(realm: str) -> Argv:
-    """`ginn rebuild` is not a CLI command yet. Its milestone is T8.3 (FR-021)."""
+    """`ginn rebuild <realm>`, which asks no yes of its own: the view confirms first (FR-021)."""
     return ("--json", "rebuild", realm)
 
 
@@ -163,7 +163,6 @@ command, and the long operations it shows are create, update and rebuild (FR-107
 PROGRESS_OPERATIONS: Final = ("create", "update", "rebuild")
 """The long operations that show the progress dialog (FR-107)."""
 
-KNOWN_MISSING: Final[Mapping[str, str]] = {
-    "rebuild": "T8.3 adds `ginn rebuild` (FR-021, IR-010)",
-}
-"""CLI verbs that a control runs but the parser does not register yet, with their milestone."""
+KNOWN_MISSING: Final[Mapping[str, str]] = {}
+"""CLI verbs that a control runs but the parser does not register yet, with their milestone. It is
+empty: every control's verb is a registered command (IR-010), `rebuild` since T8.3."""

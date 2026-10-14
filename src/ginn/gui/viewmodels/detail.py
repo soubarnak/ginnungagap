@@ -13,16 +13,14 @@ from dataclasses import dataclass
 from ginn.gui.backend import RealmView
 from ginn.gui.viewmodels.labels import NONE_TEXT, disk_label, services_label
 
-REBUILD_AVAILABLE = False
-"""`ginn rebuild` is not a CLI command until T8.3 (FR-021). The button stays off until then."""
+REBUILD_AVAILABLE = True
+"""`ginn rebuild` is a CLI command (T8.3, FR-021). The Control Plane offers the button, after its
+confirmation, for a realm that can rebuild (`can_rebuild`)."""
 
-REBUILD_UNAVAILABLE_TEXT = "Needs the rebuild command, which arrives in T8.3"
+SERVICES_TOGGLE_AVAILABLE = True
+"""`ginn services on|off` is a CLI command (T8.3, FR-083). Each switch is offered only for the mode
+that it changes (`can_services_on`, `can_services_off`)."""
 
-SERVICES_TOGGLE_AVAILABLE = False
-"""The services switch waits for T8.3, which unblocks `ginn services on|off` (FR-083). Off until
-then, so both buttons stay disabled."""
-
-SERVICES_TOGGLE_UNAVAILABLE_TEXT = "Needs ginn services on|off, which arrives in T8.3"
 EXPORTS_UNKNOWN_TEXT = "not reported by the CLI yet"
 
 
@@ -72,13 +70,18 @@ def can_update(realm: RealmView) -> bool:
     return realm.state in ("stopped", "running")
 
 
+def can_rebuild(realm: RealmView) -> bool:
+    """A rebuild runs on a stopped or running realm, as `ginn rebuild` does (FR-021)."""
+    return realm.state in ("stopped", "running")
+
+
 def can_services_on(realm: RealmView) -> bool:
-    """Services on is offered only for a realm whose services are off, and only once T8.3 lands."""
+    """Services on is offered only for a realm whose services are off (FR-083)."""
     return SERVICES_TOGGLE_AVAILABLE and realm.services is False
 
 
 def can_services_off(realm: RealmView) -> bool:
-    """Services off is offered only for a realm whose services are on, and only once T8.3 lands."""
+    """Services off is offered only for a realm whose services are on (FR-083)."""
     return SERVICES_TOGGLE_AVAILABLE and realm.services is True
 
 

@@ -15,7 +15,7 @@ from ginn.__main__ import main
 from ginn.cli.commands import tier as tier_cmd
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions
-from ginn.errors import GinnError
+from ginn.errors import GinnError, warn
 from ginn.store.records import RealmRecord
 from tests.unit.realm_cli_support import World
 
@@ -98,6 +98,26 @@ def test_a_running_realm_reports_that_a_restart_is_required(
 
 
 @pytest.mark.fr("FR-066")
+def test_a_change_that_needs_a_new_container_warns_that_the_next_start_rebuilds(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The notice is written at change time, so the rebuild at the next start is not a surprise
+    (CL-19). The operation appends it to `warnings`, and the command prints it."""
+
+    def fake_set_tier(env: Any, name: RealmName, tier: Tier, **kwargs: Any) -> RealmRecord:
+        kwargs["warnings"].append(
+            warn("GINN-W-REBUILD-PENDING", realm="lab", change="the tier changed")
+        )
+        return _record(tier, restart=True)
+
+    monkeypatch.setattr(tier_cmd, "set_tier", fake_set_tier)
+    assert main(["tier", "lab", "development"]) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("GINN-W-REBUILD-PENDING: ")
+    assert "the next start rebuilds it into a new container, because the tier changed" in err
+
+
+@pytest.mark.fr("FR-066")
 def test_json_output_carries_the_tier_the_toggles_and_the_flag(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -117,11 +137,13 @@ def test_a_refused_change_prints_its_code_and_exits_with_the_catalogue_status(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def refuse(env: Any, name: RealmName, tier: Tier, **kwargs: Any) -> RealmRecord:
-        raise GinnError("GINN-E-NOT-SUPPORTED-YET", "realm 'lab' cannot be used yet: T8.3", "", 2)
+        raise GinnError(
+            "GINN-E-REALM-STATE", "realm 'lab' is failed; a tier needs it stopped", "", 4
+        )
 
     monkeypatch.setattr(tier_cmd, "set_tier", refuse)
-    assert main(["tier", "lab", "development"]) == 2
-    assert capsys.readouterr().err.startswith("GINN-E-NOT-SUPPORTED-YET")
+    assert main(["tier", "lab", "development"]) == 4
+    assert capsys.readouterr().err.startswith("GINN-E-REALM-STATE")
 
 
 @pytest.mark.fr("FR-060")

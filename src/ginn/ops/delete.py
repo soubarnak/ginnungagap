@@ -66,17 +66,17 @@ again at the first step, and every step is idempotent, so the same delete finish
 rest in place. A re-run without a purge keeps what is left, and the result reports it.
 
 Refusals. A record that DR-020 does not allow to delete (`creating`, `updating`, `rebuilding`) is
-refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A services-on realm
-has its runit service stopped (`sv down`) inside the locked body, after the state, the Realm Home
-and the record checks, and before the record moves to `deleting`. The lock is held across the sv
-call, so the supervised finish sees it and writes nothing (ADR-003, FR-081). The read-only precheck
-of refuse_before_supervisor runs before the locks. When no runsv supervises the realm, nothing
-restarts it, and the delete goes on with podman. A runsv that is proven gone is also passed over.
-Any other `sv` failure, and a timeout, are errors inside the journal, and the record does not
+refused with GINN-E-REALM-STATE, inside the journal, so the refusal is audited. A realm whose
+container is supervised (`services_at_create`, not the desired mode, which a pending change may have
+turned off) has its runit service stopped (`sv down`) inside the locked body, after the state, the
+Realm Home and the record checks, and before the record moves to `deleting`. The lock is held across
+the sv call, so the supervised finish sees it and writes nothing (ADR-003, FR-081). The read-only
+precheck of refuse_before_supervisor runs before the locks. When no runsv supervises the realm,
+nothing restarts it, and the delete goes on with podman. A runsv that is proven gone is also passed
+over. Any other `sv` failure, and a timeout, are errors inside the journal, and the record does not
 move. The state, the host acknowledgement, the journal and the realm lock are checked before the
-`sv` call, so a refused delete does not stop the container. An unknown name
-raises GINN-E-NO-SUCH-REALM before any
-write (FR-025).
+`sv` call, so a refused delete does not stop the container. An unknown name raises
+GINN-E-NO-SUCH-REALM before any write (FR-025).
 
 Running realms. The body stops the container with podman itself. It does not call
 ops/lifecycle.stop_realm, because that takes the realm lock, which this body already holds, and it
@@ -268,7 +268,7 @@ def delete_realm(
         "purge_declined": declined,
     }
     distro = current.settings.distro.value
-    if current.settings.services:
+    if current.services_at_create:
         refuse_before_supervisor(env, name, _DELETE_FROM, "delete")
     with image_lock(env.paths, distro, "delete"), mutating(env, "delete", name, params) as mutation:
         result = _delete(env, podman, name, purge, declined, hooks, mutation)
@@ -312,9 +312,11 @@ def _delete(
         _check_home(
             env, name, hooks
         )  # every refusal of the Realm Home comes before the record moves
-    if record.settings.services:
-        # sv down runs under the realm lock this body holds (ADR-003): the finish script sees the
-        # lock held by this delete and writes nothing, so runit does not restart the container.
+    if record.services_at_create:
+        # The container's mode, not the desired one: a pending services change leaves the container
+        # supervised until its rebuild (ADR-003). sv down runs under the realm lock this body holds,
+        # so the finish script sees the lock held by this delete and writes nothing, and runit
+        # does not restart the container.
         supervisor.stop_if_supervised(env.paths, name, hooks=hooks.supervisor)
     if record.state is not RealmState.DELETING:
         store.set_state(name, RealmState.DELETING)

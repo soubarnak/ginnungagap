@@ -63,6 +63,7 @@ COMMAND_MODULES: tuple[str, ...] = (
     "install",
     "remove",
     "update",
+    "rebuild",
     "tier",
     "perms",
     "services",

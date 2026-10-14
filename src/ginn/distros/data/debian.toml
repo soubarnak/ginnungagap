@@ -24,6 +24,8 @@ stale_metadata_regex = 'Unable to fetch some archives, maybe run apt-get update|
 # with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
 # failure (ADR-011). Runtime text, not verified until M4.
 network_error_regex = 'Temporary failure resolving|Could not resolve|Connection timed out|Connection failed|Connection refused|Connection reset by peer'
+# FR-022 AC-1: apt's refusal of a name that no index lists. Runtime text, not verified until M4.
+missing_package_regex = 'Unable to locate package|has no installation candidate'
 # ADR-011: apt-get update refreshes the package lists only and never upgrades, so these verbs run it
 # first. remove and list-explicit need no lists.
 refresh_before = ["install", "upgrade", "check-updates", "resolve", "estimate"]

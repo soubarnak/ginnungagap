@@ -37,7 +37,7 @@ from ginn.gui.viewmodels.dashboard import Badge, DashboardViewModel, badge_for
 from ginn.gui.viewmodels.health import ACKNOWLEDGE_ARGS, HealthBadge, HealthViewModel
 from ginn.gui.viewmodels.labels import failure_of, format_bytes
 from ginn.gui.viewmodels.permissions import PermissionsEditor, Share
-from ginn.gui.viewmodels.wizard import CreateWizard
+from ginn.gui.viewmodels.wizard import SERVICES_CONFLICT_TEXT, CreateWizard
 
 
 def _realm(name: str, **fields: object) -> RealmView:
@@ -309,12 +309,11 @@ def test_create_args_are_the_cli_create_argv_with_the_defaults() -> None:
 
 
 @pytest.mark.fr("FR-101")
-def test_create_args_carry_the_chosen_tier_services_and_packages() -> None:
+def test_create_args_carry_the_chosen_tier_and_packages() -> None:
     wizard = CreateWizard(available())
     wizard.choose_distro("debian")
     wizard.set_name("dev")
     wizard.set_tier(Tier.DEVELOPMENT)
-    wizard.set_services(on=True)
     assert wizard.add_package("htop") is None
     assert wizard.add_package("curl") is None
 
@@ -329,12 +328,61 @@ def test_create_args_carry_the_chosen_tier_services_and_packages() -> None:
         "--tier",
         "development",
         "--services",
-        "on",
+        "off",
         "--with",
         "htop",
         "curl",
     )
     _cli_parses(args)
+
+
+@pytest.mark.fr("FR-101")
+def test_a_services_on_create_without_packages_carries_the_mode_and_no_with() -> None:
+    wizard = CreateWizard(available())
+    wizard.choose_distro("debian")
+    wizard.set_services(on=True)
+
+    args = wizard.create_args()
+
+    assert args[args.index("--services") + 1] == "on"
+    assert "--with" not in args
+    assert wizard.services_conflict() is None
+    _cli_parses(args)
+
+
+@pytest.mark.fr("FR-101")
+def test_a_services_on_create_with_a_package_is_refused_before_any_argv() -> None:
+    """ADR-003: the CLI cannot start a services-on container, so the create is not sent."""
+    wizard = CreateWizard(available())
+    wizard.choose_distro("debian")
+    wizard.set_services(on=True)
+    assert wizard.add_package("htop") is None
+
+    assert wizard.services_conflict() == SERVICES_CONFLICT_TEXT
+    assert wizard.can_create() is False
+    with pytest.raises(ValueError):
+        wizard.create_args()
+
+    wizard.remove_package("htop")
+    assert wizard.services_conflict() is None
+    assert wizard.can_create() is True
+
+
+@pytest.mark.fr("FR-101")
+def test_a_services_on_kali_create_with_the_everything_set_is_refused_until_it_is_off() -> None:
+    wizard = CreateWizard(available())
+    wizard.choose_distro("kali")
+    wizard.set_services(on=True)
+    wizard.set_everything(True)
+
+    assert wizard.services_conflict() == SERVICES_CONFLICT_TEXT
+    assert wizard.can_create() is False
+    with pytest.raises(ValueError):
+        wizard.create_args()
+
+    wizard.set_everything(False)
+    assert wizard.can_create() is True
+    assert "--everything" not in wizard.create_args()
 
 
 @pytest.mark.fr("NFR-SEC-005")

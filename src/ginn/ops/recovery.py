@@ -66,12 +66,17 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
   its `packages` param, in the same record write (FR-040, FR-041, DR-007). An AUR install (param
   `aur`) writes its step `removed` after its build-only set is gone, and its entries are `aur`
   (FR-043). An entry at any earlier step leaves the manifest as it was. The native change may
-  already have happened there, and no journal step says how far it got (residual, T8.3).
+  already have happened there, and no journal step says how far it got. The rebuild replays the
+  manifest as it stands, so this residual stays open.
 - sync, export and unexport change only host files, never a realm record (FR-044, FR-047). They are
   recovered with no state write, whatever the record reads, so a deleting or broken realm is not
   blocked by a launcher. The next run of the same operation reconciles the host files.
-- rebuild: DR-034 keeps the old root until the atomic swap, so a `rebuilding` record returns to its
-  previous state (DR-020). Other records are matched to podman, as above.
+- rebuild (ops/rebuild.py, DR-034). Until the atomic swap the record names the old generation gN,
+  and a `rebuilding` record returns to its previous state (DR-020). The new container gN+1 is an
+  orphan then, so it is stopped and removed by its generation label. A services-on orphan runs under
+  its runit service, so runsv is told to stop it first (ADR-003). After the swap the record names
+  gN+1, so the settled state comes from podman, and gN is removed by its label, best effort.
+  Other records are matched to podman, as above.
 - update: `updating` becomes `broken` (DR-020, FR-120). A record already `broken` is settled as
   broken, with no state write. Other records are matched to podman, as above.
 - delete: a `deleting` record is left deleting, and so is a `broken` record. Both states are
@@ -101,6 +106,7 @@ skipped when the record already has its target state, and a second podman stop i
 because a container that is already stopped is not running.
 """
 
+import contextlib
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Final
@@ -125,10 +131,14 @@ from ginn.packages.manager import MAX_OUTPUT_CHARS, parse_names, shown
 from ginn.packages.manifest import installed, removed
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
+from ginn.services.runit_user import remove_service, service_dir
+from ginn.services.supervise import signal_runsv_down
 from ginn.store._time import utc_from_epoch
 from ginn.store.audit import AuditEntry, AuditIndex
 from ginn.store.journal import PARAMS_OVERFLOW, JournalEntry, JournalFile, damaged_reason
 from ginn.store.locks import realm_lock
+from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 
 OP_CREATE: Final = "create"
@@ -368,7 +378,7 @@ def _settle_locked(
 
     store = RealmStore(env.paths, env.clock)
     try:
-        decision = _decide(podman, store, name, entry)
+        decision = _decide(env.paths, podman, store, name, entry)
     except GinnError as err:
         return _outcome(current, OUTCOME_BLOCKED, f"{err.code}: {err.message}", warnings=notes)
     if decision.outcome == OUTCOME_BLOCKED:
@@ -674,6 +684,7 @@ def _write_settlement(
 
 
 def _decide(
+    paths: OwnedPaths,
     podman: Podman,
     store: RealmStore,
     name: RealmName,
@@ -692,7 +703,7 @@ def _decide(
     if entry.op == OP_DELETE:
         return _decide_delete(podman, record)
     if entry.op == OP_REBUILD:
-        return _decide_rebuild(podman, record)
+        return _decide_rebuild(paths, podman, record, entry)
     if entry.op == OP_UPDATE:
         return _decide_update(podman, record)
     if entry.op == OP_START:
@@ -733,19 +744,102 @@ def _decide_update(podman: Podman, record: RealmRecord) -> _Decision:
     return _impossible(record, OP_UPDATE)
 
 
-def _decide_rebuild(podman: Podman, record: RealmRecord) -> _Decision:
+def _decide_rebuild(
+    paths: OwnedPaths, podman: Podman, record: RealmRecord, entry: JournalEntry
+) -> _Decision:
+    """The verdict for an interrupted rebuild (ops/rebuild.py, DR-034).
+
+    Before the swap the record names gN and reads `rebuilding`. Then gN+1 is an orphan, and it is
+    removed before the record returns to its previous state. The rebuild stops gN before it starts,
+    so its previous state is `stopped`. A services-on orphan runs under the realm's runit service,
+    which restarts a container that exits while runsv still wants it up. So runsv is told to stop
+    it first (`d`, which does not wait), and the removal follows. After the swap the record names
+    gN+1, and the journal says so (`new_generation` is the record's generation). Then gN is the
+    orphan, removed best effort.
+    """
     if record.state is RealmState.REBUILDING:
         previous = record.previous_state
         if previous is None:
             return _Decision(OUTCOME_BLOCKED, None, "a rebuilding record has no previous state")
+        try:
+            if record.settings.services or not record.services_at_create:
+                signal_runsv_down(service_dir(paths, record.name))
+            remove_generation(podman, record.name, record.generation + 1, keep=record.container_id)
+            if not record.services_at_create:
+                # The rebuild wrote the runit directory of a services-on gN+1 that gN does not have.
+                remove_service(paths, record.name)
+        except OSError as exc:
+            return _runit_blocked(exc)
         reason = (
             f"interrupted rebuild: returned to {previous.value}; the old root stays intact until "
             "the atomic swap (DR-034)"
         )
         return _move(record, previous, OUTCOME_RECOVERED, reason)
     if record.state in _BY_PODMAN_FROM:
+        swapped = entry.params.get("new_generation") == record.generation
+        if swapped:
+            with contextlib.suppress(GinnError):
+                remove_below(podman, record.name, record.generation, keep=record.container_id)
+            if not record.services_at_create:
+                # The swap made the realm services-off, and the crash came before the rebuild
+                # removed the directory of gN (ADR-003). The container's mode is what counts here.
+                try:
+                    signal_runsv_down(service_dir(paths, record.name))
+                    remove_service(paths, record.name)
+                except OSError as exc:
+                    return _runit_blocked(exc)
         return _decide_by_podman(podman, record, OP_REBUILD)
     return _impossible(record, OP_REBUILD)
+
+
+def _runit_blocked(exc: OSError) -> _Decision:
+    """The verdict when the runit service of an interrupted rebuild cannot be stopped or removed.
+
+    The journal entry is kept and the record is not moved, so the next recovery tries again. An
+    OSError is not a GinnError, so it is reported as a blocked outcome here, as the other failures
+    of a recovery are (`_settle_locked`).
+    """
+    reason = f"interrupted rebuild: the runit service could not be stopped or removed ({exc})"
+    return _Decision(OUTCOME_BLOCKED, None, f"{reason}; the entry is kept")
+
+
+def remove_below(podman: Podman, name: RealmName, generation: int, *, keep: str | None) -> int:
+    """Stop and remove every container of realm `name` whose generation is below `generation`.
+
+    The containers are found by the realm label, and the generation is read from each one's
+    generation label (runtime/spec.py). `keep` is never removed. A container without a generation
+    label is not one of the realm's roots, so it is left. Return the count removed. A rebuild uses
+    this after the swap, so a generation whose removal failed earlier is swept too (DR-034).
+    """
+    targets = []
+    for info in podman.ps({LABEL_REALM: name.value}):
+        raw = info.labels.get(LABEL_GENERATION)
+        if info.id == keep or raw is None or not raw.isdecimal():
+            continue
+        if int(raw) < generation:
+            targets.append(info)
+    for info in targets:
+        with contextlib.suppress(GinnError):
+            podman.stop(info.id, STOP_NOW_S)
+        podman.rm(info.id, force=True)
+    return len(targets)
+
+
+def remove_generation(podman: Podman, name: RealmName, generation: int, *, keep: str | None) -> int:
+    """Stop and remove the containers of one generation of realm `name`, and return their count.
+
+    The containers are found by the realm and generation labels (runtime/spec.py), not by an id.
+    `keep` is the id of the container that the record names now, which is never removed, even if
+    the label filter lists it. The caller passes the generation of an orphan, not the record's. A
+    stop waits for no time, as recovery's own stop does.
+    """
+    labels = {LABEL_REALM: name.value, LABEL_GENERATION: str(generation)}
+    targets = [info for info in podman.ps(labels) if info.id != keep]
+    for info in targets:
+        with contextlib.suppress(GinnError):
+            podman.stop(info.id, STOP_NOW_S)
+        podman.rm(info.id, force=True)
+    return len(targets)
 
 
 def _decide_delete(podman: Podman, record: RealmRecord) -> _Decision:

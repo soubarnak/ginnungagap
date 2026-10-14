@@ -29,6 +29,7 @@ from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make
 from ginn.errors import Warning as GinnWarning
 from ginn.ops import lifecycle
+from ginn.ops import rebuild as rebuild_module
 from ginn.ops._mutating import OpEnv, mutating
 from ginn.ops.lifecycle import (
     HostUser,
@@ -961,11 +962,37 @@ def test_a_development_realm_starts_with_the_container_it_was_made_with(
     assert record.settings.tier is Tier.DEVELOPMENT
 
 
+def _rebuilt_before_start(
+    monkeypatch: pytest.MonkeyPatch, env: OpEnv, fake: LifecyclePodman
+) -> list[tuple[str, list[Any]]]:
+    """Stub the rebuild a stale start runs (ops/rebuild.py, FR-066). The stub saves the record it
+    returns, as the swap does, and it records the podman calls that were made before it ran.
+
+    The rebuild's own tests drive it on the create fake. Here only the start's order is checked.
+    """
+    store = RealmStore(env.paths)
+    seen: list[tuple[str, list[Any]]] = []
+
+    def rebuild(env_: Any, podman: Any, name: RealmName, **kwargs: Any) -> RealmRecord:
+        seen.append((name.value, list(fake.calls)))
+        fresh = replace(store.load(name), created_options=[], kvm_at_create=False)
+        store.save(fresh)
+        return fresh
+
+    monkeypatch.setattr(rebuild_module, "rebuild_for_start", rebuild)
+    return seen
+
+
 @pytest.mark.fr("FR-066")
-def test_a_start_whose_options_differ_from_the_container_is_refused_before_any_write(
-    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+def test_a_start_whose_options_differ_from_the_container_rebuilds_before_it_starts(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A Basic record that names nested options is not started: its container lacks them (T8.3)."""
+    """A Basic record that names nested options is not started with its old container. The
+    rebuild comes first, before any podman call, and the start runs on the rebuilt generation."""
     make_realm(
         env,
         fake,
@@ -974,14 +1001,107 @@ def test_a_start_whose_options_differ_from_the_container_is_refused_before_any_w
         running=False,
         created_options=["device=/dev/fuse"],
     )
+    fake.calls.clear()
+    seen = _rebuilt_before_start(monkeypatch, env, fake)
 
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
 
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert fake.calls == []
-    assert list(env.audit.read()) == []
-    assert env.journal.pending() == []
+    assert seen == [("lab", [])]
+    assert record.state is RealmState.RUNNING
+    assert record.created_options == []
+
+
+@pytest.mark.fr("FR-066")
+@pytest.mark.fr("DR-020")
+def test_a_services_off_realm_running_with_no_container_is_settled_as_a_crash_first(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending change on a realm that reads running with no container is not refused with
+    GINN-E-REALM-STATE. The crash is recorded first (running to failed, DR-020), the lazy rebuild
+    then stops the failed realm and rebuilds it, and the start runs the new generation."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.RUNNING,
+        running=False,
+        created_options=["device=/dev/fuse"],
+    )
+    fake.calls.clear()
+    seen = _rebuilt_before_start(monkeypatch, env, fake)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert len(seen) == 1, "the stale start rebuilds, and does not refuse the record"
+    assert record.state is RealmState.RUNNING
+    assert audited_ops(env) == ["crash", "stop", "start"]
+    (crash,) = audit_of(env, "crash")
+    assert crash.outcome == "ok"
+
+
+@pytest.mark.fr("FR-063")
+@pytest.mark.fr("NFR-SEC-002")
+def test_a_start_with_a_kvm_toggle_the_container_lacks_rebuilds_first(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kvm device is fixed at create. A Custom realm whose toggle asks for it, on a host that
+    had /dev/kvm at create, is rebuilt at its next start (ADR-006)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.CUSTOM,
+        permissions=Permissions(toggles=BASIC_TOGGLES | {Toggle.KVM}),
+        created_options=[],
+        kvm_at_create=True,
+    )
+    fake.calls.clear()
+    seen = _rebuilt_before_start(monkeypatch, env, fake)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert seen == [("lab", [])]
+    assert record.state is RealmState.RUNNING
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+def test_a_start_with_a_gpu_toggle_the_container_was_made_without_rebuilds_first(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The GPU device is fixed at create, so a stored toggle that differs from the flag makes the
+    start rebuild the realm first (T8.3 is done, FR-066)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        tier=Tier.CUSTOM,
+        permissions=Permissions(toggles=BASIC_TOGGLES - {Toggle.GPU}),
+        gpu_at_create=True,
+    )
+    fake.calls.clear()
+    seen = _rebuilt_before_start(monkeypatch, env, fake)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert seen == [("lab", [])]
+    assert record.state is RealmState.RUNNING
 
 
 @pytest.mark.fr("FR-016")
@@ -1689,53 +1809,6 @@ def test_a_host_change_during_a_stop_is_handed_to_the_caller_after_the_stop(
 
     assert record.state is RealmState.STOPPED
     assert [notice.code for notice in notices] == ["GINN-W-HOST-CHANGED"]
-
-
-@pytest.mark.fr("NFR-SEC-002")
-def test_a_start_refuses_a_kvm_toggle_the_container_was_made_without(
-    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
-) -> None:
-    """The stored probe decides: the host had /dev/kvm, and the container has no kvm option."""
-    make_realm(
-        env,
-        fake,
-        "lab",
-        RealmState.STOPPED,
-        running=False,
-        tier=Tier.CUSTOM,
-        permissions=Permissions(
-            toggles=frozenset({Toggle.KVM, Toggle.DOWNLOADS, Toggle.MOUNT_ROOTS})
-        ),
-        created_options=[],
-        kvm_at_create=True,
-    )
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert fake.calls == []
-
-
-@pytest.mark.fr("FR-061")
-@pytest.mark.fr("FR-063")
-def test_a_start_refuses_a_gpu_toggle_the_container_was_made_without(
-    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
-) -> None:
-    """The GPU device is fixed at create, so a stored toggle that differs from the flag is refused
-    at start, before any write or podman call (T8.3)."""
-    make_realm(
-        env,
-        fake,
-        "lab",
-        RealmState.STOPPED,
-        running=False,
-        tier=Tier.CUSTOM,
-        permissions=Permissions(toggles=BASIC_TOGGLES - {Toggle.GPU}),
-        gpu_at_create=True,
-    )
-    with pytest.raises(GinnError, match="T8.3") as caught:
-        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert fake.calls == []
 
 
 @pytest.mark.fr("FR-067")
