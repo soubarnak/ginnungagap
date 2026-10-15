@@ -99,14 +99,6 @@ _TTYS: list[Tty] = []
 _SHARES: list[Path] = []
 _EMPTY_RUNTIME: list[Path] = []
 _FACTS: dict[str, Any] = {}
-T716_2 = (
-    "T716-2: the --root token kill cannot read the environ of a container-root process, so it finds "
-    "no tokened process, releases the lock early and writes no orphan marker"
-)
-
-
-class KnownGapT716Two(AssertionError):
-    """The failure of T716-2 (the --root token kill). Only the --root item raises it."""
 
 
 def T716(gate: str, line: str) -> None:
@@ -1057,22 +1049,15 @@ def test_g7_env_i_escapes_the_token_kill(launcher: Path, paths: OwnedPaths) -> N
 
 @pytest.mark.fr("FR-123")
 @pytest.mark.fr("FR-124")
-@pytest.mark.xfail(strict=True, reason=T716_2, raises=KnownGapT716Two)
 def test_g7_root_eof_kill_is_t716_2(launcher: Path, paths: OwnedPaths) -> None:
     """EOF before EXIT for `--root`: the kill must reach the container-root sleep, release the lock once
-    it is gone, and leave no orphan marker. Strict xfail on T716-2: the environ of a container-root
-    process is unreadable, so the sweep finds no tokened process and returns at once."""
+    it is gone, and leave no orphan marker. The token kill joins the rootless pause namespace first, so
+    the container-root environ is read (T716-2, fixed by T7.29, ADR-014)."""
     name = PREFIX + "g7r"
     with running_realm(launcher, name):
         root = measure_eof_kill(
             launcher, paths, name, "root", ROOT, ["sleep", "300"], b"sleep\x00300"
         )
-        if not (root["target_gone"] and root["lock_released"]):
-            raise KnownGapT716Two(
-                f"{T716_2}: the sleep survived ({root['target_gone_s']} s, target gone {root['target_gone']}), "
-                f"the lock was released after {root['lock_released_s']} s, environ probe "
-                f"{root['environ_probe_before_kill']}"
-            )
         assert root["target_gone"] and root["lock_released"], root
 
 
