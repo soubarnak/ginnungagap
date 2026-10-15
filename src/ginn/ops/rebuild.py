@@ -114,7 +114,9 @@ from ginn.ops.disk import StatVfs
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
+    RunUserState,
     _settle_run_user,
+    run_user_gone_error,
     run_user_pending_note,
     start_realm,
     start_through_sv,
@@ -437,17 +439,26 @@ class _Rebuild(_Create):
 
         A services-on gN+1 is started by runit, and its tmpfiles.d drop-in may not have chowned
         `/run/user/<uid>` yet. The attach mkdirs under it as the realm user, so the wait comes
-        first. It is the start's own wait (lifecycle._settle_run_user), bounded the same way. The
-        record it is given is gN+1's view, since its exec target follows the services mode of gN+1.
-        A services-off gN+1 has no wait, and its attach is the create's.
+        first. It is the start's own wait (lifecycle._settle_run_user), bounded the same way, and
+        a gN+1 that stops in the wait fails here as it does after start (FR-081). The record it is
+        given is gN+1's view, since its exec target follows the services mode of gN+1. A
+        services-off gN+1 has no wait, and its attach is the create's.
         """
         run_user_pending = False
         if self._plan.spec.services:
             new_view = replace(self._current(), services_at_create=True)
-            owned = _settle_run_user(
-                self._podman, self._container_id(), self._request.uid, new_view, self._lifecycle
+            cid = self._container_id()
+            run_user = _settle_run_user(
+                self._podman, cid, self._request.uid, new_view, self._lifecycle, self._pid
             )
-            run_user_pending = not owned
+            if run_user is RunUserState.GONE:
+                raise run_user_gone_error(
+                    self._podman,
+                    cid,
+                    self._request.name,
+                    detail="the rebuilt realm is not running after start",
+                )
+            run_user_pending = run_user is RunUserState.NOT_YET
         try:
             super()._attach()
         except GinnError as err:

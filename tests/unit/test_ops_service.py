@@ -1175,3 +1175,28 @@ def test_the_autostart_refusal_names_the_states_it_accepts_without_the_updating_
     assert caught.value.code == "GINN-E-REALM-STATE"
     assert "stopped, running or failed" in caught.value.message
     assert "updating" not in caught.value.message
+
+
+@pytest.mark.fr("AS-028")
+@pytest.mark.fr("FR-081")
+def test_a_start_that_stops_its_container_exits_70_and_counts_as_a_crash_to_the_give_up(
+    world: World,
+    env,
+    helper: Path,
+    sleeps: list[float],
+    clock: FakeClock,
+    reader_of_control: int,
+) -> None:  # type: ignore[no-untyped-def]
+    """A supervised start that fails with GINN-E-INTERNAL ends `_service-run` with exit 70, not
+    ATTACH-FAILED's 1. With no `down` mark, any non-zero end is a crash, so five of them in 60 s
+    give the realm up, as five ATTACH-FAILED exits do (FR-081, AS-028)."""
+    services_realm(world, RealmState.RUNNING, running=True)
+    hooks = hooks_for(helper, sleeps)
+    outcomes = []
+    for offset in (0.0, 10.0, 20.0, 30.0, 40.0):
+        clock.set(T0 + offset)
+        outcomes.append(finish_service(env, REALM, exit_code=70, signal_no=0, hooks=hooks))
+
+    assert outcomes == [ServiceExit.RESTART] * 4 + [ServiceExit.GAVE_UP]
+    assert stored(world).state is RealmState.FAILED
+    assert (service_dir(world.paths, REALM) / DOWN).is_file()

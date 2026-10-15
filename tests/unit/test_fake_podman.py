@@ -68,10 +68,25 @@ def test_container_moves_from_created_to_running_to_exited() -> None:
 
 
 @pytest.mark.fr("NFR-061")
+def test_an_exec_on_a_created_container_returns_255_as_the_host_podman_does() -> None:
+    fake = FakePodman()
+    container_id = fake.create(spec())
+    result = fake.exec(container_id, ["true"], target=DIRECT_TARGET)
+    assert result.exit_code == 255
+    assert "container state improper" in result.stderr
+
+
+@pytest.mark.fr("NFR-061")
+def test_an_exec_on_a_created_container_raises_when_the_adapter_would_raise() -> None:
+    fake = FakePodman(stopped_exec_exit=125)
+    container_id = fake.create(spec())
+    expect_code("GINN-E-INTERNAL", lambda: fake.exec(container_id, ["true"], target=DIRECT_TARGET))
+
+
+@pytest.mark.fr("NFR-061")
 def test_state_machine_rejects_invalid_transitions() -> None:
     fake = FakePodman()
     container_id = fake.create(spec())
-    expect_code("GINN-E-INTERNAL", lambda: fake.exec(container_id, ["true"], target=DIRECT_TARGET))
     fake.start(container_id)
     expect_code("GINN-E-INTERNAL", lambda: fake.start(container_id))
     expect_code("GINN-E-INTERNAL", lambda: fake.rm(container_id, force=False))

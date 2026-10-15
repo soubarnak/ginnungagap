@@ -197,7 +197,7 @@ def rebuild(
 
 
 RUN_USER_STAT = ("stat", "-c", "%u", "--", f"/run/user/{UID}")
-"""The argv that `run_user_owned` runs for the realm's runtime dir (T7.28)."""
+"""The argv that `run_user_state` runs for the realm's runtime dir (T7.28)."""
 
 
 def owner_checks(fake: ScriptedPodman) -> int:
@@ -729,6 +729,62 @@ def test_a_services_on_rebuild_whose_attach_fails_after_the_wait_carries_the_pen
         "GINN-W-RUN-USER-PENDING: the runtime directory of realm 'debian' was not yet owned by the "
         "realm user when its wait ended"
     ]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_rebuild_whose_container_stops_in_the_owner_wait_fails_at_once(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-081: the new generation's init is killed once the rebuild has read the owner. A stopped
+    container never becomes owned, so the wait ends at the next read, and the rebuild fails before
+    its attach, with the same error as a container that is not running after start. No pending note
+    is due (T7.28 follow-up)."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=10.0, poll_s=0.2
+    )
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    polled_sleep = lifecycle.supervisor.sleep
+    killed: list[str] = []
+
+    def kill_in_the_wait(seconds: float) -> None:
+        if owner_checks(fake) >= 1 and not killed:
+            for cid in generation_of(fake, 2):
+                fake.stop(cid, 0)
+                killed.append(cid)
+        polled_sleep(seconds)
+
+    lifecycle = replace(lifecycle, supervisor=replace(lifecycle.supervisor, sleep=kill_in_the_wait))
+    attached: list[bool] = []
+    real_attach = create_ops.attach_at_start
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        attached.append(True)
+        return real_attach(*args, **kwargs)
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    with pytest.raises(GinnError) as caught:
+        rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert len(killed) == 1
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["detail"] == "the rebuilt realm is not running after start"
+    assert caught.value.details["state"] == "exited"
+    assert owner_checks(fake) == 2, "one read before the kill, one after it, then no more"
+    assert attached == []
+    notes = getattr(caught.value, "__notes__", [])
+    assert not [n for n in notes if "GINN-W-RUN-USER-PENDING" in n]
 
 
 @pytest.mark.fr("FR-021")

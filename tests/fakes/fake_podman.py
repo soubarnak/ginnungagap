@@ -19,6 +19,7 @@ from typing import Final, NamedTuple
 from ginn.errors import GinnError, make
 from ginn.podman.adapter import (
     PATH_NOT_FOUND_REASON,
+    PODMAN_ERROR_EXIT,
     CreateSpec,
     ExecTarget,
     RetryHook,
@@ -149,6 +150,11 @@ class FakePodman:
     fail_pull_with: str | None = None
     fail_pull_times: int | None = None
     fail_exec_with: str | None = None
+    stopped_exec_exit: int = 255
+    """The exit status of an exec on a container that is not running. The host's podman 5.8.8
+    answers 255 with "container state improper", and the adapter raises only on 125
+    (PODMAN_ERROR_EXIT), so 255 comes back as a result. Set 125 to model the raising case
+    (FR-081, T7.16 section 11.8)."""
     fail_ops: dict[str, str] = field(default_factory=dict)
     pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
@@ -363,7 +369,14 @@ class FakePodman:
         self._record(op, container_id, tuple(argv))
         container = self._container(container_id)
         if container.state is not ContainerState.RUNNING:
-            raise make("GINN-E-INTERNAL")
+            if self.stopped_exec_exit == PODMAN_ERROR_EXIT:
+                raise make("GINN-E-INTERNAL")
+            return ExecResult(
+                self.stopped_exec_exit,
+                "",
+                "Error: can only create exec sessions on running containers: "
+                "container state improper\n",
+            )
         if self.fail_exec_with is not None:
             raise _error(self.fail_exec_with, container.image)
         queued = self.exec_sequences.get(tuple(argv))
