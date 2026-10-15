@@ -97,6 +97,8 @@ class _Container:
     """The `--passwd-entry` podman writes for the keep-id user. `getent passwd` reads it (T4.9b)."""
     copied: dict[str, tuple[bytes, int]] = field(default_factory=dict)
     """The files `cp_into` put in the container: destination to (content, mode bits)."""
+    image_id: str = ""
+    """The ID of the image the container was created from, fixed at create as podman fixes it."""
 
 
 def _cat(files: Mapping[str, bytes], path: str) -> ExecResult:
@@ -167,6 +169,8 @@ class FakePodman:
     log_text: dict[str, str] = field(default_factory=dict)
     images: dict[str, ImageInfo] = field(default_factory=dict)
     containers: dict[str, _Container] = field(default_factory=dict)
+    create_specs: list[CreateSpec] = field(default_factory=list)
+    """Every spec `create` accepted, in order. The argv of a create is what the tests check."""
     calls: list[FakeCall] = field(default_factory=list)
     exec_users: list[str | None] = field(default_factory=list)
     exec_calls: list[ExecCall] = field(default_factory=list)
@@ -281,27 +285,48 @@ class FakePodman:
         }
 
     def rmi(self, ref: str) -> None:
+        """Remove one image, as podman's rmi does (ADR-015 Decision 13).
+
+        A name untags only that name, and the image goes when no name holds it. An ID is refused
+        while more than one name holds it: podman does not remove such an image by ID, and the
+        adapter never passes force. The images are keyed by name, so one key is one name.
+        """
         self._record("rmi", ref)
         self._take_op_failure("rmi")
-        if self.images.pop(ref, None) is None:
+        if ref in self.images:
+            del self.images[ref]
+            return
+        found = self._find_image(ref)
+        if found is None:
             raise make("GINN-E-INTERNAL")
+        names = [name for name, image in self.images.items() if image.id == found.id]
+        if len(names) > 1:
+            err = make("GINN-E-INTERNAL")
+            err.details["reason"] = "image is referenced in multiple repositories"
+            raise err
+        for name in names:
+            del self.images[name]
 
     def create(self, spec: CreateSpec) -> str:
         self._record("create", spec.name)
         self._take_op_failure("create")
         spec.to_argv()  # validates the spec, including the privileged refusal (NFR-SEC-001)
+        self.create_specs.append(spec)
         if spec.image_id is not None:
             self._image_by_ref(spec.image_id)  # podman refuses an image ID it does not hold
         if any(c.name == spec.name for c in self.containers.values()):
             raise make("GINN-E-INTERNAL")
         container_id = f"{self._next:064x}"
         self._next += 1
+        source = spec.image_id if spec.image_id is not None else spec.image_digest_ref
+        found = self._find_image(source)
         self.containers[container_id] = _Container(
             id=container_id,
             name=spec.name,
-            image=spec.image_id if spec.image_id is not None else spec.image_digest_ref,
+            image=source,
             labels=dict(spec.labels),
             passwd_entry=spec.passwd_entry,
+            image_id=found.id if found is not None else "",
         )
         return container_id
 
@@ -333,6 +358,7 @@ class FakePodman:
 
     def _info_for(self, container: _Container) -> ContainerInfo:
         return ContainerInfo(
+            image_id=container.image_id,
             id=container.id,
             name=container.name,
             image=container.image,

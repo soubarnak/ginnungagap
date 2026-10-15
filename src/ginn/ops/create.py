@@ -111,11 +111,12 @@ from ginn.ops._rollback import Rollback
 from ginn.ops.disk import check_free_paths, estimate_required
 from ginn.ops.estimate import measure_everything
 from ginn.ops.images import image_names, uses_image
+from ginn.ops.provision import check_init
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
-from ginn.podman.adapter import PATH_NOT_FOUND_REASON, ExecTarget, Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
     AttachResult,
@@ -126,7 +127,6 @@ from ginn.runtime.attach import (
 )
 from ginn.runtime.mounts import attach_plan
 from ginn.runtime.spec import (
-    INIT_PATH,
     MACHINE_ID_PATH,
     RUN_USER_TMPFILES_PATH,
     create_spec,
@@ -409,36 +409,17 @@ class _Create:
         (ADR-003). The rebuild inherits this, so a rebuilt generation gets the same checks. A
         failure is a GinnError, so the create or the rebuild is rolled back.
         """
-        self._check_init(cid)
+        check_init(
+            self._podman,
+            self._env.paths,
+            cid,
+            image=self._plan.spec.image,
+            realm=self._request.name.value,
+        )
         machine_id = self._current().machine_id or new_machine_id()
         self._copy_machine_id(cid, machine_id)
         self._copy_run_user_tmpfiles(cid)
         self._update(machine_id=machine_id)
-
-    def _check_init(self, cid: str) -> None:
-        """Refuse a services-on image that has no /sbin/init, with GINN-E-NO-INIT (F3, FR-080).
-
-        The check copies `/sbin/init` out of the created container into a scratch directory under
-        the runtime root. podman follows a link in the source, so a link to systemd passes, and a
-        missing path fails with podman's not-found reason. That reason is the only one this check
-        takes for an absent init. Any other copy failure stays GINN-E-INTERNAL. A created container
-        is read here, not started, so nothing runs in it. The scratch copy is removed on exit.
-        """
-        try:
-            with scratch_dir(self._env.paths) as scratch:
-                try:
-                    self._podman.cp_from(cid, INIT_PATH, scratch / "init")
-                except GinnError as err:
-                    if err.details.get("reason") != PATH_NOT_FOUND_REASON:
-                        raise
-                    raise make(
-                        "GINN-E-NO-INIT",
-                        image=self._plan.spec.image,
-                        realm=self._request.name.value,
-                    ) from err
-        except OSError as exc:
-            # A failed scratch directory is a GinnError, so run_journaled rolls the create back.
-            raise _scratch_failure(exc) from exc
 
     def _copy_machine_id(self, cid: str, machine_id: str) -> None:
         """Write the realm's machine-id into the container with `podman cp` (ADR-007, F6).

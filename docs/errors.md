@@ -12,11 +12,11 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | Exit | Meaning |
 |---|---|
 | 0 | success. `GINN-W-*` warnings also keep 0: they are notices, not exceptions. |
-| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT, GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST |
+| 1 | operational failure: GINN-E-PKG-MANAGER, GINN-E-DOCTOR-FAILED, GINN-E-ATTACH-FAILED, GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT, GINN-E-REALM-BOOT, GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST |
 | 2 | input validation: usage, names, options, paths |
 | 3 | not found: GINN-E-NO-SUCH-REALM |
-| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM) |
-| 65 | data error (EX_DATAERR): image or package signature not verified |
+| 4 | conflict with existing state: name taken, undo refused, unacknowledged host change, interrupted operation not yet recovered, a realm in a state its verb does not allow (GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM), an init entry that the manifest refuses to remove (GINN-E-PKG-PROTECTED) |
+| 65 | data error (EX_DATAERR): image or package signature not verified, or a derived image that could not be built or does not hold its recorded ID (GINN-E-IMAGE-DERIVED) |
 | 69 | network failure |
 | 70 | internal error (EX_SOFTWARE) |
 | 73 | not enough disk space |
@@ -43,6 +43,7 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-HOST-DEVICE` | 1 | the host has no {device}, which {feature} needs | load the kernel module that provides the device, then retry the create; ginn does not make a nested-container realm without it | FR-062 AC-3, ADR-006 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-NOT-SET-UP` | 77 | runtime directory {path} does not exist | run 'ginn doctor'; if Host Setup has not run, run 'sudo ginn host-setup --user &lt;name&gt;'; otherwise check 'sudo sv status ginn-&lt;user&gt;' | DR-010; ADR-004 (ginn-defined; not an SRS code) |
 | `GINN-E-HOST-UNACKED` | 4 | host integrity warning not acknowledged; changed paths: {paths} | review the listed paths, then run 'ginn integrity --ack' and retry the command | FR-006 AC-1 |
+| `GINN-E-IMAGE-DERIVED` | 65 | the derived image of realm '{realm}' could not be built, or does not hold its recorded ID: {detail} | the build is rolled back or left to recovery: retry the create, or run 'ginn rebuild {realm}' for an existing realm | ADR-015 Decision 9, DR-040, NFR-SEC-004 (ginn-defined; not an SRS code) |
 | `GINN-E-IMAGE-UNVERIFIED` | 65 | image digest for {distro} does not match the trust manifest | do not use this image; retry later, and update ginn if the mismatch persists | FR-011 AC-1 |
 | `GINN-E-INTERNAL` | 70 | internal error; this is a bug | re-run with --verbose and report the output | NFR-040 |
 | `GINN-E-INTERRUPTED` | 130 | interrupted by the user | run 'ginn list' to check realm state, then retry | IR-011 |
@@ -60,7 +61,9 @@ Only a `GINN-E-` line on stderr, or a JSON error object, marks a ginn failure of
 | `GINN-E-PKG-DEPENDENTS` | 4 | removing {packages} in realm '{realm}' would also remove {dependents} | remove the dependent packages first with 'ginn remove {realm} PACKAGE', or keep the package installed; ginn does not force a removal | FR-041; ADR-011 (ginn-defined; not an SRS code) |
 | `GINN-E-PKG-MANAGER` | 1 | native package manager failed in realm '{realm}' | run again with --verbose to see the package manager output, fix its cause, then retry | FR-040; FR-120 |
 | `GINN-E-PKG-NAME-INVALID` | 2 | package name '{name}' is not valid | use plain package names with no wildcards or shell characters | FR-040 AC-2 |
+| `GINN-E-PKG-PROTECTED` | 4 | '{name}' is an init package of realm '{realm}' and cannot be removed | keep it: the init set is what lets a services-on realm boot; 'ginn delete {realm}' removes the whole realm | ADR-015 Decision 14, FR-041 (ginn-defined; not an SRS code) |
 | `GINN-E-PKG-SIGNATURE` | 65 | package signature check failed in realm '{realm}' | fix the repository keys; ginn never skips signature checks | FR-012 AC-1 |
+| `GINN-E-REALM-BOOT` | 1 | services-on realm '{realm}' did not reach running after its build: {detail} | run 'ginn doctor' and follow the failed units in the detail; the previous generation is kept, so the realm still has its old root | ADR-015 Decision 5, FR-021 AC-2 (ginn-defined; not an SRS code) |
 | `GINN-E-REALM-BUSY` | 75 | {op} in progress | wait for the running operation to finish, then retry | FR-123 AC-1 |
 | `GINN-E-REALM-STATE` | 4 | realm '{realm}' is {state}; {action} needs it {allowed} | run 'ginn status {realm}', then the command that state allows; a broken realm from an interrupted create is resumed with 'ginn create --resume {realm}', and any other broken realm is removed with 'ginn delete {realm}' | DR-020 (ginn-defined; not an SRS code) |
 | `GINN-E-REALM-USER` | 1 | the realm user of '{realm}' cannot be set up: {detail} | if the detail shows a line for the host uid that is not the expected entry, the image already has that uid, and keep-id may then write no entry: use a different distro, or report a bug; if the host home holds '$', ':' or a newline, move it; if the host user name is not a realm user name, a retry cannot change it, so report it; otherwise retry the create, and report the detail if it repeats | FR-048, ADR-006 amendment of 2026-10-13 (ginn-defined; not an SRS code) |

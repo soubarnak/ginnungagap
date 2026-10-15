@@ -51,7 +51,7 @@ OWNED_DIR_MODE = 0o700
 OWNED_FILE_MODE = 0o600
 _GROUP_OTHER_BITS = 0o077
 _APP_NAME = "ginn"
-_CONTAINERS_CONF = """\
+_CONTAINERS_CONF_HEAD = """\
 # Written by ginn (ADR-004, DR-010). ginn rewrites this file; do not edit it.
 # Written from containers.conf(5). Podman's --runtime flag selects the OCI runtime per call.
 [engine]
@@ -164,6 +164,16 @@ def check_runtime_dir(runtime: Path, uid: int) -> None:
 def _toml_string(path: Path) -> str:
     """A TOML basic string for `path`. JSON string escapes are valid TOML basic-string escapes."""
     return json.dumps(str(path))
+
+
+def _containers_conf_text(image_tmp: Path) -> str:
+    """containers.conf(5) for ginn's Podman. Image copies go to `image_tmp` (ADR-015 Decision 2f).
+
+    `image_copy_tmp_dir` is the directory podman copies an image into while it commits or unpacks
+    it. Its default is /var/tmp, which is outside the Owned Paths (DR-010), so it is set here to the
+    owned image tmpdir (ADR-015 Open question 10).
+    """
+    return _CONTAINERS_CONF_HEAD + f"image_copy_tmp_dir = {_toml_string(image_tmp)}\n"
 
 
 def _storage_conf_text(root: Path, runroot: Path) -> str:
@@ -394,7 +404,8 @@ class OwnedPaths:
         rewritten only when its bytes or mode differ, so repeated calls change nothing.
         """
         _ensure_dir(self.config, None)
-        _write_owned_file(self.podman_containers_conf, _CONTAINERS_CONF.encode("utf-8"))
+        containers = _containers_conf_text(self.image_tmp)
+        _write_owned_file(self.podman_containers_conf, containers.encode("utf-8"))
         storage = _storage_conf_text(self.podman_root, self.podman_runroot)
         _write_owned_file(self.podman_storage_conf, storage.encode("utf-8"))
 

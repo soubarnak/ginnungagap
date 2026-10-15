@@ -784,6 +784,14 @@ def test_ps_passes_label_filters_and_parses_both_containers(shim: Path, tmp_path
 
 
 @pytest.mark.fr("IR-020")
+@pytest.mark.fr("FR-122")
+def test_ps_reads_the_image_id_each_container_runs_from(shim: Path, tmp_path: Path) -> None:
+    containers = make_cli(tmp_path).ps()
+    image_id = "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8"
+    assert [c.image_id for c in containers] == [image_id, image_id]
+
+
+@pytest.mark.fr("IR-020")
 def test_inspect_parses_the_container_fixture(shim: Path, tmp_path: Path) -> None:
     use_cases("container-inspect=container-inspect-alpine")
     container = make_cli(tmp_path).inspect(CONTAINER)

@@ -7,6 +7,7 @@ drops a field therefore does not break the parse.
 """
 
 import datetime as dt
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -35,6 +36,7 @@ _STATE_BY_PODMAN: Final[Mapping[str, ContainerState]] = {
 }
 
 _ZERO_TIME: Final = "0001-01-01T00:00:00Z"
+_IMAGE_ID: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def container_state(value: str) -> ContainerState:
@@ -80,6 +82,12 @@ def _labels(obj: Mapping[str, object], key: str) -> dict[str, str]:
     return {str(k): v for k, v in value.items() if isinstance(v, str)}
 
 
+def _bare_image_id(value: str) -> str:
+    """The image ID as 64 lowercase hex digits, without `sha256:`, or "" if it is not one."""
+    bare = value.removeprefix("sha256:")
+    return bare if _IMAGE_ID.fullmatch(bare) is not None else ""
+
+
 def _timestamp(value: object) -> str:
     """Return a timestamp as text. Podman `ps` gives epoch seconds; zero times become ""."""
     if isinstance(value, bool):
@@ -100,7 +108,8 @@ class ImageInfo:
     `id` is 64 lowercase hex digits, as podman prints it. `Podman.image_id` and `Podman.commit`
     return the same text, the form that `require_image_id_ref` accepts. `labels` are the image's
     labels. The ops layer reads the base digest label of a derived image from them (ADR-015
-    Decision 13).
+    Decision 13). `user` and `env` are the image's `User` and `Env` config, which the provisioning
+    stage carries onto its commit (ADR-015 Decision 2f). `user` is "" when the image names none.
     """
 
     id: str
@@ -109,18 +118,23 @@ class ImageInfo:
     size: int
     created: str
     labels: Mapping[str, str] = field(default_factory=dict)
+    user: str = ""
+    env: tuple[str, ...] = ()
 
     @classmethod
     def from_inspect(cls, obj: Mapping[str, object]) -> "ImageInfo":
         # The labels sit in the image config. Podman may also print them at the top level, which
         # is read only when the config holds none.
+        config = _sub(obj, "Config")
         return cls(
             id=_text(obj, "Id"),
             digest=_text(obj, "Digest"),
             repo_digests=_texts(obj, "RepoDigests"),
             size=_int(obj, "Size"),
             created=_text(obj, "Created"),
-            labels=_labels(_sub(obj, "Config"), "Labels") or _labels(obj, "Labels"),
+            labels=_labels(config, "Labels") or _labels(obj, "Labels"),
+            user=_text(config, "User"),
+            env=_texts(config, "Env"),
         )
 
 
@@ -138,6 +152,10 @@ class ContainerInfo:
     finished_at: str
     labels: Mapping[str, str] = field(default_factory=dict)
     size_rw: int | None = None
+    image_id: str = ""
+    """The ID of the image the container runs from, as 64 lowercase hex digits, or "" when podman
+    gives none. A container is matched to an image by this ID alone, never by a name (ADR-015
+    Decision 13)."""
 
     @classmethod
     def from_inspect(cls, obj: Mapping[str, object]) -> "ContainerInfo":
@@ -172,6 +190,7 @@ class ContainerInfo:
             finished_at=_timestamp(obj.get("ExitedAt")),
             labels=_labels(obj, "Labels"),
             size_rw=_optional_int(obj, "Size"),
+            image_id=_bare_image_id(_text(obj, "ImageID")),
         )
 
 

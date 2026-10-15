@@ -12,7 +12,9 @@ GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH
 (ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
 GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
-(FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
+(FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-IMAGE-DERIVED (ADR-015 Decision 9),
+GINN-E-PKG-PROTECTED (ADR-015 Decision 14), GINN-E-REALM-BOOT (ADR-015 Decision 5),
+GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
 GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014),
 GINN-W-RELAY-ORPHAN (FR-123, ADR-014), GINN-W-ORPHAN-UNKNOWN (FR-124, ADR-014),
 GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
@@ -525,6 +527,31 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-080, ADR-003, F3 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-IMAGE-DERIVED",
+        exit_code=65,
+        summary="the derived image of realm '{realm}' could not be built, or does not hold its "
+        "recorded ID: {detail}",
+        remedy="the build is rolled back or left to recovery: retry the create, or run "
+        "'ginn rebuild {realm}' for an existing realm",
+        source="ADR-015 Decision 9, DR-040, NFR-SEC-004 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-PKG-PROTECTED",
+        exit_code=4,
+        summary="'{name}' is an init package of realm '{realm}' and cannot be removed",
+        remedy="keep it: the init set is what lets a services-on realm boot; 'ginn delete {realm}' "
+        "removes the whole realm",
+        source="ADR-015 Decision 14, FR-041 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-REALM-BOOT",
+        exit_code=1,
+        summary="services-on realm '{realm}' did not reach running after its build: {detail}",
+        remedy="run 'ginn doctor' and follow the failed units in the detail; the previous "
+        "generation is kept, so the realm still has its old root",
+        source="ADR-015 Decision 5, FR-021 AC-2 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-RELAY-UNAVAILABLE",
         exit_code=1,
         summary="the exec relay of realm '{realm}' does not answer after 'sv up': {detail}",
@@ -797,7 +824,8 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
         "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, "
         "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT, "
-        "GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST",
+        "GINN-E-REALM-BOOT, GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, "
+        "GINN-E-RELAY-LOST",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
@@ -806,9 +834,14 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "conflict with existing state: name taken, undo refused, unacknowledged host change, "
         "interrupted operation not yet recovered, a realm in a state its verb does not allow "
         "(GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), "
-        "a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM)",
+        "a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM), an init "
+        "entry that the manifest refuses to remove (GINN-E-PKG-PROTECTED)",
     ),
-    (65, "data error (EX_DATAERR): image or package signature not verified"),
+    (
+        65,
+        "data error (EX_DATAERR): image or package signature not verified, or a derived image "
+        "that could not be built or does not hold its recorded ID (GINN-E-IMAGE-DERIVED)",
+    ),
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),
