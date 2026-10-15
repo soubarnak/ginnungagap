@@ -30,7 +30,13 @@ from ginn.ops.recovery import OUTCOME_BROKEN, recover
 from ginn.ops.resume import resume_create
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime import attach
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH
+from ginn.runtime.provision import (
+    LABEL_PROVISION,
+    derived_image_name,
+    provision_create_spec,
+    stage_image_name,
+)
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH, NAME_PREFIX
 from ginn.services.runit_user import journald_dropin, service_dir
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -583,7 +589,8 @@ def test_a_services_on_resume_writes_its_runit_directory_and_never_starts_the_co
     original_create = fake.create
 
     def create_checking_source(spec: CreateSpec) -> str:
-        seen.append(journald_dropin(env.paths).is_file())
+        if spec.name.startswith(NAME_PREFIX):  # the realm's container, not the stage's
+            seen.append(journald_dropin(env.paths).is_file())
         return original_create(spec)
 
     monkeypatch.setattr(fake, "create", create_checking_source)
@@ -591,7 +598,7 @@ def test_a_services_on_resume_writes_its_runit_directory_and_never_starts_the_co
     result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
 
     assert seen == [True], "the drop-in exists when podman binds it at the resume's create"
-    assert "start" not in ops_of(fake)
+    assert fake.realm_starts == []
     assert result.record.state is RealmState.STOPPED
     assert result.record.settings.services is True
     assert sorted(p.name for p in service_dir(env.paths, RealmName(NAME)).iterdir()) == [
@@ -861,3 +868,69 @@ def test_a_resumed_services_on_create_keeps_the_machine_id_of_the_killed_create(
     assert result.record.machine_id == killed_id
     content, _mode = fake.containers[result.record.container_id].copied[MACHINE_ID_PATH]
     assert content == f"{killed_id}\n".encode("ascii")
+
+
+@pytest.mark.fr("FR-122")
+def test_a_resume_removes_the_provisioning_leftovers_by_id_before_it_provisions_again(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 12: the provisioning container, the stage image and the derived image that
+    a killed create left are removed by ID, before the stage the resume redoes creates its own
+    container. Recovery may sweep some of them first (ops/recovery.py), so the stage image and the
+    container are seeded here, as a stage killed during an earlier resume would leave them. The
+    derived image is whichever one the killed create left."""
+    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
+    realm = RealmName(NAME)
+    derived = derived_image_name(realm, 1)
+    leftover = fake.create(provision_create_spec(realm, 1, _load(env).image_ref))
+    stale_ids = {fake.commit(leftover, stage_image_name(realm, 1), changes=[])}
+    if derived in fake.images:
+        stale_ids.add(fake.images[derived].id)
+    fake.calls.clear()
+
+    result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
+
+    first_create = next(i for i, call in enumerate(fake.calls) if call.op == "create")
+    removed_first = {call.args[0] for call in fake.calls[:first_create] if call.op in {"rm", "rmi"}}
+    assert leftover in removed_first
+    assert stale_ids <= removed_first
+    assert leftover not in fake.containers
+    assert fake.images[derived].id not in stale_ids
+    assert result.record.state is RealmState.STOPPED
+    assert fake.ps({LABEL_PROVISION: f"{NAME}:1"}) == []
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-121")
+def test_a_services_on_resume_checks_the_provisioning_terms_even_with_its_image_in_storage(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """A services-off resume with its image in storage checks no space. A services-on resume
+    provisions again, so the init set, the Integration Package Set and the cache are checked, with
+    the base term left out (ADR-015 Decision 11). Free space below that refuses before any removal.
+    """
+    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
+    assert _load(env).image_ref in fake.images
+    containers = dict(fake.containers)
+
+    with pytest.raises(GinnError) as excinfo:
+        _resume(
+            env,
+            fake,
+            home,
+            _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(100_000_000)),
+        )
+
+    assert excinfo.value.code == "GINN-E-DISK-SPACE"
+    assert fake.containers == containers
+    assert _load(env).state is RealmState.BROKEN

@@ -236,6 +236,7 @@ def _text(result: CreateResult) -> str:
         lines.append(f"note: {result.locale_note}")
     if result.gpu_note is not None:
         lines.append(f"note: {result.gpu_note}")
+    lines.extend(f"note: {note}" for note in result.notes)
     if result.estimate is not None:
         estimate = result.estimate
         lines.append(
@@ -364,6 +365,7 @@ def _report(result: CreateResult, realms: _context.Realms, ctx: Context) -> int:
         "resumed": result.resumed,
         "locale_note": result.locale_note,
         "gpu_note": result.gpu_note,
+        "notes": list(result.notes),
         "everything": None
         if estimate is None
         else {

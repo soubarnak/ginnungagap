@@ -79,6 +79,12 @@ realm (ADR-015), which the provisioning stage installs. `services_estimated_inst
 optional and defaults to 0. It is the installed size of that set, measured on the pinned image, and
 it is 0 exactly when the set is empty. Arch's set is empty, because its image already ships systemd.
 
+`integration_estimated_installed_bytes` and `package_cache_peak_bytes` are the other two inputs of
+the disk formula of a services-on create (FR-121, ADR-015 Decision 11). Both are optional
+non-negative integers, and both default to 0. The first is the installed size of the Integration
+Package Set, and the second is the package cache during the installs, before the clean. Arch's
+first is 0, because its image already holds the set.
+
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
 distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
 """
@@ -140,6 +146,8 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
         "db_check_stdout_inconsistent",
         "services_packages",
         "services_estimated_installed_bytes",
+        "integration_estimated_installed_bytes",
+        "package_cache_peak_bytes",
     }
 )
 # The keys that read the db-check result. A file that defines the db-check verb must define them.
@@ -294,6 +302,12 @@ class DistroDef:
     clean_steps: tuple[tuple[str, ...], ...] = ()
     """The clean verb (ADR-015): argv lists, run in order, that empty the package cache. Empty when
     the data defines none. See `has_clean`."""
+    integration_estimated_installed_bytes: int = 0
+    """The installed size of the Integration Package Set, the `ips_delta` of the disk formula
+    (FR-121, ADR-015 Decision 11), measured in S-11. 0 where the image already holds the set."""
+    package_cache_peak_bytes: int = 0
+    """The package cache during the installs, before the clean: the `cache_peak` of the disk formula
+    (FR-121, ADR-015 Decision 11), measured in S-11."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -643,6 +657,10 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         services_packages=services_packages,
         services_estimated_installed_bytes=services_bytes,
         clean_steps=clean_steps,
+        integration_estimated_installed_bytes=_disk_bytes(
+            reader, raw, "integration_estimated_installed_bytes"
+        ),
+        package_cache_peak_bytes=_disk_bytes(reader, raw, "package_cache_peak_bytes"),
     )
 
 
@@ -766,6 +784,14 @@ def _services(
     if names and not size:
         raise reader.fail(bytes_field, "must be positive when services_packages is set")
     return names, size
+
+
+def _disk_bytes(reader: "_Reader", raw: Mapping[str, object], field: str) -> int:
+    """An optional size of the disk formula (FR-121): a non-negative integer, 0 when omitted."""
+    size = raw.get(field, 0)
+    if type(size) is not int or size < 0:
+        raise reader.fail(field, "must be a non-negative integer")
+    return size
 
 
 def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:

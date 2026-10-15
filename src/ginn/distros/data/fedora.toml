@@ -46,6 +46,12 @@ db_check_stdout_inconsistent = false
 services_packages = ["systemd", "dbus-broker"]
 # ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
 services_estimated_installed_bytes = 24586672
+# ADR-015 Decision 11: the installed bytes of the Integration Package Set (the ips_delta of the disk
+# formula, FR-121), measured in S-11. The set is glibc-langpack-en.
+integration_estimated_installed_bytes = 6000393
+# ADR-015 Decision 11: the package cache during the installs, before the clean (the cache_peak of
+# the disk formula, FR-121). S-11 measured the dnf cache before clean.
+package_cache_peak_bytes = 109206482
 
 [integration]
 packages = ["glibc-langpack-{lang}"]

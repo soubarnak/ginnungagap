@@ -772,10 +772,10 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec(
         code="GINN-W-SERVICES-PENDING",
         exit_code=0,
-        summary="realm '{realm}' is created stopped with services on: its container is made, and "
-        "nothing is started or installed in it",
-        remedy="a services-on realm starts through its runit entry ('ginn start'); its Integration "
-        "Package Set comes with 'ginn rebuild', which a plain start does not run",
+        summary="realm '{realm}' is created stopped with services on: its init set and Integration "
+        "Package Set are in its derived image, and nothing is started in it",
+        remedy="a services-on realm starts through its runit entry ('ginn start'); its packages go "
+        "in after that first supervised start, with 'ginn install'",
         source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

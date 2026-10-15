@@ -52,6 +52,10 @@ db_check_stdout_inconsistent = false
 # systemd (S-11). Arch still provisions, for the Integration Package Set and the commit.
 services_packages = []
 services_estimated_installed_bytes = 0
+# ADR-015 Decision 11: the Integration Package Set is already in the image, so its installed bytes
+# are 0 (S-11). The cache peak is the pacman cache before the clean (S-11).
+integration_estimated_installed_bytes = 0
+package_cache_peak_bytes = 2606348
 
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the

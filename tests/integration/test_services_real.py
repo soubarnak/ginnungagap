@@ -562,7 +562,9 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     assert argv[argv.index("--stop-timeout") + 1] == "30"
     assert "SYSTEMD_LOG_LEVEL=warning" in argv
     assert argv[-3:-1] == ["--entrypoint", '["/sbin/init"]']
-    assert "@sha256:" in argv[-1]
+    # ADR-015 Decision 4: a services-on container runs from its derived image, by its bare ID.
+    assert "@sha256:" not in argv[-1]
+    assert len(argv[-1]) == 64
     binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
     assert any(b.endswith("target=/etc/systemd/journald.conf.d/ginn.conf,ro") for b in binds)
     assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 11

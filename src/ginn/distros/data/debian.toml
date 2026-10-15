@@ -43,6 +43,12 @@ db_check_stdout_inconsistent = true
 services_packages = ["systemd", "systemd-sysv", "dbus"]
 # ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
 services_estimated_installed_bytes = 19166208
+# ADR-015 Decision 11: the installed bytes of the Integration Package Set (the ips_delta of the disk
+# formula, FR-121), measured in S-11. The set is ca-certificates and locales.
+integration_estimated_installed_bytes = 23975936
+# ADR-015 Decision 11: the package cache during the installs, before the clean (the cache_peak of
+# the disk formula, FR-121). S-11 measured the apt lists before clean.
+package_cache_peak_bytes = 21576652
 
 [integration]
 packages = ["ca-certificates", "locales"]

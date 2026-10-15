@@ -371,7 +371,47 @@ def test_services_on_is_accepted_and_leaves_the_realm_stopped_with_the_pending_n
     assert record.state is RealmState.STOPPED
     assert record.settings.services is True
     assert [c.state for c in world.fake.containers.values()] == [ContainerState.CREATED]
-    assert "start" not in world.fake.ops()
+    # Only the provisioning container is started, and it is gone (ADR-015 Decision 2). The realm
+    # container, which the record names, is never started (ADR-003).
+    started = [call.args[0] for call in world.fake.calls if call.op == "start"]
+    assert record.container_id not in started
+    assert started
+    assert payload["notes"] == []
+
+
+@pytest.mark.fr("FR-010")
+def test_a_services_off_create_lists_no_notes_in_its_json(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--json", "create", "debian"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["notes"] == []
+
+
+@pytest.mark.fr("FR-080")
+def test_a_stage_note_is_printed_as_a_note_line_in_text_mode(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-015 Decision 2h: a stage removal that fails after the commit is a note, and the create
+    still finishes. Text mode prints it as a `note:` line, as it prints the locale and GPU notes."""
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+    world.fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+    assert main(["create", "debian", "--services", "on"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "realm debian created: state stopped",
+        "note: reset-removed failed with GINN-E-INTERNAL",
+    ]
+
+
+@pytest.mark.fr("FR-080")
+def test_a_stage_note_is_listed_under_notes_in_the_json(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+    world.fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+    assert main(["--json", "create", "debian", "--services", "on"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["notes"] == ["reset-removed failed with GINN-E-INTERNAL"]
 
 
 @pytest.mark.fr("FR-010")
@@ -407,6 +447,7 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
         "resumed": False,
         "locale_note": payload["locale_note"],
         "gpu_note": payload["gpu_note"],
+        "notes": [],
         "everything": None,
     }
     record = RealmStore(world.paths).load(RealmName("debian"))

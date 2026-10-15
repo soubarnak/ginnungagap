@@ -42,6 +42,7 @@ from ginn.distros.loader import (
 )
 from ginn.domain import DistroId, PackageName, RealmName, RealmSettings, Tier
 from ginn.errors import GinnError
+from ginn.ops.provision import storage_required_bytes
 
 REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "src" / "ginn" / "distros" / "data"
@@ -789,6 +790,53 @@ CLEAN_ARGV = {
     "fedora": [["dnf", "clean", "all"]],
     "kali": _APT_CLEAN,
 }
+# The inputs of the disk formula of a services-on create (FR-121, ADR-015 Decision 11): the
+# installed bytes of the Integration Package Set, and the package cache before the clean. S-11's.
+DISK_INPUTS: dict[str, tuple[int, int]] = {
+    "arch": (0, 2_606_348),
+    "debian": (23_975_936, 21_576_652),
+    "fedora": (6_000_393, 109_206_482),
+    "kali": (24_147_968, 34_431_137),
+}
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_disk_formula_inputs_are_the_s11_measurements(name: str) -> None:
+    definition = load(name)
+    integration, cache_peak = DISK_INPUTS[name]
+    assert definition.integration_estimated_installed_bytes == integration
+    assert definition.package_cache_peak_bytes == cache_peak
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-121")
+def test_the_disk_formula_inputs_are_optional_and_default_to_zero() -> None:
+    fixture = from_mapping(_base(), source="fixture.toml")
+    assert fixture.integration_estimated_installed_bytes == 0
+    assert fixture.package_cache_peak_bytes == 0
+    raw = _base()
+    raw["integration_estimated_installed_bytes"] = 4096
+    raw["package_cache_peak_bytes"] = 8192
+    declared = from_mapping(raw, source="fixture.toml")
+    assert declared.integration_estimated_installed_bytes == 4096
+    assert declared.package_cache_peak_bytes == 8192
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-121")
+def test_the_disk_formula_gives_the_adr_worked_example_for_debian() -> None:
+    """ADR-015 Decision 11: debian's services-on create needs 189,117,833 bytes before the 1.10
+    factor, and 208,029,617 with it. The base's size is S-11's measured image size."""
+    debian = load("debian")
+    required = storage_required_bytes(
+        81_256_893,
+        debian.services_estimated_installed_bytes,
+        debian.integration_estimated_installed_bytes,
+        debian.package_cache_peak_bytes,
+    )
+    assert required == 208_029_617
 
 
 @pytest.mark.fr("FR-013")
@@ -1264,6 +1312,12 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
         "services size set with no packages",
         _set("services_estimated_installed_bytes", value=1024),
     ),
+    ("integration size is a string", _set("integration_estimated_installed_bytes", value="1")),
+    ("integration size is a bool", _set("integration_estimated_installed_bytes", value=True)),
+    ("integration size is negative", _set("integration_estimated_installed_bytes", value=-1)),
+    ("cache peak is a string", _set("package_cache_peak_bytes", value="1")),
+    ("cache peak is a bool", _set("package_cache_peak_bytes", value=True)),
+    ("cache peak is negative", _set("package_cache_peak_bytes", value=-1)),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),

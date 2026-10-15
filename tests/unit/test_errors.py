@@ -217,6 +217,19 @@ def test_warn_renders_message_and_remedy() -> None:
     )
 
 
+@pytest.mark.fr("FR-080")
+def test_the_services_pending_notice_names_the_derived_image_and_the_first_start() -> None:
+    notice = warn("GINN-W-SERVICES-PENDING", realm="lab")
+    assert notice.message == (
+        "realm 'lab' is created stopped with services on: its init set and Integration Package Set "
+        "are in its derived image, and nothing is started in it"
+    )
+    assert notice.remedy == (
+        "a services-on realm starts through its runit entry ('ginn start'); its packages go in "
+        "after that first supervised start, with 'ginn install'"
+    )
+
+
 @pytest.mark.fr("NFR-040")
 def test_ginn_error_refuses_exit_zero() -> None:
     with pytest.raises(ValueError, match="warning"):

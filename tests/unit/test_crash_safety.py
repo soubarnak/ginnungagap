@@ -77,6 +77,17 @@ from ginn.ops.delete import delete_realm
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
 from ginn.ops.packages import PackageHooks, install_packages, remove_packages
 from ginn.ops.permissions import set_permissions, set_tier
+from ginn.ops.provision import (
+    STEP_IMAGE_COMMITTED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_PROVISION_CREATED,
+    STEP_PROVISION_REMOVED,
+    STEP_RESET_CREATED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_COMMITTED,
+    STEP_STAGE_REMOVED,
+)
 from ginn.ops.recovery import OUTCOME_BROKEN, OUTCOME_FINISHED, OUTCOME_RECOVERED, recover
 from ginn.ops.resume import resume_create
 from ginn.ops.service import set_services_mode
@@ -759,6 +770,19 @@ def _agree(record: Any, containers: list[Any]) -> list[str]:
     return []
 
 
+def _started_a_realm(fake: Any) -> bool:
+    """True when podman started a services-on realm's own container (ADR-003).
+
+    A services-on create also starts its provisioning container, which carries no realm label, and
+    that start is allowed (ADR-015 Decision 2). A fake that records the realm starts at the call
+    answers from them, since a removed container leaves no label to read afterwards. Any other fake
+    answers with every start.
+    """
+    if hasattr(fake, "realm_starts"):
+        return bool(fake.realm_starts)
+    return "start" in fake.ops()
+
+
 def _verify(
     op: str,
     bed: Bed,
@@ -770,7 +794,7 @@ def _verify(
     env, fake, name = bed.env, bed.fake, bed.name
     if env.journal.pending():
         problems.append("a journal entry is still pending after recovery")
-    if bed.services and "start" in fake.ops():
+    if bed.services and _started_a_realm(fake):
         problems.append("a services-on realm was started by podman start (ADR-003)")
     if journal_existed and len(outcomes) != 1:
         problems.append(f"recovery reported {len(outcomes)} outcomes for one entry")
@@ -1049,3 +1073,32 @@ def test_a_real_sigkill_leaves_no_broken_container_running(
 ) -> None:
     problems = _real_point_problems(op, variant_label, point, tmp_path)
     assert not problems, f"SIGKILL at {point!r}: {problems}"
+
+
+PROVISION_STEPS: Final = (
+    STEP_PROVISION_CREATED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_STAGE_COMMITTED,
+    STEP_RESET_CREATED,
+    STEP_IMAGE_COMMITTED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_REMOVED,
+    STEP_PROVISION_REMOVED,
+)
+"""The journal steps of the provisioning stage of a services-on create (ADR-015 Decision 13)."""
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-080")
+def test_the_services_on_create_has_a_kill_point_at_each_provisioning_step(tmp_path: Path) -> None:
+    """Each provisioning step is a journal write of the create, so a kill before and after it is a
+    point of the sweep (NFR-030). The points come from a dry run of the services-on create."""
+    (variant,) = [v for v in VARIANTS["create"] if v.label == "services-on"]
+    labels = _dry_run(variant, tmp_path / "dry")
+    for step in PROVISION_STEPS:
+        assert f"before journal step {step}" in labels, step
+        assert f"after journal step {step}" in labels, step
+    assert labels.index(f"after journal step {STEP_PROVISION_CREATED}") < labels.index(
+        f"after journal step {STEP_STAGE_COMMITTED}"
+    )
