@@ -41,7 +41,7 @@ def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[OwnedPath
 
 def _dead_pid() -> int:
     """Return the pid of a process that has exited and been reaped."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     proc.wait(timeout=30)
     return proc.pid
 
@@ -288,7 +288,7 @@ def test_a_reused_pid_with_another_start_time_counts_as_orphaned(paths: OwnedPat
 @pytest.mark.fr("FR-122")
 def test_zombie_process_counts_as_dead(paths: OwnedPaths) -> None:
     """Exited but not yet reaped: waitid with WNOWAIT observes the exit and leaves a zombie."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     try:
         os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
         assert is_pid_alive(proc.pid) is False

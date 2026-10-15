@@ -165,7 +165,7 @@ class _Podman:
 
 def _dead_process() -> tuple[int, int]:
     """The pid and start time of a process that has exited and been reaped."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     start = process_start_ticks(proc.pid)
     proc.wait()
     assert start is not None

@@ -204,7 +204,7 @@ def kill_journal_owner(env: OpEnv, name: str) -> None:
     The pid and start time are those of a child process that was run and reaped, the same way the
     recovery tests model a killed operation.
     """
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     start = process_start_ticks(proc.pid)
     proc.wait()
     assert start is not None
