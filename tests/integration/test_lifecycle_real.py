@@ -77,7 +77,18 @@ class Gate:
     removed_image: bool
 
 
-HIDDEN_MOUNT_ROOTS = frozenset({"/media", "/mnt", f"/run/media/{getpass.getuser()}"})
+def _login_name() -> str:
+    """The login name, or "" when none can be read. The module imports without one (CI).
+
+    The gate itself still asks getpass.getuser() in its host fixture, so a gate run fails there.
+    """
+    try:
+        return getpass.getuser()
+    except OSError:
+        return ""
+
+
+HIDDEN_MOUNT_ROOTS = frozenset({"/media", "/mnt", f"/run/media/{_login_name()}"})
 """The user's real mount roots. The gate's exists probe reads them as absent, so no realm of the
 gate binds them read-write (decision recorded in the T4.9 result file, section 6)."""
 
