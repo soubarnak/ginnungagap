@@ -11,6 +11,7 @@
 - Amended: 2026-10-12 (D9). Host Setup does not make the root writes under the subtree. The supervisor run script makes them at each start of its service, and Host Setup only captures their pre-images (ADR-013). The Context, the placement paragraph of the Decision, the Consequences and the FR-001 and R-001 rows said otherwise, and they are corrected. Undo follows ADR-013 Decision 15, not "restores the recorded value". No decision changes. Each statement was confirmed against the render template in `src/ginn/hostsetup/runit_system.py`, which is the state at the time of this amendment.
 - Amended: 2026-10-14 (services-on entry through the supervisor relay, ADR-014). The D6 leaf-ownership statement and the line-45 rule extend to `ginn exec`, `ginn enter` and every other entry from a user session. A process outside `/ginn/<uid>/supervisor` reaches a services-on realm only through the relay, because a move made from a login shell needs write access on the top cgroup, which is root-owned (F2, T7.7). The S-01 exec claim is corrected at line 332, and the placement caveat at line 70 cites ADR-014. The notes sit on the original lines 45, 53, 70 and 332, and each is marked "Amended 2026-10-14". No decision in this ADR changes. The routing decision is ADR-014, Decision 1, and T7.10 builds it.
 - Amended: 2026-10-15 (services-on runtime directory, ADR-014 T7.28). A services-on create copies a tmpfiles.d drop-in into the container before its first start. A services-on start and a services-on rebuild wait for the owner of `/run/user/<uid>` before the attach. The services-on argv above is unchanged. The `U` option alone leaves that directory root-owned on a services-on realm. No decision changes. The cause and the residuals are in ADR-014, T7.28 amendment.
+- Amended: 2026-10-15 (services-on argv from the derived image, ADR-015 Decision 4, T7.18). The services-on argv runs from the realm's derived image, named by its ID, with `/sbin/init` as its explicit entrypoint and no command. The argv of the Decision above, which passes `/sbin/init` as a command after the image, is superseded for services-on realms. Nothing else changes. The decision is at the end of this file.
 
 ## Context
 
@@ -418,3 +419,21 @@ across it (FR-021).
 | AS-028 | A supervised start of a building container that runsv gives up is a wait timeout, and the rebuild rolls back (decision 5). |
 | NFR-031 | The fault matrix covers the services-on path, and a fault at any step leaves gN usable (decisions 6 and 8). |
 | FR-122 | The building container starts only while its rebuild's journal entry is live (decision 5). |
+
+## Amendment 2026-10-15: services-on argv from the derived image (ADR-015, T7.18)
+
+This amendment decides the services-on argv of ADR-015 Decision 4. It supersedes the form in which the Decision above passes `/sbin/init` as a command after the image, and nothing else. The code is `src/ginn/runtime/spec.py` (`INIT_PATH`, and the services-on branch of `create_spec`, which sets `CreateSpec.image_id`). It landed in T7.18 (621e8df) and T7.20 (f79a4c0).
+
+### Decision
+
+1. **The image is the realm's derived image, by ID.** A services-on container is created from the derived image named by the record's `init_image_id` (ADR-015 Decision 4), through `CreateSpec.image_id`. The verified base digest is still checked, as before. A services-on container never runs from a pinned image (ADR-015 Decision 1).
+2. **`/sbin/init` is the explicit entrypoint, with no command.** The services-on argv is `--entrypoint '["/sbin/init"]'`, and nothing follows the image. The derived image has a null Entrypoint and a null Cmd (ADR-015 Decision 2g), so no image command can reach systemd. The `SERVICES_COMMAND` constant is removed.
+3. **The rest of the argv is unchanged.** `--systemd=always`, the private cgroup namespace, the `/ginn/<uid>/<realm>` cgroup parent, `--user 0:0`, the stop signal and timeout, and the crun runtime stay as in the Decision above. A services-on container is still started only through its runit entry. The services-off argv, the `--init` base with the keep-alive entrypoint, is unchanged.
+
+### Requirement IDs
+
+| ID | How this amendment bears on it |
+|---|---|
+| FR-080 | systemd is PID 1 through an explicit `/sbin/init` entrypoint on the derived image, with no image command (decision 2). |
+| FR-081 | Unchanged: a services-on container starts only through its runit entry (decision 3). |
+| FR-082 | Unchanged: the services-off argv is the keep-alive base (decision 3). |
