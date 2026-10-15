@@ -38,6 +38,22 @@ PATH_NOT_FOUND_REASON: Final = "no such path in the container"
 call names is absent in the container. The ops layer reads it (ops/create.py, GINN-E-NO-INIT)."""
 
 
+@dataclass(frozen=True)
+class ExecTarget:
+    """Where one exec runs, as its caller knows it (ADR-014, Decision 1).
+
+    `realm` is the realm name. `services` is the `services_at_create` of the container being exec'd:
+    a services-on container is entered through the supervisor relay from outside the supervisor
+    leaf, and a services-off one is always entered directly. `mutating` marks a user-started change
+    of the realm, which holds the exec lock for its whole run (FR-123). The caller reads `services`
+    from the record or plan it already holds, so no exec makes an inspect call.
+    """
+
+    realm: str
+    services: bool
+    mutating: bool
+
+
 def require_digest_ref(ref: str) -> None:
     """Raise ValueError unless `ref` is `repo@sha256:<64 hex>` (FR-011: pull by digest only)."""
     if _DIGEST_REF.fullmatch(ref) is None:
@@ -350,6 +366,7 @@ class Podman(Protocol):
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -360,6 +377,7 @@ class Podman(Protocol):
         timeout_s: float | None = None,
         max_output: int | None = None,
         stdout_tail: bool = False,
+        on_ack: Callable[[int], None] | None = None,
     ) -> ExecResult:
         """Run argv in a running container. With capture=False the output is not captured.
 
@@ -370,6 +388,8 @@ class Podman(Protocol):
         its stdout passes `max_output` bytes, the podman client is killed and GINN-E-INTERNAL is
         raised with the reason in its details. Both default to no limit. A bounded run decodes its
         stdout with surrogateescape, so encoding it back gives the exact bytes of the output.
+        `target` says where the exec runs (ExecTarget, ADR-014). `on_ack`, when given, receives
+        the pid of the podman client once the client has started, before the run ends (FR-122).
         """
         ...
 
@@ -378,6 +398,7 @@ class Podman(Protocol):
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -386,13 +407,17 @@ class Podman(Protocol):
         pass_env: Sequence[str] = (),
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> int:
         """Run argv with the caller's stdio and return the exit status (for `ginn enter`).
 
         `pass_env` is as in `exec`: names only, copied by podman from its own environment.
-        `on_spawn`, when given, receives the pid of the podman client as soon as it starts, before
-        the wait, so the caller can signal it (FR-068). `on_exit`, when given, runs as soon as the
-        client is reaped, so the caller stops signalling that pid before it can be reused.
+        `target` is as in `exec`. `on_spawn`, when given, receives the pid of the podman client as
+        soon as it starts, before the wait, so the caller can see it (FR-068, FR-048). On the relay
+        route that pid is the one the relay acknowledges, and the relay forwards signals itself.
+        `on_ack` receives the same pid, and runs once the client has started (FR-122). `on_exit`,
+        when given, runs as soon as the client is reaped, so the caller stops signalling that pid
+        before it can be reused.
         """
         ...
 
@@ -405,12 +430,17 @@ class Podman(Protocol):
         ...
 
     def cp_into(self, container_id: str, src: Path, dst: str) -> None:
-        """Copy the host file `src` into the container at `dst`. The mode is kept, and the owner is
-        the container's primary uid (`podman cp --archive`, the default).
+        """Copy the host file or directory `src` into the container at `dst`. The mode is kept, and
+        the owner is the container's primary uid (`podman cp --archive`, the default).
 
-        Used for the services-on machine-id before the first start (ADR-007, F6). The container may
-        be created and not started. A `dst` whose parent the container lacks raises GINN-E-INTERNAL
-        with `reason` set to PATH_NOT_FOUND_REASON.
+        A directory goes into `dst` under its own name, as `podman cp` does when `dst` is a
+        directory. So a staged `tmpfiles.d` merges into an existing `/etc/tmpfiles.d`, and the files
+        already there stay.
+
+        Used for the services-on machine-id before the first start (ADR-007, F6), and for the
+        tmpfiles.d drop-in of the runtime dir (T7.28). The container may be created and not started.
+        A `dst` whose parent the container lacks raises GINN-E-INTERNAL with `reason` set to
+        PATH_NOT_FOUND_REASON.
         """
         ...
 

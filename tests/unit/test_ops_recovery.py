@@ -11,6 +11,7 @@ pid checks are the same ones that the real journal uses (store/journal.py).
 """
 
 import errno
+import fcntl
 import json
 import os
 import subprocess
@@ -56,10 +57,12 @@ from ginn.ops.recovery import (
 from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS
+from ginn.podman.adapter import ExecTarget
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
 from ginn.security._proc import Proc
+from ginn.services.exec_relay import exec_lock_dir, exec_lock_path
 from ginn.services.runit_user import service_dir
 from ginn.store import journal as journal_module
 from ginn.store.audit import AuditEntry, AuditLog
@@ -69,6 +72,8 @@ from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
 from ginn.store.scratch import SCRATCH_PREFIX
 from tests.fakes.clock import FakeClock
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 OP_ID = "0123456789abcdef0123456789abcdef"
 OTHER_OP_ID = "fedcba9876543210fedcba9876543210"
@@ -121,11 +126,13 @@ class _Podman:
         inspect_fails: bool = False,
         ps_fails: bool = False,
         exec_exit: int = 0,
+        listing: str = "",
     ) -> None:
         self.container = container
         self.inspect_fails = inspect_fails
         self.ps_fails = ps_fails
         self.exec_exit = exec_exit
+        self.listing = listing
         self.stops: list[str] = []
         self.execs: list[tuple[str, tuple[str, ...], str | None]] = []
 
@@ -138,7 +145,7 @@ class _Podman:
         **_: Any,
     ) -> ExecResult:
         self.execs.append((container_id, tuple(argv), user))
-        return ExecResult(self.exec_exit, "", "")
+        return ExecResult(self.exec_exit, self.listing, "")
 
     def inspect(self, container_id: str) -> ContainerInfo:
         if self.inspect_fails or self.container is None:
@@ -158,7 +165,7 @@ class _Podman:
 
 def _dead_process() -> tuple[int, int]:
     """The pid and start time of a process that has exited and been reaped."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     start = process_start_ticks(proc.pid)
     proc.wait()
     assert start is not None
@@ -315,47 +322,52 @@ def test_a_reused_pid_with_another_start_time_counts_as_dead(paths: OwnedPaths, 
     assert _state(paths) is RealmState.BROKEN
 
 
-def _hostile(kind: str, bad: Path, tmp_path: Path) -> str:
-    """Write a damaged journal file of `kind` at `bad`. Return a fragment of its expected reason."""
+def _hostile(kind: str, bad: Path, tmp_path: Path) -> tuple[str, ...]:
+    """Write a damaged journal file of `kind` at `bad`. Return the fragments of its expected reason.
+
+    One of the fragments must appear in the reason.
+    """
     if kind == "not-json":
         bad.write_bytes(b"{not json")
-        return "not valid JSON"
+        return ("not valid JSON",)
     if kind == "not-object":
         bad.write_bytes(b"[1, 2]\n")
-        return "not a JSON object"
+        return ("not a JSON object",)
     if kind == "wrong-schema":
         write_json_atomic(bad, {**_dead(realm="arch").to_json(), "schema_version": 99})
-        return "schema_version"
+        return ("schema_version",)
     if kind == "name-mismatch":
         write_json_atomic(bad, _dead(realm="debian").to_json())
-        return "names realm"
+        return ("names realm",)
     if kind == "symlink":
         target = tmp_path / "elsewhere.json"
         write_json_atomic(target, _dead(realm="arch").to_json())
         bad.symlink_to(target)
-        return "symbolic link"
+        return ("symbolic link",)
     if kind == "fifo":
         os.mkfifo(bad)
-        return "not a regular file"
+        return ("not a regular file",)
     if kind == "nested-unclosed":
+        # CPython's C scanner raises JSONDecodeError here on glibc, and RecursionError on musl,
+        # where its stack check trips first. Both mean a damaged file that is kept and reported.
         bad.write_bytes(b"[" * 50_000)
-        return "not valid JSON"
+        return ("not valid JSON", "nested too deeply to parse")
     if kind == "nested-huge":
         bad.write_bytes(b"[" * 200_000)
-        return "larger than"
+        return ("larger than",)
     if kind == "oversized":
         bad.write_bytes(b'{"schema_version": 1, "pad": "' + b"x" * 70_000 + b'"}')
-        return "larger than"
+        return ("larger than",)
     if kind == "naive-started":
         data = _dead(realm="arch").to_json()
         write_json_atomic(bad, {**data, "started": "2026-10-13T08:00:00"})
-        return "no timezone"
+        return ("no timezone",)
     if kind == "deep-params":
         nested: Any = "leaf"
         for _ in range(40):
             nested = {"n": nested}
         write_json_atomic(bad, _dead(realm="arch", params={"deep": nested}).to_json())
-        return "nested deeper than"
+        return ("nested deeper than",)
     raise AssertionError(kind)
 
 
@@ -389,7 +401,7 @@ def test_a_damaged_journal_file_is_reported_with_a_remedy_and_kept_while_others_
 
     by_realm = {o.realm: o for o in outcomes}
     assert by_realm["arch"].outcome == OUTCOME_CORRUPT
-    assert expected in by_realm["arch"].reason
+    assert any(fragment in by_realm["arch"].reason for fragment in expected)
     assert str(bad) in by_realm["arch"].reason
     assert "rm " in by_realm["arch"].reason
     assert by_realm["debian"].outcome == OUTCOME_BROKEN
@@ -2247,3 +2259,122 @@ def test_a_scratch_sweep_with_no_leftovers_takes_no_lock_so_a_held_lock_cannot_r
     assert sweep_scratch(env) == []
     with image_lock(paths, "debian", "create"):
         assert sweep_scratch(env) == []
+
+
+@pytest.mark.fr("FR-123")
+def test_a_missing_exec_lock_file_is_not_busy_and_recovery_creates_no_exec_directory(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.CREATING))
+    journal = _write_journal(paths, _dead())
+
+    outcome = _only(recover(env, _Podman()))
+
+    assert outcome.outcome != OUTCOME_BUSY
+    assert not journal.exists()
+    assert not exec_lock_dir(paths).exists()
+
+
+@pytest.mark.fr("FR-123")
+def test_a_held_exec_lock_makes_the_entry_busy_without_blocking_or_writing(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.CREATING))
+    journal = _write_journal(paths, _dead())
+    lock = exec_lock_path(paths, RealmName("arch"))
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    holder = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        before = sorted(entry.name for entry in exec_lock_dir(paths).iterdir())
+        outcome = _only(recover(env, _Podman()))
+    finally:
+        os.close(holder)
+
+    assert outcome.outcome == OUTCOME_BUSY
+    assert "exec of realm 'arch'" in outcome.reason
+    assert journal.exists()
+    assert _state(paths) is RealmState.CREATING
+    assert _audit(paths) == []
+    assert sorted(entry.name for entry in exec_lock_dir(paths).iterdir()) == before
+
+
+@pytest.mark.fr("FR-084")
+def test_a_settled_rebuild_entry_syncs_the_relay_once(
+    paths: OwnedPaths, env: OpEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[Path] = []
+    monkeypatch.setattr(
+        "ginn.ops.recovery.sync_exec_service",
+        lambda paths_arg, *_a, **_k: synced.append(paths_arg.runtime),
+    )
+    _save(paths, _record(state=RealmState.REBUILDING, previous_state=RealmState.RUNNING))
+    _write_journal(paths, _dead(op="rebuild", step="homed"))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert synced == [paths.runtime]
+    assert outcome.warnings == ()
+
+
+@pytest.mark.fr("FR-084")
+def test_a_failed_relay_sync_after_a_rebuild_is_a_warning_and_the_settlement_stands(
+    paths: OwnedPaths, env: OpEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*_args: object, **_kwargs: object) -> None:
+        raise OSError(errno.EIO, "the sv directory is unreadable")
+
+    monkeypatch.setattr("ginn.ops.recovery.sync_exec_service", broken)
+    _save(paths, _record(state=RealmState.REBUILDING, previous_state=RealmState.RUNNING))
+    _write_journal(paths, _dead(op="rebuild", step="homed"))
+
+    outcome = _only(recover(env, _Podman(ContainerState.RUNNING)))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert _state(paths) is RealmState.RUNNING
+    assert any("GINN-W-RELAY-SYNC" in note for note in outcome.warnings)
+
+
+RELAY_BATCH_NAMES: list[str] = [f"lib-{index:04d}" for index in range(300)]
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-122")
+def test_an_install_interrupted_after_its_first_relay_batch_records_that_batch_as_ginn(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """The install of 300 names on the relay route stopped after batch 1, at `exec-acked`. The
+    realm lists batch 1 as explicit, so the manifest records those names and no others (ADR-014)."""
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(
+        paths,
+        _dead(
+            op="install",
+            step="exec-acked",
+            params={"packages": RELAY_BATCH_NAMES, "aur": False},
+        ),
+    )
+    podman = _Podman(ContainerState.RUNNING, listing="\n".join(RELAY_BATCH_NAMES[:200]))
+    outcome = _only(recover(env, podman))
+    manifest = {entry.name for entry in RealmStore(paths).load(RealmName("arch")).manifest}
+    assert set(RELAY_BATCH_NAMES[:200]) <= manifest
+    assert not set(RELAY_BATCH_NAMES[200:]) & manifest
+    assert "the Install Manifest follows the realm's explicit packages" in outcome.reason
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-122")
+def test_an_interrupted_install_with_its_container_stopped_leaves_the_manifest_and_says_so(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _save(paths, _record(state=RealmState.RUNNING))
+    _write_journal(
+        paths,
+        _dead(op="install", step="exec-acked", params={"packages": ["htop"], "aur": False}),
+    )
+    outcome = _only(recover(env, _Podman(ContainerState.EXITED, listing="htop")))
+    assert RealmStore(paths).load(RealmName("arch")).manifest == []
+    assert (
+        "the container is not running, so the Install Manifest is left as it is" in outcome.reason
+    )

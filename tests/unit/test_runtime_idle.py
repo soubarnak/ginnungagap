@@ -125,7 +125,7 @@ def _arm(paths: OwnedPaths, hooks: IdleHooks, *, init: int = INIT_PID) -> GinnWa
 
 def _dead_pid() -> int:
     """The pid of a process that has exited and been reaped, so /proc has no entry for it."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])  # noqa: S603 - fixed argv, no shell
     proc.wait()
     return proc.pid
 

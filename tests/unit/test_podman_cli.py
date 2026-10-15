@@ -27,9 +27,11 @@ import pytest
 from ginn.errors import GinnError
 from ginn.ops import retry
 from ginn.podman import cli as podman_cli
-from ginn.podman.adapter import PATH_NOT_FOUND_REASON, CreateSpec, Podman, RetryHook
+from ginn.podman.adapter import PATH_NOT_FOUND_REASON, CreateSpec, ExecTarget, Podman, RetryHook
 from ginn.podman.cli import PodmanCli
 from ginn.store.paths import OwnedPaths
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 REPO = Path(__file__).resolve().parents[2]
 SHIM_DIR = REPO / "tests" / "fakes" / "podman_bin"
@@ -256,7 +258,9 @@ def test_verbose_line_splits_back_to_the_same_argv(
     use_cases("exec=exec-ok")
     lines: list[str] = []
     cli = make_cli(tmp_path, lines.append)
-    cli.exec(CONTAINER, ["sh", "-c", "echo 'a b' && printf '%s\\n' \"$HOME\""])
+    cli.exec(
+        CONTAINER, ["sh", "-c", "echo 'a b' && printf '%s\\n' \"$HOME\""], target=DIRECT_TARGET
+    )
     assert len(lines) == 1
     assert shlex.split(lines[0]) == cli.history[0]
     assert lines[0] == shlex.join(cli.history[0])
@@ -324,8 +328,8 @@ def test_every_call_carries_root_runroot_tmpdir_and_runtime(
     cli.logs(CONTAINER, 1)
     cli.top(CONTAINER)
     assert cli.image_exists(DIGEST_REF) is False
-    cli.exec(CONTAINER, ["true"])
-    cli.exec(CONTAINER, ["true"], capture=False)
+    cli.exec(CONTAINER, ["true"], target=DIRECT_TARGET)
+    cli.exec(CONTAINER, ["true"], capture=False, target=DIRECT_TARGET)
     assert len(cli.history) == 7
     for argv in cli.history:
         assert argv[0] == "podman"
@@ -385,7 +389,7 @@ def test_user_podman_settings_in_the_parent_environment_never_reach_podman(
     cli = PodmanCli.from_paths(paths)
     cli.info()
     use_cases("exec=exec-ok")
-    cli.exec_interactive(CONTAINER, ["true"])
+    cli.exec_interactive(CONTAINER, ["true"], target=DIRECT_TARGET)
 
     assert len(seen) == 2
     for env in seen:
@@ -819,6 +823,7 @@ def test_exec_builds_an_argv_list_with_option_terminator(shim: Path, tmp_path: P
         user="1000:1000",
         env={"B": "2", "A": "1"},
         workdir="/home/alice",
+        target=DIRECT_TARGET,
     )
     assert result.exit_code == 0
     assert result.stdout == "hi\n"
@@ -843,7 +848,12 @@ def test_exec_interactive_hands_the_client_pid_to_the_caller_before_it_waits(
     """`on_spawn` gets the podman client's pid as it starts, so enter can forward a signal to it."""
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
     seen: list[int] = []
-    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"], on_spawn=seen.append) == 7
+    assert (
+        make_cli(tmp_path).exec_interactive(
+            CONTAINER, ["false"], on_spawn=seen.append, target=DIRECT_TARGET
+        )
+        == 7
+    )
     assert len(seen) == 1 and seen[0] > 0 and seen[0] != os.getpid()
 
 
@@ -866,7 +876,7 @@ def test_exec_interactive_calls_on_exit_once_the_wait_has_reaped_the_client(
             reaped.append(False)
 
     status = make_cli(tmp_path).exec_interactive(
-        CONTAINER, ["false"], on_spawn=pids.append, on_exit=on_exit
+        CONTAINER, ["false"], on_spawn=pids.append, on_exit=on_exit, target=DIRECT_TARGET
     )
     assert status == 7
     assert reaped == [True]
@@ -883,7 +893,7 @@ def test_a_signal_sent_to_the_client_ends_it_and_the_status_is_128_plus_the_sign
     wrapper.chmod(0o755)
     cli = PodmanCli.from_paths(configured_paths(tmp_path), binary=str(wrapper))
     status = cli.exec_interactive(
-        CONTAINER, ["true"], on_spawn=lambda pid: os.kill(pid, signal.SIGTERM)
+        CONTAINER, ["true"], on_spawn=lambda pid: os.kill(pid, signal.SIGTERM), target=DIRECT_TARGET
     )
     assert status == 128 + signal.SIGTERM
 
@@ -891,8 +901,8 @@ def test_a_signal_sent_to_the_client_ends_it_and_the_status_is_128_plus_the_sign
 @pytest.mark.fr("IR-011")
 def test_exec_interactive_returns_the_inner_status(shim: Path, tmp_path: Path) -> None:
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 7}})
-    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"]) == 7
-    result = make_cli(tmp_path).exec(CONTAINER, ["false"], capture=False)
+    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["false"], target=DIRECT_TARGET) == 7
+    result = make_cli(tmp_path).exec(CONTAINER, ["false"], capture=False, target=DIRECT_TARGET)
     assert (result.exit_code, result.stdout, result.stderr) == (7, "", "")
 
 
@@ -907,7 +917,7 @@ def test_pass_names_reach_podman_as_env_name_and_no_value_reaches_the_argv(
     monkeypatch.setenv("http_proxy", proxy_url)
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 0}})
     status = make_cli(tmp_path).exec_interactive(
-        CONTAINER, ["env"], env={"LANG": "C.UTF-8"}, pass_env=["http_proxy"]
+        CONTAINER, ["env"], env={"LANG": "C.UTF-8"}, pass_env=["http_proxy"], target=DIRECT_TARGET
     )
     assert status == 0
     argv = logged(shim)[0]["argv"]
@@ -923,9 +933,15 @@ def test_a_pass_name_is_a_plain_name_and_is_not_also_given_a_value(
 ) -> None:
     cli = make_cli(tmp_path)
     with pytest.raises(ValueError):
-        cli.exec_interactive(CONTAINER, ["true"], pass_env=["NAME=value"])
+        cli.exec_interactive(CONTAINER, ["true"], pass_env=["NAME=value"], target=DIRECT_TARGET)
     with pytest.raises(ValueError):
-        cli.exec_interactive(CONTAINER, ["true"], env={"http_proxy": "x"}, pass_env=["http_proxy"])
+        cli.exec_interactive(
+            CONTAINER,
+            ["true"],
+            env={"http_proxy": "x"},
+            pass_env=["http_proxy"],
+            target=DIRECT_TARGET,
+        )
     assert logged(shim) == []
 
 
@@ -935,7 +951,9 @@ def test_container_root_exec_adds_no_privilege_to_the_argv(shim: Path, tmp_path:
     """`--root` is `--user 0:0` inside the container. `_exec_args` has no privileged option at all,
     so the argv carries only --tty, --interactive, --user, --env and --workdir (NFR-SEC-001)."""
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": "", "exit": 0}})
-    make_cli(tmp_path).exec_interactive(CONTAINER, ["pacman", "-S", "htop"], user="0:0")
+    make_cli(tmp_path).exec_interactive(
+        CONTAINER, ["pacman", "-S", "htop"], user="0:0", target=DIRECT_TARGET
+    )
     argv = logged(shim)[0]["argv"]
     assert argv[argv.index("exec") + 1 : argv.index("--")] == ["--user", "0:0"]
     assert "--privileged" not in argv
@@ -983,7 +1001,7 @@ def test_exec_interactive_without_a_tty_catches_interrupts_while_podman_runs(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     before = _interrupt_handlers()
-    status = make_cli(tmp_path).exec_interactive(CONTAINER, ["sleep", "9"])
+    status = make_cli(tmp_path).exec_interactive(CONTAINER, ["sleep", "9"], target=DIRECT_TARGET)
     assert status == 130
     sigint, sigquit = seen["handlers"]
     assert callable(sigint) and sigint is not signal.SIG_IGN
@@ -1009,7 +1027,7 @@ def test_a_child_started_under_the_guard_does_not_inherit_an_ignored_sigint_or_s
     wrapper.chmod(0o755)
     monkeypatch.setenv("PATH", f"{wrapper_dir}{os.pathsep}{os.environ.get('PATH', '')}")
 
-    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["true"]) == 0
+    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["true"], target=DIRECT_TARGET) == 0
 
     name, _, value = status_file.read_text(encoding="utf-8").partition(":")
     assert name == "SigIgn"
@@ -1030,7 +1048,9 @@ def test_exec_interactive_with_a_tty_leaves_the_signals_to_the_terminal(
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     before = _interrupt_handlers()
-    assert make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"], tty=True) == 0
+    assert (
+        make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"], tty=True, target=DIRECT_TARGET) == 0
+    )
     assert seen["handlers"] == before
 
 
@@ -1043,7 +1063,7 @@ def test_the_interrupt_handlers_come_back_when_the_child_raises(
     monkeypatch.setattr(subprocess, "Popen", lambda args, **kwargs: client)
     before = _interrupt_handlers()
     with pytest.raises(KeyboardInterrupt):
-        make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"])
+        make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"], target=DIRECT_TARGET)
     assert _interrupt_handlers() == before
     assert client.killed is True
 
@@ -1066,7 +1086,9 @@ def test_off_the_main_thread_the_interrupt_handlers_are_not_touched(
 
     def worker() -> None:
         try:
-            outcome["status"] = make_cli(tmp_path).exec_interactive(CONTAINER, ["sh"])
+            outcome["status"] = make_cli(tmp_path).exec_interactive(
+                CONTAINER, ["sh"], target=DIRECT_TARGET
+            )
         except BaseException as exc:  # reported to the test thread below
             outcome["error"] = exc
 
@@ -1101,7 +1123,7 @@ def test_exec_exit_125_is_podman_failure_not_the_command_status(
     code: str,
 ) -> None:
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": 125}})
-    err = expect_error(lambda: make_cli(tmp_path).exec(CONTAINER, ["true"]))
+    err = expect_error(lambda: make_cli(tmp_path).exec(CONTAINER, ["true"], target=DIRECT_TARGET))
     assert err.code == code
     assert err.details["op"] == "exec"
     assert err.details["exit"] == 125
@@ -1114,7 +1136,7 @@ def test_exec_passes_the_command_status_126_and_127_through(
 ) -> None:
     stderr = "OCI runtime exec failed: not executable\n"
     use_fixture_dir(tmp_path, {"exec": {"stdout": "", "stderr": stderr, "exit": status}})
-    result = make_cli(tmp_path).exec(CONTAINER, ["/bin/x"])
+    result = make_cli(tmp_path).exec(CONTAINER, ["/bin/x"], target=DIRECT_TARGET)
     assert (result.exit_code, result.stdout, result.stderr) == (status, "", stderr)
 
 

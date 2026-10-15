@@ -21,7 +21,7 @@ import pytest
 
 from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.cli import PodmanCli
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.attach import (
@@ -46,6 +46,10 @@ from ginn.runtime.attach import (
 from ginn.runtime.env import SessionEnv
 from ginn.runtime.mounts import Attach, AttachPlan, Mountpoint, SessionBind, Skipped
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 pytestmark = [
     pytest.mark.fr("FR-061"),
@@ -161,6 +165,7 @@ def _start(
         helper=HELPER,
         mountinfo=w.mountinfo,
         run=w.helper,
+        target=DIRECT_TARGET,
     )
 
 
@@ -182,6 +187,7 @@ def _reattach(
         helper=HELPER,
         mountinfo=w.mountinfo,
         run=w.helper,
+        target=DIRECT_TARGET,
     )
 
 
@@ -1152,6 +1158,7 @@ def test_a_link_in_the_realm_home_is_refused_and_writes_nothing_outside(
             [_folder(world)],
             realm_home=world.realm_home,
             host_home=world.host_home,
+            target=DIRECT_TARGET,
         )
     assert caught.value.code == "GINN-E-ATTACH-FAILED"
     assert list(outside.iterdir()) == []
@@ -1247,6 +1254,7 @@ def test_a_runtime_subdirectory_is_made_by_the_realm_user_at_mode_0700() -> None
         [grant],
         realm_home=Path("/owned/home/lab"),
         host_home=Path("/home/alice"),
+        target=DIRECT_TARGET,
     )
     calls = list(zip(podman.users, podman.argvs, strict=True))
     assert ("1000", ["test", "-L", "/run/user/1000/gnupg"]) in calls
@@ -1268,6 +1276,7 @@ def test_the_runtime_directory_itself_and_other_roots_are_not_chowned() -> None:
         grants,
         realm_home=Path("/owned/home/lab"),
         host_home=Path("/home/alice"),
+        target=DIRECT_TARGET,
     )
     assert not any(argv[0] in ("chown", "chmod") for argv in podman.argvs)
 
@@ -1295,6 +1304,7 @@ def test_a_symbolic_link_runtime_subdirectory_is_refused_before_anything_is_made
             [grant],
             realm_home=Path("/owned/home/lab"),
             host_home=Path("/home/alice"),
+            target=DIRECT_TARGET,
         )
     assert caught.value.code == "GINN-E-ATTACH-FAILED"
     assert podman.argvs == [["test", "-L", "/run/user/1000/gnupg"]]

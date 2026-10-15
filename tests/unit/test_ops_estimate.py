@@ -28,7 +28,7 @@ from ginn.ops.delete import DeleteHooks, delete_realm
 from ginn.ops.disk import estimate_required
 from ginn.ops.estimate import LABEL_ESTIMATE, EverythingEstimate, estimate_everything
 from ginn.ops.recovery import OUTCOME_BLOCKED, OUTCOME_BUSY, OUTCOME_SWEPT, sweep_estimates
-from ginn.podman.adapter import CreateSpec, RetryHook
+from ginn.podman.adapter import CreateSpec, ExecTarget, RetryHook
 from ginn.podman.models import ExecResult, ImageInfo
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_REALM
@@ -40,6 +40,8 @@ from ginn.store.records import RealmRecord, RealmStore
 from ginn.trust import manifest as trust
 from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 UID = 1000
 GID = 1000

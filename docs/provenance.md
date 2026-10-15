@@ -80,12 +80,12 @@ The CI default `PROVENANCE_REPOS` scans three entries:
 | Reference | Entry | Scanned at |
 |---|---|---|
 | `ref-1` | the first reference | default branch HEAD |
-| `ref-2` | the second reference | default branch HEAD |
+| `ref-2` | the second reference | commit `9964b064ae844352d4fe543ff645ff33505d9a53` |
 | `ref-3` | the first reference, shell-era tag `1.8.2.5` | commit `40c3cd724faa434aeb0a23e28776665b92de68bd` |
 
 The pin for `ref-3` is the highest `1.8.x` tag the first reference publishes, as listed by `git ls-remote --tags`. The tag is lightweight, so the commit above is the tag target. Check the pin against the `reference: ... at <commit>` line the scan prints. Changing a pin is a reviewed change to `ci.yaml` and to the occurrence count in `tests/unit/test_repo_hygiene.py`.
 
-The second reference publishes no tags, so it is scanned at HEAD. A pin needs a commit SHA chosen by a human first. Until then the scan covers that reference only at HEAD.
+The second reference publishes no tags, so it is pinned to a commit SHA. The user chose `9964b064ae844352d4fe543ff645ff33505d9a53`, its default-branch HEAD on 2026-10-15 (read with `git ls-remote`). Moving the pin is a reviewed change, as for `ref-3`.
 
 ## Run locally
 

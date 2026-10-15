@@ -63,7 +63,7 @@ from ginn.ops.disk import check_free_paths, estimate_required
 from ginn.ops.images import image_names, remove_estimate_containers, uses_image
 from ginn.ops.retry import network_retry_hook
 from ginn.packages.manager import run_step
-from ginn.podman.adapter import CreateSpec, Podman, RetryHook
+from ginn.podman.adapter import CreateSpec, ExecTarget, Podman, RetryHook
 from ginn.runtime.spec import (
     KEEP_ALIVE_COMMAND,
     KEEP_ALIVE_ENTRYPOINT,
@@ -73,6 +73,12 @@ from ginn.runtime.spec import (
 from ginn.store.locks import image_lock
 
 _NAME_PREFIX: Final = "ginn-estimate-"
+
+
+def _throwaway(realm: str) -> ExecTarget:
+    """The exec target of an estimate. Its container is created and removed with services off, so
+    every exec it makes is direct (ADR-014, Decision 1)."""
+    return ExecTarget(realm=realm, services=False, mutating=False)
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,7 @@ def measure_everything(
     *,
     realm: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
 ) -> SizeEstimate:
     """The download and installed size of the closure of `names`, read in running container `cid`.
 
@@ -115,6 +122,7 @@ def measure_everything(
         realm=realm,
         step="estimate",
         retry_hook=retry_hook,
+        target=target,
         max_output=EVERYTHING_LISTING_MAX,
     )
     closure = closure_names(listing.stdout, definition.name_pattern, realm=realm, step="estimate")
@@ -129,6 +137,7 @@ def measure_everything(
             realm=realm,
             step="estimate",
             retry_hook=retry_hook,
+            target=target,
             max_output=EVERYTHING_CHUNK_MAX,
         )
         part = size_totals(result.stdout, chunk, realm=realm, step="estimate")
@@ -242,6 +251,7 @@ class _Estimate:
             realm=self._label,
             step="refresh",
             retry_hook=self._retry,
+            target=_throwaway(self._label),
         )
         self._step("refreshed")
         size = measure_everything(
@@ -251,6 +261,7 @@ class _Estimate:
             self._plan.everything,
             realm=self._label,
             retry_hook=self._retry,
+            target=_throwaway(self._label),
         )
         self._step("estimated")
         check_free_paths(

@@ -114,6 +114,10 @@ from ginn.ops.disk import StatVfs
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
+    RunUserState,
+    _settle_run_user,
+    run_user_gone_error,
+    run_user_pending_note,
     start_realm,
     start_through_sv,
     stop_realm,
@@ -122,7 +126,7 @@ from ginn.ops.lifecycle import (
 from ginn.ops.recovery import OP_REBUILD, remove_below
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.aur import install_aur
-from ginn.packages.manager import printable, run_step, shown
+from ginn.packages.manager import name_batches, printable, run_step, shown
 from ginn.packages.manifest import removed
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
@@ -134,6 +138,7 @@ from ginn.security.caps import TierExtras
 from ginn.security.nested import write_missing_config
 from ginn.security.seccomp import write as write_profile
 from ginn.services import autostart
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import remove_service, write_service_dir
 from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
@@ -238,12 +243,17 @@ def _replay_group(
 ) -> list[str]:
     """Install `names` with `install`, and return the names that are missing upstream (FR-022).
 
-    One call installs the whole group. A refusal of the group (GINN-E-PKG-MANAGER) installed
-    nothing, so each name is tried on its own, but only when the group refusal is positive evidence
-    of a missing package (`_is_missing`). A name that is refused again with that evidence is
-    returned, and the others stay installed, even when every name is returned. Any other error,
-    such as a limit, a full disk, a network or a signature failure, and a name refused without that
-    evidence, is raised as it is, so the rebuild fails with the old realm kept (CL-17).
+    One call installs the whole group. A refusal of the group (GINN-E-PKG-MANAGER) is retried name
+    by name, but only when the refusal is positive evidence of a missing package (`_is_missing`).
+    A name refused again with that evidence is returned, and the others stay installed, even when
+    every name is returned. Any other error, such as a limit, a full disk, a network or a signature
+    failure, and a name refused without that evidence, is raised as it is, so the rebuild fails with
+    the old realm kept (CL-17).
+
+    On the relay route `install` runs the group in batches (ADR-014, T7.10 review). A refusal can
+    then come after earlier batches installed, and those stay installed in gN+1. The name-by-name
+    pass installs the names again, which does nothing to a package that is already there. gN+1 is
+    discarded when the rebuild fails, so none of it is kept.
     """
     if not names:
         return []
@@ -304,6 +314,7 @@ class _Rebuild(_Create):
         self._pull()
         self._create_container()
         self._mark_building()
+        self._sync_relay()
         self._service_dir()
         if self._plan.spec.services:
             self._start_through_sv()
@@ -333,8 +344,12 @@ class _Rebuild(_Create):
         )
 
     def _install_everything_group(self, names: list[str]) -> None:
-        """One install of `names` of the everything set, as container root (FR-014)."""
-        self._exec(self._plan.definition.argv(Verb.INSTALL, names), step="everything")
+        """One install of `names` of the everything set, as container root (FR-014).
+
+        A relay route installs the set in calls of its own size (name_batches, ADR-014).
+        """
+        for batch in name_batches(names, self._target(mutating=True)):
+            self._exec(self._plan.definition.argv(Verb.INSTALL, batch), step="everything")
 
     def _confirm_everything(self, prompt: str) -> bool:
         """A replayed everything set needs no second yes, so the answer is yes (FR-014 AC-2).
@@ -419,6 +434,42 @@ class _Rebuild(_Create):
         self._pid = info.pid
         self._step("started")
 
+    def _attach(self) -> None:
+        """Attach the grants of gN+1 once its runtime dir belongs to the realm user (T7.28).
+
+        A services-on gN+1 is started by runit, and its tmpfiles.d drop-in may not have chowned
+        `/run/user/<uid>` yet. The attach mkdirs under it as the realm user, so the wait comes
+        first. It is the start's own wait (lifecycle._settle_run_user), bounded the same way, and
+        a gN+1 that stops in the wait fails here as it does after start (FR-081). The record it is
+        given is gN+1's view, since its exec target follows the services mode of gN+1. A
+        services-off gN+1 has no wait, and its attach is the create's.
+        """
+        run_user_pending = False
+        if self._plan.spec.services:
+            new_view = replace(self._current(), services_at_create=True)
+            cid = self._container_id()
+            run_user = _settle_run_user(
+                self._podman, cid, self._request.uid, new_view, self._lifecycle, self._pid
+            )
+            if run_user is RunUserState.GONE:
+                raise run_user_gone_error(
+                    self._podman,
+                    cid,
+                    self._request.name,
+                    detail="the rebuilt realm is not running after start",
+                )
+            run_user_pending = run_user is RunUserState.NOT_YET
+        try:
+            super()._attach()
+        except GinnError as err:
+            if run_user_pending:
+                err.add_note(run_user_pending_note(self._request.name))
+            raise
+        if run_user_pending:
+            self._mutation.warnings.append(
+                warn("GINN-W-RUN-USER-PENDING", realm=self._request.name.value)
+            )
+
     def _replay(self) -> None:
         """Install the manifest's packages into gN+1, and drop the ones that are gone (FR-022).
 
@@ -438,17 +489,44 @@ class _Rebuild(_Create):
         self._step("replayed")
 
     def _install_repo(self, names: list[str]) -> None:
-        """One install of `names` with the distribution's install verb, as container root."""
+        """One install of `names` with the distribution's install verb, as container root.
+
+        A relay route replays in calls of its own size (name_batches, ADR-014). A failed call leaves
+        the earlier ones in gN+1. gN+1 is discarded when the rebuild fails, so they are not kept.
+        """
         definition = self._plan.definition
-        run_step(
-            self._podman,
-            self._container_id(),
-            definition,
-            definition.argv(Verb.INSTALL, names),
-            realm=self._request.name.value,
-            step="replay",
-            retry_hook=self._retry,
-        )
+        target = self._target(mutating=True)
+        for batch in name_batches(names, target):
+            run_step(
+                self._podman,
+                self._container_id(),
+                definition,
+                definition.argv(Verb.INSTALL, batch),
+                realm=self._request.name.value,
+                step="replay",
+                retry_hook=self._retry,
+                target=target,
+                on_ack=self._exec_acked,
+            )
+
+    def _exec_acked(self, pid: int) -> None:
+        """The journal step that records a replay exec has started (FR-122, ADR-014).
+
+        The pid is the podman client's, on either route. It is not stored, because recovery only
+        needs to know that the exec began. The step goes through `_step`, so the hook sees it too.
+        """
+        self._step("exec-acked")
+
+    def _sync_relay(self) -> None:
+        """Sync the supervisor relay with the rebuild's REBUILDING state (ADR-014).
+
+        A services-on rebuild runs its execs through the relay, so the relay must be up first. A
+        failed sync is a warning: the rebuild goes on, and the next sync retries it.
+        """
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - the rebuild goes on, so this is a warning
+            self._mutation.warnings.append(relay_failure(exc))
 
     def _build_aur(self, names: list[str]) -> None:
         """Build and install `names` from the AUR, as the install does (FR-043)."""
@@ -461,6 +539,7 @@ class _Rebuild(_Create):
             uid=self._request.uid,
             gid=self._request.gid,
             retry_hook=self._retry,
+            target=self._target(mutating=True),
             step=self._aur_step,
         )
         if outcome.residual:
@@ -573,6 +652,10 @@ class _Rebuild(_Create):
         )
         self._store.save(swapped)
         self._record = swapped
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - the swap is saved, so this is a warning
+            self._mutation.warnings.append(relay_failure(exc))
         return swapped
 
 
@@ -648,6 +731,19 @@ def _mark(mutation: Mutation, hooks: RebuildHooks, name: str) -> None:
     mutation.step(name)
     if hooks.on_step is not None:
         hooks.on_step(name)
+
+
+def _relay_follows_failure(paths: OwnedPaths, podman: Podman, err: GinnError) -> None:
+    """Sync the relay after a failed rebuild has returned its record to stopped (ADR-014).
+
+    The sync is best effort. A failure is a GINN-W-RELAY-SYNC note on the error, and the error is
+    still the rebuild's own, so the caller re-raises it as it was.
+    """
+    try:
+        sync_exec_service(paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the rebuild has failed already, so this is a note
+        warning = relay_failure(exc)
+        err.add_note(f"{warning.code}: {warning.message}")
 
 
 def _back_to_stopped(store: RealmStore, name: RealmName, old: RealmRecord) -> None:
@@ -749,12 +845,14 @@ def _locked(
             for note in rebuild.undo():
                 err.add_note(f"rollback: {note}")
             _back_to_stopped(store, name, old)
+            _relay_follows_failure(env.paths, podman, err)
             raise
         except KeyboardInterrupt as exc:
             cancelled = make("GINN-E-INTERRUPTED")
             for note in rebuild.undo():
                 cancelled.add_note(f"rollback: {note}")
             _back_to_stopped(store, name, old)
+            _relay_follows_failure(env.paths, podman, cancelled)
             raise cancelled from exc
         for pkg in rebuild.replay_missing:
             mutation.warnings.append(warn("GINN-W-REPLAY-MISSING", package=pkg))

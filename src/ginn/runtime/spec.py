@@ -47,7 +47,8 @@ Basic table, unless a row says otherwise):
   and `--tmpfs /run/user/<uid>:mode=0700,U`. These are the stable binds (FR-048, FR-061, AS-009,
   ADR-012, ADR-008 amendment). The fonts and localtime need the `fonts_timezone` toggle and the
   device needs `gpu` (FR-063), so a Basic realm has all of them. The GPU device grant of ADR-012
-  is `/dev/dri`.
+  is `/dev/dri`. A services-on container runs as root, so `U` owns the tmpfs by root. Its realm
+  user gets the directory from a tmpfiles.d drop-in at boot (`run_user_tmpfiles`, T7.28, T716-1).
 
 What the argv does not carry:
 - No `--privileged`. Basic adds no capability (NFR-SEC-001, NFR-SEC-002). The one `--cap-add` is
@@ -94,6 +95,9 @@ SERVICES_COMMAND: Final[tuple[str, ...]] = (INIT_PATH,)
 MACHINE_ID_PATH: Final = "/etc/machine-id"
 """Where a services-on container gets its machine-id, copied in with `podman cp` before the
 first start (ADR-007, F6). A bind mount is not used: it breaks systemd-machine-id-commit.service."""
+RUN_USER_TMPFILES_PATH: Final = "/etc/tmpfiles.d/ginn-run-user.conf"
+"""Where a services-on container gets the tmpfiles.d drop-in of its runtime dir, copied in with
+`podman cp` before the first start (T7.28). The drop-in gives the realm user its runtime dir."""
 SERVICES_STOP_SIGNAL: Final = "SIGRTMIN+3"
 """The services-on stop signal, which systemd treats as poweroff (ADR-003)."""
 SERVICES_STOP_TIMEOUT_S: Final = 30
@@ -341,6 +345,19 @@ def new_machine_id() -> str:
     this value into the container, and records it, so a rebuild keeps it (ADR-007).
     """
     return secrets.token_hex(16)
+
+
+def run_user_tmpfiles(uid: int, gid: int) -> str:
+    """The tmpfiles.d line that gives `/run/user/<uid>` to the realm user at every boot (T7.28).
+
+    A services-on container runs as root, because systemd is its PID 1 (ADR-003). The `U` option
+    of the runtime tmpfs chowns that tmpfs to root, so the realm user cannot attach session grants
+    under it (GINN-E-ATTACH-FAILED, T716-1). podman refuses `uid=` and `gid=` as tmpfs options, so
+    the owner is set at boot by systemd-tmpfiles-setup. `d` adjusts the owner and mode of the
+    directory that the mount already holds. The ids are the realm's, which equal the host ids under
+    keep-id.
+    """
+    return f"d {runtime_dir(uid)} 0700 {uid} {gid} -\n"
 
 
 def mitigation_mounts(spec: RealmSpec) -> list[Mount]:

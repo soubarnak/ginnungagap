@@ -5,6 +5,7 @@ import pytest
 
 from ginn.domain.enums import RealmState
 from ginn.domain.states import (
+    GIVE_UP_EDGES,
     REMOVED,
     TRANSITIONS,
     IllegalTransition,
@@ -54,8 +55,11 @@ def test_every_state_has_a_row_in_the_transition_table() -> None:
 
 
 # The rows of the TABLE, with the two "previous state" rows spelled out as their possible targets.
+# The flat table also holds the give-up edge stopped to failed (CL-24). TABLE does not: it is the
+# answer without give_up, and that edge is refused without it.
 ROWS: dict[str, set[str]] = {
     **TABLE,
+    "stopped": {"running", "rebuilding", "updating", "deleting", "failed"},
     "updating": {"stopped", "running", "broken"},
     "rebuilding": {"stopped", "running"},
 }
@@ -166,3 +170,21 @@ def test_previous_state_message_names_the_missing_previous() -> None:
 def test_removed_is_not_a_realm_state() -> None:
     assert not isinstance(REMOVED, RealmState)
     assert {member.value for member in RealmState}.isdisjoint({"removed"})
+
+
+@pytest.mark.fr("DR-020")
+def test_the_give_up_edge_is_refused_without_give_up() -> None:
+    assert GIVE_UP_EDGES == {(RealmState.STOPPED, RealmState.FAILED)}
+    assert not can_transition(RealmState.STOPPED, RealmState.FAILED)
+    assert not can_transition(RealmState.STOPPED, RealmState.FAILED, None, False)
+    with pytest.raises(IllegalTransition, match="supervisor's give-up"):
+        transition(RealmState.STOPPED, RealmState.FAILED)
+    with pytest.raises(IllegalTransition):
+        assert_transition(RealmState.STOPPED, RealmState.FAILED, None, give_up=False)
+
+
+@pytest.mark.fr("DR-020")
+def test_the_give_up_edge_is_legal_with_give_up() -> None:
+    assert can_transition(RealmState.STOPPED, RealmState.FAILED, give_up=True)
+    assert transition(RealmState.STOPPED, RealmState.FAILED, None, True) is RealmState.FAILED
+    assert_transition(RealmState.STOPPED, RealmState.FAILED, give_up=True)

@@ -146,8 +146,12 @@ def _service(paths: OwnedPaths) -> Path:
             RunitStatus("down", seconds=0, normally_up=True, want_up=True),
         ),
         (
-            "down: /x/lab: 3s, want down\n",
-            RunitStatus("down", seconds=3),
+            "run: /x/lab: (pid 4321) 3s, want down\n",
+            RunitStatus("run", pid=4321, seconds=3, want_down=True),
+        ),
+        (
+            "finish: /x/lab: (pid 99) 1s, want down\n",
+            RunitStatus("finish", pid=99, seconds=1, want_down=True),
         ),
         (
             "finish: /x/lab: (pid 99) 1s\n",
@@ -186,6 +190,19 @@ def test_status_runs_sv_status_on_the_absolute_directory_and_reads_the_line(
 
     assert status == RunitStatus("run", pid=4321, seconds=2)
     assert fake_sv.calls() == [["status", str(service_dir(paths, NAME))]]
+
+
+@pytest.mark.fr("FR-081")
+def test_status_reads_the_want_down_mark_that_sv_down_sets(
+    paths: OwnedPaths, fake_sv: FakeSv, clock: FakeClock
+) -> None:
+    _service(paths)
+    fake_sv.reply("status", out="finish: /x/lab: (pid 99) 2s, want down\n")
+
+    status = supervisor.status(paths, NAME, hooks=fake_sv.hooks(clock))
+
+    assert status.want_down is True
+    assert status.want_up is False
 
 
 @pytest.mark.fr("FR-081")

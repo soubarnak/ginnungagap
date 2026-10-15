@@ -10,6 +10,7 @@ the choke point records them (ops/_mutating.py): an ok rebuild has one `ok` audi
 failed one has its error code. Nothing here runs podman, sudo or the helper binary (AGENTS.md).
 """
 
+import errno
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import replace
@@ -24,6 +25,7 @@ from ginn.distros import load as load_distro
 from ginn.domain import InstallMethod, InstallSource, ManifestEntry, RealmName, RealmState, Tier
 from ginn.domain.permissions import Toggle, effective_toggles
 from ginn.errors import GinnError, make
+from ginn.ops import create as create_ops
 from ginn.ops import lifecycle as lifecycle_ops
 from ginn.ops import rebuild as rebuild_ops
 from ginn.ops._mutating import OpEnv
@@ -38,11 +40,12 @@ from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.idle import IdleHooks
 from ginn.runtime.realm_security import SecurityHooks
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
 from ginn.security.caps import option_keys
 from ginn.security.nested import CONFIG_DIR, FILES
 from ginn.services.runit_user import DOWN, journald_dropin, service_dir
 from ginn.services.supervisor import Result, SupervisorHooks
+from ginn.store.journal import Journal
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 from ginn.trust import manifest as trust
@@ -191,6 +194,33 @@ def rebuild(
         gid=GID,
         hooks=rebuild_hooks(tmp_path, sleeps, mountinfo, **overrides),
     )
+
+
+RUN_USER_STAT = ("stat", "-c", "%u", "--", f"/run/user/{UID}")
+"""The argv that `run_user_state` runs for the realm's runtime dir (T7.28)."""
+
+
+def owner_checks(fake: ScriptedPodman) -> int:
+    """How many owner reads of the runtime dir the fake has seen."""
+    return sum(1 for call in fake.exec_calls if tuple(call.argv) == RUN_USER_STAT)
+
+
+def polling(
+    lifecycle: LifecycleHooks,
+    runit: "_Runsv",
+    sleeps_seen: list[float],
+    *,
+    wait_s: float,
+    poll_s: float,
+) -> LifecycleHooks:
+    """The services-on seams with the owner wait bounded, and every sleep recorded on the way."""
+
+    def sleep(seconds: float) -> None:
+        sleeps_seen.append(seconds)
+        runit.sleep(seconds)
+
+    supervisor = SupervisorHooks(sv=SV, run=runit.run, clock=runit.clock, sleep=sleep)
+    return replace(lifecycle, supervisor=supervisor, run_user_wait_s=wait_s, run_user_poll_s=poll_s)
 
 
 def generation_of(fake: ScriptedPodman, generation: int) -> list[str]:
@@ -578,6 +608,205 @@ def test_a_services_on_realm_is_rebuilt_through_its_runit_service_and_keeps_its_
     assert service_dir(env.paths, NAME).is_dir()
     assert down.is_file(), "the directory is kept as it was, with down present"
     assert generation_of(fake, 1) == []
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_rebuild_waits_for_the_run_dir_owner_before_it_attaches(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7.28, T716-1: gN+1 is started by runit, and its drop-in may not have chowned the runtime dir
+    yet. The rebuild reads the owner three times, polling 0.2 s apart, and attaches after that."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=10.0, poll_s=0.2
+    )
+    fake.exec_sequences[RUN_USER_STAT] = [
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, f"{UID}\n", ""),
+    ]
+    attached_after: list[int] = []
+    real_attach = create_ops.attach_at_start
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        attached_after.append(owner_checks(fake))
+        return real_attach(*args, **kwargs)
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    result = rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert result.record.generation == 2
+    assert attached_after[0] == 3, "the rebuild's attach follows the third owner read"
+    assert [s for s in seen if s == 0.2] == [0.2, 0.2]
+    assert "GINN-W-RUN-USER-PENDING" not in [w.code for w in result.warnings]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_rebuild_whose_dir_stays_root_owned_attaches_at_its_bound(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a timeout the rebuild attaches anyway, as it did before the wait (T7.28). Nothing retries
+    the attach. The owner is read at once and then after each 0.25 s sleep, up to the 1 s bound."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=1.0, poll_s=0.25
+    )
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    attached_after: list[int] = []
+    real_attach = create_ops.attach_at_start
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        attached_after.append(owner_checks(fake))
+        return real_attach(*args, **kwargs)
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    result = rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert result.record.generation == 2
+    assert attached_after[0] == 5, "four 0.25 s sleeps, then one read at the bound"
+    assert [s for s in seen if s == 0.25][:4] == [0.25] * 4
+    pending = [w for w in result.warnings if w.code == "GINN-W-RUN-USER-PENDING"]
+    assert [w.message for w in pending] == [
+        "the runtime directory of realm 'debian' was not yet owned by the realm user when its wait "
+        "ended; the attach went ahead and succeeded"
+    ]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_rebuild_whose_attach_fails_after_the_wait_carries_the_pending_cause(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner wait timed out and the attach then failed. The rebuild raises the attach error,
+    and its warnings are not printed, so the timeout is a note on that error (T7.28, FR-083)."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=1.0, poll_s=0.25
+    )
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        raise make("GINN-E-ATTACH-FAILED", detail="ginn-rebind: mount refused")
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    with pytest.raises(GinnError) as caught:
+        rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    assert [n for n in caught.value.__notes__ if "GINN-W-RUN-USER-PENDING" in n] == [
+        "GINN-W-RUN-USER-PENDING: the runtime directory of realm 'debian' was not yet owned by the "
+        "realm user when its wait ended"
+    ]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_rebuild_whose_container_stops_in_the_owner_wait_fails_at_once(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FR-081: the new generation's init is killed once the rebuild has read the owner. A stopped
+    container never becomes owned, so the wait ends at the next read, and the rebuild fails before
+    its attach, with the same error as a container that is not running after start. No pending note
+    is due (T7.28 follow-up)."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=10.0, poll_s=0.2
+    )
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    polled_sleep = lifecycle.supervisor.sleep
+    killed: list[str] = []
+
+    def kill_in_the_wait(seconds: float) -> None:
+        if owner_checks(fake) >= 1 and not killed:
+            for cid in generation_of(fake, 2):
+                fake.stop(cid, 0)
+                killed.append(cid)
+        polled_sleep(seconds)
+
+    lifecycle = replace(lifecycle, supervisor=replace(lifecycle.supervisor, sleep=kill_in_the_wait))
+    attached: list[bool] = []
+    real_attach = create_ops.attach_at_start
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        attached.append(True)
+        return real_attach(*args, **kwargs)
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    with pytest.raises(GinnError) as caught:
+        rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert len(killed) == 1
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["detail"] == "the rebuilt realm is not running after start"
+    assert caught.value.details["state"] == "exited"
+    assert owner_checks(fake) == 2, "one read before the kill, one after it, then no more"
+    assert attached == []
+    notes = getattr(caught.value, "__notes__", [])
+    assert not [n for n in notes if "GINN-W-RUN-USER-PENDING" in n]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-061")
+def test_a_services_off_rebuild_does_not_wait_for_a_run_dir_owner(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """A services-off gN+1 runs as the realm user, and its tmpfs is `U`. No owner is read, and the
+    bound is 0 s here, so a read would show as a check."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo)
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    lifecycle = replace(lifecycle_hooks(tmp_path, mountinfo), run_user_wait_s=0.0)
+
+    result = rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert result.record.generation == 2
+    assert owner_checks(fake) == 0
 
 
 @pytest.mark.fr("FR-021")
@@ -2244,6 +2473,35 @@ def test_a_services_on_rebuild_writes_the_realms_machine_id_into_the_new_generat
     assert content == f"{before.machine_id}\n".encode("ascii")
 
 
+@pytest.mark.fr("FR-083")
+def test_a_services_on_rebuild_copies_the_run_user_drop_in_into_the_new_generation(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.28, T716-1: gN+1 is created by the same create path, so it gets the realm user's
+    tmpfiles.d drop-in too. Without it the realm user cannot attach grants under /run/user/<uid>."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    _create_services(env, fake, home, hooks)
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    record = rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    ).record
+    assert record.generation == 2
+    content, mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
+    assert content == f"d /run/user/{UID} 0700 {UID} {GID} -\n".encode("ascii")
+    assert mode == 0o644
+
+
 @pytest.mark.fr("FR-066")
 @pytest.mark.fr("FR-080")
 def test_a_lazy_services_on_rebuild_whose_image_has_no_init_is_deferred_with_the_reason(
@@ -2276,3 +2534,118 @@ def test_a_lazy_services_on_rebuild_whose_image_has_no_init_is_deferred_with_the
     assert started.generation == 1
     assert generation_of(fake, 2) == []
     assert stored(env).generation == 1
+
+
+@pytest.fixture
+def journal_steps(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every journal step name, in the order the operations record them (FR-122)."""
+    steps: list[str] = []
+    original: Callable[..., Any] = Journal.step
+
+    def recording(self: Journal, entry: Any, name: str, params: Any = None, **kwargs: Any) -> Any:
+        steps.append(name)
+        return original(self, entry, name, params, **kwargs)
+
+    monkeypatch.setattr(Journal, "step", recording)
+    return steps
+
+
+@pytest.mark.fr("FR-122")
+def test_a_rebuild_replay_records_exec_acked_for_each_install(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    journal_steps: list[str],
+) -> None:
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+        packages=("curl", "git"),
+    )
+    rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert "exec-acked" in journal_steps
+    assert journal_steps.index("exec-acked") < journal_steps.index("swapping")
+
+
+@pytest.mark.fr("FR-084")
+def test_a_rebuild_syncs_the_relay_while_rebuilding_and_again_at_the_swap(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    states: list[str] = []
+
+    def record(paths: Any, *_args: Any, **_kwargs: Any) -> None:
+        states.append(RealmStore(paths).load(NAME).state.value)
+
+    monkeypatch.setattr("ginn.ops.rebuild.sync_exec_service", record)
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert states == [RealmState.REBUILDING.value, RealmState.STOPPED.value]
+
+
+@pytest.mark.fr("FR-084")
+def test_a_failed_relay_sync_during_a_rebuild_is_a_warning_and_the_swap_stands(
+    env: OpEnv,
+    fake: Any,
+    home: Path,
+    host: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError(errno.EIO, "the sv directory is unreadable")
+
+    monkeypatch.setattr("ginn.ops.rebuild.sync_exec_service", broken)
+    make_realm(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    result = rebuild(
+        env,
+        fake,
+        home,
+        host,
+        sleeps,
+        mountinfo,
+    )
+    assert result.record.generation == 2
+    assert result.record.state is RealmState.STOPPED
+    assert "GINN-W-RELAY-SYNC" in [w.code for w in result.warnings]

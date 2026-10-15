@@ -16,8 +16,11 @@ from pathlib import Path
 import pytest
 
 from ginn.errors import GinnError
+from ginn.podman.adapter import ExecTarget
 from ginn.podman.cli import PodmanCli
 from tests.unit.test_podman_cli import configured_paths
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
 
 def _stub(tmp_path: Path, body: str) -> Path:
@@ -44,7 +47,7 @@ def test_a_run_that_hangs_is_killed_at_the_timeout(tmp_path: Path) -> None:
     cli = _cli(tmp_path, "sleep 30")
     started = time.monotonic()
     with pytest.raises(GinnError) as err:
-        cli.exec("c0ffee", ["ls"], capture=True, timeout_s=0.3)
+        cli.exec("c0ffee", ["ls"], capture=True, timeout_s=0.3, target=DIRECT_TARGET)
     assert time.monotonic() - started < 10.0
     assert err.value.code == "GINN-E-INTERNAL"
     assert "timed out" in str(err.value.details["reason"])
@@ -54,7 +57,7 @@ def test_a_run_that_hangs_is_killed_at_the_timeout(tmp_path: Path) -> None:
 def test_a_run_that_prints_past_the_cap_is_killed(tmp_path: Path) -> None:
     cli = _cli(tmp_path, "dd if=/dev/zero bs=65536 count=64 2>/dev/null")
     with pytest.raises(GinnError) as err:
-        cli.exec("c0ffee", ["ls"], capture=True, max_output=1024 * 1024)
+        cli.exec("c0ffee", ["ls"], capture=True, max_output=1024 * 1024, target=DIRECT_TARGET)
     assert "printed more than" in str(err.value.details["reason"])
 
 
@@ -104,7 +107,12 @@ def test_a_bounded_read_returns_binary_bytes_exactly(tmp_path: Path) -> None:
     octal = "".join(f"\\{b:03o}" for b in header)
     cli = _cli(tmp_path, f"printf '{octal}'")
     result = cli.exec(
-        "c0ffee", ["cat", "--", "/x.png"], capture=True, timeout_s=10.0, max_output=64
+        "c0ffee",
+        ["cat", "--", "/x.png"],
+        capture=True,
+        timeout_s=10.0,
+        max_output=64,
+        target=DIRECT_TARGET,
     )
     assert result.stdout.encode("utf-8", "surrogateescape") == header
 

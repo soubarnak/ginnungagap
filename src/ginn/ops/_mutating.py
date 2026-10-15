@@ -8,8 +8,10 @@ the realm lock for an interrupted operation, writes that operation's audit entry
 entry that names it), and removes the journal file. It skips the host integrity check, because it
 changes only ginn state, and an unacknowledged host change must not stop it. The steps, in order:
 
-1. Realm lock (FR-123, DR-033). A second operation on the same realm is refused at once with
-   GINN-E-REALM-BUSY, naming the running operation. It is never queued.
+1. Exec lock, then realm lock (FR-123, DR-033, ADR-014). A held exec lock refuses the operation
+   with GINN-E-REALM-BUSY, naming the running exec (see below). A second operation on the same
+   realm is refused at once with GINN-E-REALM-BUSY, naming the running operation. It is never
+   queued.
 2. Host integrity before check (FR-006), through `IntegrityState.before_op`. It refuses with
    GINN-E-HOST-UNACKED while a change is unacknowledged. The changed paths are in the error's
    `details["paths"]`. This module takes no global lock around before_op or after_op. The
@@ -27,6 +29,14 @@ changes only ginn state, and an unacknowledged host change must not stop it. The
 7. Journal finish, but only when the outcome is "ok" or the body raised a GinnError. Otherwise the
    journal entry stays for recovery (see below).
 8. Realm lock released.
+
+Exec lock (FR-123, ADR-014). A mutating exec holds `<runtime root>/exec/<realm>.lock` while it
+runs. The check opens that file read-only and never creates it, so a missing file is not busy. The
+operations named in EXEC_EXEMPT_OPS are not refused by it. Under the realm lock, and only while no
+exec holds the exec lock, the realm's orphan marker is audited once and removed (FR-124). That
+happens before the journal begins. A marker is read only when it is a regular file owned by the
+user, and a symlink is never followed. The audit entry of a marker is not an operation entry: it
+has no op_id and no journal entry.
 
 Steps 1 to 3 are entry. A refusal there is raised at once. The operation never began, so it writes
 no journal entry and no operation audit entry. A host change that causes a refusal is still
@@ -67,6 +77,10 @@ This module makes no subprocess call and touches no podman.
 
 from __future__ import annotations
 
+import errno
+import os
+import re
+import stat
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -76,10 +90,16 @@ from pathlib import Path
 from typing import Any, Final
 
 from ginn.domain import RealmName
-from ginn.errors import GinnError
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.integrity.fingerprint import HOST_ROOT, Fingerprint
 from ginn.integrity.state import IntegrityState
+from ginn.services._exec_lock import (
+    exec_lock_busy,
+    exec_lock_dir,
+    exec_lock_path,
+    exec_orphan_path,
+)
 from ginn.store._time import utc_from_epoch, utc_iso
 from ginn.store.audit import AuditEntry, AuditLog
 from ginn.store.journal import Journal, JournalEntry
@@ -192,7 +212,15 @@ def mutating(
     started_at = env.clock()  # the one reading for this operation: audit ts and journal started
     started = utc_iso(utc_from_epoch(started_at))
     mutation = Mutation(op, realm, uuid.uuid4().hex, started, params or {}, env.journal)
+    exempt = op in EXEC_EXEMPT_OPS
+    _check_exec_lock(env.paths, realm, exempt)  # before the realm lock (FR-123, ADR-014)
     with realm_lock(env.paths, realm, op):
+        # The check repeats under the realm lock. An exec of the realm can start under that lock,
+        # outlive its CLI and be released between the first check and this lock, so the first
+        # check alone could miss it.
+        busy = _check_exec_lock(env.paths, realm, exempt)
+        if not busy:
+            _settle_orphan(env, mutation, realm)  # a free lock means the marker is complete
         before, entry = _enter(env, mutation, started_at)
         try:
             yield mutation
@@ -310,3 +338,372 @@ def _report(problems: list[Exception], failure: BaseException | None) -> None:
     for problem in rest:
         first.add_note(f"further exit failure: {_label(problem)}: {problem}")
     raise first
+
+
+EXEC_EXEMPT_OPS: Final = frozenset({"start", "stop", "service-exit", "crash", "idle-stop"})
+"""Operations that run without the exec lock check (ADR-014). None of them starts a user's exec.
+
+`start` needs its reason: an exec runs only inside a running container, and a start that passes the
+state checks has no live exec. A supervised restart happens only after the container died, which
+killed its processes. `stop` is explicit user intent, and the exec ends with the container. `crash`,
+`idle-stop` and `service-exit` are the supervisor's own operations."""
+ORPHAN_OP: Final = "exec-orphan"
+ORPHAN_OUTCOME: Final = "orphan"
+ORPHAN_CODE: Final = "GINN-W-RELAY-ORPHAN"
+ORPHAN_MAX_BYTES: Final = 64 * 1024
+"""The most of a marker that is read. A record is at most 256 pid lines (ADR-014), so this holds
+many records. A longer marker is read up to the bound, its last record is marked truncated, and it
+is kept rather than removed, because its later records were not read."""
+HOLDER_MAX_BYTES: Final = 256
+_TOKEN: Final = re.compile(r"[0-9a-f]{32}")
+
+
+@dataclass(frozen=True)
+class OrphanMarker:
+    """One record of an orphan marker (ADR-014). `read_orphans` and `mutating()` both parse it."""
+
+    token: str | None
+    when: int | None
+    pids: tuple[int, ...]
+    kill_ran: bool
+    truncated: bool
+    unknown: tuple[int, ...] = ()
+    """Processes whose token the kill could not read, and which it left alone (FR-124)."""
+    join_failed: bool = False
+    """No namespace join, so the kill could not name the realm's unreadable processes (FR-124)."""
+
+    def survivors_text(self) -> str:
+        """The clause that names the survivors, for the `pids` of GINN-W-RELAY-ORPHAN.
+
+        Only a record with survivors, or a kill that did not run, gets that notice. The clause never
+        names an unreadable process, because the kill leaves those alone (FR-124).
+        """
+        if not self.kill_ran:
+            return "the token kill did not run, so no pid is recorded"
+        survivors = ", ".join(str(pid) for pid in self.pids)
+        return f"pids {survivors} survived the token kill"
+
+    def pids_text(self) -> str:
+        """Every clause that names the processes of the record, unreadable ones included (audit)."""
+        if not self.kill_ran:
+            return "the token kill did not run, so no pid is recorded"
+        parts = []
+        if self.pids:
+            survivors = ", ".join(str(pid) for pid in self.pids)
+            parts.append(f"pids {survivors} survived the token kill")
+        if self.join_failed:
+            parts.append("processes unknown (token not readable)")
+        if self.unknown:
+            named = ", ".join(str(pid) for pid in self.unknown)
+            parts.append(f"unknown pids (token not readable): {named}")
+        return "; ".join(parts) if parts else "the token kill recorded no pid"
+
+
+def _check_exec_lock(paths: OwnedPaths, realm: RealmName, exempt: bool) -> bool:
+    """Refuse a user operation while a mutating exec of `realm` holds its lock (FR-123, ADR-014).
+
+    Returns whether an exec holds the lock. An exempt operation is never refused, so the caller
+    learns from the result whether the orphan marker may be read. A faulty lock path raises
+    GINN-E-INTERNAL from exec_lock_busy. A user operation then fails with it, and an exempt one
+    goes on as if the lock were busy, so the marker is left alone.
+    """
+    try:
+        busy = exec_lock_busy(paths, realm)
+    except GinnError:
+        if not exempt:
+            raise
+        return True
+    if busy and not exempt:
+        raise make("GINN-E-REALM-BUSY", op=_exec_label(paths, realm))
+    return busy
+
+
+def _exec_label(paths: OwnedPaths, realm: RealmName) -> str:
+    """The `{op}` of the refusal: the running exec, named from the holder line (ADR-014).
+
+    The holder line is `run <pid> podman <pid>`. ginn-exec-run writes it after the fork and clears
+    it before the lock is released, so it can be empty for a moment. A run pid that no longer
+    exists is treated as empty too, as the relay's own refusal does.
+    """
+    words = _read_holder(exec_lock_path(paths, realm)).split()
+    if len(words) == 4 and words[0] == "run" and words[2] == "podman" and words[1].isdecimal():
+        run = int(words[1])
+        if run >= 1 and _alive(run) and words[3].isdecimal():
+            return (
+                f"an exec of realm {realm.value!r} (ginn-exec-run pid {run}, podman pid {words[3]})"
+            )
+    return f"an exec of realm {realm.value!r} (holder not yet recorded)"
+
+
+def _read_holder(path: Path) -> str:
+    """The holder line of a lock file, read without following a link. Empty when unreadable."""
+    fd = _open_unfollowed(path, os.O_RDONLY | os.O_NONBLOCK)
+    if fd is None:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        return os.read(fd, HOLDER_MAX_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+
+
+def _alive(pid: int) -> bool:
+    """True when `pid` names a process that exists. Signal 0 sends nothing."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except (OverflowError, ProcessLookupError):
+        return False
+    return True
+
+
+def _open_unfollowed(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int | None:
+    """Open `path` without following a final symlink. None when it is absent or is a link."""
+    try:
+        return os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        raise
+
+
+def parse_orphans(raw: bytes) -> tuple[OrphanMarker, ...]:
+    """The records of an orphan marker's bytes, in file order (ginn-exec-kill.c, ginn-exec-run.c).
+
+    A record starts at each `token <hex>` line and runs to the next one. Its other lines are `time
+    <epoch>`, then `pid <n>` lines, `unknown <n>` lines for processes the kill could not read, or
+    `kill not run` when the kill could not start, or `unknown join` when it had no namespace join.
+    Lines that do not parse are skipped. A last line
+    without its newline is torn, as a crash left it, and is dropped (AuditLog._read_file does the
+    same). A marker longer than ORPHAN_MAX_BYTES is cut off, and the last record it reaches is
+    marked truncated. The token is kept: it names the processes that the kill missed, and it grants
+    nothing.
+    """
+    text = raw[:ORPHAN_MAX_BYTES].decode("utf-8", errors="replace")
+    lines = text.split("\n")
+    if not text.endswith("\n"):
+        lines.pop()
+    blocks: list[list[str]] = []
+    for line in lines:
+        if line.startswith("token "):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+    truncated = len(raw) > ORPHAN_MAX_BYTES
+    records: list[OrphanMarker] = []
+    for index, block in enumerate(blocks):
+        token: str | None = None
+        when: int | None = None
+        pids: list[int] = []
+        unknown: list[int] = []
+        join_failed = False
+        kill_ran = True
+        for line in block:
+            key, _, value = line.partition(" ")
+            if key == "token" and _TOKEN.fullmatch(value):
+                token = value
+            elif key == "time" and value.isdecimal():
+                when = int(value)
+            elif key == "pid" and value.isdecimal():
+                pids.append(int(value))
+            elif key == "unknown" and value.isdecimal():
+                unknown.append(int(value))
+            elif line == "unknown join":
+                join_failed = True
+            elif line == "kill not run":
+                kill_ran = False
+        records.append(
+            OrphanMarker(
+                token=token,
+                when=when,
+                pids=tuple(pids),
+                kill_ran=kill_ran,
+                truncated=truncated and index == len(blocks) - 1,
+                unknown=tuple(unknown),
+                join_failed=join_failed,
+            )
+        )
+    return tuple(records)
+
+
+def read_orphans(paths: OwnedPaths, realm: RealmName) -> tuple[OrphanMarker, ...]:
+    """The records of the realm's orphan marker, read without changing anything (FR-124, ADR-014).
+
+    `ginn status` calls this. It neither audits nor removes the marker, which `mutating()` does at
+    the realm's next operation. A marker that is a link, a directory or not owned by the user gives
+    no records, as it does for `mutating()`, and nothing is created. No marker gives the empty
+    tuple.
+    """
+    dir_fd = _open_exec_dir(paths)
+    if dir_fd is None:
+        return ()
+    try:
+        raw = _marker_bytes(dir_fd, exec_orphan_path(paths, realm).name)
+    finally:
+        os.close(dir_fd)
+    return () if raw is None else parse_orphans(raw)
+
+
+def _open_exec_dir(paths: OwnedPaths) -> int | None:
+    """A descriptor of `exec/`, or None when it is absent or is a link. Nothing is created."""
+    return _open_unfollowed(exec_lock_dir(paths), os.O_RDONLY | os.O_DIRECTORY)
+
+
+def _marker_bytes(dir_fd: int, name: str) -> bytes | None:
+    """The marker's bytes, at most ORPHAN_MAX_BYTES + 1 of them, or None when it is not ours.
+
+    Only a regular file owned by the user is read. It is opened through `dir_fd` without following a
+    link, and without blocking, so a FIFO cannot stall the command.
+    """
+    fd = _open_unfollowed(name, os.O_RDONLY | os.O_NONBLOCK, dir_fd=dir_fd)
+    if fd is None:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return None
+        return os.read(fd, ORPHAN_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+
+
+def _settle_orphan(env: OpEnv, mutation: Mutation, realm: RealmName) -> None:
+    """Audit the realm's orphan records, then remove the marker (FR-124, ADR-014). Best effort.
+
+    Called under the realm lock while no exec holds the exec lock, so the token kill has finished
+    writing the marker. Each record is shown on the operation through `orphan_warnings`: as
+    GINN-W-RELAY-ORPHAN, and as GINN-W-ORPHAN-UNKNOWN when it names unreadable processes. Each gets
+    one audit entry, unless the Audit Log already holds one for its token and time, so a crash after
+    an append does not repeat it. The marker is removed only after its entries are written. A marker
+    longer than the read bound is not removed: its records past the bound were not read, so they
+    would be lost. It is kept, and the next operation audits the same records as already held. An
+    error never fails the operation. The marker is then kept, and GINN-W-ORPHAN-UNSETTLED says so.
+    """
+    try:
+        markers = read_orphans(env.paths, realm)
+        if not markers:
+            return
+        for marker in markers:
+            mutation.warnings.extend(orphan_warnings(realm, marker))
+        _audit_orphans(env, realm, markers)
+        if any(marker.truncated for marker in markers):
+            detail = (
+                f"the marker is over {ORPHAN_MAX_BYTES} bytes, so its later records are not read"
+            )
+            mutation.warnings.append(
+                warn("GINN-W-ORPHAN-UNSETTLED", realm=realm.value, detail=detail)
+            )
+            return
+        _remove_marker(env.paths, realm)
+    except (OSError, GinnError) as exc:
+        detail = _reason(exc)
+        mutation.warnings.append(warn("GINN-W-ORPHAN-UNSETTLED", realm=realm.value, detail=detail))
+
+
+def orphan_warnings(realm: RealmName, marker: OrphanMarker) -> list[GinnWarning]:
+    """The notices of one record of the realm's marker (FR-124, ADR-014).
+
+    GINN-W-RELAY-ORPHAN names the survivors, so only a record with survivors, or a kill that did not
+    run, gives it. GINN-W-ORPHAN-UNKNOWN is given for a record that names unreadable processes. It
+    names the `unknown` pids, with `and other processes` when the record also says `unknown join`.
+    With no pids it says `the processes`. A record of survivors alone gives the first notice only.
+    """
+    notices: list[GinnWarning] = []
+    if marker.pids or not marker.kill_ran:
+        notices.append(warn("GINN-W-RELAY-ORPHAN", realm=realm.value, pids=marker.survivors_text()))
+    if marker.unknown:
+        named = "pids " + ", ".join(str(pid) for pid in marker.unknown)
+        if marker.join_failed:
+            named += ", and other processes"
+        notices.append(warn("GINN-W-ORPHAN-UNKNOWN", realm=realm.value, processes=named))
+    elif marker.join_failed:
+        notices.append(warn("GINN-W-ORPHAN-UNKNOWN", realm=realm.value, processes="the processes"))
+    return notices
+
+
+def _audit_orphans(env: OpEnv, realm: RealmName, markers: tuple[OrphanMarker, ...]) -> None:
+    """Append one audit entry per record that the Audit Log does not hold yet (FR-124)."""
+    held = _audited_orphans(env, realm)
+    for marker in markers:
+        key = _orphan_key(marker)
+        if key is not None and key in held:
+            continue
+        env.audit.append(_orphan_entry(env, realm, marker))
+        if key is not None:
+            held.add(key)  # a second record with the same token and time is audited once
+
+
+def _audited_orphans(env: OpEnv, realm: RealmName) -> set[tuple[str, str]]:
+    """The (token, time) of each orphan entry that the Audit Log already holds for the realm."""
+    held: set[tuple[str, str]] = set()
+    for entry in env.audit.read(realm=realm):
+        token = entry.params.get("token")
+        if entry.op == ORPHAN_OP and isinstance(token, str) and entry.ts is not None:
+            held.add((token, entry.ts))
+    return held
+
+
+def _orphan_key(marker: OrphanMarker) -> tuple[str, str] | None:
+    """The (token, time) that identifies a record in the Audit Log, or None when it has neither."""
+    ts = _orphan_ts(marker.when)
+    if marker.token is None or ts is None:
+        return None
+    return marker.token, ts
+
+
+def _orphan_ts(when: int | None) -> str | None:
+    """The marker's time as an audit timestamp, or None when it is absent or does not convert."""
+    if when is None:
+        return None
+    try:
+        return utc_iso(utc_from_epoch(when))
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _orphan_entry(env: OpEnv, realm: RealmName, marker: OrphanMarker) -> AuditEntry:
+    """The audit entry for one record. Its ts is the record's time when that converts, else now.
+
+    The entry is not an operation: it has no op_id, so recovery never indexes it.
+    """
+    return AuditEntry(
+        user=env.user,
+        realm=realm.value,
+        op=ORPHAN_OP,
+        outcome=ORPHAN_OUTCOME,
+        params={
+            "token": marker.token,
+            "pids": list(marker.pids),
+            "unknown": list(marker.unknown),
+            "join_failed": marker.join_failed,
+            "kill_ran": marker.kill_ran,
+            "truncated": marker.truncated,
+        },
+        error_code=ORPHAN_CODE,
+        ts=_orphan_ts(marker.when),
+    )
+
+
+def _remove_marker(paths: OwnedPaths, realm: RealmName) -> None:
+    """Unlink the realm's marker through a descriptor of `exec/`. An absent marker is no error."""
+    dir_fd = _open_exec_dir(paths)
+    if dir_fd is None:
+        return
+    try:
+        try:
+            os.unlink(exec_orphan_path(paths, realm).name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(dir_fd)
+
+
+def _reason(exc: Exception) -> str:
+    """The text of an exception for the detail of a warning."""
+    return exc.message if isinstance(exc, GinnError) else f"{type(exc).__name__}: {exc}"

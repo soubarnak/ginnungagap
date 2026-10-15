@@ -28,7 +28,7 @@ from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import OpEnv, mutating
 from ginn.packages.manager import explicit_packages, printable, shown
 from ginn.packages.manifest import recorded_native
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.runtime.enter import RootSession
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
@@ -60,11 +60,11 @@ def _unrecorded(realm: str, detail: str) -> GinnWarning:
 
 
 def _listed(
-    podman: Podman, cid: str, definition: DistroDef, realm: str
+    podman: Podman, cid: str, definition: DistroDef, realm: str, target: ExecTarget
 ) -> tuple[frozenset[str] | None, str]:
     """The explicit packages of the container, or None with the reason it could not be read."""
     try:
-        return explicit_packages(podman, cid, definition, realm=realm), ""
+        return explicit_packages(podman, cid, definition, realm=realm, target=target), ""
     except Exception as exc:  # noqa: BLE001 - reported as a warning, so the exec status still reaches the caller
         return None, _describe(exc)
 
@@ -108,12 +108,13 @@ def _recorded_session(
     """Diff the explicit packages around `run`, record the new ones, and return the status."""
     realm = record.name.value
     definition = load_distro(record.settings.distro.value)
-    before, reason = _listed(podman, cid, definition, realm)
+    target = ExecTarget(realm=realm, services=bool(record.services_at_create), mutating=False)
+    before, reason = _listed(podman, cid, definition, realm, target)
     status = run()
     if before is None:
         notify(_unrecorded(realm, f"the packages before the session are unknown: {reason}"))
         return status
-    after, reason = _listed(podman, cid, definition, realm)
+    after, reason = _listed(podman, cid, definition, realm, target)
     if after is None:
         notify(_unrecorded(realm, f"the packages after the session are unknown: {reason}"))
         return status

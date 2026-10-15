@@ -42,7 +42,7 @@ from ginn.ops.lifecycle import (
 )
 from ginn.ops.lifecycle import _tree_usage as tree_usage
 from ginn.ops.security_ops import agent_state_path, read_agent_record
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime import attach
 from ginn.runtime.idle import IdleHooks, log_path, record_path
@@ -2780,3 +2780,546 @@ def test_exported_apps_counts_the_host_entries_of_this_realm_only(
 
     assert status.exported_apps == 2
     assert realm_status(env, fake, RealmName("other"), disk=False).exported_apps == 1
+
+
+RUN_USER_STAT = ("stat", "-c", "%u", "--", f"/run/user/{UID}")
+"""The argv that `run_user_state` runs for the realm's runtime dir (T7.28)."""
+
+
+def _polling(
+    hooks: LifecycleHooks, clock: FakeClock, sleeps: list[float], *, wait_s: float, poll_s: float
+) -> LifecycleHooks:
+    """The hooks with a clock that a sleep moves, and the runtime-dir bounds of the test."""
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    supervisor_hooks = SupervisorHooks(clock=clock, sleep=sleep)
+    return replace(
+        hooks,
+        supervisor=supervisor_hooks,
+        run_user_wait_s=wait_s,
+        run_user_poll_s=poll_s,
+    )
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_costs_no_sleep_when_the_dir_is_owned_already(clock: FakeClock) -> None:
+    sleeps: list[float] = []
+    waited = lifecycle.wait_for_run_user(
+        lambda: lifecycle.RunUserState.OWNED,
+        clock=clock,
+        sleep=sleeps.append,
+        wait_s=10.0,
+        poll_s=0.2,
+    )
+    assert waited is lifecycle.RunUserState.OWNED
+    assert sleeps == []
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_returns_once_the_owner_is_the_realm_user(clock: FakeClock) -> None:
+    states = lifecycle.RunUserState
+    answers = iter([states.NOT_YET, states.NOT_YET, states.NOT_YET, states.OWNED])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    waited = lifecycle.wait_for_run_user(
+        lambda: next(answers), clock=clock, sleep=sleep, wait_s=10.0, poll_s=0.2
+    )
+    assert waited is states.OWNED
+    assert sleeps == [0.2, 0.2, 0.2]
+
+
+@pytest.mark.fr("FR-081")
+def test_the_run_user_wait_ends_at_once_when_the_container_is_gone(clock: FakeClock) -> None:
+    """A stopped container does not become owned, so GONE ends the wait with no sleep past it."""
+    states = lifecycle.RunUserState
+    answers = iter([states.NOT_YET, states.GONE])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    waited = lifecycle.wait_for_run_user(
+        lambda: next(answers), clock=clock, sleep=sleep, wait_s=10.0, poll_s=0.2
+    )
+    assert waited is states.GONE
+    assert sleeps == [0.2]
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_gives_up_at_its_bound_and_says_so(clock: FakeClock) -> None:
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    waited = lifecycle.wait_for_run_user(
+        lambda: lifecycle.RunUserState.NOT_YET,
+        clock=clock,
+        sleep=sleep,
+        wait_s=1.0,
+        poll_s=0.25,
+    )
+    assert waited is lifecycle.RunUserState.NOT_YET
+    assert sleeps == [0.25] * 4
+
+
+@pytest.mark.fr("FR-083")
+@pytest.mark.fr("FR-081")
+def test_run_user_state_is_owned_only_for_the_realm_uid(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, home: Path
+) -> None:
+    """OWNED needs the realm uid. A failed exec on a running container is NOT_YET, and one on a
+    stopped container is GONE."""
+    states = lifecycle.RunUserState
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is states.OWNED
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is states.NOT_YET
+    fake.exec_results[RUN_USER_STAT] = ExecResult(1, "", "stat: cannot statx")
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is states.NOT_YET
+    # A failed exec while podman still runs the container says nothing about its stop.
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    fake.fail_exec_with = "GINN-E-INTERNAL"
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is states.NOT_YET
+    fake.fail_exec_with = None
+
+    make_realm(env, fake, "pen", RealmState.STOPPED, running=False, services=True)
+    pen = container_id(env, "pen")
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    assert lifecycle.run_user_state(fake, pen, UID, target=target, pid=0) is states.GONE
+
+
+@pytest.mark.fr("FR-083")
+@pytest.mark.fr("FR-081")
+def test_run_user_state_asks_podman_only_when_stat_gives_no_owner(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """stat that prints an owner settles the read: OWNED for the realm uid, NOT_YET for another, and
+    no inspect on either path, so the normal wait costs one exec per poll (FR-083). A non-zero exit,
+    such as a missing directory, gives no owner, so podman is asked whether the container is still
+    running (FR-081)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    owner_answers = [
+        (ExecResult(0, f"{UID}\n", ""), lifecycle.RunUserState.OWNED),
+        (ExecResult(0, "0\n", ""), lifecycle.RunUserState.NOT_YET),
+    ]
+    for answer, expected in owner_answers:
+        fake.exec_results[RUN_USER_STAT] = answer
+        fake.calls.clear()
+        assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is expected
+        assert fake.ops() == ["exec"]
+
+    fake.exec_results[RUN_USER_STAT] = ExecResult(1, "", "stat: cannot statx")
+    fake.calls.clear()
+    assert (
+        lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid)
+        is lifecycle.RunUserState.NOT_YET
+    )
+    assert fake.ops() == ["exec", "inspect"]
+
+
+@pytest.mark.fr("FR-081")
+def test_stat_output_that_is_not_a_number_gives_no_owner_and_podman_is_asked(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """Output that does not parse is no owner. On a running container the read stays NOT_YET."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    for stdout in ("", "garbage\n"):
+        fake.exec_results[RUN_USER_STAT] = ExecResult(0, stdout, "")
+        fake.calls.clear()
+        assert (
+            lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid)
+            is lifecycle.RunUserState.NOT_YET
+        )
+        assert fake.ops() == ["exec", "inspect"]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_255_from_an_exec_on_an_exited_container_is_gone(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The host's podman answers an exec on an exited container with 255, and the adapter returns it
+    rather than raising. That is no owner, so podman is asked, and the exited state is GONE
+    (FR-081, T7.16 section 11.8)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    fake.stop(cid, 0)
+    fake.calls.clear()
+
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is (
+        lifecycle.RunUserState.GONE
+    )
+    assert fake.ops() == ["exec", "inspect"]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_raising_exec_on_an_exited_container_is_gone_too(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The adapter's raising case: an exec that raises (125) on an exited container is GONE too."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    fake.stopped_exec_exit = 125
+    fake.stop(cid, 0)
+
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is (
+        lifecycle.RunUserState.GONE
+    )
+
+
+@pytest.mark.fr("FR-081")
+def test_an_inspect_error_on_a_listed_container_is_not_yet(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """A failed exec, then a failed inspect, while podman still lists the container: that is no sign
+    the container stopped, so the read is NOT_YET and the wait keeps going (FR-081)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    fake.fail_exec_with = "GINN-E-INTERNAL"
+    fake.fail_ops = {"inspect": "GINN-E-INTERNAL"}
+
+    assert (
+        lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid)
+        is lifecycle.RunUserState.NOT_YET
+    )
+    assert fake.fail_ops == {}, "the inspect fault was taken"
+
+
+@pytest.mark.fr("FR-081")
+def test_an_inspect_error_on_an_absent_container_is_gone(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """podman no longer lists the container and its inspect fails: the start's container has gone,
+    so the read is GONE (FR-081)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    del fake.containers[cid]  # podman removed the container
+    fake.fail_ops = {"inspect": "GINN-E-INTERNAL"}
+
+    assert (
+        lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid)
+        is lifecycle.RunUserState.GONE
+    )
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        (ContainerState.PAUSED, lifecycle.RunUserState.NOT_YET),
+        (ContainerState.UNKNOWN, lifecycle.RunUserState.NOT_YET),
+        (ContainerState.STOPPING, lifecycle.RunUserState.GONE),
+        (ContainerState.EXITED, lifecycle.RunUserState.GONE),
+        (ContainerState.CREATED, lifecycle.RunUserState.GONE),
+    ],
+)
+def test_the_state_podman_reports_after_a_failed_exec_decides_gone(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    state: ContainerState,
+    expected: lifecycle.RunUserState,
+) -> None:
+    """The halted states and stopping are gone. Paused and unknown count as running, so the wait
+    keeps polling them (FR-081)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    fake.containers[cid].state = state
+
+    assert lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid) is expected
+
+
+@pytest.mark.fr("FR-081")
+def test_a_container_with_another_init_pid_is_gone_to_the_start_that_read_the_old_one(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The start read the init pid after `podman start`. A failed exec on a container that now runs
+    another pid means it restarted in between, so the start's view is stale: GONE. With the same
+    pid, the same failed exec is NOT_YET (FR-081)."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    pid = fake.containers[cid].pid
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+    fake.fail_exec_with = "GINN-E-INTERNAL"
+
+    assert (
+        lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid)
+        is lifecycle.RunUserState.NOT_YET
+    )
+    assert (
+        lifecycle.run_user_state(fake, cid, UID, target=target, pid=pid + 1)
+        is lifecycle.RunUserState.GONE
+    )
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-083")
+def test_a_supervised_services_on_start_waits_for_the_owner_before_it_attaches(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """T7.28, T716-1: the drop-in gives the runtime dir to the realm user at boot. The start polls
+    the owner until it is the realm user, and only then attaches and records `running`."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_sequences[RUN_USER_STAT] = [
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, f"{UID}\n", ""),
+    ]
+    hooks = _polling(hooks, clock, sleeps, wait_s=10.0, poll_s=0.2)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.2, 0.2]
+    assert fake.exec_sequences[RUN_USER_STAT] == []
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-083")
+def test_a_supervised_start_whose_dir_stays_root_owned_goes_on_at_its_bound(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """On a timeout the start records `running` anyway, and the attach runs as it did before the
+    wait (T7.28). Nothing retries the attach here."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.25] * 4
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_timeout_is_a_pending_warning_on_the_start_and_the_start_goes_on(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """T7.28: the owner wait gives up at its bound. The start still records `running`, and the
+    timeout is GINN-W-RUN-USER-PENDING on the start's warnings (FR-083)."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+    warnings: list[GinnWarning] = []
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=hooks, warnings=warnings, supervised=True
+    )
+
+    assert record.state is RealmState.RUNNING
+    pending = [w for w in warnings if w.code == "GINN-W-RUN-USER-PENDING"]
+    assert [w.message for w in pending] == [
+        "the runtime directory of realm 'lab' was not yet owned by the realm user when its wait "
+        "ended; the attach went ahead and succeeded"
+    ]
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_timeout_then_a_failed_attach_carries_the_pending_cause_as_a_note(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    home: Path,
+) -> None:
+    """The owner wait timed out and the attach then failed. The start raises the attach error, and
+    its warnings are not printed, so the timeout is a note on that error (T7.28, FR-083)."""
+    (home / "Downloads").mkdir()
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    fake.unshare_results.append(ExecResult(1, "", "ginn-rebind: mount refused"))
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+    warnings: list[GinnWarning] = []
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=hooks,
+            warnings=warnings,
+            supervised=True,
+        )
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    assert sleeps == [0.25] * 4
+    assert [note for note in caught.value.__notes__ if "GINN-W-RUN-USER-PENDING" in note] == [
+        "GINN-W-RUN-USER-PENDING: the runtime directory of realm 'lab' was not yet owned by the "
+        "realm user when its wait ended"
+    ]
+    assert warnings == []
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_owner_that_comes_in_time_then_a_failed_attach_adds_no_note(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    home: Path,
+) -> None:
+    """The owner is ready in time, so a failed attach carries no pending note."""
+    (home / "Downloads").mkdir()
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    fake.unshare_results.append(ExecResult(1, "", "ginn-rebind: mount refused"))
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    notes = getattr(caught.value, "__notes__", [])
+    assert not any("GINN-W-RUN-USER-PENDING" in note for note in notes)
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_owner_read_in_time_gives_no_pending_warning(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """The owner is the realm user on the second read, so the wait returns in time and the start
+    has no pending warning."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_sequences[RUN_USER_STAT] = [ExecResult(0, "0\n", ""), ExecResult(0, f"{UID}\n", "")]
+    hooks = _polling(hooks, clock, sleeps, wait_s=10.0, poll_s=0.2)
+    warnings: list[GinnWarning] = []
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=hooks, warnings=warnings, supervised=True
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.2]
+    assert "GINN-W-RUN-USER-PENDING" not in [w.code for w in warnings]
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_off_start_does_not_wait_for_a_run_dir_owner(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """A services-off tmpfs is chowned to the realm user at create (`U`), so there is no wait."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == []
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.parametrize("stopped_exit", [255, 125])
+def test_a_container_that_stops_during_the_run_user_wait_ends_the_wait_at_once(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    stopped_exit: int,
+) -> None:
+    """FR-081 AC-3 on the start path: the init is killed while the start waits for the owner. A
+    stopped container cannot take the owner, so the wait ends at the first failed read and does not
+    run out its bound. The attach then fails as it does for a crashed container, with no pending
+    note (T7.28 follow-up). The host's podman answers 255, and the raising 125 is kept as a case."""
+    fake.stopped_exec_exit = stopped_exit
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    cid = container_id(env, "lab")
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+        if len(sleeps) == 1:
+            fake.stop(cid, 0)  # the init is killed during the first poll interval
+
+    hooks = replace(
+        hooks,
+        supervisor=SupervisorHooks(clock=clock, sleep=sleep),
+        run_user_wait_s=10.0,
+        run_user_poll_s=0.2,
+    )
+    warnings: list[GinnWarning] = []
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=hooks,
+            warnings=warnings,
+            supervised=True,
+        )
+
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["detail"] == "the realm is not running after start"
+    assert caught.value.details["state"] == "exited"
+    assert sleeps == [0.2]
+    notes = getattr(caught.value, "__notes__", [])
+    assert not any("GINN-W-RUN-USER-PENDING" in note for note in notes)
+    assert warnings == []
+    assert "unshare" not in fake.ops()
+    assert stored(env, "lab").state is RealmState.STOPPED

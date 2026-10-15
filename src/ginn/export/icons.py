@@ -37,7 +37,7 @@ from ginn.export._realm import (
     read_realm_file,
     run_listing,
 )
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 
 ICON_MAX_BYTES: Final = 2 * 1024 * 1024
 """The largest icon file ginn copies out of a realm, in bytes (realm input is untrusted)."""
@@ -111,12 +111,14 @@ class IconIndex:
         """Why the listing failed, or None. A failed listing leaves theme names unresolved."""
 
     @classmethod
-    def build(cls, podman: Podman, container_id: str, *, realm: str) -> IconIndex:
+    def build(
+        cls, podman: Podman, container_id: str, *, realm: str, target: ExecTarget
+    ) -> IconIndex:
         """Run `ICON_LIST` in the realm, bounded. A bad status gives an empty index with its reason.
 
         A podman failure, a hang or an overflow raises GINN-E-EXPORT-LIST (see `run_listing`).
         """
-        result = run_listing(podman, container_id, ICON_LIST, realm=realm)
+        result = run_listing(podman, container_id, ICON_LIST, realm=realm, target=target)
         if result.exit_code not in (0, 1):
             return cls({}, f"find exited with status {result.exit_code}")
         return cls.from_listing(result.stdout)
@@ -259,6 +261,7 @@ def copy_icon(
     app: str,
     dest_dir: Path,
     size: int,
+    target: ExecTarget,
 ) -> Path:
     """Copy one realm icon to `dest_dir/<app><ext>` after the checks of the module docstring.
 
@@ -269,7 +272,7 @@ def copy_icon(
         raise IconError(f"{realm_path} is larger than {ICON_MAX_BYTES} bytes")
     ext = posixpath.splitext(realm_path)[1]
     try:
-        data = read_realm_file(podman, container_id, realm_path, cap=ICON_MAX_BYTES)
+        data = read_realm_file(podman, container_id, realm_path, cap=ICON_MAX_BYTES, target=target)
     except RealmFileTooLarge as exc:
         raise IconError(f"{realm_path} is larger than {ICON_MAX_BYTES} bytes") from exc
     except RealmFileUnreadable as exc:

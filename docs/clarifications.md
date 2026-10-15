@@ -28,12 +28,17 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-20 | The records keep schema 1 when a change adds fields, so downgrade across T8.3 is unsupported while a change is pending | DR-035, FR-122, FR-066, ADR-003 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-22 | The Kali everything estimate is read-only for ginn's state, but it pulls the base image and refreshes the lists in a throwaway container | FR-014 AC-1, DR-032, FR-123, FR-124, FR-121, IR-002 | open, for SRS v1.1; the build proceeds under this behaviour (2026-10-14) |
 | CL-23 | The S-05s idle band is read as a ceiling: a median below 37.63 MiB minus 1 MiB passes when the masks and the journald cap are proven | NFR-003, ADR-007 | decided by the orchestrator 2026-10-14; the build proceeds under this reading |
+| CL-24 | DR-020 gains `stopped` to `failed`, legal only on the supervisor's give-up (F10) | DR-020, FR-081, NFR-033 | decided by the user 2026-10-14; the build proceeds under this reading (ADR-014) |
+| CL-25 | FR-081 AC-3 "failed" includes a realm that crash-loops at boot, with no user command | FR-081, FR-084, NFR-033 | open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014) |
+| CL-26 | DR-010's `$XDG_RUNTIME_DIR/ginn` is satisfied by `/run/ginn/<uid>`, which outlives logout | DR-010, FR-081, FR-084, DEP-3 | open, for SRS v1.1; satisfied by ADR-004 (CL-1); real logout pending T7.8 |
+| CL-27 | Signal forwarding to in-realm processes (SIGINT, SIGTERM, SIGWINCH) on both routes is part of enter and launch behaviour | FR-048, FR-049 | open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014) |
 | CL-28 | A services-on realm gets a per-realm machine-id copied into /etc/machine-id before its first start, and systemd-logind.service is masked by default (eleven units); the create checks /sbin/init first, and delete removes the empty realm cgroup directory | ADR-007, FR-080, NFR-003, FR-019, FR-122 | decided by the user 2026-10-14 (machine-id and logind); the init check and the cgroup removal follow the brief of 2026-10-14; the build proceeds under this behaviour |
 | CL-29 | `supervisor` is a reserved realm name, because it is the name of Host Setup's cgroup leaf; delete never removes that leaf | DR-002, FR-001, FR-019, ADR-003 | decided by the reviewer 2026-10-15 (review of the void branch); the build proceeds under this reading |
 | CL-30 | A services-on create installs systemd and the init set through a provisioning stage, with one derived image per realm | FR-010, FR-013, FR-066, FR-080, FR-082, FR-083, CR-007, CL-18, ADR-003 | decided by the user 2026-10-14 (systemd at create, not a repin; one derived image per realm and on-to-off keeps the init set, both user decisions of 2026-10-14); open, for SRS v1.1; ADR-015 (proposed) builds under this behaviour |
 | CL-31 | The init set is part of a services-on realm's package list | FR-010, FR-013, CR-007 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
 | CL-32 | A derived image is trusted by its matched base, its signature checks and its recorded ID | DR-040, NFR-SEC-004, FR-010, FR-011, FR-012 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
 | CL-33 | CR-007 names the per-realm machine-id copy | CR-007, FR-080, ADR-007, CL-28 | decided by the user 2026-10-14 for the machine-id (CL-28); the CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code |
+| CL-34 | The T7.28 tmpfiles.d drop-in `/etc/tmpfiles.d/ginn-run-user.conf` is a second file that ginn writes into a services-on realm's `/etc`, per container and not in the derived image | CR-007, FR-080, FR-083, CL-28, CL-33, ADR-015 (Decision 2f) | open, for SRS v1.1; the build proceeds under this reading (2026-10-15, ADR-014 T7.28); no user decision is recorded |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -240,9 +245,44 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Consequence: S-05s passes, and T7.3 keeps shipping the a+b+d create-time forms. NFR-003 is still measured per distribution at T7.7 with the ADR-003 argv.
 - Status: decided by the orchestrator 2026-10-14; the user may overrule it.
 
+## CL-24: DR-020 gains stopped to failed, on the supervisor's give-up only
+
+- Requirement IDs: DR-020, FR-081, NFR-033.
+- Issue: the DR-020 transition table has no edge from `stopped` to `failed`. FR-081 AC-3 requires that 5 crashes within 60 s end with `ginn status` showing `failed`. A crash during a start leaves the realm `stopped`, and the table does not allow the move (T7.7, F10: `spikes/results/T7.7-services-real.md:21`, `:162`).
+- Reading: DR-020 gains one edge, `stopped` to `failed`. It is legal only when the supervisor gives up: 5 counted crashes within 60 s, with no user stop in progress. No user command, and no other path, moves a stopped realm to `failed`. This is the user's decision of 2026-10-14 (F10).
+- Proposed wording: add `stopped` to `failed` (supervisor give-up only) to the DR-020 table.
+- How ginn works now (landed in T7.12, 2026-10-15): `finish_service` sets `failed` from `stopped` or `running` on give-up, through the `give_up` flag of the transition check, so no other caller can make the edge. The stop rule that a give-up depends on is ADR-014 Decision 2 rule 2 as amended by the T7.12 amendment. Exit 0, or exit 1 with `want down`, records `stopped`. Any other exit with `want down` keeps the state and reports GINN-W-STOP-UNSETTLED. Neither counts a crash.
+- Status: decided by the user 2026-10-14. The build proceeds under this reading. The SRS wording is open for v1.1. Landed in T7.12 (2026-10-15). The G12 host check, which confirms runsv's write order, is pending.
+
+## CL-25: FR-081 AC-3 "failed" includes a realm that crash-loops at boot
+
+- Requirement IDs: FR-081, FR-084, NFR-033.
+- Issue: FR-081 AC-3 says the realm is "left stopped" and `ginn status` shows `failed`. It does not say whether a crash loop started at boot by the autostart path (FR-084, with no login session and no user command) also ends `failed`.
+- Reading: a give-up reached during an autostart at boot ends the same way as one reached during a user start. The process stays down, and the record reads `failed`. `ginn status` shows `failed` until the user runs `ginn start`.
+- Proposed wording: in FR-081 AC-3, "failed" applies to any give-up, including one reached during the autostart at boot.
+- How ginn works now: the give-up rule of ADR-014 Decision 2 (rules 1 to 5) does not depend on how the start was triggered. T7.12 tests a crash loop that the supervisor starts without a user command.
+- Status: open, for SRS v1.1. The build proceeds under this reading (2026-10-14).
+
+## CL-26: DR-010's $XDG_RUNTIME_DIR/ginn is satisfied by /run/ginn/uid
+
+- Requirement IDs: DR-010, FR-081, FR-084, DEP-3.
+- Issue: DR-010 names `$XDG_RUNTIME_DIR/ginn` as an Owned Path. The code uses `/run/ginn/<uid>` (ADR-004). ADR-004 records that `/run/ginn/<uid>` survives logout (its line 33), but it does not state why. The reason is the logind behaviour described in CL-1: `$XDG_RUNTIME_DIR` belongs to the login session and is removed at logout unless lingering is enabled. `/run/ginn/<uid>` lies outside the session directory, so it outlives logout.
+- Reading: the DR-010 runtime path is satisfied by `/run/ginn/<uid>` (or `GINN_RUNTIME_DIR`), which is an Owned Path. The relay (ADR-014) runs in the user's supervisor, which is started at boot without a login session (FR-084). The relay therefore survives logout as well, and so do autostarted realms.
+- Proposed wording: DR-010 names `/run/ginn/<uid>` (or `GINN_RUNTIME_DIR`) in place of `$XDG_RUNTIME_DIR/ginn`.
+- Evidence: the logout behaviour is simulated (S-04s, CL-1). The real logout run is pending T7.8, which must also confirm that the relay and an autostarted realm survive it.
+- How ginn works now: ginn uses `/run/ginn/<uid>` (ADR-004, CL-1). ADR-014 places the exec socket and the exec lock under that root.
+- Status: satisfied by ADR-004 (CL-1). The real logout run is pending T7.8. The SRS wording is open for v1.1.
+
+## CL-27: signal forwarding to in-realm processes is part of enter and launch behaviour
+
+- Requirement IDs: FR-048, FR-049.
+- Issue: FR-048 (enter opens a shell in the realm) and FR-049 (exec runs a command and returns its exit code) say nothing about signals. A user who presses Ctrl-C, or sends SIGTERM or SIGWINCH to `ginn enter` or `ginn exec`, expects the in-realm process to receive it. The direct route forwards these signals through the podman client (`src/ginn/runtime/enter.py:285`, and the SIGINT hold at `src/ginn/podman/cli.py:732`). The relay route must do the same (ADR-014). No SRS requirement names it.
+- Proposed wording: FR-048 and FR-049 include forwarding of SIGINT, SIGTERM and SIGWINCH from the caller to the in-realm process, on every route. A tty session receives Ctrl-C as input. For a non-tty caller, SIGINT reaches the in-realm process as far as podman exec passes it on.
+- How ginn works now: the direct route holds SIGINT in the parent and forwards signals to the podman client. The relay route forwards them as SIG messages (ADR-014, Terminal handling). Whether podman exec passes a non-tty SIGINT on into the container command is open (gate G13).
+- Status: open, for SRS v1.1; the build proceeds under this reading (2026-10-14, ADR-014). The on_spawn and on_exit tests cite FR-048 and FR-049 for this behaviour.
 ## CL-28: the machine-id, the logind mask, the init check and the realm cgroup directory
 
-- Requirement IDs: ADR-007, FR-080, NFR-003, FR-019, FR-122. CL-24 to CL-27 are reserved by another branch.
+- Requirement IDs: ADR-007, FR-080, NFR-003, FR-019, FR-122. CL-24 to CL-27 are the services-supervisor-relay clarifications (ADR-014), written on this branch.
 - Issue: the arch realm of the T7.7 gate ran 7 failed units (F6). The cause is the image's `/etc/machine-id`, which holds the literal word `uninitialized` (spikes/results/F6-F1-probe.md, section A.1). A missing `/sbin/init` surfaces as GINN-E-INTERNAL or GINN-E-SERVICE-TIMEOUT, and the crun message is hidden (F3). `ginn delete` leaves the realm's empty cgroup directory (F9). The arch realm also misses NFR-003 by 0.29 MiB with the machine-id alone (v1cp, 40.29 MiB against 40), and with logind masked too it is under the budget by 6.7 MiB (v4cp, 33.27 MiB; hand argv).
 - Decision, by the user on 2026-10-14: the machine-id is a random 32-hex value written into `/etc/machine-id` with `podman cp` before the first start. The record keeps it, so a rebuild writes the same value (a new field on schema 1, read as None when absent, as CL-20 does). It is not a bind mount, which breaks `systemd-machine-id-commit.service`. `systemd-logind.service` joins the masked units, so mitigation (b) masks eleven units (ADR-007 D8).
 - Reading of the brief, for the other two items. The create checks the image for `/sbin/init` before any start, with a `podman cp` of that path into a scratch directory under the runtime root. A missing path is refused with GINN-E-NO-INIT, which names the image and the realm. Any other copy failure stays GINN-E-INTERNAL. The check runs at create, not at each start, because the image is fixed at create and a rebuild runs the same check. `ginn delete` removes the realm's cgroup directory with rmdir only, when it is empty. A directory that stays is a warning (GINN-W-CGROUP-LEFT), not a failure. The directory is per realm, not per generation, so the rebuild's removal of an old generation does not touch it.
@@ -297,4 +337,13 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Proposed wording: "Realm contents also include the machine-id that ginn writes into `/etc/machine-id` of a services-on realm before its first start. It is a random 32-hex value kept on the realm record, and a rebuild writes the same value again. It is not a bind mount of a host file."
 - Reading (ADR-015, Context and the CR-007 row): the copy is existing code (CL-28) and does not change. This CL only names it in CR-007.
 - Status: decided by the user 2026-10-14 for the machine-id (CL-28). The CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code.
+
+## CL-34: the tmpfiles.d drop-in is a second file ginn writes into a services-on realm's /etc
+
+- Requirement IDs: CR-007, FR-080, FR-083, CL-28, CL-33, ADR-015 (Decision 2f).
+- Issue: Since T7.28, a services-on create writes one file into the container's `/etc` before its first start, next to the machine-id of CL-28. The file is `/etc/tmpfiles.d/ginn-run-user.conf`, and its one line is `d /run/user/<uid> 0700 <uid> <gid> -`. ginn stages the line in a directory and copies that directory into `/etc/` with `podman cp`. podman merges the file into an existing `/etc/tmpfiles.d`, which is measured on arch (`spikes/results/T7.16-relay-gates.md`, section 8.1). podman creating that directory when the image lacks it is not measured, as ADR-014 T7.28 item 6 says. systemd-tmpfiles-setup applies the line at each boot, so the realm user owns `/run/user/<uid>`. The rebuild's new generation gets the same copy, and a services-off realm gets none. The file is needed because podman refuses a `uid=` option on `--tmpfs`, so the owner cannot be set in the argv (ADR-014, T7.28, item 2). CR-007 does not name the file, so it reads as content outside its three listed sources, the same reading CL-33 gives the machine-id copy.
+- Proposed wording: "Realm contents also include one tmpfiles.d drop-in that ginn writes into `/etc/tmpfiles.d` of a services-on realm before its first start. It has one line, which gives the realm's runtime directory `/run/user/<uid>` to the realm user at each boot. ginn writes it into each such container from the realm record, and it is not part of the derived image."
+- Per container, not in the derived image: the line carries the realm user's uid and gid, which is realm identity. ADR-015 Decision 2f removes the realm identity labels from the derived image at commit, and the CR-007 row of ADR-015 relies on that. So the drop-in is written into each services-on container at create and at rebuild, as the machine-id copy is, and it is not baked into the ADR-015 derived image.
+- Relation to CL-33: CL-33 names only the machine-id copy. This CL extends the same CR-007 naming to the drop-in. CL-33 stays the record for the machine-id.
+- Status: open, for SRS v1.1. The build proceeds under this reading (2026-10-15, ADR-014 T7.28). No user decision is recorded for it.
 

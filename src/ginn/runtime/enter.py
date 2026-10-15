@@ -85,7 +85,7 @@ from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
 from ginn.ops.security_ops import finish_app, start_app
-from ginn.podman.adapter import PODMAN_ERROR_EXIT, Podman
+from ginn.podman.adapter import PODMAN_ERROR_EXIT, ExecTarget, Podman
 from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime._enter_plan import exec_home, exec_user, login_argv, share_after
 from ginn.runtime.attach import Admit, admission, needs_reattach, reattach
@@ -557,6 +557,9 @@ def _enter_look(
             status = podman.exec_interactive(
                 cid,
                 command,
+                target=ExecTarget(
+                    realm=name.value, services=bool(record.services_at_create), mutating=False
+                ),
                 user=exec_user(session.uid, gid, root=root),
                 env={**look.session.env, "HOME": home},
                 workdir=home,
@@ -655,6 +658,9 @@ def _reattach_in_lock(
         realm_home=env.paths.homes / name.value,
         host_home=session.host_home,
         admit=look.admit,
+        target=ExecTarget(
+            realm=name.value, services=bool(current.services_at_create), mutating=False
+        ),
         helper=hooks.lifecycle.helper,
         mountinfo=mountinfo,
     )

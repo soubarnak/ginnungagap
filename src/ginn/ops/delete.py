@@ -121,6 +121,7 @@ from ginn.podman.models import ContainerInfo, ContainerState
 from ginn.runtime import idle as idle_watch
 from ginn.runtime.spec import LABEL_REALM, services_cgroup_parent
 from ginn.services import supervisor
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import remove_service
 from ginn.services.supervisor import SupervisorHooks
 from ginn.store.locks import image_lock
@@ -363,6 +364,11 @@ def _delete(
 
     store.delete(name)
     _step(mutation, hooks, "record-removed")
+    try:
+        # The realm is gone, so a relay failure is a warning: the delete itself has finished.
+        sync_exec_service(env.paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the delete has finished, so this is a warning
+        mutation.warnings.append(relay_failure(exc))
     return DeleteResult(
         realm=name.value,
         home=home_state,

@@ -62,7 +62,7 @@ from typing import Final, Literal
 
 from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError, make
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ExecResult
 from ginn.runtime.env import SessionEnv
 from ginn.runtime.mounts import AttachPlan, Skipped, recheck
@@ -348,15 +348,16 @@ _RUNTIME_SUBDIR: Final = re.compile(r"/run/user/([0-9]+)/[^/]+(?:/[^/]+)*")
 """A directory strictly below a user's runtime directory, such as `gnupg` or `pulse`."""
 
 
-def _runtime_subdir(podman: Podman, container: str, parent: str) -> None:
+def _runtime_subdir(podman: Podman, container: str, parent: str, *, target: ExecTarget) -> None:
     """Make a runtime subdirectory, such as `/run/user/<uid>/gnupg`, as the realm user at mode 0700.
 
-    The realm user owns `/run/user/<uid>` (its tmpfs is chowned to it), so the directory is made
-    with that uid and no root command runs on it. A root `mkdir` would leave the directory
-    root-owned, which gpg refuses, and a root `chown` or `chmod` would follow a link that the realm
-    planted. Only a directory strictly below `/run/user/<uid>` is handled, and only for that uid. A
-    `.` or `..` part is refused, and a symbolic link is refused before the directory is made. Every
-    argument is one argv element (NFR-SEC-005).
+    The realm user owns `/run/user/<uid>`. A services-off tmpfs is chowned to it at create, and a
+    services-on one gets its owner from the tmpfiles.d drop-in at boot, which the start waits for
+    (T7.28). So the directory is made with that uid and no root command runs on it. A root `mkdir`
+    would leave the directory root-owned, which gpg refuses, and a root `chown` or `chmod` would
+    follow a link that the realm planted. Only a directory strictly below `/run/user/<uid>` is
+    handled, and only for that uid. A `.` or `..` part is refused, and a symbolic link is refused
+    before the directory is made. Every argument is one argv element (NFR-SEC-005).
     """
     match = _RUNTIME_SUBDIR.fullmatch(parent)
     if match is None:
@@ -364,16 +365,30 @@ def _runtime_subdir(podman: Podman, container: str, parent: str) -> None:
     if any(part in (".", "..") for part in parent.split("/")):
         raise _failed(f"a runtime subdirectory may not hold '.' or '..': {parent}")
     user = match.group(1)
-    if _in_container_result(podman, container, ["test", "-L", parent], user=user) == 0:
+    if (
+        _in_container_result(podman, container, ["test", "-L", parent], user=user, target=target)
+        == 0
+    ):
         raise _failed(f"a runtime subdirectory is a symbolic link, refused: {parent}")
-    _in_container(podman, container, ["mkdir", "-p", "-m", "0700", "--", parent], user=user)
+    _in_container(
+        podman,
+        container,
+        ["mkdir", "-p", "-m", "0700", "--", parent],
+        user=user,
+        target=target,
+    )
 
 
 def _in_container_result(
-    podman: Podman, container: str, argv: Sequence[str], *, user: str = "0:0"
+    podman: Podman,
+    container: str,
+    argv: Sequence[str],
+    *,
+    user: str = "0:0",
+    target: ExecTarget,
 ) -> int:
     """The exit status of one command in the realm, with no failure raised."""
-    return podman.exec(container, argv, user=user).exit_code
+    return podman.exec(container, argv, target=target, user=user).exit_code
 
 
 def make_mountpoints(
@@ -383,6 +398,7 @@ def make_mountpoints(
     *,
     realm_home: Path,
     host_home: Path,
+    target: ExecTarget,
 ) -> None:
     """Make the directories that the placeholders of `grants` sit in. The helper makes the rest.
 
@@ -400,9 +416,9 @@ def make_mountpoints(
             parents[str(realm.parent)] = None
     roots = [parent for parent in parents if _RUNTIME_SUBDIR.fullmatch(parent) is None]
     if roots:
-        _in_container(podman, container, ["mkdir", "-p", "--", *roots])
+        _in_container(podman, container, ["mkdir", "-p", "--", *roots], target=target)
     for parent in parents:
-        _runtime_subdir(podman, container, parent)
+        _runtime_subdir(podman, container, parent, target=target)
 
 
 def _make_home_point(realm_home: Path, rel: Path, *, is_dir: bool) -> None:
@@ -437,10 +453,15 @@ def _lstat_mode(path: Path) -> int | None:
 
 
 def _in_container(
-    podman: Podman, container: str, argv: Sequence[str], *, user: str = "0:0"
+    podman: Podman,
+    container: str,
+    argv: Sequence[str],
+    *,
+    user: str = "0:0",
+    target: ExecTarget,
 ) -> None:
     """Run one command in the realm, as container root unless `user` says otherwise (ADR-008)."""
-    result = podman.exec(container, argv, user=user)
+    result = podman.exec(container, argv, target=target, user=user)
     if result.exit_code != 0:
         err = _failed(_decisive(result.stderr))
         err.details["exit"] = result.exit_code
@@ -524,6 +545,7 @@ def _run(
     host_home: Path,
     helper: str | None,
     run: HelperRun,
+    target: ExecTarget,
 ) -> list[_Row]:
     """Make the parent directories that `points` need, then run the helper for `ops`.
 
@@ -531,7 +553,9 @@ def _run(
     """
     if not ops:
         return []
-    make_mountpoints(podman, container, points, realm_home=realm_home, host_home=host_home)
+    make_mountpoints(
+        podman, container, points, realm_home=realm_home, host_home=host_home, target=target
+    )
     attach_ops = [(_resolved(grants[i]), op) for i, op in ops]
     return _attach(podman, run, helper or helper_path(), pid, attach_ops)
 
@@ -591,6 +615,7 @@ def _visible_children(
     current: Sequence[SourceIdentity | None],
     ops: Sequence[tuple[int, Op]],
     rows: Sequence[_Row],
+    target: ExecTarget,
 ) -> dict[int, int]:
     """The mounts the realm shows below each attached realm path, for the groups with mounts below.
 
@@ -605,7 +630,7 @@ def _visible_children(
     ]
     if not checked:
         return {}
-    result = podman.exec(container, ["cat", "/proc/self/mountinfo"], user="0:0")
+    result = podman.exec(container, ["cat", "/proc/self/mountinfo"], target=target, user="0:0")
     if result.exit_code != 0:
         raise _failed(_decisive(result.stderr))
     mounts = _mounts(result.stdout.encode())
@@ -632,6 +657,7 @@ def _unmount(
     host_home: Path,
     helper: str | None,
     run: HelperRun,
+    target: ExecTarget,
 ) -> None:
     """Remove the mount that a group left on each realm path whose source is not visible (FR-064).
 
@@ -648,6 +674,7 @@ def _unmount(
         host_home=host_home,
         helper=helper,
         run=run,
+        target=target,
     )
     if any(row.status != "missing" for row in rows):
         raise _failed("a mount over a source that is not visible could not be removed")
@@ -688,6 +715,7 @@ def attach_at_start(
     realm_home: Path,
     host_home: Path,
     admit: Admit,
+    target: ExecTarget,
     helper: str | None = None,
     mountinfo: Path = MOUNTINFO,
     run: HelperRun | None = None,
@@ -700,7 +728,7 @@ def attach_at_start(
     skipped with NOT_VISIBLE, and its mount is removed. The start goes on in both cases (FR-064).
     Any other failure raises GINN-E-ATTACH-FAILED, and the caller stops the realm again (ADR-008,
     T4.10 notes). `pid` is the container's init process, read after start. `run` runs the helper
-    (see `run_on_host`).
+    (see `run_on_host`). `target` says where the realm's own execs run (ADR-014, Decision 1).
     """
     runner = run or run_on_host
     grants = _with_session(grants, session)
@@ -721,8 +749,9 @@ def attach_at_start(
         host_home=host_home,
         helper=helper,
         run=runner,
+        target=target,
     )
-    children = _visible_children(podman, container, grants, current, ops, rows)
+    children = _visible_children(podman, container, grants, current, ops, rows, target)
     records, mismatched = _settle(grants, current, ops, rows, reasons, children)
     if mismatched:
         _unmount(
@@ -735,6 +764,7 @@ def attach_at_start(
             host_home=host_home,
             helper=helper,
             run=runner,
+            target=target,
         )
     return AttachResult(records=records, skipped=_skipped(records, reasons))
 
@@ -805,6 +835,7 @@ def reattach(
     realm_home: Path,
     host_home: Path,
     admit: Admit,
+    target: ExecTarget,
     helper: str | None = None,
     mountinfo: Path = MOUNTINFO,
     run: HelperRun | None = None,
@@ -836,8 +867,11 @@ def reattach(
         host_home=host_home,
         helper=helper,
         run=runner,
+        target=target,
     )
-    children = _visible_children(podman, container, checked, decision.current, decision.ops, rows)
+    children = _visible_children(
+        podman, container, checked, decision.current, decision.ops, rows, target
+    )
     records, mismatched = _settle(
         checked, decision.current, decision.ops, rows, decision.reasons, children
     )
@@ -852,5 +886,6 @@ def reattach(
             host_home=host_home,
             helper=helper,
             run=runner,
+            target=target,
         )
     return AttachResult(records=records, skipped=_skipped(records, decision.reasons))

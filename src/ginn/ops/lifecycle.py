@@ -112,6 +112,7 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -129,8 +130,8 @@ from ginn.ops.security_ops import (
     sync_agent,
     write_nvidia,
 )
-from ginn.podman.adapter import Podman
-from ginn.podman.models import ContainerInfo, ContainerState
+from ginn.podman.adapter import ExecTarget, Podman
+from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime.attach import (
     MOUNTINFO,
     AttachResult,
@@ -142,7 +143,7 @@ from ginn.runtime.attach import (
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.idle import IdleHooks, idle_stopped
 from ginn.runtime.idle import arm as arm_idle_watcher
-from ginn.runtime.mounts import AttachPlan, Exists, attach_plan
+from ginn.runtime.mounts import AttachPlan, Exists, attach_plan, runtime_dir
 from ginn.runtime.realm_security import (
     SecurityHooks,
     agent_enabled,
@@ -153,6 +154,7 @@ from ginn.runtime.spec import LABEL_REALM
 from ginn.security import agent
 from ginn.security.caps import option_keys
 from ginn.services import autostart, supervisor
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.supervisor import SupervisorHooks
 from ginn.store._time import utc_from_epoch, utc_iso
 from ginn.store.locks import realm_lock
@@ -167,6 +169,13 @@ START_WAIT_S: Final = 60.0
 """Seconds a services-on `start` waits for its supervised start to record `running` (FR-081)."""
 START_POLL_S: Final = 0.5
 """Seconds between two reads of the record while a services-on start is awaited."""
+RUN_USER_WAIT_S: Final = 10.0
+"""Seconds a services-on start waits for `/run/user/<uid>` to belong to the realm user (T7.28).
+
+The owner comes from the tmpfiles.d drop-in, which systemd-tmpfiles-setup applies at boot. That can
+run after `podman start` returns, and the attach mkdirs under the directory as the realm user."""
+RUN_USER_POLL_S: Final = 0.2
+"""Seconds between two reads of the runtime dir's owner while that wait runs (T7.28)."""
 ROLLBACK_STOP_TIMEOUT_S: Final = 0
 """A start that failed has no state to save, so its stop does not wait (as create's rollback)."""
 USAGE_ENTRY_BUDGET: Final = 100_000
@@ -293,6 +302,7 @@ class LifecycleHooks:
     CreateHooks. `stop_timeout_s` is the wait before a kill. `tree_usage` measures a Realm Home
     and returns its bytes and whether the walk was partial (FR-020). `supervisor` is the sv control
     of a services-on realm, and `start_wait_s` and `start_poll_s` bound the wait for its start.
+    `run_user_wait_s` and `run_user_poll_s` bound the wait for the runtime dir's owner (T7.28).
     """
 
     exists: Exists = os.path.exists
@@ -300,6 +310,8 @@ class LifecycleHooks:
     supervisor: SupervisorHooks = field(default_factory=SupervisorHooks)
     start_wait_s: float = START_WAIT_S
     start_poll_s: float = START_POLL_S
+    run_user_wait_s: float = RUN_USER_WAIT_S
+    run_user_poll_s: float = RUN_USER_POLL_S
     helper: str | None = None
     stop_timeout_s: int = STOP_TIMEOUT_S
     tree_usage: Callable[[Path], tuple[int, bool]] = _tree_usage
@@ -730,6 +742,13 @@ def start_realm(
     if not user.host_home.is_absolute():
         raise ValueError(f"host home must be absolute, not {user.host_home}")
     if current.state is RealmState.RUNNING and _running(podman, name, current.container_id):
+        if current.services_at_create:
+            # A running realm needs no start, but its relay is synced, so a relay that is down comes
+            # back (ADR-014, NFR-001). A failure is a warning, and the start still succeeds.
+            early: list[GinnWarning] = []
+            _sync_relay_noted(env, podman, early)
+            if warnings is not None:
+                warnings.extend(early)
         return current
     if current.state is RealmState.RUNNING and not current.services_at_create:
         _settle_idle_stop(env, podman, name)
@@ -749,6 +768,9 @@ def start_realm(
             env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
         )
         started = start_through_sv(env, podman, name, hooks)
+        # The realm reads running now. The relay comes up before the sync below, which execs from
+        # the session, so it is up before any exec the start needs (ADR-014, NFR-001).
+        _sync_relay_noted(env, podman, notices)
         if rebuilt:
             notices.extend(_sync_rebuilt(env, podman, name, hooks))
         if warnings is not None:
@@ -761,6 +783,9 @@ def start_realm(
         record = _start(env, podman, name, user, hooks, mutation)
         if not record.services_at_create:
             _arm_idle(env, podman, record, hooks, mutation)
+    if record.services_at_create:
+        # The supervised start has recorded running; its attach ran in the leaf (direct route).
+        _sync_relay_noted(env, podman, notices)
     notices.extend(mutation.warnings)
     if rebuilt:
         notices.extend(_sync_rebuilt(env, podman, name, hooks))
@@ -865,6 +890,18 @@ def _start_timeout(name: RealmName, elapsed: float, detail: str) -> GinnError:
         seconds=round(elapsed),
         detail=detail,
     )
+
+
+def _sync_relay_noted(env: OpEnv, podman: Podman, notices: list[GinnWarning]) -> None:
+    """Sync the relay after a start or stop that has been recorded (ADR-014).
+
+    The command has already succeeded, so a failed sync does not fail it. The failure is added to
+    `notices` as GINN-W-RELAY-SYNC, and the next sync retries it.
+    """
+    try:
+        sync_exec_service(env.paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the command has succeeded, so this is a warning
+        notices.append(relay_failure(exc))
 
 
 def _settle_idle_stop(env: OpEnv, podman: Podman, name: RealmName) -> None:
@@ -1010,6 +1047,165 @@ def _follow_autostart(env: OpEnv, name: RealmName) -> None:
     autostart.apply(env.paths, name, record.settings.autostart)
 
 
+_LEFT_STATES: Final = _HALTED | frozenset({ContainerState.STOPPING})
+"""The states in which a start's container cannot take the runtime dir's owner (FR-081): the
+halted ones, and stopping. Paused and unknown count as running here, so the wait keeps polling."""
+
+
+class RunUserState(Enum):
+    """What one read of `/run/user/<uid>` in a starting container found (T7.28, FR-081)."""
+
+    OWNED = "owned"
+    """The directory belongs to the realm user."""
+    NOT_YET = "not yet"
+    """The directory is not owned yet, or the read failed while the container still runs."""
+    GONE = "gone"
+    """The container is not running any more, so the directory will not be given to the user."""
+
+
+def wait_for_run_user(
+    read: Callable[[], RunUserState],
+    *,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    wait_s: float,
+    poll_s: float,
+) -> RunUserState:
+    """Poll `read` until it answers OWNED or GONE, or `wait_s` seconds pass. Return the last answer.
+
+    The first read comes at once, so a directory that is owned already costs no sleep. Each later
+    read follows a sleep of `poll_s`. GONE ends the wait at once: a stopped container does not
+    become owned later, so the rest of the bound is not spent (FR-081). A timeout returns NOT_YET,
+    and the caller goes on (T7.28): the attach then fails as it did before the wait, and nothing
+    retries it.
+    """
+    deadline = clock() + wait_s
+    while True:
+        state = read()
+        if state is not RunUserState.NOT_YET or clock() >= deadline:
+            return state
+        sleep(poll_s)
+
+
+def run_user_state(
+    podman: Podman, cid: str, uid: int, *, target: ExecTarget, pid: int
+) -> RunUserState:
+    """Read whether `/run/user/<uid>` in the container belongs to the realm user (T7.28, T716-1).
+
+    The check is a stat run as container root in the realm, and only the uid is compared: the owner
+    the drop-in gives. When stat prints an owner, the answer is OWNED for the realm uid and NOT_YET
+    for any other, and podman is asked nothing more. When it prints no owner, the read is unsettled:
+    the exec raised, exited non-zero (a missing directory, or podman's 125 or 255 for an exec on a
+    stopped container, which the adapter may return rather than raise), or printed what does not
+    parse. Only then is `_gone` asked. A killed init fails every later read, so a start that waits
+    on one would otherwise spend its whole bound (FR-081). `pid` is the init pid the start read
+    after `podman start`.
+    """
+    try:
+        result = podman.exec(
+            cid, ["stat", "-c", "%u", "--", runtime_dir(uid)], target=target, user="0:0"
+        )
+    except GinnError:
+        return RunUserState.GONE if _gone(podman, cid, pid) else RunUserState.NOT_YET
+    owner = _owner(result)
+    if owner is None:
+        return RunUserState.GONE if _gone(podman, cid, pid) else RunUserState.NOT_YET
+    return RunUserState.OWNED if owner == uid else RunUserState.NOT_YET
+
+
+def _owner(result: ExecResult) -> int | None:
+    """The uid stat printed, or None when it printed none: a non-zero exit, or output that is not a
+    number (FR-081)."""
+    if result.exit_code != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _gone(podman: Podman, cid: str, pid: int) -> bool:
+    """True when the container the start began with has left (FR-081): its state is in
+    `_LEFT_STATES`, or podman runs another init pid, so it restarted since the start read it. Read
+    only, and asked only after a failed exec. An inspect that fails is GONE only when podman no
+    longer lists the container."""
+    try:
+        info = podman.inspect(cid)
+    except GinnError:
+        return _absent(podman, cid)
+    return info.state in _LEFT_STATES or info.pid != pid
+
+
+def _absent(podman: Podman, cid: str) -> bool:
+    """True when podman lists no container with this id. A failed listing is no answer (FR-081)."""
+    try:
+        listed = podman.ps()
+    except GinnError:
+        return False
+    return all(info.id != cid for info in listed)
+
+
+def run_user_pending_note(name: RealmName) -> str:
+    """The note on a failed attach whose owner wait timed out (GINN-W-RUN-USER-PENDING, FR-083).
+
+    A failed start or rebuild raises its own error, and its warnings are not printed. The timeout
+    is carried on that error instead, as a note, so the cause is not lost (T7.28).
+    """
+    return (
+        f"GINN-W-RUN-USER-PENDING: the runtime directory of realm '{name.value}' was not yet owned "
+        "by the realm user when its wait ended"
+    )
+
+
+def run_user_gone_error(podman: Podman, cid: str, name: RealmName, *, detail: str) -> GinnError:
+    """The error of a start or rebuild whose container stopped during the runtime-dir wait (FR-081).
+
+    It has the details of the not-running check that runs right after `started`: `detail` names the
+    caller, and `state` is podman's state, or "absent" or "unavailable" when the inspect gives none.
+    It is raised before the attach, so no attach runs against a dead container, and no pending note
+    is due: the wait ended because the container stopped, not because of a timeout.
+    """
+    return _internal(
+        detail,
+        realm=name.value,
+        state=_observed_state(podman, cid),
+        reason="the container stopped while the start waited for its runtime directory",
+    )
+
+
+def _observed_state(podman: Podman, cid: str) -> str:
+    """The state podman reports for the container. When the inspect fails, "absent" if podman no
+    longer lists it, and "unavailable" otherwise (the status vocabulary)."""
+    try:
+        return podman.inspect(cid).state.value
+    except GinnError:
+        return _ABSENT if _absent(podman, cid) else _UNAVAILABLE
+
+
+def _settle_run_user(
+    podman: Podman, cid: str, uid: int, record: RealmRecord, hooks: LifecycleHooks, pid: int
+) -> RunUserState:
+    """Wait for the realm's runtime dir to belong to the realm user, before the grants attach.
+
+    A services-on container's `/run/user/<uid>` is root-owned until systemd-tmpfiles-setup applies
+    the drop-in (T716-1). The wait is bounded by `hooks.run_user_wait_s`, and it ends at once when
+    the container stops (GONE). The answer is the last read: OWNED, or NOT_YET at a timeout. The
+    start goes on after a timeout, and the attach fails if the directory is still root's (T7.28).
+    The caller says which: a warning when the attach succeeds, or a note on its error when it fails.
+    A GONE caller raises `run_user_gone_error` instead. `pid` is the init pid the start read.
+    """
+    target = ExecTarget(
+        realm=record.name.value, services=bool(record.services_at_create), mutating=False
+    )
+    return wait_for_run_user(
+        lambda: run_user_state(podman, cid, uid, target=target, pid=pid),
+        clock=hooks.supervisor.clock,
+        sleep=hooks.supervisor.sleep,
+        wait_s=hooks.run_user_wait_s,
+        poll_s=hooks.run_user_poll_s,
+    )
+
+
 def _start(
     env: OpEnv,
     podman: Podman,
@@ -1056,12 +1252,22 @@ def _start(
         nvidia_plan_write(env, hooks)
     if hooks.before_start is not None:
         hooks.before_start()
+    run_user_pending = False
     try:
         podman.start(cid)
         info = podman.inspect(cid)
         if info.state is not ContainerState.RUNNING or info.pid < 2:
             raise _internal("the realm is not running after start", state=info.state.value)
         mutation.step("started")
+        if record.services_at_create:
+            # Before the attach: it mkdirs under /run/user/<uid> as the realm user (T7.28). A
+            # container that stopped in the wait fails here, as a crash after start does (FR-081).
+            run_user = _settle_run_user(podman, cid, user.uid, record, hooks, info.pid)
+            if run_user is RunUserState.GONE:
+                raise run_user_gone_error(
+                    podman, cid, name, detail="the realm is not running after start"
+                )
+            run_user_pending = run_user is RunUserState.NOT_YET
         if agent_enabled(record.settings.tier, record.permissions.toggles):
             # A missing helper is a skip: the start has no SSH grant, and it warns (ADR-008).
             if any(skip.reason == agent.HELPER_MISSING for skip in grants.session.skipped):
@@ -1077,10 +1283,14 @@ def _start(
         grants = _plan_grants(env, record, user, hooks)
         result, skips = _attach(env, podman, record, cid, info.pid, user, hooks, grants)
     except GinnError as err:
+        if run_user_pending:
+            err.add_note(run_user_pending_note(name))
         _back_to_stopped(env, podman, name, cid, err)
         _leave_agent_quietly(env, name, err)
         raise
     mutation.step("attached")
+    if run_user_pending:
+        mutation.warnings.append(warn("GINN-W-RUN-USER-PENDING", realm=name.value))
     running = _save(
         env,
         store,
@@ -1119,6 +1329,9 @@ def _attach(
             owned_paths=grants.owned,
             runtime_root=env.paths.runtime,
             env=user.host_env,
+        ),
+        target=ExecTarget(
+            realm=record.name.value, services=bool(record.services_at_create), mutating=False
         ),
         helper=hooks.helper,
         mountinfo=hooks.mountinfo,
@@ -1210,8 +1423,10 @@ def _stop_supervised(
             stopped = record
         else:
             stopped = _stop(env, podman, name, hooks, mutation)
+    notices = list(mutation.warnings)
+    _sync_relay_noted(env, podman, notices)  # NFR-001: the relay goes down when nothing needs it
     if warnings is not None:
-        warnings.extend(mutation.warnings)
+        warnings.extend(notices)
     return stopped
 
 

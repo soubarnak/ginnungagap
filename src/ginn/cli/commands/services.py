@@ -38,7 +38,9 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
     realms = _context.realms(ctx.output)
     _context.settle_interrupted(realms, ctx.output, read_only=True)
     notices: list[GinnWarning] = []
-    record = set_services_mode(realms.env, name, on=args.mode == "on", warnings=notices)
+    record = set_services_mode(
+        realms.env, name, on=args.mode == "on", warnings=notices, podman=realms.podman
+    )
     _context.finish(realms, ctx.output)
     for notice in notices:
         ctx.output.warn(notice)

@@ -17,8 +17,10 @@ F11 changes):
    created its state directory yet, so the waiter first polls for it, for up to
    STATE_APPEAR_SECONDS. A timeout raises GINN-E-UNDO-SERVICE-RUNNING and leaves the record in
    place, so a rerun continues from here.
-3. Per-user cleanup, after the wait confirmed the exit. First the other symbolic links (the runsv
-   supervise links), each matched against its own target. Then the per-user service directories,
+3. Per-user cleanup, after the wait confirmed the exit. First the relay service `_exec` and its
+   runtime files (FR-003, ADR-014), which undo removes through directory descriptors and never with
+   sv (`_undo_exec_service`). Then the other symbolic links (the runsv supervise links), each
+   matched against its own target. Then the per-user service directories,
    leaf first; the runsv state directories under /run/runit, which hold only runit's names; the
    subordinate ID lines that setup appended (`subids.remove_exact`, which also reports every
    differing line of the user, on every undo); and the per-user files and directories, restored
@@ -63,7 +65,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
-from ginn.errors import make
+from ginn.errors import GinnError, make
 from ginn.hostsetup import record as rec
 from ginn.hostsetup import runit_system, subids
 from ginn.hostsetup._atomic import atomic_symlink, atomic_write, sync_dir
@@ -87,6 +89,14 @@ from ginn.hostsetup._common import (
 )
 from ginn.hostsetup.cgroups import DEFAULT_CGROUP_ROOT
 from ginn.hostsetup.setup import TMP_DIR, read_boot_id
+from ginn.services.exec_relay import (
+    EXEC_SERVICE,
+    LOCK_DIR_NAME,
+    SOCKET_NAME,
+    SYNC_LOCK_NAME,
+    TEMP_PREFIX,
+)
+from ginn.services.supervisor import SUPERVISE_DIR, SUPERVISE_OK
 from ginn.store.paths import realms_dir_for_home
 
 RECORD_DIR = rec.RECORD_DIR
@@ -106,6 +116,7 @@ CGROUP_BUSY_SECONDS = sum(CGROUP_BUSY_DELAYS)
 UNDO_STEPS: tuple[str, ...] = (
     "link",
     "wait",
+    "exec",
     "service",
     "subids",
     "files",
@@ -471,6 +482,12 @@ def _undo_record(ctx: _Ctx, current: rec.HostSetupRecord) -> UndoResult:
     ctx.wait(ctx.root / runit_system.SV_PARENT / f"ginn-{ctx.user}", SERVICE_WAIT_SECONDS)
     ctx.hit("wait")
 
+    # After the wait, the user's runsvdir has exited and the finish script of its service has
+    # stopped the runsv children in the supervisor leaf (runit_system), so the relay service is no
+    # longer started by anyone. Only then is it removed, and never with sv (ADR-014).
+    _undo_exec_service(ctx, current)
+    ctx.hit("exec")
+
     for entry in current.paths:
         if entry.kind == "symlink" and not _is_service_link(entry, ctx.user):
             _undo_link(ctx, entry)
@@ -543,6 +560,274 @@ def _undo_record(ctx: _Ctx, current: rec.HostSetupRecord) -> UndoResult:
         left=tuple(ctx.left),
         notes=tuple(ctx.notes),
     )
+
+
+def _undo_exec_service(ctx: _Ctx, current: rec.HostSetupRecord) -> None:
+    """The relay service and its runtime files, after the wait (FR-003, ADR-014).
+
+    Host Setup does not list them, because ginn installs the relay after setup. So undo finds them
+    by the layout that is fixed: `<home>/.local/state/ginn/sv/_exec`, its `._exec.*` leftovers and
+    the sync lock (runit_system SV_DIR), and `run/ginn/<uid>/exec.sock` and `run/ginn/<uid>/exec/`
+    in the user's runtime tree. Both trees belong to the user, so every step is anchored to a
+    directory descriptor that was opened with O_NOFOLLOW, and no path is re-resolved by name. A
+    link is removed as a link and never entered. Nothing here runs sv: root must not drive a runsv
+    that the user owns (ADR-014). A runsv that still reads `_exec/supervise/ok` keeps the service,
+    and the leftover is reported.
+    """
+    shown = _home_sv_dir(current.home)
+    sv_fd = _open_exec_dir(ctx, [part for part in shown.parts if part != "/"], str(shown))
+    if sv_fd is not None:
+        try:
+            _undo_supervision_dir(ctx, sv_fd, shown)
+        finally:
+            os.close(sv_fd)
+    runtime = f"run/ginn/{current.uid}"
+    if _probe(ctx.root / runtime)[0] != "dir":
+        # A runtime tree that is a link or a file is not walked (the runtime step reports it).
+        return
+    runtime_fd = _open_exec_dir(ctx, ["run", "ginn", str(current.uid)], runtime)
+    if runtime_fd is None:
+        return
+    try:
+        _undo_runtime_relay(ctx, runtime_fd, runtime)
+    finally:
+        os.close(runtime_fd)
+
+
+def _open_exec_dir(ctx: _Ctx, parts: Sequence[str], shown: str) -> int | None:
+    """`_open_real_dir`, with an unsafe component left and reported, not raised (FR-003, ADR-014).
+
+    The links are removed and runsv has been waited for when this runs. A raise here would stop
+    undo with the record kept, and a rerun would stop at the same component. So the component is
+    left and reported, and undo goes on.
+    """
+    try:
+        return _open_real_dir(ctx.root, parts)
+    except GinnError as err:
+        path = str(err.details.get("path", shown))
+        ctx.leave(path, "is not a real directory, so it is not walked and is left alone")
+        return None
+
+
+def _undo_supervision_dir(ctx: _Ctx, sv_fd: int, shown: PurePosixPath) -> None:
+    """Remove `_exec` and the dotted leftovers of the relay from the supervision directory."""
+    for name in os.listdir(sv_fd):
+        if name == EXEC_SERVICE:
+            _undo_relay_service(ctx, sv_fd, shown / EXEC_SERVICE)
+        elif name.startswith(TEMP_PREFIX) or name == SYNC_LOCK_NAME:
+            _remove_anchored(ctx, sv_fd, name, shown / name, want=_any_kind)
+
+
+def _undo_relay_service(ctx: _Ctx, sv_fd: int, shown: PurePosixPath) -> None:
+    """Remove the relay's service directory, unless a runsv still reads it (ADR-014)."""
+    try:
+        info = os.stat(EXEC_SERVICE, dir_fd=sv_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        ctx.leave(str(shown), _state_reason(_kind_word(info.st_mode)))
+        return
+    try:
+        service_fd = os.open(
+            EXEC_SERVICE,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=sv_fd,
+        )
+    except OSError as exc:
+        ctx.leave(str(shown), f"could not be opened to be removed: {exc.strerror}")
+        return
+    try:
+        supervised = _runsv_reads(service_fd)
+    finally:
+        os.close(service_fd)
+    if supervised:
+        ctx.leave(str(shown), "is still read by a runsv after the wait, so it is kept")
+        return
+    _remove_anchored(ctx, sv_fd, EXEC_SERVICE, shown, want=stat.S_ISDIR)
+
+
+def _undo_runtime_relay(ctx: _Ctx, runtime_fd: int, runtime: str) -> None:
+    """Remove the relay's socket and its lock directory from the runtime tree (ADR-014)."""
+    _remove_anchored(
+        ctx, runtime_fd, SOCKET_NAME, PurePosixPath(runtime) / SOCKET_NAME, want=stat.S_ISSOCK
+    )
+    _remove_anchored(
+        ctx, runtime_fd, LOCK_DIR_NAME, PurePosixPath(runtime) / LOCK_DIR_NAME, want=stat.S_ISDIR
+    )
+
+
+def _runsv_reads(service_fd: int) -> bool:
+    """True while a runsv reads the service's `ok` FIFO, so it still supervises the directory.
+
+    runsv keeps `supervise/ok` open for reading (runsv(8)). The FIFO is opened write-only and
+    non-blocking, which fails with ENXIO when no reader holds it, and nothing is written. Each
+    entry is named relative to its descriptor, and a link is not read as a runsv, so no symbolic
+    link is followed.
+    """
+    try:
+        supervise = os.open(
+            SUPERVISE_DIR,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=service_fd,
+        )
+    except OSError:
+        return False
+    try:
+        try:
+            info = os.stat(SUPERVISE_OK, dir_fd=supervise, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISFIFO(info.st_mode):
+            return False
+        try:
+            fd = os.open(
+                SUPERVISE_OK,
+                os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=supervise,
+            )
+        except OSError:
+            return False
+        os.close(fd)
+        return True
+    finally:
+        os.close(supervise)
+
+
+def _any_kind(mode: int) -> bool:
+    """Accept any kind of entry, for the dotted leftovers that ginn itself names (ADR-014)."""
+    return True
+
+
+def _remove_anchored(
+    ctx: _Ctx,
+    parent: int,
+    name: str,
+    shown: PurePosixPath,
+    *,
+    want: Callable[[int], bool],
+) -> None:
+    """Remove `name` under the directory `parent`, when it is of the kind ginn makes (ADR-014).
+
+    An absent entry is a no-op. An entry of another kind is reported and left, so a link or a file
+    that the user put there under another name is never removed by a root process. `want` tests
+    the file type of the entry, from its lstat.
+    """
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if not want(info.st_mode):
+            ctx.leave(str(shown), _state_reason(_kind_word(info.st_mode)))
+            return
+        _remove_at(parent, name)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        ctx.leave(str(shown), f"could not be removed: {exc.strerror}")
+
+
+@dataclass
+class _Frame:
+    """One directory on the walk of `_remove_at`: its descriptor, its name, and what is left in it.
+
+    `parent_fd` is the descriptor of the directory that holds `name`, so `name` is removed from it.
+    """
+
+    fd: int
+    name: str
+    parent_fd: int
+    pending: list[str]
+
+
+def _open_frame(parent_fd: int, name: str) -> _Frame:
+    """Open the directory `name` under `parent_fd` with O_NOFOLLOW, and list it (ADR-014)."""
+    fd = os.open(
+        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd
+    )
+    try:
+        pending = os.listdir(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return _Frame(fd, name, parent_fd, pending)
+
+
+def _remove_at(parent: int, name: str) -> None:
+    """Remove `name` under the directory `parent`, and everything below it (ADR-014).
+
+    The walk is iterative, so a deep tree does not reach the recursion limit. Its stack holds one
+    open descriptor per directory on the path being removed. Each directory is opened from its
+    parent's descriptor with O_NOFOLLOW, and every entry is named relative to its directory's
+    descriptor. A link at any level is unlinked as a link and never entered, and a name that is
+    swapped for a link during the walk makes the open fail (ELOOP), so nothing outside the tree is
+    touched. An entry that vanishes after it was listed is skipped. A missing `name` raises
+    FileNotFoundError for the caller, which treats it as absent. A directory is removed once its
+    entries are gone. The depth is bounded by the process's descriptor limit (RLIMIT_NOFILE): a
+    deeper tree fails with EMFILE, which the caller reports.
+    """
+    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode):
+        os.unlink(name, dir_fd=parent)
+        return
+    stack = [_open_frame(parent, name)]
+    try:
+        while stack:
+            frame = stack[-1]
+            if not frame.pending:
+                stack.pop()
+                os.close(frame.fd)
+                try:
+                    os.rmdir(frame.name, dir_fd=frame.parent_fd)
+                except FileNotFoundError:
+                    pass  # it has gone since its entries were removed, so nothing is left to do
+                continue
+            child = frame.pending.pop()
+            try:
+                child_info = os.stat(child, dir_fd=frame.fd, follow_symlinks=False)
+                if stat.S_ISDIR(child_info.st_mode):
+                    stack.append(_open_frame(frame.fd, child))
+                else:
+                    os.unlink(child, dir_fd=frame.fd)
+            except FileNotFoundError:
+                continue  # listed, then removed by someone else, so it is already gone
+    finally:
+        for frame in stack:
+            os.close(frame.fd)
+
+
+def _home_sv_dir(home: str) -> PurePosixPath:
+    """The user's runit supervision directory, under the recorded home (runit_system SV_DIR)."""
+    return PurePosixPath(home) / ".local" / "state" / "ginn" / "sv"
+
+
+def _open_real_dir(root: Path, parts: Sequence[str]) -> int | None:
+    """Open `root/parts` as a directory and return its descriptor, or None when it is absent.
+
+    The walk opens each component from the one before it with O_NOFOLLOW, so no symbolic link is
+    followed. The caller owns the descriptor and closes it, and keeps it for every removal under the
+    directory. A missing component means the path is absent. A component that is a link, or is not
+    a directory, raises GINN-E-SETUP-PATH-UNSAFE, which names the path, as `_realm_names` does.
+    """
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    walked = root
+    for part in parts:
+        walked = walked / part
+        try:
+            child = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=fd,
+            )
+        except FileNotFoundError:
+            os.close(fd)
+            return None
+        except OSError as exc:
+            os.close(fd)
+            raise rec.unsafe(
+                walked,
+                f"cannot be walked to find the relay service ({os.strerror(exc.errno or 0)})",
+            ) from None
+        os.close(fd)
+        fd = child
+    return fd
 
 
 def _records_dir_plan(

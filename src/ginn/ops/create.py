@@ -82,7 +82,7 @@ import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final
 
 from ginn.distros import Verb
@@ -115,7 +115,7 @@ from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
-from ginn.podman.adapter import PATH_NOT_FOUND_REASON, Podman
+from ginn.podman.adapter import PATH_NOT_FOUND_REASON, ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
     AttachResult,
@@ -125,10 +125,18 @@ from ginn.runtime.attach import (
     share_skipped,
 )
 from ginn.runtime.mounts import attach_plan
-from ginn.runtime.spec import INIT_PATH, MACHINE_ID_PATH, create_spec, new_machine_id
+from ginn.runtime.spec import (
+    INIT_PATH,
+    MACHINE_ID_PATH,
+    RUN_USER_TMPFILES_PATH,
+    create_spec,
+    new_machine_id,
+    run_user_tmpfiles,
+)
 from ginn.security.nested import write_config
 from ginn.security.nvidia import Status
 from ginn.security.seccomp import write as write_profile
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import remove_service, write_journald_dropin, write_service_dir
 from ginn.store._time import utc_from_epoch
 from ginn.store.locks import image_lock
@@ -172,6 +180,17 @@ def _scratch_failure(exc: OSError) -> GinnError:
     """The GINN-E-INTERNAL of a scratch directory that cannot be made, written or read (F3, F6)."""
     err = make("GINN-E-INTERNAL")
     err.details.update({"detail": f"create scratch directory: {exc.strerror or exc}"})
+    return err
+
+
+def _drop_in_failure(cause: OSError | GinnError) -> GinnError:
+    """The GINN-E-INTERNAL of the tmpfiles.d drop-in step, with its cause named (T7.28)."""
+    if isinstance(cause, OSError):
+        reason = cause.strerror or str(cause)
+    else:
+        reason = f"{cause.code} {cause.message}"
+    err = make("GINN-E-INTERNAL")
+    err.details.update({"detail": f"tmpfiles.d drop-in: {reason}"})
     return err
 
 
@@ -257,14 +276,24 @@ class _Create:
         if not notes:
             try:
                 self._store.delete(self._request.name)
-                return notes
             except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
                 notes.append(f"record: {type(exc).__name__}: {exc}")
+            else:
+                self._sync_relay_after_undo(notes)
+                return notes
         try:
             self._store.set_state(self._request.name, RealmState.BROKEN)
         except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
             notes.append(f"record broken: {type(exc).__name__}: {exc}")
+        self._sync_relay_after_undo(notes)
         return notes
+
+    def _sync_relay_after_undo(self, notes: list[str]) -> None:
+        """Let the relay service follow the records after the undo (ADR-014). A failure is noted."""
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - recorded, so the error still reaches the caller
+            notes.append(f"relay service: {type(exc).__name__}: {exc}")
 
     # Phases.
 
@@ -373,15 +402,17 @@ class _Create:
         self._step("created")
 
     def _prepare_services(self, cid: str) -> None:
-        """Check that the image has systemd, and give the container its machine-id (F3, F6).
+        """Check that the image has systemd, give the container its machine-id (F3, F6), and its
+        runtime-dir drop-in for the realm user (T7.28, T716-1).
 
-        Both run before the first start, which for a services-on realm is its runit start
+        All run before the first start, which for a services-on realm is its runit start
         (ADR-003). The rebuild inherits this, so a rebuilt generation gets the same checks. A
         failure is a GinnError, so the create or the rebuild is rolled back.
         """
         self._check_init(cid)
         machine_id = self._current().machine_id or new_machine_id()
         self._copy_machine_id(cid, machine_id)
+        self._copy_run_user_tmpfiles(cid)
         self._update(machine_id=machine_id)
 
     def _check_init(self, cid: str) -> None:
@@ -425,6 +456,31 @@ class _Create:
                 self._podman.cp_into(cid, src, MACHINE_ID_PATH)
         except OSError as exc:
             raise _scratch_failure(exc) from exc
+
+    def _copy_run_user_tmpfiles(self, cid: str) -> None:
+        """Copy the realm user's tmpfiles.d drop-in into the container with `podman cp` (T7.28).
+
+        The drop-in directory is staged, and the staged directory is copied into `/etc/`. podman
+        makes `/etc/tmpfiles.d` when the image lacks it, and merges the drop-in into it when it
+        exists, so the other files there stay. The line makes systemd-tmpfiles-setup give
+        `/run/user/<uid>` to the realm user at each boot (T716-1). A failure of any step is a
+        GINN-E-INTERNAL that names the drop-in step, so the create is rolled back.
+        """
+        spec = self._plan.spec
+        drop_in = PurePosixPath(RUN_USER_TMPFILES_PATH)
+        try:
+            with scratch_dir(self._env.paths) as scratch:
+                staged = scratch / drop_in.parent.name
+                staged.mkdir(mode=0o755)
+                # The umask masks mkdir's mode, and podman cp applies the staged mode to
+                # /etc/tmpfiles.d, so the mode is set again after the mkdir.
+                staged.chmod(0o755)
+                src = staged / drop_in.name
+                src.write_text(run_user_tmpfiles(spec.uid, spec.gid), encoding="ascii")
+                src.chmod(0o644)
+                self._podman.cp_into(cid, staged, f"{drop_in.parent.parent}/")
+        except (OSError, GinnError) as exc:
+            raise _drop_in_failure(exc) from exc
 
     def _write_journald_dropin(self) -> None:
         """Write the shared journald drop-in that the create argv binds (ADR-007 a, CR-007)."""
@@ -500,6 +556,7 @@ class _Create:
                 runtime_root=self._env.paths.runtime,
                 env=env,
             ),
+            target=self._target(mutating=False),
             helper=self._hooks.helper,
             mountinfo=self._hooks.mountinfo,
         )
@@ -517,7 +574,10 @@ class _Create:
         """
         expected = self._plan.spec.passwd_entry
         result = self._podman.exec(
-            self._container_id(), ["getent", "passwd", str(self._request.uid)], user=ROOT_USER
+            self._container_id(),
+            ["getent", "passwd", str(self._request.uid)],
+            target=self._target(mutating=False),
+            user=ROOT_USER,
         )
         found = result.stdout.strip()
         if result.exit_code != 0 or found != expected:
@@ -606,6 +666,7 @@ class _Create:
             self._plan.everything,
             realm=self._request.name.value,
             retry_hook=self._retry,
+            target=self._target(mutating=False),
         )
 
     def _install_with(self) -> None:
@@ -624,6 +685,10 @@ class _Create:
         because no package is installed. The notice names what this create did not do.
         """
         self._write_service()
+        try:
+            sync_exec_service(self._env.paths, self._podman)
+        except Exception as exc:  # noqa: BLE001 - the realm is made, so a relay failure is a warning
+            self._mutation.warnings.append(relay_failure(exc))
         notice = warn("GINN-W-SERVICES-PENDING", realm=self._request.name.value)
         self._mutation.warnings.append(notice)
         self._step("stopped")
@@ -709,6 +774,17 @@ class _Create:
         self._store.save(record)
         self._record = record
 
+    def _target(self, *, mutating: bool) -> ExecTarget:
+        """The exec target of this operation, by the services mode of the container it builds.
+
+        A services-on create stops after `created` and runs no exec, so its execs are all services
+        off. A rebuild overrides nothing here: its plan carries the mode of the new generation
+        (ADR-014, Decision 1).
+        """
+        return ExecTarget(
+            realm=self._request.name.value, services=self._plan.spec.services, mutating=mutating
+        )
+
     def _exec(self, argv: list[str], *, step: str) -> None:
         """Run a package step as container root, with its failure mapped (FR-012, FR-040).
 
@@ -723,6 +799,7 @@ class _Create:
             realm=self._request.name.value,
             step=step,
             retry_hook=self._retry,
+            target=self._target(mutating=True),
         )
 
 

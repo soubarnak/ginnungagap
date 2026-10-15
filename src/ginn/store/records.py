@@ -451,17 +451,20 @@ class RealmStore:
             raise make("GINN-E-NO-SUCH-REALM", realm=name.value) from None
         fsync_dir(path.parent)
 
-    def set_state(self, name: RealmName, new_state: Target) -> RealmRecord:
+    def set_state(
+        self, name: RealmName, new_state: Target, *, give_up: bool = False
+    ) -> RealmRecord:
         """Move the realm to `new_state` if DR-020 allows it, then save and return the record.
 
         Entering `updating` or `rebuilding` records the current state as `previous_state`.
         Leaving either one clears it. Leaving `rebuilding` also clears the building container, so
         a rollback or a recovery that returns the record to stopped leaves no container named.
         An illegal move raises IllegalTransition and nothing is written. Removal is `delete()`, so
-        a REMOVED target is refused here.
+        a REMOVED target is refused here. `give_up` is passed only by the supervisor's give-up,
+        which is the one caller that may move a stopped realm to failed (CL-24).
         """
         record = self.load(name)
-        checked = transition(record.state, new_state, record.previous_state)
+        checked = transition(record.state, new_state, record.previous_state, give_up)
         if not isinstance(checked, RealmState):
             raise ValueError("a realm is removed with RealmStore.delete(), not set_state()")
         previous = record.state if checked in _PREVIOUS_BOUND else None

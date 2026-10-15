@@ -57,7 +57,12 @@ def _recorded(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     calls: list[tuple[str, bool]] = []
 
     def fake_set_services_mode(
-        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+        env: Any,
+        name: RealmName,
+        *,
+        on: bool,
+        warnings: list[Any] | None = None,
+        podman: Any = None,
     ) -> RealmRecord:
         calls.append((str(name), on))
         return _record(on)
@@ -95,7 +100,12 @@ def test_a_refused_change_prints_its_code_and_exits_with_the_catalogue_status(
     world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def refuse(
-        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+        env: Any,
+        name: RealmName,
+        *,
+        on: bool,
+        warnings: list[Any] | None = None,
+        podman: Any = None,
     ) -> RealmRecord:
         raise GinnError(
             "GINN-E-REALM-STATE",
@@ -118,7 +128,12 @@ def test_a_change_warns_that_the_next_start_rebuilds(
     the realm, and the command prints it (FR-083, CL-19)."""
 
     def fake_set_services_mode(
-        env: Any, name: RealmName, *, on: bool, warnings: list[Any] | None = None
+        env: Any,
+        name: RealmName,
+        *,
+        on: bool,
+        warnings: list[Any] | None = None,
+        podman: Any = None,
     ) -> RealmRecord:
         assert warnings is not None
         warnings.append(
@@ -131,6 +146,30 @@ def test_a_change_warns_that_the_next_start_rebuilds(
     err = capsys.readouterr().err
     assert err.startswith("GINN-W-REBUILD-PENDING: ")
     assert "because the services mode changed" in err
+
+
+@pytest.mark.fr("FR-084")
+def test_the_command_hands_its_podman_adapter_to_the_operation_so_the_relay_follows(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-014: `ginn services on|off` syncs the relay service, which needs the adapter's podman
+    command, so the command passes its adapter to set_services_mode."""
+    seen: list[object] = []
+
+    def record_adapter(
+        env: Any,
+        name: RealmName,
+        *,
+        on: bool,
+        warnings: list[Any] | None = None,
+        podman: Any = None,
+    ) -> RealmRecord:
+        seen.append(podman)
+        return _record(on)
+
+    monkeypatch.setattr(services_cmd, "set_services_mode", record_adapter)
+    assert main(["services", "lab", "on"]) == 0
+    assert seen == [world.fake], "the adapter of the command's realms is the one passed"
 
 
 def test_json_output_carries_the_name_and_the_mode(

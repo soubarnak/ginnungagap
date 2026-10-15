@@ -19,7 +19,9 @@ from typing import Final, NamedTuple
 from ginn.errors import GinnError, make
 from ginn.podman.adapter import (
     PATH_NOT_FOUND_REASON,
+    PODMAN_ERROR_EXIT,
     CreateSpec,
+    ExecTarget,
     RetryHook,
     require_digest_ref,
     with_network_retry,
@@ -47,11 +49,19 @@ _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FAKE_IMAGE_CREATED: Final = "1970-01-01T00:00:00Z"
 
 
+_RUN_USER_DIR: Final = re.compile(r"/run/user/([0-9]+)")
+"""The runtime dir of a realm user. The fake answers its owner as the realm user (T7.28)."""
+
+
 class FakeCall(NamedTuple):
     """One recorded call. Pulls are recorded once per attempt."""
 
     op: str
     args: tuple[object, ...]
+
+
+FAKE_CLIENT_PID: Final = 4242
+"""The pid the fake reports to `on_ack`. No process runs, so no real pid exists."""
 
 
 @dataclass
@@ -71,6 +81,7 @@ class ExecCall:
     workdir: str | None
     tty: bool
     interactive: bool
+    target: ExecTarget | None = None
 
 
 @dataclass
@@ -139,6 +150,11 @@ class FakePodman:
     fail_pull_with: str | None = None
     fail_pull_times: int | None = None
     fail_exec_with: str | None = None
+    stopped_exec_exit: int = 255
+    """The exit status of an exec on a container that is not running. The host's podman 5.8.8
+    answers 255 with "container state improper", and the adapter raises only on 125
+    (PODMAN_ERROR_EXIT), so 255 comes back as a result. Set 125 to model the raising case
+    (FR-081, T7.16 section 11.8)."""
     fail_ops: dict[str, str] = field(default_factory=dict)
     pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
@@ -312,6 +328,7 @@ class FakePodman:
         pass_env: Sequence[str],
         tty: bool,
         interactive: bool,
+        target: ExecTarget,
     ) -> None:
         """Keep the options of one exec call, as the adapter received them.
 
@@ -339,6 +356,7 @@ class FakePodman:
                 workdir=workdir,
                 tty=tty,
                 interactive=interactive,
+                target=target,
             )
         )
 
@@ -351,7 +369,14 @@ class FakePodman:
         self._record(op, container_id, tuple(argv))
         container = self._container(container_id)
         if container.state is not ContainerState.RUNNING:
-            raise make("GINN-E-INTERNAL")
+            if self.stopped_exec_exit == PODMAN_ERROR_EXIT:
+                raise make("GINN-E-INTERNAL")
+            return ExecResult(
+                self.stopped_exec_exit,
+                "",
+                "Error: can only create exec sessions on running containers: "
+                "container state improper\n",
+            )
         if self.fail_exec_with is not None:
             raise _error(self.fail_exec_with, container.image)
         queued = self.exec_sequences.get(tuple(argv))
@@ -364,6 +389,11 @@ class FakePodman:
             return _getent_passwd(container, argv[2])
         if len(argv) == 3 and tuple(argv[:2]) == ("cat", "--"):
             return _cat(self.files, argv[2])
+        if len(argv) == 5 and tuple(argv[:3]) == ("stat", "-c", "%u") and argv[3] == "--":
+            # The drop-in has given the runtime dir to its realm user at boot (T7.28): owned.
+            owner = _RUN_USER_DIR.fullmatch(argv[4])
+            if owner is not None:
+                return ExecResult(0, f"{owner.group(1)}\n", "")
         return ExecResult(0, "", "")
 
     def exec(
@@ -371,6 +401,7 @@ class FakePodman:
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -381,12 +412,18 @@ class FakePodman:
         timeout_s: float | None = None,
         max_output: int | None = None,
         stdout_tail: bool = False,
+        on_ack: Callable[[int], None] | None = None,
     ) -> ExecResult:
         """The limits are accepted for the protocol. A test injects a hang or an overflow itself.
-        `stdout_tail` is accepted too: the fake answers with its whole canned output."""
+        `stdout_tail` is accepted too: the fake answers with its whole canned output. `on_ack` gets
+        the fake client pid once the exec has run, as the relay's ACK would (FR-122)."""
         self.exec_users.append(user)
-        self._note_exec("exec", container_id, argv, user, env, workdir, pass_env, tty, interactive)
+        self._note_exec(
+            "exec", container_id, argv, user, env, workdir, pass_env, tty, interactive, target
+        )
         result = self._exec("exec", container_id, argv)
+        if on_ack is not None:
+            on_ack(FAKE_CLIENT_PID)
         if not capture:
             return ExecResult(result.exit_code, "", "")
         if (
@@ -404,6 +441,7 @@ class FakePodman:
         container_id: str,
         argv: Sequence[str],
         *,
+        target: ExecTarget,
         user: str | None = None,
         env: Mapping[str, str] | None = None,
         workdir: str | None = None,
@@ -412,11 +450,24 @@ class FakePodman:
         pass_env: Sequence[str] = (),
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_ack: Callable[[int], None] | None = None,
     ) -> int:
         self._note_exec(
-            "exec_interactive", container_id, argv, user, env, workdir, pass_env, tty, interactive
+            "exec_interactive",
+            container_id,
+            argv,
+            user,
+            env,
+            workdir,
+            pass_env,
+            tty,
+            interactive,
+            target,
         )
-        return self._exec("exec_interactive", container_id, argv).exit_code
+        status = self._exec("exec_interactive", container_id, argv).exit_code
+        if on_ack is not None:
+            on_ack(FAKE_CLIENT_PID)
+        return status
 
     def cp_from(self, container_id: str, src: str, dst: Path) -> None:
         self._record("cp_from", container_id, src, str(dst))
@@ -429,9 +480,19 @@ class FakePodman:
         dst.write_bytes(content)
 
     def cp_into(self, container_id: str, src: Path, dst: str) -> None:
+        """A file goes to `dst`. A directory goes into `dst`, under its own name, as podman cp does
+        when `dst` is a directory: its files are then recorded at `dst/<name>/<relative path>`."""
         self._record("cp_into", container_id, dst)
         self._take_op_failure("cp_into")
         container = self._container(container_id)
+        if src.is_dir():
+            base = dst.rstrip("/") + "/" + src.name
+            for path in sorted(src.rglob("*")):
+                if path.is_file():
+                    rel = path.relative_to(src).as_posix()
+                    mode = path.stat().st_mode & 0o777
+                    container.copied[f"{base}/{rel}"] = (path.read_bytes(), mode)
+            return
         container.copied[dst] = (src.read_bytes(), src.stat().st_mode & 0o777)
 
     def top(self, container_id: str) -> list[tuple[int, int, str]]:

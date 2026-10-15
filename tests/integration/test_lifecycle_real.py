@@ -39,6 +39,7 @@ from ginn.errors import GinnError
 from ginn.ops.create import CreateHooks, CreateRequest, create_realm
 from ginn.ops.delete import delete_realm
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
+from ginn.podman.adapter import ExecTarget
 from ginn.runtime import attach as attach_mod
 from ginn.runtime.attach import (
     AttachResult,
@@ -76,7 +77,18 @@ class Gate:
     removed_image: bool
 
 
-HIDDEN_MOUNT_ROOTS = frozenset({"/media", "/mnt", f"/run/media/{getpass.getuser()}"})
+def _login_name() -> str:
+    """The login name, or "" when none can be read. The module imports without one (CI).
+
+    The gate itself still asks getpass.getuser() in its host fixture, so a gate run fails there.
+    """
+    try:
+        return getpass.getuser()
+    except OSError:
+        return ""
+
+
+HIDDEN_MOUNT_ROOTS = frozenset({"/media", "/mnt", f"/run/media/{_login_name()}"})
 """The user's real mount roots. The gate's exists probe reads them as absent, so no realm of the
 gate binds them read-write (decision recorded in the T4.9 result file, section 6)."""
 
@@ -140,6 +152,10 @@ def _admit_all(grant: GrantRecord) -> None:
     return None
 
 
+DIRECT = ExecTarget(realm="lifecycle-gate", services=False, mutating=False)
+"""The exec target of the services-off realms of this module (ADR-014, Decision 1)."""
+
+
 def _proc(name: str) -> str:
     return Path(f"/proc/{name}").read_text(encoding="utf-8").strip()
 
@@ -150,7 +166,7 @@ def _loadavg() -> list[str]:
 
 def sh(host: Host, cid: str, script: str, *args: str, user: str = ROOT_USER) -> Any:
     """Run `script` in the box with /bin/sh. Paths go in `args` ($1, $2, ...), not in the script."""
-    return host.cli.exec(cid, ["/bin/sh", "-c", script, "sh", *args], user=user)
+    return host.cli.exec(cid, ["/bin/sh", "-c", script, "sh", *args], user=user, target=DIRECT)
 
 
 def grant(path: Path, realm: str, *, mode: Mode = "rw", is_dir: bool = False) -> GrantRecord:
@@ -167,6 +183,7 @@ def attach(host: Host, box: Box, grants: list[GrantRecord]) -> AttachResult:
         realm_home=host.realm_home(box.name),
         host_home=host.host_home,
         admit=_admit_all,
+        target=ExecTarget(realm=box.name, services=False, mutating=False),
         helper=host.helper,
     )
 
@@ -185,6 +202,7 @@ def lazy(host: Host, box: Box, records: list[GrantRecord]) -> tuple[bool, Attach
         realm_home=host.realm_home(box.name),
         host_home=host.host_home,
         admit=_admit_all,
+        target=ExecTarget(realm=box.name, services=False, mutating=False),
         helper=host.helper,
     )
 
@@ -201,6 +219,7 @@ def reattach_outcome(host: Host, box: Box, records: list[GrantRecord]) -> dict[s
             realm_home=host.realm_home(box.name),
             host_home=host.host_home,
             admit=_admit_all,
+            target=ExecTarget(realm=box.name, services=False, mutating=False),
             helper=host.helper,
         )
     except GinnError as err:
@@ -385,7 +404,7 @@ def _realm_user_facts(host: Host, cid: str) -> dict[str, Any]:
         ).stdout,
         "getent_group": sh(host, cid, 'getent group "$1"', gid).stdout.strip(),
         "home_seen_by_exec": host.cli.exec(
-            cid, ["/bin/sh", "-c", 'echo "$HOME"'], user=f"{uid}:{gid}"
+            cid, ["/bin/sh", "-c", 'echo "$HOME"'], user=f"{uid}:{gid}", target=DIRECT
         ).stdout.strip(),
         "subid_lines_for_user": sh(
             host, cid, 'grep -c "^$1:" /etc/subuid /etc/subgid', host.user
@@ -615,8 +634,16 @@ def test_g_ps_reports_the_pid(gate: Gate, host: Host) -> None:
 def test_h_exec_workdir_and_missing_workdir(gate: Gate, host: Host) -> None:
     cid = _start_gate(host)
     try:
-        ok = host.cli.exec(cid, ["/bin/sh", "-c", "pwd; id -u"], user=ROOT_USER, workdir="/root")
-        missing = host.cli.exec(cid, ["/bin/true"], user=ROOT_USER, workdir="/no/such/dir")
+        ok = host.cli.exec(
+            cid,
+            ["/bin/sh", "-c", "pwd; id -u"],
+            user=ROOT_USER,
+            workdir="/root",
+            target=DIRECT,
+        )
+        missing = host.cli.exec(
+            cid, ["/bin/true"], user=ROOT_USER, workdir="/no/such/dir", target=DIRECT
+        )
         facts = {
             "root_workdir_exit": ok.exit_code,
             "root_workdir_stdout": ok.stdout.split(),
@@ -1058,6 +1085,7 @@ def test_b_drive_mounted_on_the_host_after_start(host: Host, box: Box) -> None:
             realm_home=host.realm_home(box.name),
             host_home=host.host_home,
             admit=_admit_all,
+            target=ExecTarget(realm=box.name, services=False, mutating=False),
             helper=host.helper,
         )
         outcome = {"raised": None, "records": len(again.records), "skipped": len(again.skipped)}
@@ -1200,7 +1228,7 @@ def test_musl_smoke_create_start_exec_delete(host: Host) -> None:
             hooks=LifecycleHooks(helper=host.helper),
         )
         cid = _container_of(host, "musl")
-        assert host.cli.exec(cid, ["/bin/true"], user=ROOT_USER).exit_code == 0
+        assert host.cli.exec(cid, ["/bin/true"], user=ROOT_USER, target=DIRECT).exit_code == 0
         stop_realm(host.env, host.cli, name, hooks=LifecycleHooks(helper=host.helper))
     finally:
         if RealmStore(host.paths, time.time).exists(name):

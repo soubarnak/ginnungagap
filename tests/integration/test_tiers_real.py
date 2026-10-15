@@ -43,6 +43,7 @@ from ginn.ops.delete import delete_realm
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
 from ginn.ops.permissions import set_permissions, set_tier
 from ginn.ops.security_ops import read_agent_record
+from ginn.podman.adapter import ExecTarget
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.security.agent import AgentRecord
 from ginn.store.records import RealmRecord, RealmStore
@@ -143,7 +144,8 @@ def _load(host: Host, name: str) -> RealmRecord:
 def _run(host: Host, name: str, argv: list[str]) -> int:
     """Run argv in the realm as its user, and return the exit status (no shell is built here)."""
     container = _load(host, name).container_id or ""
-    return host.cli.exec(container, argv).exit_code
+    target = ExecTarget(realm=name, services=False, mutating=False)
+    return host.cli.exec(container, argv, target=target).exit_code
 
 
 def _host_files(host: Host) -> None:

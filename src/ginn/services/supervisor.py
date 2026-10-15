@@ -133,6 +133,7 @@ class RunitStatus:
     time in that state. `normally_up` is False when the `down` file exists (autostart off).
     `want_up` is set while runsv means to start run: a `down` service that is restarting after a
     crash says `want up`, and only a `down` service that does not want up has been given up.
+    `want_down` is set once `sv down` has been sent, so the end of run is a user stop (CL-24).
     """
 
     state: str
@@ -140,6 +141,7 @@ class RunitStatus:
     seconds: int | None = None
     normally_up: bool = False
     want_up: bool = False
+    want_down: bool = False
 
     def describe(self) -> str:
         """The state for `ginn status`, for example `run, pid 4321, 12 s`."""
@@ -166,6 +168,7 @@ def parse_status(text: str) -> RunitStatus:
         seconds=int(match["seconds"]),
         normally_up=", normally up" in match["rest"],
         want_up=", want up" in match["rest"],
+        want_down=", want down" in match["rest"],
     )
 
 

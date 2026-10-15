@@ -62,9 +62,15 @@ def run_tool(argv: Sequence[str], *, check: bool = True, timeout: float = 300) -
 
 
 def tool(name: str) -> str:
-    """The absolute path of a host tool, or a failure: the gate needs it."""
+    """The absolute path of a host tool. With the gate on, a missing tool fails: the gate needs it.
+
+    With the gate off every test here is skipped, so a missing tool returns its bare name and the
+    module still imports (CI has no podman). Nothing runs the name then.
+    """
     found = shutil.which(name)
     if found is None:
+        if os.environ.get(GATE_SWITCH) != "1":
+            return name
         pytest.fail(f"the host gate needs {name} on PATH")
     return found
 

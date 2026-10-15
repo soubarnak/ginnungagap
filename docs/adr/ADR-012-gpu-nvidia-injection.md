@@ -6,6 +6,7 @@
 - Amended: 2026-10-12 (D6). The status is set to what S-06 ran. The S-06 method is cited from its variant table. The catatonit fact is corrected, and DR-010 and FR-082 are added. No decision changes.
 - Amended: 2026-10-12 (D7). Status qualifier narrowed to the runc renderer check and the S-06 parts of FR-069, with the pending items and their tasks named. No decision changes.
 - Amended: 2026-10-12 (variable grant attachment). The HOME sentence in the Decision is corrected. HOME is set at exec by `runtime/env.py` (T4.3, M4), so it is not an M6 item. M6 still owns `XDG_CACHE_HOME`. The display and audio socket binds are attached after `podman start` under ADR-008, not bound at create. The fonts, localtime, device and NVIDIA items are unchanged. No decision changes.
+- Amended: 2026-10-15 (runtime directory owner, ADR-014 T7.28). The display and audio binds attach under `/run/user/<uid>` after start. On a services-on realm that directory is owned by the realm user, through the tmpfiles.d drop-in that create copies in, and the start waits for that owner before the attach. No decision changes.
 
 ## Context
 

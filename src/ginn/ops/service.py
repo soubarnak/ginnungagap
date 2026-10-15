@@ -8,11 +8,14 @@ that argv, so ginn-wait supervises the conmon of the container. The exec happens
 lock is released, so the start's journal and audit entries are complete.
 
 `finish_service` is the work of `ginn _service-finish <realm> <exit> <signal>`, which runit runs as
-the `finish` script. A stop request (exit 0, from ginn-wait's SIGTERM) moves the realm to `stopped`
-and leaves the filter. Any other end is a crash. The crash times are counted in the realm's crash
-log (services/supervise.py). A crash waits RESTART_DELAY_S, and runsv restarts run. After
-CRASH_LIMIT crashes within CRASH_WINDOW_S the realm is given up: its `down` file is written, runsv
-is told not to restart it, and a running realm moves to `failed` (DR-020, AS-028).
+the `finish` script. A stop request is an exit 0 (from ginn-wait's SIGTERM), or an exit 1 while
+runsv has its `want down` mark, which `sv down` sets (CL-24). Either records the realm stopped and
+leaves the filter. Any other end with the mark keeps the realm's state and counts no crash. Any
+other end is a crash, and a crash during a start counts the same as a crash of a running realm.
+The crash times are counted in the realm's crash log (services/supervise.py). A crash waits
+RESTART_DELAY_S, and runsv restarts run. After CRASH_LIMIT crashes within CRASH_WINDOW_S the realm
+is given up: its `down` file is written, runsv is told not to restart it, and a stopped or running
+realm moves to `failed` (DR-020, CL-24, AS-028).
 
 The crash log, the `down` file and the runsv control write are the supervisor's own files, and the
 realm lock is not taken for them. So a busy realm or an unacknowledged host change cannot stop a
@@ -22,6 +25,7 @@ give-up. Only the record move and its audit entry go through ops/_mutating.py (D
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -39,6 +43,7 @@ from ginn.ops.security_ops import leave_agent, reconcile_proxy
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerState
 from ginn.services import autostart
+from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.services.runit_user import (
     WAIT_HELPER,
     conmon_pidfile,
@@ -55,6 +60,8 @@ from ginn.services.supervise import (
     signal_runsv_down,
     write_crashes,
 )
+from ginn.services.supervisor import SupervisorHooks
+from ginn.services.supervisor import status as runit_status
 from ginn.store._time import utc_from_epoch
 from ginn.store.paths import OWNED_DIR_MODE, OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -71,23 +78,26 @@ class ServiceHooks:
     """The seams of the supervised start and finish. The defaults are the real ones.
 
     `wait_helper` is the ginn-wait path, which the start checks is executable. `sleep` is the
-    restart delay of a crash (AS-028), so a test does not wait 5 s.
+    restart delay of a crash (AS-028), so a test does not wait 5 s. `supervisor` is the sv control
+    that reads the `want down` mark of a finish (CL-24).
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
     wait_helper: str = WAIT_HELPER
     sleep: Callable[[float], None] = time.sleep
+    supervisor: SupervisorHooks = field(default_factory=SupervisorHooks)
 
 
 class ServiceExit(Enum):
     """What the finish script did with one end of run."""
 
     STOPPED = "stopped"
-    """A stop request: the realm reads stopped, and runsv does not restart it."""
+    """A stop request: runsv does not restart run. The realm reads stopped, unless the request
+    ended with a code other than 0 or 1, which keeps the realm's state (CL-24)."""
     RESTART = "restart"
     """A crash that is not the fifth in 60 s: runsv restarts run after the delay."""
     GAVE_UP = "gave-up"
-    """The fifth crash in 60 s: left stopped, or failed if it was running (AS-028)."""
+    """The fifth crash in 60 s: the realm reads failed, from stopped or running (CL-24, AS-028)."""
 
 
 def start_service(
@@ -189,6 +199,23 @@ def finish_service(
     or -1 when run did not exit normally, and the signal that ended run (runsv(8)). The FR-006
     warnings of a stop are appended to `warnings` when it is given.
 
+    The stop mark is checked before the crash is counted. The rule, by the exit code of run and the
+    `want down` mark that `sv down` sets (CL-24, ADR-014):
+
+    - Exit 0 is a stop request, with or without the mark: the realm reads stopped.
+    - Exit 1 with the mark is a stop request too. It is ginn-wait's own 1 (conmon exited on its
+      own), so the container is gone: the realm reads stopped.
+    - Any other code with the mark (-1, ginn-wait 2 to 5, or a ginn exit from `_service-run`) is a
+      stop request that proves nothing about the container. For example, ginn-wait 4 means
+      `podman stop` failed while conmon runs. The realm keeps its state, and GINN-W-STOP-UNSETTLED
+      is reported. A `_service-run` refusal that exits 1 has the code of ginn-wait's 1, so it takes
+      the stop line and records stopped. That is correct when the refusal comes before podman starts
+      the container, since then no container runs.
+    - Without the mark, a non-zero end is a crash. A status that cannot be read is no proof of a
+      stop, so such an end is a crash too.
+
+    A stop request of either kind counts no crash, clears the crash count and gives no give-up.
+
     While a rebuild is in progress (its record reads rebuilding), the end of run writes no record:
     the rebuild stops its building container with `sv down` and settles the record at its swap or
     rollback, and recovery does so for an interrupted rebuild. The supervisor's own files are still
@@ -196,9 +223,13 @@ def finish_service(
     """
     rebuilding = _rebuilding(env, name)
     if exit_code == 0:
-        if not rebuilding:
-            _record_stopped(env, name, exit_code, signal_no, warnings)
-        crash_log(env.paths, name).unlink(missing_ok=True)
+        _finish_stop(env, name, exit_code, signal_no, warnings, rebuilding)
+        return ServiceExit.STOPPED
+    if _user_stop(env.paths, name, hooks.supervisor):
+        if exit_code == 1:
+            _finish_stop(env, name, exit_code, signal_no, warnings, rebuilding)
+        else:
+            _finish_kept_stop(env, name, exit_code, warnings)
         return ServiceExit.STOPPED
     log = crash_log(env.paths, name)
     stamps, give_up = note_crash(read_crashes(log), env.clock())
@@ -213,7 +244,83 @@ def finish_service(
     log.unlink(missing_ok=True)
     if not rebuilding:
         _record_failed(env, name, exit_code, signal_no)
+    notice = _sync_relay(env.paths)  # NFR-001: a realm given up is no longer running (ADR-014)
+    if notice is not None:
+        _finish_notice(notice, warnings)
     return ServiceExit.GAVE_UP
+
+
+def _finish_stop(
+    env: OpEnv,
+    name: RealmName,
+    exit_code: int,
+    signal_no: int,
+    warnings: list[GinnWarning] | None,
+    rebuilding: bool,
+) -> None:
+    """A stop request that exited 0: record the realm stopped, clear the crash count (FR-081)."""
+    if not rebuilding:
+        _record_stopped(env, name, exit_code, signal_no, warnings)
+    # A clean stop clears the crash count, so the count is cleared before the relay is synced:
+    # a failed sync must not leave stale crashes to count toward a give-up (FR-081).
+    crash_log(env.paths, name).unlink(missing_ok=True)
+    notice = _sync_relay(env.paths)  # NFR-001: the relay follows a realm that stopped (ADR-014)
+    if notice is not None:
+        _finish_notice(notice, warnings)
+
+
+def _finish_kept_stop(
+    env: OpEnv, name: RealmName, exit_code: int, warnings: list[GinnWarning] | None
+) -> None:
+    """A stop request that ended with a code other than 0 or 1 (CL-24): no crash is counted, and the
+    record keeps its state, since the container may still run. The stop request still clears the
+    crash count. The kept state is a GINN-W-STOP-UNSETTLED warning, sent as the other finish
+    notices are (the caller's list, or the runit log)."""
+    crash_log(env.paths, name).unlink(missing_ok=True)
+    _finish_notice(warn("GINN-W-STOP-UNSETTLED", realm=name.value, exit_code=exit_code), warnings)
+
+
+def _user_stop(paths: OwnedPaths, name: RealmName, hooks: SupervisorHooks) -> bool:
+    """True when runsv marks the realm `want down`, which only `sv down` sets (CL-24). Read only.
+
+    A status that cannot be read, such as an sv that is not installed, is not a stop: the end is
+    then counted as a crash, so a give-up is never skipped on a guess (FR-081).
+    """
+    try:
+        return runit_status(paths, name, hooks=hooks).want_down
+    except GinnError:
+        return False
+
+
+def _sync_relay(paths: OwnedPaths, podman: Podman | None = None) -> GinnWarning | None:
+    """Sync the relay after an operation that has been recorded, and return a failure (ADR-014).
+
+    The outcome is already recorded, so a failed sync does not change it. The failure comes back as
+    a GINN-W-RELAY-SYNC warning, and the next sync retries it.
+    """
+    try:
+        sync_exec_service(paths, podman)
+    except Exception as exc:  # noqa: BLE001 - the outcome is recorded, so the failure is a warning
+        return relay_failure(exc)
+    return None
+
+
+def _finish_notice(notice: GinnWarning, warnings: list[GinnWarning] | None) -> None:
+    """Pass a finish's warning to its caller, which prints it; with no list, write it to stderr.
+
+    The CLI passes a list, so the warning is printed as every other warning is. A finish with no
+    list has no user, so its stderr is the runit log of the service (FR-081).
+    """
+    if warnings is not None:
+        warnings.append(notice)
+    else:
+        _runit_log(notice)
+
+
+def _runit_log(notice: GinnWarning) -> None:
+    """Write a warning to stderr as the CLI's text output does. A finish has no user, so its
+    stderr is the runit log of the service (FR-081)."""
+    sys.stderr.write(f"{notice.code}: {notice.message}\n  fix: {notice.remedy}\n")
 
 
 def _rebuilding(env: OpEnv, name: RealmName) -> bool:
@@ -234,6 +341,7 @@ def set_services_mode(
     *,
     on: bool,
     warnings: list[GinnWarning] | None = None,
+    podman: Podman | None = None,
 ) -> RealmRecord:
     """`ginn services <realm> on|off`: set the services mode (FR-083, ADR-003). Return the record.
 
@@ -253,6 +361,9 @@ def set_services_mode(
     Setting the mode the realm already has is a no-op: the record is returned and nothing is
     written. A realm that is neither stopped nor running is refused with GINN-E-REALM-STATE before
     any write. The change's GINN-W-REBUILD-PENDING notice is appended to `warnings` (CL-19).
+
+    The relay service follows the change at once (ADR-014). `podman` is the adapter whose podman
+    command the service renders, and None applies only the running state of an installed service.
     """
     store = RealmStore(env.paths, env.clock)
     current = store.load(name)  # GINN-E-NO-SUCH-REALM before any audit entry
@@ -260,8 +371,13 @@ def set_services_mode(
         return current
     with mutating(env, "services", name, {"services": on}) as mutation:
         record = _services_body(env, store, name, on, mutation)
+    # After the journal entry is finished: a body error would roll the change back, and a relay
+    # failure must not fail a change that is already saved (ADR-014, the _mutating.py contract).
+    notice = _sync_relay(env.paths, podman)
     if warnings is not None:
         warnings.extend(mutation.warnings)
+        if notice is not None:
+            warnings.append(notice)
     return record
 
 
@@ -412,9 +528,11 @@ def _record_stopped(
 
 
 def _record_failed(env: OpEnv, name: RealmName, exit_code: int, signal_no: int) -> None:
-    """A give-up: a running realm moves to failed, as DR-020 allows. The audit entry is written.
+    """A give-up: a stopped or running realm moves to failed (CL-24, DR-020). The audit entry is
+    written, and it names the move.
 
-    A stopped realm stays stopped, because DR-020 has no stopped-to-failed move. The entry says so.
+    The move is legal only as a give-up, so this is the one caller that passes `give_up`. A realm
+    in any other state keeps it, and the entry says so.
     """
     store = RealmStore(env.paths, env.clock)
     params = {
@@ -427,8 +545,9 @@ def _record_failed(env: OpEnv, name: RealmName, exit_code: int, signal_no: int) 
     try:
         with mutating(env, "service-exit", name, params) as mutation:
             record = store.load(name)
-            if can_transition(record.state, RealmState.FAILED, record.previous_state):
-                store.set_state(name, RealmState.FAILED)
+            if can_transition(record.state, RealmState.FAILED, record.previous_state, give_up=True):
+                store.set_state(name, RealmState.FAILED, give_up=True)
+                mutation.add_params(state=f"failed (was {record.state.value})")
             else:
                 mutation.add_params(state_kept=record.state.value)
     except GinnError as err:

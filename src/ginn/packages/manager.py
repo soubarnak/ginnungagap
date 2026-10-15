@@ -33,7 +33,7 @@ AC-2).
 
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
@@ -46,9 +46,11 @@ from ginn.distros.loader import (
     arch_check_status,
     db_check_status,
 )
+from ginn.domain import InstallMethod, InstallSource, ManifestEntry
 from ginn.errors import GinnError, make
 from ginn.ops.retry import is_network
-from ginn.podman.adapter import Podman, RetryHook, with_network_retry
+from ginn.packages.manifest import installed, removed
+from ginn.podman.adapter import ExecTarget, Podman, RetryHook, with_network_retry
 from ginn.podman.models import ExecResult
 
 ROOT_USER: Final = "0:0"
@@ -77,6 +79,43 @@ _APT_HEADING: Final = re.compile(r"will be removed", re.IGNORECASE)
 """The apt heading of a removal list: `The following packages will be REMOVED:`."""
 _REMOVAL_WORD: Final = re.compile(r"\b(?:removed|removing)\b", re.IGNORECASE)
 """The dnf headings of a removal list: `Removing:` and `Removing dependent packages:`."""
+
+
+RELAY_NAMES_PER_EXEC: Final = 200
+"""The most package names one exec on the relay route carries (ADR-014, FR-049).
+
+The relay takes 256 argv items and 64 KiB per request (native/ginn-exec-frame.h). The verb's words
+and the exec options take about 20 items, so 200 names fit with room to spare.
+"""
+RELAY_NAME_BYTES: Final = 40 * 1024
+"""The most name bytes one relay exec carries, which keeps the request under 64 KiB with margin."""
+
+
+def name_batches(names: Sequence[str], target: ExecTarget) -> list[list[str]]:
+    """Split the names of one package verb into the calls that the exec route can carry (ADR-014).
+
+    The direct route has no such limit, so it keeps one call whatever the count. A services-on
+    target takes at most RELAY_NAMES_PER_EXEC names and RELAY_NAME_BYTES of name bytes per exec, and
+    a longer list is split in order. A services-on target is split even when its call runs direct
+    inside the supervisor leaf; the split is only more calls, with the same result. An empty list is
+    one empty batch, as before.
+    """
+    listed = list(names)
+    if not target.services or not listed:
+        return [listed]
+    batches: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for name in listed:
+        cost = len(name.encode("utf-8")) + 1
+        full = len(current) == RELAY_NAMES_PER_EXEC or size + cost > RELAY_NAME_BYTES
+        if current and full:
+            batches.append(current)
+            current, size = [], 0
+        current.append(name)
+        size += cost
+    batches.append(current)
+    return batches
 
 
 def printable(text: str, limit: int = MAX_NAME_CHARS) -> str:
@@ -156,14 +195,19 @@ def run_step(
     realm: str,
     step: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
     user: str = ROOT_USER,
     env: Mapping[str, str] = LOCALE,
     workdir: str | None = None,
     timeout_s: float | None = None,
     max_output: int | None = None,
     stdout_tail: bool = False,
+    on_ack: Callable[[int], None] | None = None,
 ) -> ExecResult:
     """Run one package-manager argv, and return its result. Container root by default.
+
+    `target` says where the exec runs (ADR-014), and `on_ack` gets the podman pid once it has
+    started (FR-122). A retried attempt calls `on_ack` again.
 
     `user`, `env` and `workdir` are for the AUR build (packages/aur.py), which runs as the realm
     user in its build directory (FR-043). `timeout_s` and `max_output` bound the step (the adapter
@@ -178,12 +222,14 @@ def run_step(
             result = podman.exec(
                 container_id,
                 argv,
+                target=target,
                 user=user,
                 env=env,
                 workdir=workdir,
                 timeout_s=timeout_s,
                 max_output=max_output,
                 stdout_tail=stdout_tail,
+                on_ack=on_ack,
             )
         except GinnError as exc:
             reason = exc.details.get("reason")
@@ -246,6 +292,7 @@ def explicit_packages(
     *,
     realm: str,
     retry_hook: RetryHook | None = None,
+    target: ExecTarget,
 ) -> frozenset[str]:
     """The explicitly installed package names, from the `list-explicit` verb (DR-007).
 
@@ -260,8 +307,111 @@ def explicit_packages(
         realm=realm,
         step="list-explicit",
         retry_hook=retry_hook,
+        target=target,
     )
     return parse_names(result.stdout, realm=realm)
+
+
+def explicit_manifest(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    *,
+    realm: str,
+    services: bool,
+    manifest: Sequence[ManifestEntry],
+    names: Sequence[str],
+    installed_now: bool,
+) -> list[ManifestEntry] | None:
+    """The Install Manifest that the realm's explicit-package list gives for `names`.
+
+    Read only: nothing is saved, so the caller decides what to write. After an install, each name
+    the realm lists as explicit is recorded as `ginn`. After a remove, each name it no longer lists
+    is dropped. None when the list cannot be read or is over the caps, and the caller keeps the
+    manifest it had. A result equal to `manifest` means nothing changes.
+    """
+    try:
+        explicit = explicit_packages(
+            podman,
+            container_id,
+            definition,
+            realm=realm,
+            target=ExecTarget(realm=realm, services=services, mutating=False),
+        )
+    except Exception:  # noqa: BLE001 - the caller's own error is the one that counts
+        return None
+    if installed_now:
+        present = [raw for raw in names if raw in explicit]
+        if not present:
+            return list(manifest)
+        return installed(manifest, present, source=InstallSource.REPO, method=InstallMethod.GINN)
+    gone = [raw for raw in names if raw not in explicit]
+    if not gone:
+        return list(manifest)
+    return removed(manifest, gone)
+
+
+def remove_passes(
+    batches: Sequence[Sequence[str]],
+    remove: Callable[[Sequence[str]], None],
+    *,
+    still_present: Callable[[], frozenset[str]] | None,
+) -> None:
+    """Remove each batch, retrying the refused ones after the pass (ADR-014, T7.10 review).
+
+    A batch that the manager refuses with GINN-E-PKG-MANAGER is kept, and tried again after the
+    pass. Passes repeat while a pass removes something, and at most once per batch, so a batch that
+    needs a later batch removed first (A needed by B, with B in a later batch) succeeds on the next
+    pass. A pass that removes nothing, or the last pass, raises the last refusal.
+
+    When `still_present` is given, it is read once before the removal and again before each batch.
+    A name that was present at the start and is gone now was taken by an earlier removal as a
+    dependent, so it is not passed again (dnf may exit non-zero for it). A name that was never
+    present is passed as it is. A read that fails with a GinnError leaves the removal unfiltered: if
+    the first read fails, no batch is filtered, and if a later read fails, its batch is not. Any
+    other error stops the removal at once and is raised.
+    """
+    pending = [list(batch) for batch in batches]
+    initial = _read_present(still_present)
+    last: GinnError | None = None
+    for _ in range(len(pending)):
+        refused_now: list[list[str]] = []
+        removed_any = False
+        for batch in pending:
+            names = batch
+            if initial is not None and still_present is not None:
+                present = _read_present(still_present)
+                if present is not None:
+                    names = [raw for raw in batch if raw not in initial or raw in present]
+            if not names:
+                continue
+            try:
+                remove(names)
+            except GinnError as err:
+                if err.code != "GINN-E-PKG-MANAGER":
+                    raise
+                refused_now.append(batch)
+                last = err
+                continue
+            removed_any = True
+        if not refused_now:
+            return
+        if not removed_any:
+            raise last if last is not None else make("GINN-E-INTERNAL")
+        pending = refused_now
+    if last is None:
+        raise make("GINN-E-INTERNAL")
+    raise last
+
+
+def _read_present(still_present: Callable[[], frozenset[str]] | None) -> frozenset[str] | None:
+    """The names present now, or None when there is no reader or its read fails (remove_passes)."""
+    if still_present is None:
+        return None
+    try:
+        return still_present()
+    except GinnError:
+        return None
 
 
 def _opens_list(line: str) -> str | None:
@@ -330,6 +480,7 @@ def removal_dependents(
     *,
     realm: str,
     retry_hook: RetryHook | None = None,
+    target: ExecTarget,
 ) -> frozenset[str]:
     """The packages that removing `names` would also remove, from the `remove-check` dry run.
 
@@ -341,6 +492,7 @@ def removal_dependents(
         lambda: podman.exec(
             container_id,
             definition.argv(Verb.REMOVE_CHECK, names),
+            target=target,
             user=ROOT_USER,
             env=LOCALE,
         ),
@@ -381,6 +533,7 @@ def _exec(
     realm: str,
     step: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
 ) -> ExecResult:
     """One check step as container root under the locale. A non-zero status is returned, not raised.
 
@@ -389,7 +542,7 @@ def _exec(
     """
 
     def attempt() -> ExecResult:
-        result = podman.exec(container_id, argv, user=ROOT_USER, env=LOCALE)
+        result = podman.exec(container_id, argv, target=target, user=ROOT_USER, env=LOCALE)
         if network_failure(definition, result):
             raise _network(realm, step, result)
         return result
@@ -431,6 +584,7 @@ def _single(
     *,
     realm: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
 ) -> CheckResult:
     """A one-step check: Debian, Kali and Fedora. Exit 0 is none, or updates if rows are listed.
 
@@ -438,7 +592,14 @@ def _single(
     100). Any other non-zero status is a failure, so apt's 100 on an error stays one.
     """
     result = _exec(
-        podman, container_id, definition, argv, realm=realm, step="check", retry_hook=retry_hook
+        podman,
+        container_id,
+        definition,
+        argv,
+        realm=realm,
+        step="check",
+        retry_hook=retry_hook,
+        target=target,
     )
     listed = _listed(definition, result.stdout, realm=realm, step="check")
     if _fatal(definition, result.stderr):
@@ -461,6 +622,7 @@ def _layered(
     *,
     realm: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
 ) -> CheckResult:
     """The Arch check of ADR-011: setup steps, then the scratch sync, then the query.
 
@@ -477,6 +639,7 @@ def _layered(
             realm=realm,
             step="check-setup",
             retry_hook=retry_hook,
+            target=target,
         )
         if result.exit_code != 0:
             raise failure(definition, result, realm=realm, step="check-setup")
@@ -488,6 +651,7 @@ def _layered(
         realm=realm,
         step="check-sync",
         retry_hook=retry_hook,
+        target=target,
     )
     if sync_result.exit_code != 0:
         raise failure(definition, sync_result, realm=realm, step="check-sync")
@@ -499,6 +663,7 @@ def _layered(
         realm=realm,
         step="check-query",
         retry_hook=retry_hook,
+        target=target,
     )
     listed = _listed(definition, query_result.stdout, realm=realm, step="check-query")
     status = arch_check_status(
@@ -521,6 +686,7 @@ def _remove_scratch(
     *,
     realm: str,
     retry_hook: RetryHook | None,
+    target: ExecTarget,
 ) -> None:
     """Remove the scratch directory. `rm -rf` does not follow the `local` link (ADR-011)."""
     result = _exec(
@@ -531,6 +697,7 @@ def _remove_scratch(
         realm=realm,
         step="check-cleanup",
         retry_hook=retry_hook,
+        target=target,
     )
     if result.exit_code != 0:
         detail = f"the scratch directory {printable(scratch)} is not removed"
@@ -545,6 +712,7 @@ def run_check(
     realm: str,
     retry_hook: RetryHook | None = None,
     tmpdir: str | None = None,
+    target: ExecTarget,
 ) -> CheckResult:
     """Run check-updates in a running realm and return what it found (FR-024, ADR-011).
 
@@ -567,26 +735,53 @@ def run_check(
             realm=realm,
             step="refresh",
             retry_hook=retry_hook,
+            target=target,
         )
     if not definition.check_updates_needs_tmpdir:
         return _single(
-            podman, container_id, definition, steps[0], realm=realm, retry_hook=retry_hook
+            podman,
+            container_id,
+            definition,
+            steps[0],
+            realm=realm,
+            retry_hook=retry_hook,
+            target=target,
         )
     if scratch is None:
         raise refused(realm, "check", "the scratch directory is not set")
     try:
         result = _layered(
-            podman, container_id, definition, steps, realm=realm, retry_hook=retry_hook
+            podman,
+            container_id,
+            definition,
+            steps,
+            realm=realm,
+            retry_hook=retry_hook,
+            target=target,
         )
     except BaseException:
         try:
             _remove_scratch(
-                podman, container_id, definition, scratch, realm=realm, retry_hook=retry_hook
+                podman,
+                container_id,
+                definition,
+                scratch,
+                realm=realm,
+                retry_hook=retry_hook,
+                target=target,
             )
         except GinnError:
             pass  # the check's own error is the one raised; the leftover is a scratch copy
         raise
-    _remove_scratch(podman, container_id, definition, scratch, realm=realm, retry_hook=retry_hook)
+    _remove_scratch(
+        podman,
+        container_id,
+        definition,
+        scratch,
+        realm=realm,
+        retry_hook=retry_hook,
+        target=target,
+    )
     return result
 
 
@@ -596,6 +791,7 @@ def database_inconsistent(
     definition: DistroDef,
     *,
     realm: str,
+    target: ExecTarget,
 ) -> bool:
     """True when the db-check verb reports an inconsistent package database (FR-120 AC-2, ADR-011).
 
@@ -607,7 +803,13 @@ def database_inconsistent(
     """
     if not definition.has_db_check:
         return False
-    result = podman.exec(container_id, definition.argv(Verb.DB_CHECK), user=ROOT_USER, env=LOCALE)
+    result = podman.exec(
+        container_id,
+        definition.argv(Verb.DB_CHECK),
+        target=target,
+        user=ROOT_USER,
+        env=LOCALE,
+    )
     check_output(result.stdout, realm=realm, step="db-check")
     status = db_check_status(
         result.exit_code,
