@@ -26,8 +26,6 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.environ_support import require_environ_readable
-
 REPO = Path(__file__).resolve().parents[2]
 NATIVE = REPO / "native"
 HEADER = NATIVE / "ginn-exec-frame.h"
@@ -438,7 +436,6 @@ def test_the_drain_lets_podman_finish_writing_after_the_client_left(
 def test_the_token_kill_ends_the_tokened_processes_in_the_realm_tree_and_spares_the_rest(
     built: Path, tmp_path: Path
 ) -> None:
-    require_environ_readable()
     token = "c" * 32
     cgroup = tmp_path / "cg"
     (cgroup / "libpod").mkdir(parents=True)

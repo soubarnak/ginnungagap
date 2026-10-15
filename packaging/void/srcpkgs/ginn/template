@@ -8,7 +8,7 @@ archs="x86_64 x86_64-musl"
 build_style=python3-pep517
 # The release tarball has no git metadata, so the repo hygiene test cannot run here.
 # CI runs it on the checkout.
-make_check_args="--ignore=tests/unit/test_repo_hygiene.py"
+make_check_args="-rs --ignore=tests/unit/test_repo_hygiene.py"
 # gcc and make build the nine native helpers in native/ (post_install).
 hostmakedepends="python3-setuptools python3-wheel gcc make"
 # containers-common ships /usr/share/containers/seccomp.json. ginn generates its seccomp profile

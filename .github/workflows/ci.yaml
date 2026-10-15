@@ -44,7 +44,7 @@ jobs:
           cp -a /src /home/tester/ginn
           chown -R tester /home/tester/ginn
           git config --system --add safe.directory /home/tester/ginn
-          su -l tester -c 'cd ~/ginn && python3 -m pytest -q --cov=ginn --cov-report=term-missing --cov-fail-under=80 && ruff check src tests tools && python3 -m mypy src/ginn && python3 tools/gen_errors_doc.py --check && python3 tools/traceability.py --check' </dev/null
+          su -l tester -c 'cd ~/ginn && python3 -m pytest -q -rs --cov=ginn --cov-report=term-missing --cov-fail-under=80 && ruff check src tests tools && python3 -m mypy src/ginn && python3 tools/gen_errors_doc.py --check && python3 tools/traceability.py --check' </dev/null
           CONTAINER
 
   provenance:
