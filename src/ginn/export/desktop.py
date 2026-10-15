@@ -48,43 +48,28 @@ MAIN_GROUP: Final = "Desktop Entry"
 ACTION_PREFIX: Final = "Desktop Action "
 REALM_KEY: Final = "X-Ginn-Realm"
 SOURCE_KEY: Final = "X-Ginn-Source"
-FIELD_CODES: Final = frozenset({"%f", "%F", "%u", "%U", "%i", "%c", "%k"})
-DEPRECATED_CODES: Final = frozenset({"%d", "%D", "%n", "%N", "%v", "%m"})
+FIELD_CODES: Final = frozenset("%f %F %u %U %i %c %k".split())
+DEPRECATED_CODES: Final = frozenset("%d %D %n %N %v %m".split())
 MAIN_KEYS: Final = frozenset(
-    {
-        "Type",
-        "Version",
-        "Name",
-        "GenericName",
-        "NoDisplay",
-        "Comment",
-        "Icon",
-        "Hidden",
-        "OnlyShowIn",
-        "NotShowIn",
-        "Terminal",
-        "Categories",
-        "Keywords",
-        "StartupNotify",
-        "StartupWMClass",
-        "MimeType",
-        "Actions",
-        "Exec",
-    }
+    "Type Version Name GenericName NoDisplay Comment Icon Hidden OnlyShowIn NotShowIn "
+    "Terminal Categories Keywords StartupNotify StartupWMClass MimeType Actions Exec".split()
 )
 """The keys of the main group that the host entry may carry: the spec's list, minus `TryExec`,
 `DBusActivatable` and `Path`, which the host cannot use for a realm binary (see render_export).
 Any other key, including every `X-` key and every extension key, is dropped. A menu reads its
 keys with their meaning, so a key that a desktop environment acts on (for example a switch that
 runs an entry as another user) must never come from the realm."""
-ACTION_KEYS: Final = frozenset({"Name", "Icon", "Exec"})
+ACTION_KEYS: Final = frozenset("Name Icon Exec".split())
 """The keys of a `[Desktop Action ...]` group that the host entry may carry."""
-LOCALIZED_KEYS: Final = frozenset({"Name", "GenericName", "Comment", "Keywords"})
+LOCALIZED_KEYS: Final = frozenset("Name GenericName Comment Keywords".split())
 """The keys that may carry `[locale]` variants: the menu shows these translated. Every other key
 keeps only its unlocalized line, so a localized `Exec[xx]` or `Type[xx]` is never passed on."""
 _EXEC_RESERVED: Final = frozenset(" \t\n\"'\\<>~|&;$*?#()`")
 _QUOTED_ESCAPES: Final = frozenset('"`$\\')
-_STRING_ESCAPES: Final = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+_QUOTED_CHAR: Final = re.compile(r'["`$\\]')
+_STRING_ESCAPES: Final = dict(zip("sntr\\", " \n\t\r\\", strict=True))
+_STRING_ESCAPE: Final = re.compile(r"\\([sntr\\])")
+_ESCAPE_TABLE: Final = str.maketrans({"\\": "\\\\", "\n": "\\n", "\t": "\\t", "\r": "\\r"})
 _KEY: Final = re.compile(r"([A-Za-z0-9-]+)(?:\[([^\[\]]+)\])?")
 
 
@@ -200,21 +185,12 @@ def _key_line(line: str) -> _Item:
 
 def unescape(raw: str) -> str:
     """Undo the string escapes of a Desktop Entry value. An unknown escape stays as written."""
-    out: list[str] = []
-    i = 0
-    while i < len(raw):
-        if raw[i] == "\\" and i + 1 < len(raw) and raw[i + 1] in _STRING_ESCAPES:
-            out.append(_STRING_ESCAPES[raw[i + 1]])
-            i += 2
-            continue
-        out.append(raw[i])
-        i += 1
-    return "".join(out)
+    return _STRING_ESCAPE.sub(lambda match: _STRING_ESCAPES[match.group(1)], raw)
 
 
 def escape(text: str) -> str:
     """The string escapes for `text`. `unescape(escape(x)) == x` for every `x`."""
-    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return text.translate(_ESCAPE_TABLE)
 
 
 def split_exec(value: str) -> list[str]:
@@ -268,10 +244,9 @@ def join_exec(argv: list[str] | tuple[str, ...]) -> str:
 def _exec_arg(arg: str) -> str:
     if arg in FIELD_CODES:
         return arg
-    if arg == "" or any(ch in _EXEC_RESERVED for ch in arg):
-        escaped = "".join("\\" + ch if ch in _QUOTED_ESCAPES else ch for ch in arg)
-        return f'"{escaped}"'
-    return arg
+    if arg and not _EXEC_RESERVED.intersection(arg):
+        return arg
+    return '"' + _QUOTED_CHAR.sub(r"\\\g<0>", arg) + '"'
 
 
 def exec_argv(entry: DesktopEntry, group_name: str) -> list[str] | None:
@@ -293,14 +268,8 @@ def icon_names(entry: DesktopEntry) -> list[str]:
     action icon is dropped by `render_export`. Two copies of different names would share one host
     file name (`<app><ext>`), so the second would overwrite the first.
     """
-    group = entry.group(MAIN_GROUP)
-    if group is None:
-        return []
-    for item in group.items:
-        if item.key == "Icon" and item.locale is None:
-            name = unescape(item.value)
-            return [name] if name else []
-    return []
+    name = entry.get("Icon")
+    return [name] if name else []
 
 
 def exportable_reason(entry: DesktopEntry) -> str | None:
@@ -361,48 +330,53 @@ def render_export(
 
 def _action_ids(main: _Group) -> list[str]:
     """The identifiers in the main group's `Actions=` list, empty entries skipped."""
-    for item in main.items:
-        if item.key == "Actions" and item.locale is None:
-            return [name for name in unescape(item.value).split(";") if name]
-    return []
+    values = [item.value for item in main.items if item.key == "Actions" and item.locale is None]
+    if not values:
+        return []
+    return [name for name in unescape(values[0]).split(";") if name]
 
 
 def _keep(group: _Group, allowed: frozenset[str], localized: frozenset[str]) -> None:
     """Keep only the key lines the host entry may carry (see MAIN_KEYS, LOCALIZED_KEYS)."""
-    group.items = [
-        item
-        for item in group.items
-        if item.key is not None
-        and item.key in allowed
-        and (item.locale is None or item.key in localized)
-    ]
+    kept: list[_Item] = []
+    for item in group.items:
+        if item.key not in allowed:
+            continue
+        if item.locale is not None and item.key not in localized:
+            continue
+        kept.append(item)
+    group.items = kept
 
 
 def _item(key: str, locale: str | None, value: str) -> _Item:
     """A new `Key[locale]=value` line, with `value` (unescaped) escaped for the file."""
-    suffix = f"[{locale}]" if locale else ""
+    head = f"{key}[{locale}]" if locale else key
     raw = escape(value)
-    return _Item(text=f"{key}{suffix}={raw}", key=key, locale=locale, value=raw)
+    return _Item(text=f"{head}={raw}", key=key, locale=locale, value=raw)
 
 
 def _replace(group: _Group, key: str, value: str) -> None:
     """Set the plain `key` of `group`: the first line is replaced, later copies are removed."""
     fresh = _item(key, None, value)
-    positions = [i for i, item in enumerate(group.items) if item.key == key and item.locale is None]
-    if not positions:
+    plain = [i for i, item in enumerate(group.items) if item.key == key and item.locale is None]
+    if not plain:
         # After the last key line, so a new key does not follow the group's trailing blank lines.
         last = max((i for i, item in enumerate(group.items) if item.key is not None), default=-1)
         group.items.insert(last + 1, fresh)
         return
-    group.items[positions[0]] = fresh
-    for index in reversed(positions[1:]):
-        del group.items[index]
+    first, *later = plain
+    group.items[first] = fresh
+    group.items = [item for i, item in enumerate(group.items) if i not in later]
 
 
 def _rename(group: _Group, realm: str) -> None:
-    for i, item in enumerate(group.items):
-        if item.key == "Name":
-            group.items[i] = _item("Name", item.locale, unescape(item.value) + f" ({realm})")
+    renamed: list[_Item] = []
+    for item in group.items:
+        if item.key != "Name":
+            renamed.append(item)
+            continue
+        renamed.append(_item("Name", item.locale, f"{unescape(item.value)} ({realm})"))
+    group.items = renamed
 
 
 def _rewrite_exec(group: _Group, realm: str, program: str) -> None:
@@ -425,18 +399,12 @@ def _rewrite_exec(group: _Group, realm: str, program: str) -> None:
 
 def _rewrite_icon(group: _Group, icon_paths: Mapping[str, str]) -> None:
     """Keep one plain `Icon` at the place of the first `Icon` line, and drop localized ones."""
-    first = next((i for i, item in enumerate(group.items) if item.key == "Icon"), None)
-    if first is None:
+    slots = [i for i, item in enumerate(group.items) if item.key == "Icon"]
+    if not slots:
         return
-    name = next(
-        (
-            unescape(item.value)
-            for item in group.items
-            if item.key == "Icon" and item.locale is None
-        ),
-        "",
-    )
+    plain = [unescape(group.items[i].value) for i in slots if group.items[i].locale is None]
+    name = plain[0] if plain else ""
     group.items = [item for item in group.items if item.key != "Icon"]
     path = icon_paths.get(name) if name else None
     if path is not None:
-        group.items.insert(min(first, len(group.items)), _item("Icon", None, path))
+        group.items.insert(min(slots[0], len(group.items)), _item("Icon", None, path))

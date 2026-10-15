@@ -7,16 +7,17 @@ to run it, with the remedy that the error carries. Pure Python, no GTK.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import dataclasses
 
 from ginn.gui.viewmodels.labels import Failure
 
 HOST_NOT_SET_UP: str = "GINN-E-HOST-NOT-SET-UP"
 HOST_SETUP_TITLE = "Host Setup has not run"
 HOST_SETUP_REMEDY = "Run 'sudo ginn host-setup --user <name>', then open the Control Plane again."
+_UNNAMED_TITLE = "The Control Plane cannot start"
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class StatusText:
     title: str
     description: str
@@ -24,10 +25,6 @@ class StatusText:
 
 def status_text(failure: Failure) -> StatusText:
     """The page for a failure that stops the Control Plane before its first read."""
-    if failure.code == HOST_NOT_SET_UP:
-        return StatusText(
-            title=HOST_SETUP_TITLE,
-            description=failure.remedy or HOST_SETUP_REMEDY,
-        )
-    title = failure.code or "The Control Plane cannot start"
-    return StatusText(title=title, description=failure.remedy or failure.message)
+    if failure.code != HOST_NOT_SET_UP:
+        return StatusText(failure.code or _UNNAMED_TITLE, failure.remedy or failure.message)
+    return StatusText(HOST_SETUP_TITLE, failure.remedy or HOST_SETUP_REMEDY)
