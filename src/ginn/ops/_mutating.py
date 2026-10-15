@@ -367,14 +367,25 @@ class OrphanMarker:
     pids: tuple[int, ...]
     kill_ran: bool
     truncated: bool
+    unknown: tuple[int, ...] = ()
+    """Processes whose token the kill could not read, and which it left alone (FR-124)."""
+    join_failed: bool = False
+    """No namespace join, so the kill could not name the realm's unreadable processes (FR-124)."""
 
     def pids_text(self) -> str:
         """The clause that names the processes, for the `pids` of GINN-W-RELAY-ORPHAN."""
         if not self.kill_ran:
             return "the token kill did not run, so no pid is recorded"
-        if not self.pids:
-            return "the token kill recorded no pid"
-        return "pids " + ", ".join(str(pid) for pid in self.pids) + " survived the token kill"
+        parts = []
+        if self.pids:
+            survivors = ", ".join(str(pid) for pid in self.pids)
+            parts.append(f"pids {survivors} survived the token kill")
+        if self.join_failed:
+            parts.append("processes unknown (token not readable)")
+        if self.unknown:
+            named = ", ".join(str(pid) for pid in self.unknown)
+            parts.append(f"unknown pids (token not readable): {named}")
+        return "; ".join(parts) if parts else "the token kill recorded no pid"
 
 
 def _check_exec_lock(paths: OwnedPaths, realm: RealmName, exempt: bool) -> bool:
@@ -454,12 +465,14 @@ def _open_unfollowed(path: str | Path, flags: int, *, dir_fd: int | None = None)
 def parse_orphans(raw: bytes) -> tuple[OrphanMarker, ...]:
     """The records of an orphan marker's bytes, in file order (ginn-exec-kill.c, ginn-exec-run.c).
 
-    A record starts at each `token <hex>` line and runs to the next one. Its other lines are
-    `time <epoch>`, then `pid <n>` lines, or `kill not run` when the kill could not start. Lines
-    that do not parse are skipped. A last line without its newline is torn, as a crash left it,
-    and is dropped (AuditLog._read_file does the same). A marker longer than ORPHAN_MAX_BYTES is cut
-    off, and the last record it reaches is marked truncated. The token is kept: it names the
-    processes that the kill missed, and it grants nothing.
+    A record starts at each `token <hex>` line and runs to the next one. Its other lines are `time
+    <epoch>`, then `pid <n>` lines, `unknown <n>` lines for processes the kill could not read, or
+    `kill not run` when the kill could not start, or `unknown join` when it had no namespace join.
+    Lines that do not parse are skipped. A last line
+    without its newline is torn, as a crash left it, and is dropped (AuditLog._read_file does the
+    same). A marker longer than ORPHAN_MAX_BYTES is cut off, and the last record it reaches is
+    marked truncated. The token is kept: it names the processes that the kill missed, and it grants
+    nothing.
     """
     text = raw[:ORPHAN_MAX_BYTES].decode("utf-8", errors="replace")
     lines = text.split("\n")
@@ -477,6 +490,8 @@ def parse_orphans(raw: bytes) -> tuple[OrphanMarker, ...]:
         token: str | None = None
         when: int | None = None
         pids: list[int] = []
+        unknown: list[int] = []
+        join_failed = False
         kill_ran = True
         for line in block:
             key, _, value = line.partition(" ")
@@ -486,6 +501,10 @@ def parse_orphans(raw: bytes) -> tuple[OrphanMarker, ...]:
                 when = int(value)
             elif key == "pid" and value.isdecimal():
                 pids.append(int(value))
+            elif key == "unknown" and value.isdecimal():
+                unknown.append(int(value))
+            elif line == "unknown join":
+                join_failed = True
             elif line == "kill not run":
                 kill_ran = False
         records.append(
@@ -495,6 +514,8 @@ def parse_orphans(raw: bytes) -> tuple[OrphanMarker, ...]:
                 pids=tuple(pids),
                 kill_ran=kill_ran,
                 truncated=truncated and index == len(blocks) - 1,
+                unknown=tuple(unknown),
+                join_failed=join_failed,
             )
         )
     return tuple(records)
@@ -630,6 +651,8 @@ def _orphan_entry(env: OpEnv, realm: RealmName, marker: OrphanMarker) -> AuditEn
         params={
             "token": marker.token,
             "pids": list(marker.pids),
+            "unknown": list(marker.unknown),
+            "join_failed": marker.join_failed,
             "kill_ran": marker.kill_ran,
             "truncated": marker.truncated,
         },

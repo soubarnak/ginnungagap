@@ -206,15 +206,23 @@ def test_an_exec_that_starts_after_the_first_check_is_refused_under_the_realm_lo
 
 @pytest.mark.fr("FR-124")
 @pytest.mark.parametrize(
-    ("marker", "pids", "kill_ran"),
+    ("marker", "pids", "unknown", "join_failed", "kill_ran"),
     [
-        (f"{MARKER_TEXT}pid 111\npid 222\n", [111, 222], True),
-        (f"{MARKER_TEXT}kill not run\n", [], False),
+        (f"{MARKER_TEXT}pid 111\npid 222\n", [111, 222], [], False, True),
+        (f"{MARKER_TEXT}kill not run\n", [], [], False, False),
+        (f"{MARKER_TEXT}unknown 333\n", [], [333], False, True),
+        (f"{MARKER_TEXT}unknown join\n", [], [], True, True),
     ],
-    ids=["survivors", "kill-not-run"],
+    ids=["survivors", "kill-not-run", "unknown", "unknown-join"],
 )
 def test_an_orphan_marker_is_audited_once_and_removed(
-    paths: OwnedPaths, env: OpEnv, marker: str, pids: list[int], kill_ran: bool
+    paths: OwnedPaths,
+    env: OpEnv,
+    marker: str,
+    pids: list[int],
+    unknown: list[int],
+    join_failed: bool,
+    kill_ran: bool,
 ) -> None:
     _write_marker(paths, marker)
     with mutating(env, "install", ARCH):
@@ -229,6 +237,8 @@ def test_an_orphan_marker_is_audited_once_and_removed(
     assert entry.params == {
         "token": EXEC_HEX,
         "pids": pids,
+        "unknown": unknown,
+        "join_failed": join_failed,
         "kill_ran": kill_ran,
         "truncated": False,
     }
@@ -530,3 +540,17 @@ def test_an_oversize_marker_is_audited_within_the_bound_and_kept(
         pass
     assert len(_orphans(env)) == 1
     assert marker.exists()
+
+
+@pytest.mark.fr("FR-124")
+def test_an_unknown_pid_is_named_apart_from_a_survivor_and_is_never_a_no_pid_record() -> None:
+    """A record with only `unknown` lines says so: the kill left those pids alone, it found none."""
+    (only,) = _mutating.parse_orphans(f"{MARKER_TEXT}unknown 333\n".encode())
+    assert (only.pids, only.unknown, only.kill_ran) == ((), (333,), True)
+    assert only.pids_text() == "unknown pids (token not readable): 333"
+    (mixed,) = _mutating.parse_orphans(f"{MARKER_TEXT}pid 111\nunknown 333\n".encode())
+    assert mixed.pids_text() == (
+        "pids 111 survived the token kill; unknown pids (token not readable): 333"
+    )
+    (joined,) = _mutating.parse_orphans(f"{MARKER_TEXT}unknown join\n".encode())
+    assert joined.join_failed and joined.pids_text() == "processes unknown (token not readable)"

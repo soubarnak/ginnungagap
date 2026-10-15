@@ -25,8 +25,9 @@ $(BUILD)/%: %.c
 	@mkdir -p $(BUILD)
 	$(CC) $(WARN) -o $@ $<
 
-# The frame header is a prerequisite of every helper that includes it (ADR-014, Wire protocol).
-$(BUILD)/ginn-exec-relay $(BUILD)/ginn-exec-worker $(BUILD)/ginn-exec-run $(BUILD)/ginn-exec-kill: ginn-exec-frame.h
+# The frame header is a prerequisite of every helper that includes it (ADR-014, Wire protocol). The kill
+# helper does not include it (its one define is written out in the source), so the frame's lines are not its.
+$(BUILD)/ginn-exec-relay $(BUILD)/ginn-exec-worker $(BUILD)/ginn-exec-run: ginn-exec-frame.h
 
 check: lines
 	@mkdir -p $(BUILD)/check

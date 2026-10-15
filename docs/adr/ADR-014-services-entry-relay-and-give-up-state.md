@@ -2,7 +2,7 @@
 
 - Status: Proposed (Decision 2 accepted by the user on 2026-10-14)
 - Date: 2026-10-14
-- Amended: 2026-10-15 (T7.9 review: four helpers, the worker-to-run contract, the relay root argument, the undo step, and the env-name, flag and LOCKED rules; T7.12 review: the stop rule of Decision 2; T7.13 review: the orphan marker). See "Amendment (2026-10-15): T7.9 review", "Amendment (2026-10-15): T7.12 give-up rule" and "Amendment (2026-10-15): T7.13 review, the orphan marker" at the end.
+- Amended: 2026-10-15 (T7.9 review: four helpers, the worker-to-run contract, the relay root argument, the undo step, and the env-name, flag and LOCKED rules; T7.12 review: the stop rule of Decision 2; T7.13 review: the orphan marker; T7.10 review; T7.16 host gates; T7.29: the token kill joins the realm's user namespace). See the dated amendments at the end.
 
 ## Context
 
@@ -390,3 +390,21 @@ The host gates ran on the Void host with the user's supervisor live (`ginn docto
 10. F11 closed (G11 and the full run). The NFR-003 and NFR-021 budgets are read from VmRSS, and the measured values are under budget: a 33.71 MiB median for an arch realm, and 168.97 MiB for five realms (the relay listener, about 1.4 MiB, is added to the sum from the next run). The 87 MiB of T7.7 was measured before the F6 fix (degraded arch boot, 7 failed units, no logind mask). `spikes/results/F6-F1-probe.md` measured 40.29 MiB with the machine-id fix and 33.27 MiB with the masks. The product-path re-gate after ADR-015 (CL-30) is still planned, so this closure is for the current design.
 
 Open after this amendment: O2 for the relay route is answered only at the podman level (item 2). O8 for `--root` needs the decision in item 4. F11 is closed (item 10), with the post-ADR-015 re-gate still planned. Nothing else in the list is open.
+
+## Amendment (2026-10-15): T7.29, the token kill and the user namespace
+
+This amendment records the fix for host finding T716-2 (`spikes/results/T7.16-probe-716.md`, section A) and answers O8 for `--root` execs. It amends item 7 of the T7.9 amendment and the marker contract of the T7.13 amendment.
+
+1. Cause. A `--root` exec's processes are owned by the container's root, which is a sub-uid on the host. Their `/proc/<pid>/environ` is mode 0400, so the kill helper's read failed with EACCES on DAC, not on ptrace, and the helper counted them as untokened. Their survivors were neither killed nor recorded, and the lock was released at once.
+
+2. The join. Before it reads an environ it cannot read, `ginn-exec-kill` joins a user namespace with `setns(CLONE_NEWUSER)`. From a realm process in a foreign user namespace it walks `NS_GET_PARENT` up to the outermost ancestor whose parent is the helper's own namespace, which is the rootless pause namespace. It joins that ancestor only when `NS_GET_OWNER_UID` equals the helper's uid. Joining the outermost ancestor, not the first namespace found, keeps the join valid when a realm process sits in a nested namespace (a unit with `PrivateUsers=yes`, bwrap, podman in the realm). After it opens the namespace, the helper checks with `pidfd_send_signal(pfd, 0)` that the pid was not reused. The join changes no pid numbers and no `/proc` view, and the helper still signals only tokened pids under the realm's cgroup tree through their pidfds.
+
+3. Never as host root. `ginn-exec-kill` exits 2 at once when its effective uid is 0 (CR-003).
+
+4. Unknown processes. A process whose environ stays unreadable is never killed, because it may be the realm's init or a service. If no join happened, the record holds one line `unknown join`. After a join, a pid is recorded as `unknown <pid>` only if it started at or after `ginn-exec-run`, the helper's parent, which predates the exec, so older realm processes are never listed. Either form makes the helper exit 3 with GINN-W-RELAY-ORPHAN. The CLI parses `unknown join` as `join_failed` and the pids as `unknown`, and audits both.
+
+5. Residuals. The sweep stops when no tokened process is left, so the exec lock is released while unknown pids may still run; the marker and its warning are then the only guard. An unreadable process met before the join candidate in the first sweep gives a spurious `unknown join`. A pid reused between reading `cgroup.procs` and `pidfd_open` can make the helper join the wrong namespace; that yields unknowns, never a wrong kill. The warning text for an unknown-only record still reads as if the command left processes; a dedicated warning, GINN-W-ORPHAN-UNKNOWN, is planned with the next owner of `src/ginn/errors.py`.
+
+6. Layout. `ginn-exec-kill.c` no longer includes `ginn-exec-frame.h`; it defines the GINN-W-RELAY-ORPHAN string itself, and a unit test pins it to the header's value. Its counted size is 200 lines.
+
+7. Host check. Probe A5 proved the read from inside the container's namespace. The read from the pause namespace, and the kill of a `--root` survivor, are checked by the G7 `--root` gate (`tests/integration/test_exec_relay_real.py`, strict xfail `KnownGapT716Two` until it passes).

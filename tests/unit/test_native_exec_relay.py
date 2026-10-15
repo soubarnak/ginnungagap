@@ -282,12 +282,22 @@ def test_the_frame_constants_are_the_adr_014_values() -> None:
 
 
 @pytest.mark.fr("FR-049")
-def test_the_relay_and_the_kill_helper_with_the_header_stay_within_200_lines() -> None:
-    """The lines target counts the shared header toward each helper that includes it (ADR-014)."""
+def test_the_relay_with_the_header_and_the_kill_helper_alone_stay_within_200_lines() -> None:
+    """The lines target counts the shared header toward each helper that includes it (ADR-014).
+
+    The kill helper does not include the header, so it is counted alone. It spells out the
+    warning define itself."""
     header = len(HEADER.read_text(encoding="utf-8").splitlines())
-    for name in ("ginn-exec-relay", "ginn-exec-kill"):
-        own = len((NATIVE / f"{name}.c").read_text(encoding="utf-8").splitlines())
-        assert own + header <= LINE_LIMIT, f"{name}.c with the header has {own + header} lines"
+    relay = len((NATIVE / "ginn-exec-relay.c").read_text(encoding="utf-8").splitlines())
+    assert relay + header <= LINE_LIMIT, (
+        f"ginn-exec-relay.c with the header: {relay + header} lines"
+    )
+    kill_source = (NATIVE / "ginn-exec-kill.c").read_text(encoding="utf-8")
+    assert '#include "ginn-exec-frame.h"' not in kill_source
+    kill = len(kill_source.splitlines())
+    assert kill <= LINE_LIMIT, f"ginn-exec-kill.c has {kill} lines"
+    match = re.search(r'^#define GINN_EXEC_W_ORPHAN "([^"]*)"$', kill_source, re.MULTILINE)
+    assert match is not None and match.group(1) == C["W_ORPHAN"], "kill's warning text drifted"
 
 
 @pytest.mark.fr("FR-049")
