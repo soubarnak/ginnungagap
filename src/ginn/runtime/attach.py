@@ -351,12 +351,13 @@ _RUNTIME_SUBDIR: Final = re.compile(r"/run/user/([0-9]+)/[^/]+(?:/[^/]+)*")
 def _runtime_subdir(podman: Podman, container: str, parent: str, *, target: ExecTarget) -> None:
     """Make a runtime subdirectory, such as `/run/user/<uid>/gnupg`, as the realm user at mode 0700.
 
-    The realm user owns `/run/user/<uid>` (its tmpfs is chowned to it), so the directory is made
-    with that uid and no root command runs on it. A root `mkdir` would leave the directory
-    root-owned, which gpg refuses, and a root `chown` or `chmod` would follow a link that the realm
-    planted. Only a directory strictly below `/run/user/<uid>` is handled, and only for that uid. A
-    `.` or `..` part is refused, and a symbolic link is refused before the directory is made. Every
-    argument is one argv element (NFR-SEC-005).
+    The realm user owns `/run/user/<uid>`. A services-off tmpfs is chowned to it at create, and a
+    services-on one gets its owner from the tmpfiles.d drop-in at boot, which the start waits for
+    (T7.28). So the directory is made with that uid and no root command runs on it. A root `mkdir`
+    would leave the directory root-owned, which gpg refuses, and a root `chown` or `chmod` would
+    follow a link that the realm planted. Only a directory strictly below `/run/user/<uid>` is
+    handled, and only for that uid. A `.` or `..` part is refused, and a symbolic link is refused
+    before the directory is made. Every argument is one argv element (NFR-SEC-005).
     """
     match = _RUNTIME_SUBDIR.fullmatch(parent)
     if match is None:

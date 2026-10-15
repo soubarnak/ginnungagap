@@ -114,6 +114,7 @@ from ginn.ops.disk import StatVfs
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
+    _settle_run_user,
     start_realm,
     start_through_sv,
     stop_realm,
@@ -429,6 +430,22 @@ class _Rebuild(_Create):
             raise err
         self._pid = info.pid
         self._step("started")
+
+    def _attach(self) -> None:
+        """Attach the grants of gN+1 once its runtime dir belongs to the realm user (T7.28).
+
+        A services-on gN+1 is started by runit, and its tmpfiles.d drop-in may not have chowned
+        `/run/user/<uid>` yet. The attach mkdirs under it as the realm user, so the wait comes
+        first. It is the start's own wait (lifecycle._settle_run_user), bounded the same way. The
+        record it is given is gN+1's view, since its exec target follows the services mode of gN+1.
+        A services-off gN+1 has no wait, and its attach is the create's.
+        """
+        if self._plan.spec.services:
+            new_view = replace(self._current(), services_at_create=True)
+            _settle_run_user(
+                self._podman, self._container_id(), self._request.uid, new_view, self._lifecycle
+            )
+        super()._attach()
 
     def _replay(self) -> None:
         """Install the manifest's packages into gN+1, and drop the ones that are gone (FR-022).

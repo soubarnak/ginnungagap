@@ -142,7 +142,7 @@ from ginn.runtime.attach import (
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.idle import IdleHooks, idle_stopped
 from ginn.runtime.idle import arm as arm_idle_watcher
-from ginn.runtime.mounts import AttachPlan, Exists, attach_plan
+from ginn.runtime.mounts import AttachPlan, Exists, attach_plan, runtime_dir
 from ginn.runtime.realm_security import (
     SecurityHooks,
     agent_enabled,
@@ -168,6 +168,13 @@ START_WAIT_S: Final = 60.0
 """Seconds a services-on `start` waits for its supervised start to record `running` (FR-081)."""
 START_POLL_S: Final = 0.5
 """Seconds between two reads of the record while a services-on start is awaited."""
+RUN_USER_WAIT_S: Final = 10.0
+"""Seconds a services-on start waits for `/run/user/<uid>` to belong to the realm user (T7.28).
+
+The owner comes from the tmpfiles.d drop-in, which systemd-tmpfiles-setup applies at boot. That can
+run after `podman start` returns, and the attach mkdirs under the directory as the realm user."""
+RUN_USER_POLL_S: Final = 0.2
+"""Seconds between two reads of the runtime dir's owner while that wait runs (T7.28)."""
 ROLLBACK_STOP_TIMEOUT_S: Final = 0
 """A start that failed has no state to save, so its stop does not wait (as create's rollback)."""
 USAGE_ENTRY_BUDGET: Final = 100_000
@@ -294,6 +301,7 @@ class LifecycleHooks:
     CreateHooks. `stop_timeout_s` is the wait before a kill. `tree_usage` measures a Realm Home
     and returns its bytes and whether the walk was partial (FR-020). `supervisor` is the sv control
     of a services-on realm, and `start_wait_s` and `start_poll_s` bound the wait for its start.
+    `run_user_wait_s` and `run_user_poll_s` bound the wait for the runtime dir's owner (T7.28).
     """
 
     exists: Exists = os.path.exists
@@ -301,6 +309,8 @@ class LifecycleHooks:
     supervisor: SupervisorHooks = field(default_factory=SupervisorHooks)
     start_wait_s: float = START_WAIT_S
     start_poll_s: float = START_POLL_S
+    run_user_wait_s: float = RUN_USER_WAIT_S
+    run_user_poll_s: float = RUN_USER_POLL_S
     helper: str | None = None
     stop_timeout_s: int = STOP_TIMEOUT_S
     tree_usage: Callable[[Path], tuple[int, bool]] = _tree_usage
@@ -1036,6 +1046,65 @@ def _follow_autostart(env: OpEnv, name: RealmName) -> None:
     autostart.apply(env.paths, name, record.settings.autostart)
 
 
+def wait_for_run_user(
+    owned: Callable[[], bool],
+    *,
+    clock: Callable[[], float],
+    sleep: Callable[[float], None],
+    wait_s: float,
+    poll_s: float,
+) -> bool:
+    """Poll `owned` until it answers True or `wait_s` seconds have passed. Return whether it did.
+
+    The first read comes at once, so a directory that is owned already costs no sleep. Each later
+    read follows a sleep of `poll_s`. A timeout returns False, and the caller goes on (T7.28): the
+    attach then fails as it did before the wait, and nothing retries it.
+    """
+    deadline = clock() + wait_s
+    while not owned():
+        if clock() >= deadline:
+            return False
+        sleep(poll_s)
+    return True
+
+
+def run_user_owned(podman: Podman, cid: str, uid: int, *, target: ExecTarget) -> bool:
+    """Whether `/run/user/<uid>` in the container belongs to the realm user (T7.28, T716-1).
+
+    The check is a stat run as container root in the realm. A failed exec counts as not owned yet,
+    so a realm that is still coming up is polled again. Only the uid is compared, which is the owner
+    the drop-in gives.
+    """
+    try:
+        result = podman.exec(
+            cid, ["stat", "-c", "%u", "--", runtime_dir(uid)], target=target, user="0:0"
+        )
+    except GinnError:
+        return False
+    return result.exit_code == 0 and result.stdout.strip() == str(uid)
+
+
+def _settle_run_user(
+    podman: Podman, cid: str, uid: int, record: RealmRecord, hooks: LifecycleHooks
+) -> None:
+    """Wait for the realm's runtime dir to belong to the realm user, before the grants attach.
+
+    A services-on container's `/run/user/<uid>` is root-owned until systemd-tmpfiles-setup applies
+    the drop-in (T716-1). The wait is bounded by `hooks.run_user_wait_s`. On a timeout the start
+    goes on, and the attach fails if the directory is still root's (T7.28).
+    """
+    target = ExecTarget(
+        realm=record.name.value, services=bool(record.services_at_create), mutating=False
+    )
+    wait_for_run_user(
+        lambda: run_user_owned(podman, cid, uid, target=target),
+        clock=hooks.supervisor.clock,
+        sleep=hooks.supervisor.sleep,
+        wait_s=hooks.run_user_wait_s,
+        poll_s=hooks.run_user_poll_s,
+    )
+
+
 def _start(
     env: OpEnv,
     podman: Podman,
@@ -1088,6 +1157,9 @@ def _start(
         if info.state is not ContainerState.RUNNING or info.pid < 2:
             raise _internal("the realm is not running after start", state=info.state.value)
         mutation.step("started")
+        if record.services_at_create:
+            # Before the attach: it mkdirs under /run/user/<uid> as the realm user (T7.28).
+            _settle_run_user(podman, cid, user.uid, record, hooks)
         if agent_enabled(record.settings.tier, record.permissions.toggles):
             # A missing helper is a skip: the start has no SSH grant, and it warns (ADR-008).
             if any(skip.reason == agent.HELPER_MISSING for skip in grants.session.skipped):

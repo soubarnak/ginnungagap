@@ -42,7 +42,7 @@ from ginn.ops.lifecycle import (
 )
 from ginn.ops.lifecycle import _tree_usage as tree_usage
 from ginn.ops.security_ops import agent_state_path, read_agent_record
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
 from ginn.runtime import attach
 from ginn.runtime.idle import IdleHooks, log_path, record_path
@@ -2780,3 +2780,156 @@ def test_exported_apps_counts_the_host_entries_of_this_realm_only(
 
     assert status.exported_apps == 2
     assert realm_status(env, fake, RealmName("other"), disk=False).exported_apps == 1
+
+
+RUN_USER_STAT = ("stat", "-c", "%u", "--", f"/run/user/{UID}")
+"""The argv that `run_user_owned` runs for the realm's runtime dir (T7.28)."""
+
+
+def _polling(
+    hooks: LifecycleHooks, clock: FakeClock, sleeps: list[float], *, wait_s: float, poll_s: float
+) -> LifecycleHooks:
+    """The hooks with a clock that a sleep moves, and the runtime-dir bounds of the test."""
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    supervisor_hooks = SupervisorHooks(clock=clock, sleep=sleep)
+    return replace(
+        hooks,
+        supervisor=supervisor_hooks,
+        run_user_wait_s=wait_s,
+        run_user_poll_s=poll_s,
+    )
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_costs_no_sleep_when_the_dir_is_owned_already(clock: FakeClock) -> None:
+    sleeps: list[float] = []
+    waited = lifecycle.wait_for_run_user(
+        lambda: True, clock=clock, sleep=sleeps.append, wait_s=10.0, poll_s=0.2
+    )
+    assert waited is True
+    assert sleeps == []
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_returns_once_the_owner_is_the_realm_user(clock: FakeClock) -> None:
+    answers = iter([False, False, False, True])
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    waited = lifecycle.wait_for_run_user(
+        lambda: next(answers), clock=clock, sleep=sleep, wait_s=10.0, poll_s=0.2
+    )
+    assert waited is True
+    assert sleeps == [0.2, 0.2, 0.2]
+
+
+@pytest.mark.fr("FR-083")
+def test_the_run_user_wait_gives_up_at_its_bound_and_says_so(clock: FakeClock) -> None:
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    waited = lifecycle.wait_for_run_user(
+        lambda: False, clock=clock, sleep=sleep, wait_s=1.0, poll_s=0.25
+    )
+    assert waited is False
+    assert sleeps == [0.25] * 4
+
+
+@pytest.mark.fr("FR-083")
+def test_run_user_owned_is_true_only_for_the_realm_uid_and_a_failed_exec_is_not_owned(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, home: Path
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, services=True)
+    cid = container_id(env, "lab")
+    target = ExecTarget(realm="lab", services=True, mutating=False)
+
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    assert lifecycle.run_user_owned(fake, cid, UID, target=target) is True
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    assert lifecycle.run_user_owned(fake, cid, UID, target=target) is False
+    fake.exec_results[RUN_USER_STAT] = ExecResult(1, "", "stat: cannot statx")
+    assert lifecycle.run_user_owned(fake, cid, UID, target=target) is False
+
+    make_realm(env, fake, "pen", RealmState.STOPPED, running=False, services=True)
+    pen = container_id(env, "pen")
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    assert lifecycle.run_user_owned(fake, pen, UID, target=target) is False
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-083")
+def test_a_supervised_services_on_start_waits_for_the_owner_before_it_attaches(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """T7.28, T716-1: the drop-in gives the runtime dir to the realm user at boot. The start polls
+    the owner until it is the realm user, and only then attaches and records `running`."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_sequences[RUN_USER_STAT] = [
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, "0\n", ""),
+        ExecResult(0, f"{UID}\n", ""),
+    ]
+    hooks = _polling(hooks, clock, sleeps, wait_s=10.0, poll_s=0.2)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.2, 0.2]
+    assert fake.exec_sequences[RUN_USER_STAT] == []
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-083")
+def test_a_supervised_start_whose_dir_stays_root_owned_goes_on_at_its_bound(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """On a timeout the start records `running` anyway, and the attach runs as it did before the
+    wait (T7.28). Nothing retries the attach here."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.25] * 4
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_off_start_does_not_wait_for_a_run_dir_owner(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """A services-off tmpfs is chowned to the realm user at create (`U`), so there is no wait."""
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == []

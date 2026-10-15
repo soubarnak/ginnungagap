@@ -43,7 +43,7 @@ import subprocess  # noqa: S404 - fixed argv lists only, never a shell (NFR-SEC-
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,12 @@ import pytest
 
 from ginn.domain import RealmName
 from ginn.podman.cli import PodmanCli
+from ginn.services._exec_lock import (
+    exec_lock_busy,
+    exec_lock_dir,
+    exec_lock_path,
+    exec_orphan_path,
+)
 from ginn.services.exec_relay import exec_service_dir, exec_socket
 from ginn.services.runit_user import service_dir
 from ginn.services.supervisor import parse_status
@@ -59,18 +65,11 @@ from ginn.store.paths import OwnedPaths
 from tests.integration.conftest import REPO, run_tool, tool
 
 
-class KnownGap(AssertionError):
-    """The failure of a tracked product gap (F<n>). Only the places where the gap shows raise it.
-    Each item that carries it names it with `raises=KnownGap` on its strict xfail mark, so any other
-    failure of that item stays a failure."""
-
-
 class KnownGapF1(AssertionError):
     """The failure of gap F1: an image without /sbin/init, refused at create (GINN-E-NO-INIT).
 
-    Two guards hold. The raise is gated on F1_DISTROS in `create_or_gap`, so a NO-INIT elsewhere
-    stays a plain failure. The mark is `raises=KnownGapF1`, and KnownGapF1 is not a KnownGap, so an
-    F11 item with `raises=KnownGap` cannot absorb it (pytest's `raises=` uses isinstance)."""
+    The raise is gated on F1_DISTROS in `create_or_gap`, so a NO-INIT elsewhere stays a plain
+    failure. The mark is `raises=KnownGapF1`, so no other failure of an item is absorbed."""
 
 
 F1_DISTROS = ("debian", "fedora")
@@ -90,10 +89,6 @@ SV = tool("sv")
 F1_NO_INIT = (
     "F1: the pinned debian and fedora images have no /sbin/init, so a services-on create is "
     "refused with GINN-E-NO-INIT; see spikes/results/T7.7-services-real.md"
-)
-F2_CLI_ATTACH = (
-    "F2/F7: a lazy rebuild's grant attach runs from the CLI session and fails with "
-    "GINN-E-ATTACH-FAILED; see spikes/results/T7.7-services-real.md"
 )
 FR080_CASES = [
     pytest.param(
@@ -454,6 +449,28 @@ def write_launcher(bin_dir: Path) -> Path:
     return script
 
 
+_CREATED: list[str] = []
+"""The realms that this module asked `create` for, so its teardown can remove their exec files."""
+
+
+def remove_exec_leftovers(paths: OwnedPaths, names: Sequence[str], *, exec_existed: bool) -> None:
+    """Remove the exec lock and orphan marker of each realm in `names`, and `exec/` if it is empty.
+
+    A lock that an exec still holds is left alone, so no second holder can take it (ADR-014). The
+    `exec/` directory goes only when this module found it absent, and it is empty now.
+    """
+    for name in dict.fromkeys(names):
+        realm = RealmName(name)
+        if exec_lock_busy(paths, realm):
+            continue
+        for leftover in (exec_lock_path(paths, realm), exec_orphan_path(paths, realm)):
+            with contextlib.suppress(FileNotFoundError):
+                leftover.unlink()
+    exec_dir = exec_lock_dir(paths)
+    if not exec_existed and exec_dir.is_dir() and not any(exec_dir.iterdir()):
+        exec_dir.rmdir()
+
+
 @pytest.fixture(scope="module")
 def launcher(paths: OwnedPaths) -> Iterator[Path]:
     """The gate's ginn command: the product CLI with the helper paths of native/build (see the
@@ -463,10 +480,13 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
     bin_dir = base / "bin"
     bin_dir.mkdir(mode=0o700)
     script = write_launcher(bin_dir)
+    exec_existed = exec_lock_dir(paths).is_dir()
+    _CREATED.clear()
     try:
         yield script
     finally:
         sweep(script, paths)
+        remove_exec_leftovers(paths, _CREATED, exec_existed=exec_existed)
         shutil.rmtree(base, ignore_errors=True)
 
 
@@ -495,6 +515,7 @@ def no_leftovers(launcher: Path, paths: OwnedPaths) -> Iterator[None]:
 
 
 def create(launcher: Path, distro: str, name: str, services: str) -> Ran:
+    _CREATED.append(name)
     return ginn(launcher, "create", distro, "--name", name, "--services", services)
 
 
@@ -571,7 +592,6 @@ def test_fr084_autostart_toggles_the_down_file(launcher: Path, paths: OwnedPaths
 
 
 @pytest.mark.fr("FR-083")
-@pytest.mark.xfail(strict=True, reason=F2_CLI_ATTACH, raises=KnownGap)
 def test_fr083_services_change_rebuilds_to_systemd_pid1(launcher: Path, paths: OwnedPaths) -> None:
     """FR-083 AC-1: a services-off realm with htop, turned on, restarts as generation 2 with systemd
     as PID 1 and htop still installed. Run on arch, the distribution that boots here.
@@ -588,8 +608,6 @@ def test_fr083_services_change_rebuilds_to_systemd_pid1(launcher: Path, paths: O
         assert ginn(launcher, "services", name, "on").rc == 0
         ran = ginn(launcher, "start", name)
         assert ran.rc == 0, ran.error_text()
-        if "GINN-W-REBUILD-DEFERRED" in ran.codes():
-            raise KnownGap(f"F2/F7: the lazy rebuild was deferred; warnings {ran.codes()}")
         assert ginn(launcher, "status", name).body.get("generation") == 2
         status, pid1 = leaf_exec(paths, name, "cat /proc/1/comm")
         assert status == 0 and pid1.strip() == "systemd", pid1[-300:]

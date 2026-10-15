@@ -56,7 +56,7 @@ from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
 from ginn.runtime.realm_security import SecurityHooks
-from ginn.runtime.spec import MACHINE_ID_PATH
+from ginn.runtime.spec import MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
 from ginn.security.nvidia import NvidiaPlan, Status
 from ginn.services.runit_user import journald_dropin
 from ginn.store.locks import image_lock
@@ -382,6 +382,155 @@ def test_a_clean_create_leaves_a_stopped_basic_realm_with_services_off(
     assert steps == list(STEPS)
     assert env.journal.pending() == []
     assert [(e.outcome, e.error_code) for e in create_entries(env)] == [("ok", None)]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_create_copies_the_run_user_drop_in_before_any_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.28, T716-1: the services-on container runs as root, so the runtime tmpfs stays `U`. The
+    realm user's owner line goes in with `podman cp` after the create and before any start."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == [f"/run/user/{UID}:mode=0700,U"]
+    content, mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
+    assert content == f"d /run/user/{UID} 0700 {UID} {GID} -\n".encode("ascii")
+    assert mode == 0o644
+    ops = ops_of(fake)
+    assert ops.index("create") < ops.index("cp_into")
+    assert "start" not in ops
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_the_drop_in_carries_the_realm_uid_and_gid_it_was_planned_for(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.28: the uid and the gid are different numbers here, so the line must name each one."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    wanted = replace(request(home, services=True), uid=1001, gid=1002)
+    record = create_realm(env, fake, wanted, hooks=hooks).record
+    content, _mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
+    assert content == b"d /run/user/1001 0700 1001 1002 -\n"
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == ["/run/user/1001:mode=0700,U"]
+
+
+@pytest.mark.fr("FR-080")
+def test_the_drop_in_is_copied_as_a_directory_into_etc_after_the_machine_id(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """podman cp of the staged `tmpfiles.d` directory into `/etc/` makes or merges the directory."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    destinations = [call.args[1] for call in fake.calls if call.op == "cp_into"]
+    assert destinations == [MACHINE_ID_PATH, "/etc/"]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_the_staged_drop_in_directory_is_0755_even_under_a_077_umask(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7.28: under a 077 umask mkdir's 0755 would stage as 0700, and podman cp applies the staged
+    mode to /etc/tmpfiles.d. The mode is read at the copy, while the directory still exists."""
+    modes: list[int] = []
+    real_copy = fake.cp_into
+
+    def record_then_copy(container_id: str, src: Path, dst: str) -> None:
+        if dst == "/etc/":
+            modes.append(src.stat().st_mode & 0o777)
+        real_copy(container_id, src, dst)
+
+    monkeypatch.setattr(fake, "cp_into", record_then_copy)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    previous = os.umask(0o077)
+    try:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    finally:
+        os.umask(previous)
+    assert modes == [0o755]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+@pytest.mark.parametrize("failure", ["os-error", "ginn-error"])
+def test_a_failed_drop_in_copy_names_its_step_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Only the drop-in copy fails. The machine-id copy before it lands, and the create is refused
+    with GINN-E-INTERNAL naming the drop-in, with no container, record or pending journal entry."""
+    real_copy = fake.cp_into
+
+    def copy_fails_for_the_drop_in(container_id: str, src: Path, dst: str) -> None:
+        if dst != "/etc/":
+            real_copy(container_id, src, dst)
+            return
+        if failure == "os-error":
+            raise OSError(errno.EIO, "Input/output error")
+        raise make("GINN-E-INTERNAL")
+
+    monkeypatch.setattr(fake, "cp_into", copy_fails_for_the_drop_in)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    detail = caught.value.details["detail"]
+    assert isinstance(detail, str)
+    assert detail.startswith("tmpfiles.d drop-in: ")
+    if failure == "os-error":
+        assert detail == "tmpfiles.d drop-in: Input/output error"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-083")
+def test_a_services_off_create_copies_no_run_user_drop_in(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Services off runs as the realm user, so `U` owns the runtime tmpfs. No drop-in is needed."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home), hooks=hooks).record
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == [f"/run/user/{UID}:mode=0700,U"]
+    assert RUN_USER_TMPFILES_PATH not in fake.containers[record.container_id].copied
 
 
 @pytest.mark.fr("FR-010")

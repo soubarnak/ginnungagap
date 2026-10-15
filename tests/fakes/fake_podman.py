@@ -48,6 +48,10 @@ _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FAKE_IMAGE_CREATED: Final = "1970-01-01T00:00:00Z"
 
 
+_RUN_USER_DIR: Final = re.compile(r"/run/user/([0-9]+)")
+"""The runtime dir of a realm user. The fake answers its owner as the realm user (T7.28)."""
+
+
 class FakeCall(NamedTuple):
     """One recorded call. Pulls are recorded once per attempt."""
 
@@ -372,6 +376,11 @@ class FakePodman:
             return _getent_passwd(container, argv[2])
         if len(argv) == 3 and tuple(argv[:2]) == ("cat", "--"):
             return _cat(self.files, argv[2])
+        if len(argv) == 5 and tuple(argv[:3]) == ("stat", "-c", "%u") and argv[3] == "--":
+            # The drop-in has given the runtime dir to its realm user at boot (T7.28): owned.
+            owner = _RUN_USER_DIR.fullmatch(argv[4])
+            if owner is not None:
+                return ExecResult(0, f"{owner.group(1)}\n", "")
         return ExecResult(0, "", "")
 
     def exec(
@@ -458,9 +467,19 @@ class FakePodman:
         dst.write_bytes(content)
 
     def cp_into(self, container_id: str, src: Path, dst: str) -> None:
+        """A file goes to `dst`. A directory goes into `dst`, under its own name, as podman cp does
+        when `dst` is a directory: its files are then recorded at `dst/<name>/<relative path>`."""
         self._record("cp_into", container_id, dst)
         self._take_op_failure("cp_into")
         container = self._container(container_id)
+        if src.is_dir():
+            base = dst.rstrip("/") + "/" + src.name
+            for path in sorted(src.rglob("*")):
+                if path.is_file():
+                    rel = path.relative_to(src).as_posix()
+                    mode = path.stat().st_mode & 0o777
+                    container.copied[f"{base}/{rel}"] = (path.read_bytes(), mode)
+            return
         container.copied[dst] = (src.read_bytes(), src.stat().st_mode & 0o777)
 
     def top(self, container_id: str) -> list[tuple[int, int, str]]:

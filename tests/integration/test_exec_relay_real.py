@@ -99,19 +99,10 @@ _TTYS: list[Tty] = []
 _SHARES: list[Path] = []
 _EMPTY_RUNTIME: list[Path] = []
 _FACTS: dict[str, Any] = {}
-T716_1 = (
-    "T716-1: a services-on container's /run/user/<uid> is root-owned (systemd mounts /run over the "
-    "ginn tmpfs), so a session grant attach fails with GINN-E-ATTACH-FAILED"
-)
 T716_2 = (
     "T716-2: the --root token kill cannot read the environ of a container-root process, so it finds "
     "no tokened process, releases the lock early and writes no orphan marker"
 )
-
-
-class KnownGapT716One(AssertionError):
-    """The failure of T716-1 (a session grant attach in a services-on container). Only the G1 and G5
-    places raise it, when their own signature shows. Any other failure stays a plain failure."""
 
 
 class KnownGapT716Two(AssertionError):
@@ -669,7 +660,6 @@ def teardown(launcher: Path, paths: OwnedPaths) -> None:
 
 @pytest.mark.fr("FR-083")
 @pytest.mark.fr("FR-049")
-@pytest.mark.xfail(strict=True, reason=T716_1, raises=KnownGapT716One)
 def test_g1_exec_root_goes_through_the_relay(launcher: Path, paths: OwnedPaths) -> None:
     """`ginn exec --root arch -- cat /proc/1/comm` on a services-on realm, with the session's own
     environment. The relay route is entered; the session grant attach that `ginn exec` runs first
@@ -685,8 +675,6 @@ def test_g1_exec_root_goes_through_the_relay(launcher: Path, paths: OwnedPaths) 
             "G1",
             f"ginn_exec_root_rc={rc} stdout={out.strip()!r} took={time.monotonic() - began:.2f}s stderr={err.strip()[-300:]!r}",
         )
-        if rc != 0 and "GINN-E-ATTACH-FAILED" in err:
-            raise KnownGapT716One(f"{T716_1}: {err.strip()[-200:]}")
         assert rc == 0, err.strip()[-300:]
         assert out.strip() == "systemd", out
 
@@ -876,7 +864,6 @@ def test_g4_install_and_remove_through_the_relay(launcher: Path, paths: OwnedPat
 
 @pytest.mark.fr("FR-021")
 @pytest.mark.fr("FR-083")
-@pytest.mark.xfail(strict=True, reason=T716_1, raises=KnownGapT716One)
 def test_g5_rebuild_replay_goes_through_the_relay(launcher: Path, paths: OwnedPaths) -> None:
     """A services-off realm with htop turns services on. Its next start rebuilds it, and the replay
     runs through the relay, routed by the plan's spec.services. Generation 2, PID 1 systemd, and
@@ -891,8 +878,6 @@ def test_g5_rebuild_replay_goes_through_the_relay(launcher: Path, paths: OwnedPa
         with StepWatch(paths, name) as watch:
             ran = ginn_run(launcher, "start", name)
         T716("G5", f"start rc={ran.rc} codes={ran.codes()} steps_seen={watch.seen}")
-        if "GINN-W-REBUILD-DEFERRED" in ran.codes():
-            raise KnownGapT716One(f"{T716_1}: the lazy rebuild was deferred, codes {ran.codes()}")
         assert ran.rc == 0, ran.error_text()
         generation = ginn_run(launcher, "status", name).body.get("generation")
         T716("G5", f"generation={generation}")

@@ -27,6 +27,7 @@ from ginn.runtime.spec import (
     create_spec,
     realm_passwd_entry,
     realm_spec,
+    run_user_tmpfiles,
     services_cgroup_parent,
 )
 from ginn.trust import pull_reference
@@ -517,6 +518,17 @@ def test_services_on_argv_for_every_non_kali_distro(distro: str) -> None:
     assert_services_on_argv(argv, distro=distro)
     golden_flags = [arg for arg in GOLDEN_ARCH_SERVICES_ON if arg.startswith("--")]
     assert [arg for arg in argv if arg.startswith("--")] == golden_flags
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_the_services_on_runtime_tmpfs_stays_u_and_the_drop_in_names_the_realm_user() -> None:
+    """T7.28, T716-1: `U` keeps the runtime tmpfs argv (podman refuses `uid=`), so the realm
+    user's owner comes from the tmpfiles.d drop-in that create copies in before the first start."""
+    argv = create_argv(make_spec(services=True, uid=1001, gid=1002))
+    assert option_values(argv, "--tmpfs") == ["/run/user/1001:mode=0700,U"]
+    assert argv[argv.index("--user") + 1] == "0:0"
+    assert run_user_tmpfiles(1001, 1002) == "d /run/user/1001 0700 1001 1002 -\n"
 
 
 @pytest.mark.fr("FR-080")

@@ -430,12 +430,17 @@ class Podman(Protocol):
         ...
 
     def cp_into(self, container_id: str, src: Path, dst: str) -> None:
-        """Copy the host file `src` into the container at `dst`. The mode is kept, and the owner is
-        the container's primary uid (`podman cp --archive`, the default).
+        """Copy the host file or directory `src` into the container at `dst`. The mode is kept, and
+        the owner is the container's primary uid (`podman cp --archive`, the default).
 
-        Used for the services-on machine-id before the first start (ADR-007, F6). The container may
-        be created and not started. A `dst` whose parent the container lacks raises GINN-E-INTERNAL
-        with `reason` set to PATH_NOT_FOUND_REASON.
+        A directory goes into `dst` under its own name, as `podman cp` does when `dst` is a
+        directory. So a staged `tmpfiles.d` merges into an existing `/etc/tmpfiles.d`, and the files
+        already there stay.
+
+        Used for the services-on machine-id before the first start (ADR-007, F6), and for the
+        tmpfiles.d drop-in of the runtime dir (T7.28). The container may be created and not started.
+        A `dst` whose parent the container lacks raises GINN-E-INTERNAL with `reason` set to
+        PATH_NOT_FOUND_REASON.
         """
         ...
 
