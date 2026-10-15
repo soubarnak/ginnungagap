@@ -21,10 +21,15 @@ these steps. Each one is a journal step, in this order. The names are stable and
 - exports-removed: the realm's exported entries go: its menu entries and icon copies, its CLI
   launchers, and its sync state (FR-019 AC-1, DR-008). Nothing reads the realm, so this runs
   whether or not the realm still runs, and a rerun removes what is left.
-- image-removed: the record's image is removed when no container uses it. A failed rmi keeps the
-  image and records the error code, and the delete goes on. A container that shows no image name
-  is not compared, and a note says so. A container that uses the image keeps it, and a note names
-  it.
+- init-image-removed: the realm's provisioning leftovers go, its reset and provisioning containers,
+  then every derived and stage image of the realm, each by its ID (ADR-015 Decision 13). Nothing is
+  kept, because the record goes with the realm. A failed rmi, or an image that a container still
+  uses, is a note, and the delete goes on. A listing or container-removal error stops the delete at
+  this step, and the record stays deleting for the next delete.
+- image-removed: the record's image, the pinned base, is removed when no container uses it and no
+  derived image is built on it (ops/images.py). A failed rmi keeps the image and records the error
+  code, and the delete goes on. A container that shows no image name is not compared, and a note
+  says so. A container that uses the image keeps it, and a note names it.
 - home: the Realm Home is removed only when `purge_home` is asked and `confirm` returns True
   (AS-014, DR-017). Otherwise it is kept, and the result says so.
 - record-removed: the record file is removed last (DR-020, `deleting` to removed).
@@ -115,6 +120,7 @@ from ginn.hostsetup.cgroups import DEFAULT_CGROUP_ROOT, SUPERVISOR_LEAF
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.images import remove_estimate_containers, remove_image
 from ginn.ops.lifecycle import STOP_TIMEOUT_S, refuse_before_supervisor
+from ginn.ops.provision import remove_derived
 from ginn.ops.security_ops import forget_proxy, leave_agent
 from ginn.podman.adapter import Podman
 from ginn.podman.models import ContainerInfo, ContainerState
@@ -133,6 +139,7 @@ STEPS: Final[tuple[str, ...]] = (
     "container-removed",
     "service-removed",
     "exports-removed",
+    "init-image-removed",
     "image-removed",
     "home",
     "record-removed",
@@ -350,6 +357,15 @@ def _delete(
 
     unexport_all(env.paths, name)
     _step(mutation, hooks, "exports-removed")
+
+    # ADR-015 Decision 13: the provisioning containers, then every derived and stage image of the
+    # realm, each removed by its ID. Nothing is kept, because the record goes with the realm. A
+    # listing or container-removal GinnError stops the delete here: the record stays deleting, and a
+    # re-run finishes the sweep. Only a failed rmi is a note. The pinned base comes after this step,
+    # so a derived image that stays keeps it (ops/images.py).
+    init_removal = remove_derived(podman, name, keep=())
+    notes.extend(init_removal.notes)
+    _step(mutation, hooks, "init-image-removed")
 
     # The image lock is held, so an estimate container of this distribution is a leftover of a
     # killed estimate. It would count as an image user, so it is removed before the check.

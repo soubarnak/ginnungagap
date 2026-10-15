@@ -47,12 +47,14 @@ the original op_id is never written twice:
 Revert rules, by the operation the journal names. They follow DR-020, the ADRs, FR-122 and FR-120:
 
 - create: `creating` becomes `broken`, with no error code. A container that podman runs is stopped
-  first, as `_broken_verdict` describes. Partial artifacts stay, for `ginn create --resume` or
-  `ginn delete` (FR-122). The record keeps the request of the create (`create_pending`), so the
-  resume can finish it (ops/resume.py). A record already `stopped` is a complete create, because
-  `stopped` is the last record write of a create, so it is recovered without a change. A record
-  already `broken` is settled as broken, with no state write, and a container that runs is stopped
-  too.
+  first, as `_broken_verdict` describes. The provisioning containers go first, then the derived and
+  stage images outside the keep set, which are the record's `init_image_id` and
+  `building_init_image_id`, each removed by ID (ADR-015 Decision 13). Other partial artifacts stay,
+  for `ginn create --resume` or `ginn delete` (FR-122). The record keeps the request of the create
+  (`create_pending`), so the resume can finish it (ops/resume.py). A record already `stopped` is a
+  complete create, because `stopped` is the last record write of a create, so it is recovered
+  without a change. A record already `broken` is settled as broken, with no state write, and a
+  container that runs is stopped too.
 - start: a record that already reads `running` is a completed start, because the record is saved
   running only after the attach. So is a journal step of `running`. Both are matched to podman. Any
   other step means the start did not finish: a container that podman runs is stopped, and the
@@ -78,8 +80,12 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
 - rebuild (ops/rebuild.py, DR-034). Until the atomic swap the record names the old generation gN,
   and a `rebuilding` record returns to its previous state (DR-020). The new container gN+1 is an
   orphan then, so it is stopped and removed by its generation label. A services-on orphan runs under
-  its runit service, so runsv is told to stop it first (ADR-003). After the swap the record names
-  gN+1, so the settled state comes from podman, and gN is removed by its label, best effort.
+  its runit service, so runsv is told to stop it first (ADR-003). Its provisioning leftovers and the
+  derived images outside the keep set go with it, by ID; the move that returns the record to its
+  previous state clears `building_init_image_id`, so only `init_image_id` is kept then (ADR-015
+  Decision 13). After the swap the record names gN+1, so the settled state comes from podman, and
+  gN is removed by its label, best effort, and then the derived images outside the keep set go by
+  ID, with the containers before the images.
   Other records are matched to podman, as above.
 - update: `updating` becomes `broken` (DR-020, FR-120), with a running container stopped first as
   for create. A record already `broken` is settled as broken, with no state write, and a container
@@ -120,7 +126,7 @@ No other command runs it, so an app launch or a runit restart makes no podman ca
 
 import contextlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -139,6 +145,7 @@ from ginn.domain import (
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv, is_finished
 from ginn.ops.images import remove_estimate_containers, remove_image
+from ginn.ops.provision import remove_derived
 from ginn.ops.security_ops import leave_agent
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import (
@@ -953,9 +960,13 @@ def _decide_create(paths: OwnedPaths, podman: Podman, record: RealmRecord) -> _D
         reason = "the record already reads stopped, the last record write of a create"
         return _Decision(OUTCOME_RECOVERED, None, reason)
     if record.state in (RealmState.CREATING, RealmState.BROKEN):
-        reason = (
-            "interrupted create: marked broken; partial artifacts are left for "
-            "'ginn create --resume' or 'ginn delete' (FR-122)"
+        # The provisioning leftovers go before the realm is marked broken (ADR-015 Decision 13). A
+        # realm container that uses a derived image keeps it, with a note, and the verdict stops it.
+        removal = remove_derived(podman, record.name, _recorded_images(record))
+        reason = _with_notes(
+            "interrupted create: marked broken; its provisioning leftovers are swept, and other "
+            "partial artifacts are left for 'ginn create --resume' or 'ginn delete' (FR-122)",
+            removal.notes,
         )
         return _broken_verdict(paths, podman, record, reason)
     return _impossible(record, OP_CREATE)
@@ -1034,12 +1045,20 @@ def _decide_rebuild(
             f"interrupted rebuild: returned to {previous.value}; the old root stays intact until "
             "the atomic swap (DR-034)"
         )
-        return _move(record, previous, OUTCOME_RECOVERED, reason)
+        decision = _move(record, previous, OUTCOME_RECOVERED, reason)
+        if decision.outcome == OUTCOME_BLOCKED:
+            return decision
+        # The move clears building_init_image_id, so the image the rebuild was making is outside the
+        # keep set, and only the image that the record still names is kept (ADR-015 Decision 13).
+        removal = remove_derived(podman, record.name, (record.init_image_id,))
+        return replace(decision, reason=_with_notes(decision.reason, removal.notes))
     if record.state in _BY_PODMAN_FROM:
         swapped = entry.params.get("new_generation") == record.generation
+        notes: list[str] = []
         if swapped:
             with contextlib.suppress(GinnError):
                 remove_below(podman, record.name, record.generation, keep=record.container_id)
+            notes.extend(_sweep_after_swap(podman, record))
             if not record.services_at_create:
                 # The swap made the realm services-off, and the crash came before the rebuild
                 # removed the directory of gN (ADR-003). The container's mode is what counts here.
@@ -1048,8 +1067,34 @@ def _decide_rebuild(
                     remove_service(paths, record.name)
                 except OSError as exc:
                     return _runit_blocked(exc)
-        return _decide_by_podman(podman, record, OP_REBUILD)
+        decision = _decide_by_podman(podman, record, OP_REBUILD)
+        return replace(decision, reason=_with_notes(decision.reason, notes))
     return _impossible(record, OP_REBUILD)
+
+
+def _recorded_images(record: RealmRecord) -> tuple[str | None, ...]:
+    """The derived image IDs that a recovery keeps: `init_image_id` and `building_init_image_id`
+    (ADR-015 Decision 13). A None is no image. Every other derived image of the realm is removed."""
+    return (record.init_image_id, record.building_init_image_id)
+
+
+def _sweep_after_swap(podman: Podman, record: RealmRecord) -> list[str]:
+    """The derived images of the realm that are outside the keep set, after the swap (Decision 13).
+
+    The containers below gN go first, in `remove_below`. This is best effort, as that removal is:
+    a failure is a note, and the next sweep or delete takes what is left.
+    """
+    try:
+        return list(remove_derived(podman, record.name, _recorded_images(record)).notes)
+    except GinnError as err:
+        return [f"derived images not swept ({err.code})"]
+
+
+def _with_notes(reason: str, notes: Iterable[str]) -> str:
+    """The reason with the notes of a sweep appended, separated by `; `. A reason with no notes is
+    returned as it is."""
+    found = list(notes)
+    return reason if not found else f"{reason}; {'; '.join(found)}"
 
 
 def _runit_blocked(exc: OSError) -> _Decision:
@@ -1070,6 +1115,10 @@ def remove_below(podman: Podman, name: RealmName, generation: int, *, keep: str 
     generation label (runtime/spec.py). `keep` is never removed. A container without a generation
     label is not one of the realm's roots, so it is left. Return the count removed. A rebuild uses
     this after the swap, so a generation whose removal failed earlier is swept too (DR-034).
+
+    The derived images are not removed here. Containers keep this generation selection, and images
+    are never compared by generation. A caller removes the derived images outside the keep set by
+    ID, with `remove_derived`, after this call (ADR-015 Decision 13).
     """
     targets = []
     for info in podman.ps({LABEL_REALM: name.value}):
