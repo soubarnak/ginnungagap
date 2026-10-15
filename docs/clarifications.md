@@ -38,6 +38,7 @@ The SRS is not edited here. Every entry has the status "open, for SRS v1.1" unle
 | CL-31 | The init set is part of a services-on realm's package list | FR-010, FR-013, CR-007 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
 | CL-32 | A derived image is trusted by its matched base, its signature checks and its recorded ID | DR-040, NFR-SEC-004, FR-010, FR-011, FR-012 | open, for SRS v1.1; ADR-015 (proposed) builds under this reading |
 | CL-33 | CR-007 names the per-realm machine-id copy | CR-007, FR-080, ADR-007, CL-28 | decided by the user 2026-10-14 for the machine-id (CL-28); the CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code |
+| CL-34 | The T7.28 tmpfiles.d drop-in `/etc/tmpfiles.d/ginn-run-user.conf` is a second file that ginn writes into a services-on realm's `/etc`, per container and not in the derived image | CR-007, FR-080, FR-083, CL-28, CL-33, ADR-015 (Decision 2f) | open, for SRS v1.1; the build proceeds under this reading (2026-10-15, ADR-014 T7.28); no user decision is recorded |
 
 ## CL-1: runtime directory for services-on realms
 
@@ -336,4 +337,13 @@ No CL-4 was raised. The number is kept so that the register does not renumber.
 - Proposed wording: "Realm contents also include the machine-id that ginn writes into `/etc/machine-id` of a services-on realm before its first start. It is a random 32-hex value kept on the realm record, and a rebuild writes the same value again. It is not a bind mount of a host file."
 - Reading (ADR-015, Context and the CR-007 row): the copy is existing code (CL-28) and does not change. This CL only names it in CR-007.
 - Status: decided by the user 2026-10-14 for the machine-id (CL-28). The CR-007 wording is open, for SRS v1.1; ADR-015 (proposed) keeps the CL-28 code.
+
+## CL-34: the tmpfiles.d drop-in is a second file ginn writes into a services-on realm's /etc
+
+- Requirement IDs: CR-007, FR-080, FR-083, CL-28, CL-33, ADR-015 (Decision 2f).
+- Issue: Since T7.28, a services-on create writes one file into the container's `/etc` before its first start, next to the machine-id of CL-28. The file is `/etc/tmpfiles.d/ginn-run-user.conf`, and its one line is `d /run/user/<uid> 0700 <uid> <gid> -`. ginn stages the line in a directory and copies that directory into `/etc/` with `podman cp`. podman merges the file into an existing `/etc/tmpfiles.d`, which is measured on arch (`spikes/results/T7.16-relay-gates.md`, section 8.1). podman creating that directory when the image lacks it is not measured, as ADR-014 T7.28 item 6 says. systemd-tmpfiles-setup applies the line at each boot, so the realm user owns `/run/user/<uid>`. The rebuild's new generation gets the same copy, and a services-off realm gets none. The file is needed because podman refuses a `uid=` option on `--tmpfs`, so the owner cannot be set in the argv (ADR-014, T7.28, item 2). CR-007 does not name the file, so it reads as content outside its three listed sources, the same reading CL-33 gives the machine-id copy.
+- Proposed wording: "Realm contents also include one tmpfiles.d drop-in that ginn writes into `/etc/tmpfiles.d` of a services-on realm before its first start. It has one line, which gives the realm's runtime directory `/run/user/<uid>` to the realm user at each boot. ginn writes it into each such container from the realm record, and it is not part of the derived image."
+- Per container, not in the derived image: the line carries the realm user's uid and gid, which is realm identity. ADR-015 Decision 2f removes the realm identity labels from the derived image at commit, and the CR-007 row of ADR-015 relies on that. So the drop-in is written into each services-on container at create and at rebuild, as the machine-id copy is, and it is not baked into the ADR-015 derived image.
+- Relation to CL-33: CL-33 names only the machine-id copy. This CL extends the same CR-007 naming to the drop-in. CL-33 stays the record for the machine-id.
+- Status: open, for SRS v1.1. The build proceeds under this reading (2026-10-15, ADR-014 T7.28). No user decision is recorded for it.
 
