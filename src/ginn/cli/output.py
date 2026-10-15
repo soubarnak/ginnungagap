@@ -10,7 +10,11 @@ Stream contract:
 - stderr in text mode: a failure or warning is `CODE: message` then `  fix: remedy`; a failure
   then has one `  note: text` line for each note it collected; verbose lines are plain text. A
   progress step is a verbose line in text mode, so the default text run prints nothing extra.
-- stderr in JSON mode: every line is one JSON object. Verbose lines are `{"verbose": "..."}`.
+  `note()` writes `note: text` to stderr for a command that succeeded, and `install` uses it.
+  `delete` prints its notes as `note:` lines on stdout, inside its text result instead.
+- stderr in JSON mode: every line is one JSON object. Success notes never go here: `install` and
+  `delete` carry them in the result under `notes`, which both always include. Verbose lines are
+  `{"verbose": "..."}`.
   Each finished step of a long operation is `{"progress": {"step", "message"}}` (FR-107), and it
   is written whether or not --verbose is on. Warnings that cannot ride in a result are
   `{"warning": {code, message, remedy}}`. On failure the error object
@@ -72,6 +76,16 @@ class Output:
             self._warnings.append(w)
         else:
             sys.stderr.write(f"{w.code}: {w.message}\n  fix: {w.remedy}\n")
+
+    def note(self, text: str) -> None:
+        """Report a note of a command that succeeded: `note: text` on stderr in text mode.
+
+        In JSON mode nothing is written here. A command with notes puts them in its result, under
+        `notes`, so stderr keeps only its own JSON lines. A note is not a warning: it has no code,
+        and it does not depend on --verbose.
+        """
+        if not self.json_mode:
+            sys.stderr.write(_line(f"note: {text}"))
 
     def error(self, err: GinnError) -> None:
         """Write a failure to stderr. In JSON mode, queued warnings come first, the error last.

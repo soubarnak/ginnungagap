@@ -29,6 +29,14 @@ a package the user did not name is refused with GINN-E-PKG-DEPENDENTS before any
 Then `remove` runs with no cascade flag (FR-041), and the names leave the manifest. The menu
 sync follows, as step 7 of an install does.
 
+Init entries (ADR-015 Decision 14). An init entry is a package that the provisioning stage
+installed for a services-on realm, and its manifest entry carries `init`. An install that names one
+is a manifest no-op: that name is not passed to the package manager, and `notes` gets a line that
+says so. An install of init entries only changes nothing and starts nothing. A remove that names one
+is refused as a whole with GINN-E-PKG-PROTECTED, before any step, because the init set is what lets
+the realm boot. A start can rebuild the realm and change its init set, so the remove checks it again
+under the lock, before its first step.
+
 The realm stays running after an install or a remove, as enter leaves it (ADR-008).
 
 Failure. A GinnError from the body is final: the realm's package manager has already refused or
@@ -150,6 +158,31 @@ def _refuse_non_arch_aur(distro: DistroId) -> None:
         raise make("GINN-E-OPTION-INVALID", option="--aur", distro=distro.value)
 
 
+def _init_names(record: RealmRecord) -> frozenset[str]:
+    """The names of the realm's init entries (ADR-015 Decision 14). Install and remove read them."""
+    return frozenset(entry.name for entry in record.manifest if entry.init)
+
+
+def _init_note(realm: str, name: str) -> str:
+    """The printed note of an install that names an init entry (ADR-015 Decision 14)."""
+    return (
+        f"'{name}' is an init package of realm '{realm}': it is already installed, "
+        "so ginn install changed nothing for it"
+    )
+
+
+def _refuse_protected(record: RealmRecord, names: Sequence[str]) -> None:
+    """Refuse a removal that names init entries, as a whole (GINN-E-PKG-PROTECTED, FR-041).
+
+    Every protected name is listed. The check runs before a start, and again under the lock in
+    `_remove_body`, because a start can rebuild the realm and change its init set (ADR-015).
+    """
+    init = _init_names(record)
+    protected = [raw for raw in names if raw in init]
+    if protected:
+        raise make("GINN-E-PKG-PROTECTED", realm=record.name.value, name=shown(protected))
+
+
 def _running(podman: Podman, record: RealmRecord) -> bool:
     """True when podman lists the realm's container and it is not created or exited."""
     cid = record.container_id
@@ -157,6 +190,18 @@ def _running(podman: Podman, record: RealmRecord) -> bool:
         return False
     listed = podman.ps({LABEL_REALM: record.name.value})
     return any(info.id == cid and info.state not in _HALTED for info in listed)
+
+
+def _refuse_state(record: RealmRecord, *, action: str) -> None:
+    """Refuse a state the verb does not allow (GINN-E-REALM-STATE)."""
+    if record.state not in _ENTERABLE:
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=record.name.value,
+            state=record.state.value,
+            action=action,
+            allowed="stopped, failed or running",
+        )
 
 
 def _ensure_started(
@@ -170,14 +215,7 @@ def _ensure_started(
     notices: list[GinnWarning],
 ) -> None:
     """Refuse a state the verb does not allow, then start a stopped realm (FR-017, enter's rule)."""
-    if record.state not in _ENTERABLE:
-        raise make(
-            "GINN-E-REALM-STATE",
-            realm=record.name.value,
-            state=record.state.value,
-            action=action,
-            allowed="stopped, failed or running",
-        )
+    _refuse_state(record, action=action)
     if not _running(podman, record):
         start_realm(
             env,
@@ -415,6 +453,9 @@ def _remove_body(
     """The steps of a remove, under the realm lock. The dry run comes first where it is defined."""
     store = RealmStore(env.paths, env.clock)
     current, cid = _load_running(store, podman, name, action=OP_REMOVE)
+    # The init set can change during the start (a rebuild), so the refusal is checked again here,
+    # under the lock, before any step (ADR-015 Decision 14).
+    _refuse_protected(current, names)
     retry = _retry(hooks)
     realm = name.value
     services = bool(current.services_at_create)
@@ -503,6 +544,8 @@ def install_packages(
     gid: int | None = None,
     hooks: PackageHooks | None = None,
     warnings: list[GinnWarning] | None = None,
+    notes: list[str] | None = None,
+    sent: list[str] | None = None,
 ) -> RealmRecord:
     """Install `packages` in realm `name` and record them as `ginn` installs (FR-040).
 
@@ -510,6 +553,11 @@ def install_packages(
     `gid` is the host group of the realm user; it defaults to this process's group, as enter does.
     The checks of the module docstring run before any side effect. The FR-006 warnings of a start
     and of the install are appended to `warnings` when it is given, after the operation finished.
+    A name that is an init entry of the realm is a manifest no-op (ADR-015 Decision 14): it is not
+    passed on. Its note is appended to `notes` when it is given, before the install runs, so the
+    note is still there when the install fails. `sent` is filled, when it is given, with the names
+    that were passed to the package manager or the AUR build, once the install finished. A request
+    of init entries only changes nothing and starts nothing.
     """
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
@@ -518,6 +566,15 @@ def install_packages(
     names = _checked(record, packages)
     if aur:
         _refuse_non_arch_aur(record.settings.distro)
+    init = _init_names(record)
+    skipped = [raw for raw in names if raw in init]
+    names = [raw for raw in names if raw not in init]
+    init_notes = [_init_note(record.name.value, raw) for raw in skipped]
+    if not names:
+        _refuse_state(record, action=OP_INSTALL)
+        if notes is not None:
+            notes.extend(init_notes)
+        return record
     definition = load_distro(record.settings.distro.value)
     notices: list[GinnWarning] = []
     _ensure_started(
@@ -529,6 +586,8 @@ def install_packages(
         hooks=hooks,
         notices=notices,
     )
+    if notes is not None:
+        notes.extend(init_notes)
     with mutating(env, OP_INSTALL, name, {"packages": names, "aur": aur}) as mutation:
         if aur:
             group = os.getgid() if gid is None else gid
@@ -541,6 +600,8 @@ def install_packages(
     notices.extend(mutation.warnings)
     if warnings is not None:
         warnings.extend(notices)
+    if sent is not None:
+        sent.extend(names)
     return store.load(name)
 
 
@@ -557,13 +618,16 @@ def remove_packages(
     """Remove `packages` from realm `name` and drop them from the manifest (FR-041).
 
     A removal that would take another package is refused before it runs (ADR-011), so the
-    realm's packages are never changed by a removal the user did not ask for.
+    realm's packages are never changed by a removal the user did not ask for. A request that names
+    an init entry is refused as a whole with GINN-E-PKG-PROTECTED, before any step (ADR-015
+    Decision 14), so none of its packages is removed.
     """
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
     _refuse_kali(record)
     names = _checked(record, packages)
+    _refuse_protected(record, names)
     definition = load_distro(record.settings.distro.value)
     notices: list[GinnWarning] = []
     _ensure_started(

@@ -130,6 +130,25 @@ def test_installed_sets_each_name_and_keeps_the_other_entries_sorted() -> None:
 
 
 @pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-021")
+def test_installed_keeps_the_init_flag_of_an_init_entry_it_replaces() -> None:
+    init_entry = ManifestEntry(
+        name="systemd", source=InstallSource.REPO, method=InstallMethod.GINN, init=True
+    )
+    before = [init_entry, _entry("htop")]
+    after = installed(
+        before, ["systemd", "htop"], source=InstallSource.REPO, method=InstallMethod.NATIVE
+    )
+    # The source and method are the new ones, and the init flag of systemd survives the replacement.
+    assert after == [
+        ManifestEntry(name="htop", source=InstallSource.REPO, method=InstallMethod.NATIVE),
+        ManifestEntry(
+            name="systemd", source=InstallSource.REPO, method=InstallMethod.NATIVE, init=True
+        ),
+    ]
+
+
+@pytest.mark.fr("DR-007")
 @pytest.mark.fr("FR-040")
 def test_installed_takes_the_ginn_method_for_a_name_that_was_native() -> None:
     before = [_entry("htop", InstallMethod.NATIVE)]
