@@ -1460,21 +1460,25 @@ def test_g12_a_stop_during_a_run_is_not_counted(launcher: Path, paths: OwnedPath
 # ----------------------------------------------------------------------------------------------
 
 
-def container_sleep_pids(full_cid: str, duration: str) -> list[int]:
-    """This user's processes that run exactly `sleep <duration>` inside the container `full_cid`. The
-    container's processes sit in its libpod-<id> cgroup scope, so the scope is checked as well as the
-    argv. The duration is unique to this gate, so no other process matches."""
-    scope = f"libpod-{full_cid}".encode()
+def container_sleep_pids(init_pid: int, duration: str) -> list[int]:
+    """This user's processes that run exactly `sleep <duration>` in the pid namespace of the container
+    whose init is `init_pid`. The namespace is compared, not a cgroup: a services-off realm has no
+    `--cgroup-parent` (ADR-003), so its processes stay in the caller's session cgroup and no libpod
+    scope exists to match (T7.16 G13 probe). The duration is unique to this gate, so no other
+    process matches."""
+    try:
+        ns = os.readlink(f"/proc/{init_pid}/ns/pid")
+    except OSError:
+        return []
     found: list[int] = []
     for pid, _comm, _ppid, cmd in procs():
         if cmd.split(b"\0")[:2] != [b"sleep", duration.encode()]:
             continue
         try:
-            cgroup = Path(f"/proc/{pid}/cgroup").read_bytes()
+            if os.readlink(f"/proc/{pid}/ns/pid") == ns:
+                found.append(pid)
         except OSError:
             continue
-        if scope in cgroup:
-            found.append(pid)
     return found
 
 
@@ -1490,6 +1494,7 @@ def test_g13_non_tty_sigint_to_the_podman_client(launcher: Path, paths: OwnedPat
         assert ginn_run(launcher, "start", name).rc == 0
         full = full_container_id(paths, name)
         cid = full[:12]
+        init = pid_of(paths, name)
         script = 'trap "exit 42" INT; sleep 1713 & wait; echo after-wait'
         env = {"XDG_RUNTIME_DIR": str(paths.runtime), "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
         proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -1501,7 +1506,7 @@ def test_g13_non_tty_sigint_to_the_podman_client(launcher: Path, paths: OwnedPat
             env=env,
         )
         assert wait_for(
-            lambda: bool(container_sleep_pids(full, "1713")), timeout=SPAWN_S, step=0.1
+            lambda: bool(container_sleep_pids(init, "1713")), timeout=SPAWN_S, step=0.1
         ), "no sleep"
         os.kill(proc.pid, signal.SIGINT)
         try:
@@ -1514,7 +1519,7 @@ def test_g13_non_tty_sigint_to_the_podman_client(launcher: Path, paths: OwnedPat
             "G13",
             f"podman_client_exit={status} stdout={out.strip()[-120:]!r} stderr_tail={err[-160:]!r}",
         )
-        alive = container_sleep_pids(full, "1713")
+        alive = container_sleep_pids(init, "1713")
         T716("G13", f"sleep_100_alive_after_podman_sigint={bool(alive)}")
         for pid in alive:
             with contextlib.suppress(ProcessLookupError):
