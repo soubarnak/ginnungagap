@@ -7,6 +7,7 @@ native), the record field read back from JSON, and a record written before the f
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -73,11 +74,47 @@ def test_an_entry_round_trips_through_its_json_object() -> None:
         {"name": "htop", "source": "pip", "method": "ginn"},
         {"name": "htop", "source": "repo", "method": "docker"},
         {"name": "htop", "source": None, "method": "ginn"},
+        {"name": "htop", "source": "repo", "method": "ginn", "init": "yes"},
+        {"name": "htop", "source": "repo", "method": "ginn", "init": 1},
     ],
 )
 def test_a_bad_entry_field_is_refused(data: dict[str, Any]) -> None:
     with pytest.raises((TypeError, ValueError)):
         ManifestEntry.from_dict(data)
+
+
+@pytest.mark.fr("FR-021")
+def test_an_init_entry_writes_its_flag_and_reads_it_back() -> None:
+    entry = ManifestEntry(
+        name="systemd", source=InstallSource.REPO, method=InstallMethod.GINN, init=True
+    )
+    data = entry.to_dict()
+    assert data == {"name": "systemd", "source": "repo", "method": "ginn", "init": True}
+    assert ManifestEntry.from_dict(data) == entry
+
+
+@pytest.mark.fr("DR-035")
+def test_an_entry_written_before_the_init_flag_reads_as_not_init() -> None:
+    old = {"name": "htop", "source": "repo", "method": "ginn"}
+    entry = ManifestEntry.from_dict(old)
+    assert entry.init is False
+    assert entry == _entry("htop")
+
+
+@pytest.mark.fr("FR-021")
+def test_init_entries_survive_a_record_round_trip_with_their_flags() -> None:
+    init_entry = ManifestEntry(
+        name="systemd", source=InstallSource.REPO, method=InstallMethod.GINN, init=True
+    )
+    record = _record([init_entry, _entry("htop")])
+    data = json.loads(json.dumps(record.to_json()))
+    assert data["manifest"] == [
+        {"name": "systemd", "source": "repo", "method": "ginn", "init": True},
+        {"name": "htop", "source": "repo", "method": "ginn"},
+    ]
+    restored = RealmRecord.from_json(data)
+    assert restored.manifest == record.manifest
+    assert [entry.init for entry in restored.manifest] == [True, False]
 
 
 @pytest.mark.fr("DR-007")
