@@ -20,6 +20,7 @@ import os
 import resource
 import stat
 import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -321,19 +322,27 @@ def test_a_crash_after_the_relay_step_leaves_a_rerun_that_finishes_the_removal(
 
 
 DEEP_LEVELS = 2000
-"""The depth of the deep tree. It is above the recursion limit, so a recursive walk would fail."""
+"""The depth the deep tree aims for. It must be above the recursion limit, or a recursive walk
+would not fail. A filesystem may refuse a deeper directory, so the tree can stop shallower."""
 
 
-def _build_deep_tree(base: Path, levels: int, outside: Path) -> None:
-    """Make `base/d0/.../d<levels-1>` with a file and a link to `outside` at the bottom.
+def _build_deep_tree(base: Path, levels: int, outside: Path) -> int:
+    """Make `base/d0/.../d<n-1>` with a file and a link to `outside` at the bottom. Return n.
 
     Each level is opened from the one above it, so the path is never built as one string, and the
-    descriptors held here stay at two.
+    descriptors held here stay at two. A filesystem may refuse a directory nested past some depth
+    with ENAMETOOLONG (the CI container's refused level 1538), so the tree stops there.
     """
     fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    built = 0
     try:
         for level in range(levels):
-            os.mkdir(f"d{level}", 0o755, dir_fd=fd)
+            try:
+                os.mkdir(f"d{level}", 0o755, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno != errno.ENAMETOOLONG:
+                    raise
+                break
             child = os.open(
                 f"d{level}",
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -341,6 +350,7 @@ def _build_deep_tree(base: Path, levels: int, outside: Path) -> None:
             )
             os.close(fd)
             fd = child
+            built += 1
         leaf = os.open(
             "leaf", os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=fd
         )
@@ -348,12 +358,19 @@ def _build_deep_tree(base: Path, levels: int, outside: Path) -> None:
         os.symlink(str(outside), "link", dir_fd=fd)
     finally:
         os.close(fd)
+    return built
 
 
 @pytest.mark.fr("CR-006")
 @pytest.mark.fr("FR-003")
-def test_a_tree_two_thousand_levels_deep_is_removed_without_recursion(tmp_path: Path) -> None:
-    """The walk holds one descriptor per level, so the test raises the soft descriptor limit."""
+def test_a_tree_deeper_than_the_recursion_limit_is_removed_without_recursion(
+    tmp_path: Path,
+) -> None:
+    """The walk holds one descriptor per level, so the test raises the soft descriptor limit.
+
+    The tree is built as deep as the filesystem allows, up to DEEP_LEVELS. It must be deeper than
+    the recursion limit for the claim to hold, so a filesystem that stops shallower skips the test.
+    """
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     want = DEEP_LEVELS + 256
     if hard != resource.RLIM_INFINITY and hard < want:
@@ -365,7 +382,13 @@ def test_a_tree_two_thousand_levels_deep_is_removed_without_recursion(tmp_path: 
     open_before = len(os.listdir("/proc/self/fd"))
     resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, want), hard))
     try:
-        _build_deep_tree(base, DEEP_LEVELS, outside)
+        built = _build_deep_tree(base, DEEP_LEVELS, outside)
+        limit = sys.getrecursionlimit()
+        if built <= limit:
+            pytest.skip(
+                f"the filesystem at {tmp_path} refuses a directory nested {built + 1} levels "
+                f"deep (ENAMETOOLONG), which is not deeper than the recursion limit {limit}"
+            )
         parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
             _remove_at(parent, "deep")

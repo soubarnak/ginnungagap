@@ -85,6 +85,7 @@ from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security import nvidia
+from ginn.security.caps import NESTED_DEVICES
 from ginn.services.runit_user import service_dir, write_service_dir
 from ginn.store.records import RealmRecord, RealmStore
 from tests.fakes.clock import FakeClock
@@ -96,10 +97,10 @@ from tests.unit.crash_support import (
     probing,
 )
 from tests.unit.realm_cli_support import DIGEST, World, build_world, record_of
-from tests.unit.test_ops_create import GINN_PROGRAM, ScriptedPodman, hooks_for
+from tests.unit.test_ops_create import GINN_PROGRAM, SECCOMP_SOURCE, ScriptedPodman, hooks_for
 from tests.unit.test_ops_create import request as create_request
 from tests.unit.test_ops_rebuild import NAME as REBUILD_NAME
-from tests.unit.test_ops_rebuild import lifecycle_hooks
+from tests.unit.test_ops_rebuild import lifecycle_hooks, rebuild_hooks
 from tests.unit.test_ops_rebuild import make_realm as rebuild_make_realm
 from tests.unit.test_ops_rebuild import rebuild as rebuild_run
 from tests.unit.test_ops_rebuild_faults import CASES as REBUILD_CASES
@@ -199,6 +200,25 @@ def _env(world: World) -> OpEnv:
     return OpEnv.for_paths(world.paths, USER, root_dir=world.host, clock=FakeClock())
 
 
+def _lifecycle(world: World) -> LifecycleHooks:
+    """The start seams of a bed. A pending change of a development realm is applied by a lazy
+    rebuild at the next start, and that rebuild needs the nested devices and the containers seccomp
+    profile of a nested realm (ADR-006). Both are answered here, not read from the host. A host
+    without /dev/fuse or the profile (the CI container has neither) would defer the rebuild, and the
+    old services-on root would then wait for a runsvdir.
+    """
+    mountinfo = world.tmp / "mountinfo"
+
+    def exists(path: str) -> bool:
+        return str(path).startswith(str(world.tmp)) or path in NESTED_DEVICES
+
+    source = world.tmp / "containers-seccomp.json"
+    source.write_text(json.dumps(SECCOMP_SOURCE), encoding="utf-8")
+    hooks = lifecycle_hooks(world.tmp, mountinfo)
+    rebuild = rebuild_hooks(world.tmp, [], mountinfo, exists=exists, seccomp_source=source)
+    return replace(hooks, rebuild=rebuild)
+
+
 def _bed(world: World, name: RealmName, fake: Any) -> Bed:
     return Bed(
         env=_env(world),
@@ -208,7 +228,7 @@ def _bed(world: World, name: RealmName, fake: Any) -> Bed:
         tmp=world.tmp,
         marker=world.paths.homes / name.value / MARKER,
         session=HostUser(uid=os.getuid(), host_home=world.home, host_env={}),
-        hooks=lifecycle_hooks(world.tmp, world.tmp / "mountinfo"),
+        hooks=_lifecycle(world),
     )
 
 

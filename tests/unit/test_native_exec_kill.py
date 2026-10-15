@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.environ_support import require_environ_readable
+
 REPO = Path(__file__).resolve().parents[2]
 NATIVE = REPO / "native"
 WARNINGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"]
@@ -251,6 +253,7 @@ def _finish(proc: subprocess.Popen[bytes]) -> tuple[int, str]:
 def test_processes_in_the_helpers_own_namespace_are_killed_and_no_join_is_attempted(
     kill_bin: Path, tmp_path: Path
 ) -> None:
+    require_environ_readable()
     lib = _build_shim(tmp_path)
     log = tmp_path / "setns.log"
     tokened = _sleeper({"GINN_EXEC_TOKEN": TOKEN}, tmp_path / "ready-a", namespaced=False)
@@ -270,6 +273,7 @@ def test_processes_in_the_helpers_own_namespace_are_killed_and_no_join_is_attemp
 def test_a_token_process_in_another_namespace_is_joined_then_killed_through_its_pidfd(
     kill_bin: Path, tmp_path: Path
 ) -> None:
+    require_environ_readable()
     _require_userns()
     lib = _build_shim(tmp_path)
     log = tmp_path / "setns.log"
@@ -291,6 +295,7 @@ def test_the_join_goes_to_the_outermost_ancestor_not_to_the_nested_namespace_of_
 ) -> None:
     """The token process sits in a namespace nested under the outer one. The helper must join the
     outer one, which holds the subuid mapping, and kill the token process through it."""
+    require_environ_readable()
     _require_userns()
     lib = _build_shim(tmp_path)
     log = tmp_path / "setns.log"

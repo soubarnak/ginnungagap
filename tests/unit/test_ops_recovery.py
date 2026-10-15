@@ -322,47 +322,52 @@ def test_a_reused_pid_with_another_start_time_counts_as_dead(paths: OwnedPaths, 
     assert _state(paths) is RealmState.BROKEN
 
 
-def _hostile(kind: str, bad: Path, tmp_path: Path) -> str:
-    """Write a damaged journal file of `kind` at `bad`. Return a fragment of its expected reason."""
+def _hostile(kind: str, bad: Path, tmp_path: Path) -> tuple[str, ...]:
+    """Write a damaged journal file of `kind` at `bad`. Return the fragments of its expected reason.
+
+    One of the fragments must appear in the reason.
+    """
     if kind == "not-json":
         bad.write_bytes(b"{not json")
-        return "not valid JSON"
+        return ("not valid JSON",)
     if kind == "not-object":
         bad.write_bytes(b"[1, 2]\n")
-        return "not a JSON object"
+        return ("not a JSON object",)
     if kind == "wrong-schema":
         write_json_atomic(bad, {**_dead(realm="arch").to_json(), "schema_version": 99})
-        return "schema_version"
+        return ("schema_version",)
     if kind == "name-mismatch":
         write_json_atomic(bad, _dead(realm="debian").to_json())
-        return "names realm"
+        return ("names realm",)
     if kind == "symlink":
         target = tmp_path / "elsewhere.json"
         write_json_atomic(target, _dead(realm="arch").to_json())
         bad.symlink_to(target)
-        return "symbolic link"
+        return ("symbolic link",)
     if kind == "fifo":
         os.mkfifo(bad)
-        return "not a regular file"
+        return ("not a regular file",)
     if kind == "nested-unclosed":
+        # CPython's C scanner raises JSONDecodeError here on glibc, and RecursionError on musl,
+        # where its stack check trips first. Both mean a damaged file that is kept and reported.
         bad.write_bytes(b"[" * 50_000)
-        return "not valid JSON"
+        return ("not valid JSON", "nested too deeply to parse")
     if kind == "nested-huge":
         bad.write_bytes(b"[" * 200_000)
-        return "larger than"
+        return ("larger than",)
     if kind == "oversized":
         bad.write_bytes(b'{"schema_version": 1, "pad": "' + b"x" * 70_000 + b'"}')
-        return "larger than"
+        return ("larger than",)
     if kind == "naive-started":
         data = _dead(realm="arch").to_json()
         write_json_atomic(bad, {**data, "started": "2026-10-13T08:00:00"})
-        return "no timezone"
+        return ("no timezone",)
     if kind == "deep-params":
         nested: Any = "leaf"
         for _ in range(40):
             nested = {"n": nested}
         write_json_atomic(bad, _dead(realm="arch", params={"deep": nested}).to_json())
-        return "nested deeper than"
+        return ("nested deeper than",)
     raise AssertionError(kind)
 
 
@@ -396,7 +401,7 @@ def test_a_damaged_journal_file_is_reported_with_a_remedy_and_kept_while_others_
 
     by_realm = {o.realm: o for o in outcomes}
     assert by_realm["arch"].outcome == OUTCOME_CORRUPT
-    assert expected in by_realm["arch"].reason
+    assert any(fragment in by_realm["arch"].reason for fragment in expected)
     assert str(bad) in by_realm["arch"].reason
     assert "rm " in by_realm["arch"].reason
     assert by_realm["debian"].outcome == OUTCOME_BROKEN
