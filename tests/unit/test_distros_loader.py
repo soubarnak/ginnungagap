@@ -65,6 +65,9 @@ PKG_MANAGERS = frozenset(
 # Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
 # mkdir and links the installed-package database into it with ln (arch.toml).
 SCRATCH_TOOLS = frozenset({"mkdir", "ln"})
+# Tools a clean step may run besides a package manager: rm empties apt's list directory and find
+# empties the arch package cache (debian.toml, arch.toml). mkdir is in SCRATCH_TOOLS already.
+CLEAN_TOOLS = frozenset({"rm", "find"})
 # The scratch path a caller would pass to check_updates(). The loader never creates it.
 CHECK_TMP = "/srv/ginn-check-0001"
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
@@ -133,11 +136,12 @@ def _check_steps_of(name: str) -> list[list[str]]:
 
 
 def _every_argv(name: str) -> list[tuple[str, list[str]]]:
-    """Each verb's argv (check-updates excluded), then each check-updates step, labelled."""
+    """Each verb's argv (check-updates and clean excluded), then each check-updates and clean step,
+    labelled."""
     definition = load(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
-        if verb is Verb.CHECK_UPDATES:
+        if verb in (Verb.CHECK_UPDATES, Verb.CLEAN):
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
             continue
@@ -147,6 +151,8 @@ def _every_argv(name: str) -> list[tuple[str, list[str]]]:
         out.append((verb.value, definition.argv(verb, packages)))
     for index, step in enumerate(_check_steps_of(name)):
         out.append((f"check-updates[{index}]", step))
+    for index, step in enumerate(definition.clean_steps):
+        out.append((f"clean[{index}]", list(step)))
     return out
 
 
@@ -183,7 +189,7 @@ def test_each_shipped_distribution_loads_with_every_verb() -> None:
         assert definition.id == name
         assert definition.trust_key == name
         assert definition.shell == "/bin/bash"
-        expected = set(Verb) - {Verb.CHECK_UPDATES}
+        expected = set(Verb) - {Verb.CHECK_UPDATES, Verb.CLEAN}
         if name not in REMOVE_CHECK_DISTROS:
             expected.discard(Verb.REMOVE_CHECK)
         assert set(definition.verbs) == expected, name
@@ -431,7 +437,7 @@ def test_every_verb_is_an_argv_list_and_never_a_shell(name: str) -> None:
     for label, argv in _every_argv(name):
         assert argv, (name, label)
         assert all(isinstance(element, str) for element in argv)
-        assert argv[0] in PKG_MANAGERS | SCRATCH_TOOLS, (name, label, argv[0])
+        assert argv[0] in PKG_MANAGERS | SCRATCH_TOOLS | CLEAN_TOOLS, (name, label, argv[0])
         assert not SHELLS & set(argv), (name, label)
 
 
@@ -662,6 +668,16 @@ def test_check_updates_is_refused_as_one_argv() -> None:
     assert info.value.message == "verb check-updates is a list of steps; use check_updates()"
 
 
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
+def test_clean_is_refused_as_one_argv_because_it_is_a_list_of_steps(name: str) -> None:
+    with pytest.raises(GinnError) as info:
+        load(name).argv(Verb.CLEAN)
+    _expect("GINN-E-USAGE", 2)(info.value)
+    assert info.value.message == "verb clean is a list of steps; use clean_steps"
+
+
 @pytest.mark.fr("FR-024")
 @pytest.mark.parametrize(
     ("sync_exit", "query_exit", "stdout", "stderr", "expected"),
@@ -752,6 +768,94 @@ def test_the_everything_packages_are_optional_data_and_only_kali_has_them() -> N
     raw = _base()
     raw["everything"] = ["meta-one", "meta-two"]
     assert from_mapping(raw, source="fixture.toml").everything == ("meta-one", "meta-two")
+
+
+# The init set (services_packages) and its measured installed size, and the clean steps, per
+# shipped distribution. Both come from S-11 (ADR-015, Decision 11 and Decision 3).
+SERVICES_SET: dict[str, tuple[tuple[str, ...], int]] = {
+    "arch": ((), 0),
+    "debian": (("systemd", "systemd-sysv", "dbus"), 19_166_208),
+    "fedora": (("systemd", "dbus-broker"), 24_586_672),
+    "kali": (("systemd", "systemd-sysv", "dbus"), 22_935_552),
+}
+_APT_CLEAN = [
+    ["apt-get", "clean"],
+    ["rm", "-rf", "/var/lib/apt/lists"],
+    ["mkdir", "-p", "/var/lib/apt/lists/partial"],
+]
+CLEAN_ARGV = {
+    "arch": [["find", "/var/cache/pacman/pkg", "-mindepth", "1", "-delete"]],
+    "debian": _APT_CLEAN,
+    "fedora": [["dnf", "clean", "all"]],
+    "kali": _APT_CLEAN,
+}
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+def test_the_init_set_is_optional_data_that_defaults_to_nothing() -> None:
+    fixture = from_mapping(_base(), source="fixture.toml")
+    assert fixture.services_packages == ()
+    assert fixture.services_estimated_installed_bytes == 0
+    raw = _base()
+    raw["services_packages"] = ["systemd", "dbus"]
+    raw["services_estimated_installed_bytes"] = 1024
+    declared = from_mapping(raw, source="fixture.toml")
+    assert declared.services_packages == ("systemd", "dbus")
+    assert declared.services_estimated_installed_bytes == 1024
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_init_set_and_its_size_are_the_s11_measurements(name: str) -> None:
+    packages, size = SERVICES_SET[name]
+    definition = load(name)
+    assert definition.services_packages == packages
+    assert definition.services_estimated_installed_bytes == size
+    assert (size == 0) == (packages == ())
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_init_set_is_never_part_of_the_integration_set(name: str) -> None:
+    """The init set is for services-on realms only (ADR-015). The Integration Package Set goes to
+    every realm, so none of the init packages may be in it."""
+    definition = load(name)
+    integration = definition.integration_set("en_US.UTF-8").packages
+    assert not set(definition.services_packages) & set(integration), name
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_clean_steps_are_the_s11_cache_clean_per_distribution(name: str) -> None:
+    definition = load(name)
+    assert definition.has_clean is True
+    assert [list(step) for step in definition.clean_steps] == CLEAN_ARGV[name]
+    assert Verb.CLEAN not in definition.verbs
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+def test_clean_is_optional_and_a_definition_may_declare_it_as_steps() -> None:
+    fixture = load("_test")
+    assert fixture.has_clean is False
+    assert fixture.clean_steps == ()
+    raw = _base()
+    raw["verbs"]["clean"] = [["fake-pm", "clean"], ["fake-pm", "purge", "--cache"]]
+    declared = from_mapping(raw, source="fixture.toml")
+    assert declared.has_clean is True
+    assert declared.clean_steps == (("fake-pm", "clean"), ("fake-pm", "purge", "--cache"))
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.fr("NFR-060")
+def test_arch_clean_empties_the_cache_and_keeps_the_directory_and_the_sync_databases() -> None:
+    (step,) = load("arch").clean_steps
+    assert step[:2] == ("find", "/var/cache/pacman/pkg")
+    assert step[step.index("-mindepth") + 1] == "1"
+    assert "/var/lib/pacman" not in " ".join(step)
 
 
 @pytest.mark.fr("FR-024")
@@ -1146,6 +1250,20 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("everything is a string", _set("everything", value="kali-linux-everything")),
     ("everything names a bad package", _set("everything", value=["Bad_Name"])),
     ("everything repeats a package", _set("everything", value=["meta", "meta"])),
+    ("services_packages is a string", _set("services_packages", value="systemd")),
+    ("services_packages names a bad package", _set("services_packages", value=["Bad_Name"])),
+    (
+        "services_packages repeats a package",
+        _set("services_packages", value=["systemd", "systemd"]),
+    ),
+    ("services_packages set without a size", _set("services_packages", value=["systemd"])),
+    ("services size is a string", _set("services_estimated_installed_bytes", value="1024")),
+    ("services size is a bool", _set("services_estimated_installed_bytes", value=True)),
+    ("services size is negative", _set("services_estimated_installed_bytes", value=-1)),
+    (
+        "services size set with no packages",
+        _set("services_estimated_installed_bytes", value=1024),
+    ),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),
@@ -1211,6 +1329,17 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
         "remove-check embeds {packages} in a string",
         _set("verbs", "remove-check", value=["fake-pm", "--name={packages}"]),
     ),
+    ("clean is a string", _set("verbs", "clean", value="fake-pm clean")),
+    ("clean is one argv, not a step list", _set("verbs", "clean", value=["fake-pm", "clean"])),
+    ("clean is an empty list", _set("verbs", "clean", value=[])),
+    ("clean has an empty step", _set("verbs", "clean", value=[[]])),
+    ("clean uses {packages}", _set("verbs", "clean", value=[["fake-pm", "{packages}"]])),
+    ("clean uses {tmpdir}", _set("verbs", "clean", value=[["fake-pm", "{tmpdir}"]])),
+    (
+        "clean embeds a placeholder in a string",
+        _set("verbs", "clean", value=[["fake-pm", "--n={lang}"]]),
+    ),
+    ("clean command has a space", _set("verbs", "clean", value=[["fake-pm clean"]])),
 ]
 
 

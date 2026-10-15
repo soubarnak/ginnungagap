@@ -44,6 +44,11 @@ check_updates_count_regex = '\[upgradable from: '
 # inconsistent (loader.py). Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = true
+# ADR-015: the init set of a services-on realm, which the provisioning stage installs. S-11 booted
+# this set with zero failed units on the pinned image (spikes/results/S-11.md).
+services_packages = ["systemd", "systemd-sysv", "dbus"]
+# ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
+services_estimated_installed_bytes = 22935552
 
 [integration]
 packages = ["ca-certificates", "locales"]
@@ -89,3 +94,11 @@ resolve = [
 ]
 # apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
 estimate = ["apt-cache", "show", "{packages}"]
+# ADR-015 Decision 3: the clean steps of the provisioning stage, run after the packages are installed.
+# They empty the package cache and the apt lists. The last step leaves the empty partial directory
+# that the pinned image ships with (checked in S-11). Each step is one argv, with no placeholder.
+clean = [
+    ["apt-get", "clean"],
+    ["rm", "-rf", "/var/lib/apt/lists"],
+    ["mkdir", "-p", "/var/lib/apt/lists/partial"],
+]

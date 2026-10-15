@@ -48,6 +48,10 @@ refresh_before = []
 # Not verified until M4: pacman(8) documents no exit statuses for -D.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015 (orchestrator decision Q2): the init set is empty, because the Arch image already ships
+# systemd (S-11). Arch still provisions, for the Integration Package Set and the commit.
+services_packages = []
+services_estimated_installed_bytes = 0
 
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
@@ -104,3 +108,10 @@ list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 resolve = ["pacman", "--sync", "--print", "--print-format", "%n", "{packages}"]
 # --info is -Si: repository info, including Download Size and Installed Size. Changes nothing.
 estimate = ["pacman", "--sync", "--info", "{packages}"]
+# ADR-015 Decision 3: empties the package cache and keeps the directory. The sync databases in
+# /var/lib/pacman/sync stay, because install needs them (ADR-011). find is bounded to the cache
+# directory, inside the provisioning container, so it is not a search of the host. The argv is not
+# pacman --sync --clean --clean --noconfirm, because --noconfirm answers that prompt with N and the
+# cache stays (S-11). Untested: this argv has not run on a host, and whether find is in the arch base
+# image is open (ADR-015 Open question 11).
+clean = [["find", "/var/cache/pacman/pkg", "-mindepth", "1", "-delete"]]

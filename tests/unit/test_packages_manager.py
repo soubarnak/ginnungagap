@@ -109,11 +109,11 @@ def _definition(name: str) -> DistroDef:
 
 
 def _argvs(name: str) -> list[tuple[str, list[str]]]:
-    """Every verb argv (with a sample package), then every check-updates step, labelled."""
+    """Every verb argv (with a sample package), then every check-updates and clean step."""
     definition = _definition(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
-        if verb is Verb.CHECK_UPDATES:
+        if verb in (Verb.CHECK_UPDATES, Verb.CLEAN):
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
             continue
@@ -124,6 +124,8 @@ def _argvs(name: str) -> list[tuple[str, list[str]]]:
     tmpdir = CHECK_TMP if definition.check_updates_needs_tmpdir else None
     for index, step in enumerate(definition.check_updates(tmpdir)):
         out.append((f"check-updates[{index}]", list(step)))
+    for index, step in enumerate(definition.clean_steps):
+        out.append((f"clean[{index}]", list(step)))
     if name == "arch":
         out.extend(_aur_argvs())
     return out

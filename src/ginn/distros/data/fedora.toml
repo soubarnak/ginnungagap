@@ -41,6 +41,11 @@ check_updates_exit_for_updates = 100
 # not broken. Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015: the init set of a services-on realm, which the provisioning stage installs. S-11 installed
+# and booted this set with zero failed units on the pinned image (spikes/results/S-11.md).
+services_packages = ["systemd", "dbus-broker"]
+# ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
+services_estimated_installed_bytes = 24586672
 
 [integration]
 packages = ["glibc-langpack-{lang}"]
@@ -82,3 +87,6 @@ estimate = [
     "--queryformat", '%{{name}} %{{downloadsize}} %{{installsize}}\n',
     "{packages}",
 ]
+# ADR-015 Decision 3 (orchestrator decision Q5): dnf clean all empties the cached packages and
+# metadata. It names no package and no placeholder.
+clean = [["dnf", "clean", "all"]]
