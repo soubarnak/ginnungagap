@@ -19,6 +19,7 @@ from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.podman.adapter import CreateSpec
+from ginn.runtime import spec as spec_module
 from ginn.runtime._enter_plan import login_argv
 from ginn.runtime.mounts import Skipped, create_binds
 from ginn.runtime.spec import (
@@ -154,8 +155,9 @@ GOLDEN_ARCH_SERVICES_ON = [
     "/run/user/1000:mode=0700,U",
     "--device",
     "/dev/dri",
+    "--entrypoint",
+    '["/sbin/init"]',
     DIGEST,
-    "/sbin/init",
 ]
 
 
@@ -176,6 +178,7 @@ def make_spec(
     services: bool = False,
     tier: Tier = Tier.BASIC,
     generation: int = 1,
+    image_id: str | None = None,
 ) -> RealmSpec:
     """A spec with the stable binds planned from `present`. Its binds are always Basic's."""
     binds = create_binds(
@@ -201,6 +204,7 @@ def make_spec(
         services=services,
         conmon_pidfile=f"/run/ginn/{uid}/services/{name}.conmon.pid" if services else None,
         generation=generation,
+        image_id=image_id,
     )
 
 
@@ -487,7 +491,7 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str 
     assert "--security-opt" not in argv
     assert "--init" not in argv
     assert "--init-path" not in argv
-    assert "--entrypoint" not in argv
+    assert option_values(argv, "--entrypoint") == ['["/sbin/init"]']
     assert not any(arg.startswith("--cgroups") for arg in argv)
     assert "--systemd=always" in argv
     assert option_values(argv, "--user") == ["0:0"]
@@ -501,13 +505,79 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str 
     assert option_values(argv, "--env") == ["SYSTEMD_LOG_LEVEL=warning"]
     entry = argv[argv.index("--passwd-entry") + 1]
     assert entry.endswith(f":alice:/home/alice:{load_distro(distro).shell}")
-    assert argv[-2:] == [pull_reference(distro) if distro == "kali" else DIGEST, "/sbin/init"]
+    assert argv[-1] == (pull_reference(distro) if distro == "kali" else DIGEST)
 
 
 @pytest.mark.fr("FR-080")
 def test_services_on_golden_argv_for_arch() -> None:
-    """The ADR-003 flag set on the S-01 crun row, after the realm's own options, command last."""
+    """The ADR-003 flag set on the S-01 crun row, after the realm's own options, with `/sbin/init`
+    as the explicit entrypoint before the image (ADR-015 Decision 4)."""
     assert create_argv(make_spec(services=True)) == GOLDEN_ARCH_SERVICES_ON
+
+
+DERIVED_ID = "cd" * 32
+"""A derived image's ID: 64 lowercase hex digits, with no `sha256:` prefix (ADR-015 Decision 4)."""
+
+
+@pytest.mark.fr("FR-080")
+def test_services_on_names_sbin_init_as_its_entrypoint_and_gives_no_command() -> None:
+    """The services-on form has no command. `/sbin/init` is the explicit entrypoint, so the
+    derived image's own command cannot reach it (ADR-015 Decision 4)."""
+    spec = create_spec(make_spec(services=True))
+    assert spec.entrypoint_argv == ["/sbin/init"]
+    assert spec.command == []
+    assert spec.init is False
+    argv = create_argv(make_spec(services=True))
+    assert argv[-3:] == ["--entrypoint", '["/sbin/init"]', DIGEST]
+
+
+@pytest.mark.fr("FR-080")
+def test_services_on_from_a_derived_image_runs_sbin_init_with_the_id_as_the_last_argument() -> None:
+    argv = create_argv(make_spec(services=True, image_id=DERIVED_ID))
+    assert argv[-3:] == ["--entrypoint", '["/sbin/init"]', DERIVED_ID]
+    assert DIGEST not in argv
+
+
+@pytest.mark.fr("FR-083")
+def test_services_off_from_a_derived_image_keeps_the_keep_alive_and_the_id() -> None:
+    argv = create_argv(make_spec(image_id=DERIVED_ID))
+    assert argv[-4:] == ["--entrypoint", '["sleep"]', DERIVED_ID, "infinity"]
+    assert DIGEST not in argv
+
+
+@pytest.mark.fr("FR-080")
+def test_the_services_on_command_constant_is_gone_and_the_init_path_is_the_entrypoint() -> None:
+    assert not hasattr(spec_module, "SERVICES_COMMAND")
+    assert spec_module.INIT_PATH == "/sbin/init"
+
+
+@pytest.mark.fr("FR-011")
+def test_the_derived_image_id_is_optional_and_the_digest_is_still_the_checked_base() -> None:
+    assert make_spec().image_id is None
+    assert create_spec(make_spec()).image_id is None
+    spec = make_spec(services=True, image_id=DERIVED_ID)
+    assert spec.image == DIGEST
+    assert create_spec(spec).image_digest_ref == DIGEST
+    assert create_spec(spec).image_id == DERIVED_ID
+    with pytest.raises(ValueError, match="FR-011"):
+        make_spec(image="arch:latest", image_id=DERIVED_ID)
+
+
+@pytest.mark.fr("FR-011")
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "sha256:" + "cd" * 32,
+        "CD" * 32,
+        "cd" * 31,
+        "cd" * 33,
+        "cd" * 31 + "xy",
+    ],
+    ids=["prefixed", "uppercase", "short", "long", "not-hex"],
+)
+def test_a_derived_image_id_must_be_bare_64_lowercase_hex(bad: str) -> None:
+    with pytest.raises(ValueError, match="ADR-015"):
+        make_spec(services=True, image_id=bad)
 
 
 @pytest.mark.fr("FR-080")

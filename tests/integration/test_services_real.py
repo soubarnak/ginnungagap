@@ -561,7 +561,8 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     assert argv[argv.index("--stop-signal") + 1] == "SIGRTMIN+3"
     assert argv[argv.index("--stop-timeout") + 1] == "30"
     assert "SYSTEMD_LOG_LEVEL=warning" in argv
-    assert argv[-1] == "/sbin/init"
+    assert argv[-3:-1] == ["--entrypoint", '["/sbin/init"]']
+    assert "@sha256:" in argv[-1]
     binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
     assert any(b.endswith("target=/etc/systemd/journald.conf.d/ginn.conf,ro") for b in binds)
     assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 11
