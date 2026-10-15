@@ -372,8 +372,19 @@ class OrphanMarker:
     join_failed: bool = False
     """No namespace join, so the kill could not name the realm's unreadable processes (FR-124)."""
 
+    def survivors_text(self) -> str:
+        """The clause that names the survivors, for the `pids` of GINN-W-RELAY-ORPHAN.
+
+        Only a record with survivors, or a kill that did not run, gets that notice. The clause never
+        names an unreadable process, because the kill leaves those alone (FR-124).
+        """
+        if not self.kill_ran:
+            return "the token kill did not run, so no pid is recorded"
+        survivors = ", ".join(str(pid) for pid in self.pids)
+        return f"pids {survivors} survived the token kill"
+
     def pids_text(self) -> str:
-        """The clause that names the processes, for the `pids` of GINN-W-RELAY-ORPHAN."""
+        """Every clause that names the processes of the record, unreadable ones included (audit)."""
         if not self.kill_ran:
             return "the token kill did not run, so no pid is recorded"
         parts = []
@@ -566,9 +577,10 @@ def _settle_orphan(env: OpEnv, mutation: Mutation, realm: RealmName) -> None:
     """Audit the realm's orphan records, then remove the marker (FR-124, ADR-014). Best effort.
 
     Called under the realm lock while no exec holds the exec lock, so the token kill has finished
-    writing the marker. Each record is shown on the operation as GINN-W-RELAY-ORPHAN. Each gets one
-    audit entry, unless the Audit Log already holds one for its token and time, so a crash after an
-    append does not repeat it. The marker is removed only after its entries are written. A marker
+    writing the marker. Each record is shown on the operation through `orphan_warnings`: as
+    GINN-W-RELAY-ORPHAN, and as GINN-W-ORPHAN-UNKNOWN when it names unreadable processes. Each gets
+    one audit entry, unless the Audit Log already holds one for its token and time, so a crash after
+    an append does not repeat it. The marker is removed only after its entries are written. A marker
     longer than the read bound is not removed: its records past the bound were not read, so they
     would be lost. It is kept, and the next operation audits the same records as already held. An
     error never fails the operation. The marker is then kept, and GINN-W-ORPHAN-UNSETTLED says so.
@@ -577,7 +589,8 @@ def _settle_orphan(env: OpEnv, mutation: Mutation, realm: RealmName) -> None:
         markers = read_orphans(env.paths, realm)
         if not markers:
             return
-        mutation.warnings.extend(_orphan_warning(realm, marker) for marker in markers)
+        for marker in markers:
+            mutation.warnings.extend(orphan_warnings(realm, marker))
         _audit_orphans(env, realm, markers)
         if any(marker.truncated for marker in markers):
             detail = (
@@ -593,9 +606,25 @@ def _settle_orphan(env: OpEnv, mutation: Mutation, realm: RealmName) -> None:
         mutation.warnings.append(warn("GINN-W-ORPHAN-UNSETTLED", realm=realm.value, detail=detail))
 
 
-def _orphan_warning(realm: RealmName, marker: OrphanMarker) -> GinnWarning:
-    """The GINN-W-RELAY-ORPHAN notice for one record of the realm's marker."""
-    return warn("GINN-W-RELAY-ORPHAN", realm=realm.value, pids=marker.pids_text())
+def orphan_warnings(realm: RealmName, marker: OrphanMarker) -> list[GinnWarning]:
+    """The notices of one record of the realm's marker (FR-124, ADR-014).
+
+    GINN-W-RELAY-ORPHAN names the survivors, so only a record with survivors, or a kill that did not
+    run, gives it. GINN-W-ORPHAN-UNKNOWN is given for a record that names unreadable processes. It
+    names the `unknown` pids, with `and other processes` when the record also says `unknown join`.
+    With no pids it says `the processes`. A record of survivors alone gives the first notice only.
+    """
+    notices: list[GinnWarning] = []
+    if marker.pids or not marker.kill_ran:
+        notices.append(warn("GINN-W-RELAY-ORPHAN", realm=realm.value, pids=marker.survivors_text()))
+    if marker.unknown:
+        named = "pids " + ", ".join(str(pid) for pid in marker.unknown)
+        if marker.join_failed:
+            named += ", and other processes"
+        notices.append(warn("GINN-W-ORPHAN-UNKNOWN", realm=realm.value, processes=named))
+    elif marker.join_failed:
+        notices.append(warn("GINN-W-ORPHAN-UNKNOWN", realm=realm.value, processes="the processes"))
+    return notices
 
 
 def _audit_orphans(env: OpEnv, realm: RealmName, markers: tuple[OrphanMarker, ...]) -> None:

@@ -1084,19 +1084,33 @@ def run_user_owned(podman: Podman, cid: str, uid: int, *, target: ExecTarget) ->
     return result.exit_code == 0 and result.stdout.strip() == str(uid)
 
 
+def run_user_pending_note(name: RealmName) -> str:
+    """The note on a failed attach whose owner wait timed out (GINN-W-RUN-USER-PENDING, FR-083).
+
+    A failed start or rebuild raises its own error, and its warnings are not printed. The timeout
+    is carried on that error instead, as a note, so the cause is not lost (T7.28).
+    """
+    return (
+        f"GINN-W-RUN-USER-PENDING: the runtime directory of realm '{name.value}' was not yet owned "
+        "by the realm user when its wait ended"
+    )
+
+
 def _settle_run_user(
     podman: Podman, cid: str, uid: int, record: RealmRecord, hooks: LifecycleHooks
-) -> None:
+) -> bool:
     """Wait for the realm's runtime dir to belong to the realm user, before the grants attach.
 
     A services-on container's `/run/user/<uid>` is root-owned until systemd-tmpfiles-setup applies
-    the drop-in (T716-1). The wait is bounded by `hooks.run_user_wait_s`. On a timeout the start
-    goes on, and the attach fails if the directory is still root's (T7.28).
+    the drop-in (T716-1). The wait is bounded by `hooks.run_user_wait_s`. Return whether the owner
+    was the realm user when the wait ended. False is a timeout: the start goes on, and the attach
+    fails if the directory is still root's (T7.28). The caller says which: a warning when the
+    attach succeeds, or a note on its error when it fails.
     """
     target = ExecTarget(
         realm=record.name.value, services=bool(record.services_at_create), mutating=False
     )
-    wait_for_run_user(
+    return wait_for_run_user(
         lambda: run_user_owned(podman, cid, uid, target=target),
         clock=hooks.supervisor.clock,
         sleep=hooks.supervisor.sleep,
@@ -1151,6 +1165,7 @@ def _start(
         nvidia_plan_write(env, hooks)
     if hooks.before_start is not None:
         hooks.before_start()
+    run_user_pending = False
     try:
         podman.start(cid)
         info = podman.inspect(cid)
@@ -1159,7 +1174,7 @@ def _start(
         mutation.step("started")
         if record.services_at_create:
             # Before the attach: it mkdirs under /run/user/<uid> as the realm user (T7.28).
-            _settle_run_user(podman, cid, user.uid, record, hooks)
+            run_user_pending = not _settle_run_user(podman, cid, user.uid, record, hooks)
         if agent_enabled(record.settings.tier, record.permissions.toggles):
             # A missing helper is a skip: the start has no SSH grant, and it warns (ADR-008).
             if any(skip.reason == agent.HELPER_MISSING for skip in grants.session.skipped):
@@ -1175,10 +1190,14 @@ def _start(
         grants = _plan_grants(env, record, user, hooks)
         result, skips = _attach(env, podman, record, cid, info.pid, user, hooks, grants)
     except GinnError as err:
+        if run_user_pending:
+            err.add_note(run_user_pending_note(name))
         _back_to_stopped(env, podman, name, cid, err)
         _leave_agent_quietly(env, name, err)
         raise
     mutation.step("attached")
+    if run_user_pending:
+        mutation.warnings.append(warn("GINN-W-RUN-USER-PENDING", realm=name.value))
     running = _save(
         env,
         store,

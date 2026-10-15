@@ -2915,6 +2915,123 @@ def test_a_supervised_start_whose_dir_stays_root_owned_goes_on_at_its_bound(
     assert sleeps == [0.25] * 4
 
 
+@pytest.mark.fr("FR-083")
+def test_a_run_user_timeout_is_a_pending_warning_on_the_start_and_the_start_goes_on(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """T7.28: the owner wait gives up at its bound. The start still records `running`, and the
+    timeout is GINN-W-RUN-USER-PENDING on the start's warnings (FR-083)."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+    warnings: list[GinnWarning] = []
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=hooks, warnings=warnings, supervised=True
+    )
+
+    assert record.state is RealmState.RUNNING
+    pending = [w for w in warnings if w.code == "GINN-W-RUN-USER-PENDING"]
+    assert [w.message for w in pending] == [
+        "the runtime directory of realm 'lab' was not yet owned by the realm user when its wait "
+        "ended; the attach went ahead and succeeded"
+    ]
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_timeout_then_a_failed_attach_carries_the_pending_cause_as_a_note(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    home: Path,
+) -> None:
+    """The owner wait timed out and the attach then failed. The start raises the attach error, and
+    its warnings are not printed, so the timeout is a note on that error (T7.28, FR-083)."""
+    (home / "Downloads").mkdir()
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+    fake.unshare_results.append(ExecResult(1, "", "ginn-rebind: mount refused"))
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+    warnings: list[GinnWarning] = []
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=hooks,
+            warnings=warnings,
+            supervised=True,
+        )
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    assert sleeps == [0.25] * 4
+    assert [note for note in caught.value.__notes__ if "GINN-W-RUN-USER-PENDING" in note] == [
+        "GINN-W-RUN-USER-PENDING: the runtime directory of realm 'lab' was not yet owned by the "
+        "realm user when its wait ended"
+    ]
+    assert warnings == []
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_owner_that_comes_in_time_then_a_failed_attach_adds_no_note(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+    home: Path,
+) -> None:
+    """The owner is ready in time, so a failed attach carries no pending note."""
+    (home / "Downloads").mkdir()
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, f"{UID}\n", "")
+    fake.unshare_results.append(ExecResult(1, "", "ginn-rebind: mount refused"))
+    hooks = _polling(hooks, clock, sleeps, wait_s=1.0, poll_s=0.25)
+
+    with pytest.raises(GinnError) as caught:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, supervised=True)
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    notes = getattr(caught.value, "__notes__", [])
+    assert not any("GINN-W-RUN-USER-PENDING" in note for note in notes)
+
+
+@pytest.mark.fr("FR-083")
+def test_a_run_user_owner_read_in_time_gives_no_pending_warning(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    clock: FakeClock,
+) -> None:
+    """The owner is the realm user on the second read, so the wait returns in time and the start
+    has no pending warning."""
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    sleeps: list[float] = []
+    fake.exec_sequences[RUN_USER_STAT] = [ExecResult(0, "0\n", ""), ExecResult(0, f"{UID}\n", "")]
+    hooks = _polling(hooks, clock, sleeps, wait_s=10.0, poll_s=0.2)
+    warnings: list[GinnWarning] = []
+
+    record = start_realm(
+        env, fake, RealmName("lab"), session=user, hooks=hooks, warnings=warnings, supervised=True
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert sleeps == [0.2]
+    assert "GINN-W-RUN-USER-PENDING" not in [w.code for w in warnings]
+
+
 @pytest.mark.fr("FR-081")
 def test_a_services_off_start_does_not_wait_for_a_run_dir_owner(
     env: OpEnv,

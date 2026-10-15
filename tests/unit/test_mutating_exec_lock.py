@@ -479,6 +479,86 @@ def test_a_settled_record_is_a_warning_on_the_operation(paths: OwnedPaths, env: 
 
 
 @pytest.mark.fr("FR-124")
+@pytest.mark.parametrize(
+    ("marker", "codes", "unknown"),
+    [
+        (f"{MARKER_TEXT}unknown 333\n", ["GINN-W-ORPHAN-UNKNOWN"], "pids 333"),
+        (f"{MARKER_TEXT}unknown join\n", ["GINN-W-ORPHAN-UNKNOWN"], "the processes"),
+        (
+            f"{MARKER_TEXT}pid 111\nunknown 333\n",
+            ["GINN-W-RELAY-ORPHAN", "GINN-W-ORPHAN-UNKNOWN"],
+            "pids 333",
+        ),
+        (
+            f"{MARKER_TEXT}unknown join\nunknown 333\n",
+            ["GINN-W-ORPHAN-UNKNOWN"],
+            "pids 333, and other processes",
+        ),
+    ],
+    ids=[
+        "unknown-pids",
+        "unknown-join",
+        "survivors-and-unknown-pids",
+        "unknown-join-and-unknown-pids",
+    ],
+)
+def test_a_record_with_unreadable_processes_gives_the_unknown_warning(
+    paths: OwnedPaths, env: OpEnv, marker: str, codes: list[str], unknown: str
+) -> None:
+    """The kill never touches an unreadable process, so its record is not a survivor. The
+    operation says so with GINN-W-ORPHAN-UNKNOWN, after the GINN-W-RELAY-ORPHAN of any survivors
+    (FR-124). A record with no survivor gives no GINN-W-RELAY-ORPHAN at all."""
+    _write_marker(paths, marker)
+
+    with mutating(env, "install", ARCH) as mutation:
+        pass
+
+    assert [w.code for w in mutation.warnings] == codes
+    assert mutation.warnings[-1].message == (
+        f"the token kill could not read {unknown} of a command in realm 'arch'; they may still run"
+    )
+    assert not exec_orphan_path(paths, ARCH).exists()
+
+
+@pytest.mark.fr("FR-124")
+def test_the_relay_orphan_notice_of_a_mixed_record_names_only_the_survivors(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    _write_marker(paths, f"{MARKER_TEXT}pid 111\nunknown 333\n")
+
+    with mutating(env, "install", ARCH) as mutation:
+        pass
+
+    assert mutation.warnings[0].message == (
+        "a command in realm 'arch' left processes that the token kill could not stop: "
+        "pids 111 survived the token kill"
+    )
+    assert "333" not in mutation.warnings[0].message
+
+
+@pytest.mark.fr("FR-124")
+@pytest.mark.parametrize(
+    "marker",
+    [None, f"{MARKER_TEXT}pid 111\n", f"{MARKER_TEXT}kill not run\n"],
+    ids=["no-marker", "survivors", "kill-not-run"],
+)
+def test_a_record_with_no_unreadable_process_gives_no_unknown_warning(
+    paths: OwnedPaths, env: OpEnv, marker: str | None
+) -> None:
+    """The normal path: no marker, survivors the kill left running, or a kill that did not run.
+    None of them names an unreadable process, so GINN-W-ORPHAN-UNKNOWN is never shown."""
+    if marker is not None:
+        _write_marker(paths, marker)
+
+    with mutating(env, "install", ARCH) as mutation:
+        pass
+
+    codes = [w.code for w in mutation.warnings]
+    assert "GINN-W-ORPHAN-UNKNOWN" not in codes
+    assert codes == (["GINN-W-RELAY-ORPHAN"] if marker is not None else [])
+
+
+@pytest.mark.fr("FR-124")
 def test_an_audit_failure_keeps_the_marker_and_never_fails_the_operation(
     paths: OwnedPaths, env: OpEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:

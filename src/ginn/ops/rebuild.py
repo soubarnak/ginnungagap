@@ -115,6 +115,7 @@ from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
     _settle_run_user,
+    run_user_pending_note,
     start_realm,
     start_through_sv,
     stop_realm,
@@ -440,12 +441,23 @@ class _Rebuild(_Create):
         record it is given is gN+1's view, since its exec target follows the services mode of gN+1.
         A services-off gN+1 has no wait, and its attach is the create's.
         """
+        run_user_pending = False
         if self._plan.spec.services:
             new_view = replace(self._current(), services_at_create=True)
-            _settle_run_user(
+            owned = _settle_run_user(
                 self._podman, self._container_id(), self._request.uid, new_view, self._lifecycle
             )
-        super()._attach()
+            run_user_pending = not owned
+        try:
+            super()._attach()
+        except GinnError as err:
+            if run_user_pending:
+                err.add_note(run_user_pending_note(self._request.name))
+            raise
+        if run_user_pending:
+            self._mutation.warnings.append(
+                warn("GINN-W-RUN-USER-PENDING", realm=self._request.name.value)
+            )
 
     def _replay(self) -> None:
         """Install the manifest's packages into gN+1, and drop the ones that are gone (FR-022).

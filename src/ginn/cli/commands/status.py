@@ -6,8 +6,9 @@ no realm lock and writes no record. Recovery runs first, as in every realm comma
 a recovery that raises becomes a warning, so the status is still shown (see _context).
 
 An orphan marker of the realm (FR-124, ADR-014) is shown as GINN-W-RELAY-ORPHAN, one warning per
-record. It is read only: the marker is audited and removed by the realm's next mutating operation,
-not by status. A marker that cannot be read is GINN-W-ORPHAN-UNSETTLED, and status still succeeds.
+record, and as GINN-W-ORPHAN-UNKNOWN for a record with processes the kill could not read. It is read
+only: the marker is audited and removed by the realm's next mutating operation, not by status. A
+marker that cannot be read is GINN-W-ORPHAN-UNSETTLED, and status still succeeds.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from ginn.cli.commands import CommandSpec, Context
 from ginn.cli.output import Output
 from ginn.domain import RealmName
 from ginn.errors import GinnError, warn
-from ginn.ops._mutating import read_orphans
+from ginn.ops._mutating import orphan_warnings, read_orphans
 from ginn.ops.lifecycle import realm_status
 from ginn.services._exec_lock import exec_lock_busy
 from ginn.store.paths import OwnedPaths
@@ -61,7 +62,8 @@ def _orphan_notices(paths: OwnedPaths, name: RealmName, output: Output) -> None:
         output.warn(warn("GINN-W-ORPHAN-UNSETTLED", realm=name.value, detail=detail))
         return
     for record in records:
-        output.warn(warn("GINN-W-RELAY-ORPHAN", realm=name.value, pids=record.pids_text()))
+        for notice in orphan_warnings(name, record):
+            output.warn(notice)
 
 
 SPEC = CommandSpec(

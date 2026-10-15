@@ -14,7 +14,8 @@ GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), 
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
 (FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
 GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014),
-GINN-W-RELAY-ORPHAN (FR-123, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
+GINN-W-RELAY-ORPHAN (FR-123, ADR-014), GINN-W-ORPHAN-UNKNOWN (FR-124, ADR-014),
+GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
 the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -586,6 +587,16 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-124, ADR-014 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-W-ORPHAN-UNKNOWN",
+        exit_code=0,
+        summary="the token kill could not read {processes} of a command in realm '{realm}'; they "
+        "may still run",
+        remedy="the exec lock is released, so other commands can run; check the processes with "
+        "'ps', stop any that belong to the command with 'kill', and this warning clears after the "
+        "next operation that changes realm '{realm}'",
+        source="FR-124, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-W-RELAY-SYNC",
         exit_code=0,
         summary="the relay service could not follow the realm states after the operation was "
@@ -593,6 +604,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="the operation keeps its result; the next start, stop or services change syncs the "
         "relay again, and if it keeps failing, run 'ginn doctor'",
         source="FR-084, ADR-014 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-RUN-USER-PENDING",
+        exit_code=0,
+        summary="the runtime directory of realm '{realm}' was not yet owned by the realm user when "
+        "its wait ended; the attach went ahead and succeeded",
+        remedy="the grants are attached; if a program in realm '{realm}' reports a permission "
+        "error in its runtime directory, run 'ginn stop {realm}' and then 'ginn start {realm}'",
+        source="FR-083, ADR-014 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-STOP-UNSETTLED",

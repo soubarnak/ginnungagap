@@ -35,6 +35,16 @@ KILL_NOT_RUN = (
     "a command in realm 'arch' left processes that the token kill could not stop: "
     "the token kill did not run, so no pid is recorded"
 )
+UNKNOWN_PIDS = (
+    "the token kill could not read pids 333 of a command in realm 'arch'; they may still run"
+)
+UNKNOWN_PROCESSES = (
+    "the token kill could not read the processes of a command in realm 'arch'; they may still run"
+)
+UNKNOWN_PIDS_AND_OTHERS = (
+    "the token kill could not read pids 333, and other processes of a command in realm 'arch'; "
+    "they may still run"
+)
 
 
 def _marker(world: World, text: str) -> Path:
@@ -93,6 +103,53 @@ def test_a_kill_that_did_not_run_is_said_so_and_names_no_pid(
 
     assert main(["status", "arch"]) == 0
     assert f"GINN-W-RELAY-ORPHAN: {KILL_NOT_RUN}" in capsys.readouterr().err
+
+
+@pytest.mark.fr("FR-124")
+@pytest.mark.parametrize(
+    ("record", "codes", "unknown"),
+    [
+        ("unknown 333\n", ["GINN-W-ORPHAN-UNKNOWN"], UNKNOWN_PIDS),
+        ("unknown join\n", ["GINN-W-ORPHAN-UNKNOWN"], UNKNOWN_PROCESSES),
+        (
+            "pid 111\nunknown 333\n",
+            ["GINN-W-RELAY-ORPHAN", "GINN-W-ORPHAN-UNKNOWN"],
+            UNKNOWN_PIDS,
+        ),
+        (
+            "unknown join\nunknown 333\n",
+            ["GINN-W-ORPHAN-UNKNOWN"],
+            UNKNOWN_PIDS_AND_OTHERS,
+        ),
+    ],
+    ids=["unknown-pids", "unknown-join", "survivors-and-unknown-pids", "join-and-unknown-pids"],
+)
+def test_status_shows_unreadable_processes_as_their_own_warning(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    record: str,
+    codes: list[str],
+    unknown: str,
+) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+    _marker(world, f"token {EXEC_HEX}\ntime 1700000000\n{record}")
+
+    assert main(["--json", "status", "arch"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [w["code"] for w in payload["warnings"]] == codes
+    assert payload["warnings"][-1]["message"] == unknown
+
+
+@pytest.mark.fr("FR-124")
+def test_status_shows_no_unknown_warning_for_survivors_alone(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+    _marker(world, MARKER)
+
+    assert main(["--json", "status", "arch"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [w["code"] for w in payload["warnings"]] == ["GINN-W-RELAY-ORPHAN"]
 
 
 @pytest.mark.fr("FR-020")

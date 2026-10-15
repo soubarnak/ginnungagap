@@ -649,6 +649,7 @@ def test_a_services_on_rebuild_waits_for_the_run_dir_owner_before_it_attaches(
     assert result.record.generation == 2
     assert attached_after[0] == 3, "the rebuild's attach follows the third owner read"
     assert [s for s in seen if s == 0.2] == [0.2, 0.2]
+    assert "GINN-W-RUN-USER-PENDING" not in [w.code for w in result.warnings]
 
 
 @pytest.mark.fr("FR-021")
@@ -686,6 +687,48 @@ def test_a_services_on_rebuild_whose_dir_stays_root_owned_attaches_at_its_bound(
     assert result.record.generation == 2
     assert attached_after[0] == 5, "four 0.25 s sleeps, then one read at the bound"
     assert [s for s in seen if s == 0.25][:4] == [0.25] * 4
+    pending = [w for w in result.warnings if w.code == "GINN-W-RUN-USER-PENDING"]
+    assert [w.message for w in pending] == [
+        "the runtime directory of realm 'debian' was not yet owned by the realm user when its wait "
+        "ended; the attach went ahead and succeeded"
+    ]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_rebuild_whose_attach_fails_after_the_wait_carries_the_pending_cause(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The owner wait timed out and the attach then failed. The rebuild raises the attach error,
+    and its warnings are not printed, so the timeout is a note on that error (T7.28, FR-083)."""
+    _create_services(
+        env, fake, home, hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    )
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    seen: list[float] = []
+    lifecycle = polling(
+        _supervised_lifecycle(tmp_path, mountinfo, runit), runit, seen, wait_s=1.0, poll_s=0.25
+    )
+    fake.exec_results[RUN_USER_STAT] = ExecResult(0, "0\n", "")
+
+    def attach(*args: Any, **kwargs: Any) -> Any:
+        raise make("GINN-E-ATTACH-FAILED", detail="ginn-rebind: mount refused")
+
+    monkeypatch.setattr(create_ops, "attach_at_start", attach)
+    with pytest.raises(GinnError) as caught:
+        rebuild(env, fake, home, tmp_path, sleeps, mountinfo, lifecycle=lifecycle)
+
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    assert [n for n in caught.value.__notes__ if "GINN-W-RUN-USER-PENDING" in n] == [
+        "GINN-W-RUN-USER-PENDING: the runtime directory of realm 'debian' was not yet owned by the "
+        "realm user when its wait ended"
+    ]
 
 
 @pytest.mark.fr("FR-021")
