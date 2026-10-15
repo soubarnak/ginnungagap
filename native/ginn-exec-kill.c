@@ -7,7 +7,7 @@
  * on stderr and exit 3. Exit 0: none left or no cgroup. Exit 2: usage or euid 0. Exit 1: a system call failed.
  * A --root exec's environ belongs to container root (T716-2), so the helper joins the outermost ancestor of a foreign
  * namespace, when our uid owns it. Without a join the record says `unknown join`; after one, an unreadable process is
- * `unknown <pid>` unless it predates ginn-exec-run, the exec's parent. The marker is opened for append.
+ * `unknown <pid>` unless it predates ginn-exec-run, the exec's parent. Stderr names each unread process, its step, errno.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -29,8 +29,8 @@
 #define KILL_SWEEP 20
 #define MAX_PIDS 256
 #define MAX_DEPTH 32
-/* The text of ginn-exec-frame.h's define, written out because this helper does not include that header (its
- * 60 lines are not counted here). The relay test checks that the two are equal. */
+#define MAX_MISS 8
+/* Written out here, not taken from ginn-exec-frame.h (its 60 lines are not counted); the relay test pins it. */
 #define GINN_EXEC_W_ORPHAN "GINN-W-RELAY-ORPHAN"
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
@@ -39,10 +39,11 @@
 #define SYS_pidfd_send_signal 424
 #endif
 
-static const char *token;
-static struct stat own;
-static long long parent; /* start time of ginn-exec-run, the helper's parent */
-static int found[MAX_PIDS], nfound, unknown[MAX_PIDS], nunknown, blind, tried, joined;
+static const char *token, *fstep;
+static struct stat own; static long long parent; /* start time of ginn-exec-run, the helper's parent */
+static int found[MAX_PIDS], nfound, unknown[MAX_PIDS], nunknown, blind, tried, joined, nmiss;
+static int ferr, jerr; static char jmsg[128]; /* errno of the failed environ step and of a failed join; the join's text */
+static struct { int pid, err; const char *step; } miss[MAX_MISS]; /* unread processes: pid, failed step, errno */
 
 static void die(const char *op) { fprintf(stderr, "ginn-exec-kill: %s: %s\n", op, strerror(errno)), exit(1); }
 static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000LL + t.tv_nsec / 1000000; }
@@ -78,13 +79,11 @@ static int outermost(int fd) {
 	return -1;
 }
 
-/* Tries the namespace of pid as the join target. It must be foreign, descend from the helper's namespace and be
- * owned by our uid. The pidfd must still name pid after the namespace is open, so pid is not a reused pid. A
- * candidate that fails a check leaves tried unset, so the next process is tried. */
+/* Tries the namespace of pid as the join target. It must be foreign, descend from the helper's namespace and be owned
+ * by our uid, and the pidfd must still name pid after the open. A candidate that fails a check leaves tried unset. */
 static void consider(int pid, int pfd) {
 	char path[64];
-	uid_t owner;
-	int fd, target;
+	uid_t owner; int fd, target;
 	snprintf(path, sizeof path, "/proc/%d/ns/user", pid);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
 	if (fd < 0) return;
@@ -93,6 +92,7 @@ static void consider(int pid, int pfd) {
 		if (target >= 0 && ioctl(target, NS_GET_OWNER_UID, &owner) == 0 && owner == getuid()) {
 			tried = 1;
 			joined = setns(target, CLONE_NEWUSER) == 0;
+			if (!joined) jerr = errno, snprintf(jmsg, sizeof jmsg, "setns above pid %d: %s (errno %d)", pid, strerror(jerr), jerr);
 		}
 		if (target >= 0) close(target);
 	}
@@ -103,16 +103,14 @@ static void consider(int pid, int pfd) {
  * or the process has gone (ENOENT, ESRCH). -1 when the environ cannot be read, so the process is unknown. */
 static int tokened(int pid, int pfd) {
 	static char buf[65536], entry[64];
-	char path[64];
-	ssize_t n;
-	char *p;
-	int fd, hit = 0;
+	char path[64], *p;
+	ssize_t n; int fd, hit = 0;
 	if (!tried) consider(pid, pfd);
 	snprintf(path, sizeof path, "/proc/%d/environ", pid);
 	snprintf(entry, sizeof entry, "GINN_EXEC_TOKEN=%s", token);
 	fd = open(path, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) return errno == ENOENT || errno == ESRCH ? 0 : -1; /* ESRCH: a zombie has no environ */
-	n = read(fd, buf, sizeof buf - 1);
+	if (fd < 0) return errno == ENOENT || errno == ESRCH ? 0 : (ferr = errno, fstep = "open environ", -1); /* ESRCH: a zombie has no environ */
+	if ((n = read(fd, buf, sizeof buf - 1)) < 0) ferr = errno, fstep = "read environ";
 	close(fd);
 	if (n < 0) return -1;
 	if (n == 0 || (syscall(SYS_pidfd_send_signal, pfd, 0, NULL, 0) < 0 && errno == ESRCH)) return 0;
@@ -122,13 +120,13 @@ static int tokened(int pid, int pfd) {
 	return hit;
 }
 
+static void note(int pid) { if (nmiss < MAX_MISS) miss[nmiss].pid = pid, miss[nmiss].err = ferr, miss[nmiss++].step = fstep; }
+
 /* One sweep of dir and its subtree: each tokened process gets sig through its pidfd. Returns the tokened count.
  * An unreadable process counts in blind before a join. After one, it is unknown unless it predates the parent. */
 static int sweep(const char *dir, int sig) {
 	char path[4096], line[32];
-	struct dirent *e;
-	FILE *f;
-	DIR *d;
+	struct dirent *e; FILE *f; DIR *d;
 	int n = 0;
 	snprintf(path, sizeof path, "%s/cgroup.procs", dir);
 	f = fopen(path, "r");
@@ -144,10 +142,10 @@ static int sweep(const char *dir, int sig) {
 				syscall(SYS_pidfd_send_signal, pfd, sig, NULL, 0);
 				n++;
 			} else if (t < 0 && !joined) {
-				blind++;
+				blind++, note(pid);
 			} else if (t < 0) {
 				long long st = starttime(pid);
-				if ((st < 0 || parent < 0 || st >= parent) && nunknown < MAX_PIDS) unknown[nunknown++] = pid;
+				if ((st < 0 || parent < 0 || st >= parent) && nunknown < MAX_PIDS) unknown[nunknown++] = pid, note(pid);
 			}
 			close(pfd);
 		}
@@ -168,8 +166,7 @@ static int sweep(const char *dir, int sig) {
 int main(int argc, char **argv) {
 	const struct timespec tick = {0, 100000000};
 	long long t0 = now_ms();
-	char buf[16384];
-	int round = 0, n, fd, i, len;
+	char buf[16384]; int round = 0, n, fd, i, len;
 	if (geteuid() == 0) return fprintf(stderr, "ginn-exec-kill: refuses to run as root (CR-003)\n"), 2;
 	if (argc != 4 || argv[1][0] != '/' || argv[3][0] != '/')
 		return fprintf(stderr, "usage: ginn-exec-kill <realm-cgroup> <token> <orphan-marker>\n"), 2;
@@ -177,7 +174,7 @@ int main(int argc, char **argv) {
 	if (stat("/proc/self/ns/user", &own) < 0) die("stat");
 	parent = starttime(getppid());
 	for (;;) {
-		nfound = nunknown = blind = 0;
+		nfound = nunknown = blind = nmiss = 0;
 		n = sweep(argv[1], round < KILL_SWEEP ? SIGTERM : SIGKILL);
 		if (n == 0 || now_ms() - t0 >= BOUND_MS) break;
 		round++;
@@ -188,13 +185,16 @@ int main(int argc, char **argv) {
 	for (i = 0; i < nfound; i++) len += snprintf(buf + len, sizeof buf - len, "pid %d\n", found[i]);
 	if (blind) len += snprintf(buf + len, sizeof buf - len, "unknown join\n");
 	for (i = 0; i < nunknown; i++) len += snprintf(buf + len, sizeof buf - len, "unknown %d\n", unknown[i]);
-	fd = open(argv[3], O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
-	if (fd >= 0) {
+	if ((fd = open(argv[3], O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600)) >= 0) {
 		if (write(fd, buf, len) != len) fprintf(stderr, "ginn-exec-kill: the marker record was not written whole\n");
 		close(fd);
 	}
 	if (nfound) fprintf(stderr, "%s: %d processes of the exec survived the token kill\n", GINN_EXEC_W_ORPHAN, nfound);
 	if (blind) fprintf(stderr, "%s: the realm's processes could not be read for their token; left running\n", GINN_EXEC_W_ORPHAN);
-	else if (nunknown) fprintf(stderr, "%s: %d processes whose token could not be read were left running\n", GINN_EXEC_W_ORPHAN, nunknown);
+	if (nunknown) fprintf(stderr, "%s: %d processes whose token could not be read were left running\n", GINN_EXEC_W_ORPHAN, nunknown);
+	/* The first MAX_MISS unread processes with their step and errno (FR-124), then a count and the join's errno. */
+	for (i = 0; i < nmiss; i++) fprintf(stderr, "  pid %d: %s: %s (errno %d)\n", miss[i].pid, miss[i].step, strerror(miss[i].err), miss[i].err);
+	if (blind + nunknown > nmiss) fprintf(stderr, "  and %d more unread processes\n", blind + nunknown - nmiss);
+	if (blind && !joined) fprintf(stderr, "  join: %s\n", tried ? jmsg : "not attempted, no realm process is in a joinable user namespace");
 	return 3;
 }

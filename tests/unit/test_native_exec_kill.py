@@ -9,11 +9,13 @@ ginn-exec-run. Without a join the record says only `unknown join`.
 The tests run the helper directly on a fake cgroup tree of the test's own sleepers. Some
 sleepers start in a user namespace (preexec_fn unshare), so the helper's setns is real. A shim
 (LD_PRELOAD) logs each setns and the namespace it named, can make setns fail, can make every
-environ open fail with EACCES (as a process of another owner does), and can make geteuid return
-0. Nothing here runs podman or touches a realm. Gate G7 on the Void host is the real check."""
+environ open fail with EACCES (as a process of another owner does), can make every environ read
+fail with EIO, and can make geteuid return 0. Nothing here runs podman or touches a realm. Gate G7
+on the Void host is the real check."""
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import shutil
@@ -51,7 +53,8 @@ _SHIM = r"""
 #include <unistd.h>
 /* Test-only. GINN_TEST_SETNS_LOG collects "<nstype> <result> <namespace>" per setns.
  * GINN_TEST_SETNS_FAIL makes setns fail with EPERM. GINN_TEST_ENVIRON_EACCES makes each open of a
- * .../environ path fail with EACCES. GINN_TEST_EUID_ROOT makes geteuid return 0. */
+ * .../environ path fail with EACCES. GINN_TEST_ENVIRON_EIO makes each read of a .../environ
+ * fd fail with EIO. GINN_TEST_EUID_ROOT makes geteuid return 0. */
 int setns(int fd, int nstype) {
 	static int (*real)(int, int);
 	const char *log = getenv("GINN_TEST_SETNS_LOG");
@@ -99,6 +102,22 @@ int open(const char *path, int flags, ...) {
 		return real(path, flags, mode);
 	}
 	return real(path, flags);
+}
+
+ssize_t read(int fd, void *buf, size_t count) {
+	static ssize_t (*real)(int, void *, size_t);
+	char link[256] = "", path[64];
+	ssize_t k;
+	if (!real) real = (ssize_t (*)(int, void *, size_t))dlsym(RTLD_NEXT, "read");
+	if (getenv("GINN_TEST_ENVIRON_EIO")) {
+		snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+		k = readlink(path, link, sizeof link - 1);
+		if (k > 8 && !strcmp(link + k - 8, "/environ")) {
+			errno = EIO;
+			return -1;
+		}
+	}
+	return real(fd, buf, count);
 }
 """
 
@@ -249,6 +268,11 @@ def _finish(proc: subprocess.Popen[bytes]) -> tuple[int, str]:
     return proc.returncode, err.decode("utf-8")
 
 
+def _err(code: int) -> str:
+    """The text the helper prints for errno `code`: its strerror, then the number (FR-124)."""
+    return f"{os.strerror(code)} (errno {code})"
+
+
 @pytest.mark.fr("FR-124")
 def test_processes_in_the_helpers_own_namespace_are_killed_and_no_join_is_attempted(
     kill_bin: Path, tmp_path: Path
@@ -351,6 +375,12 @@ def test_a_refused_join_records_only_unknown_join_and_spares_the_processes(
     run = _run_kill(kill_bin, cgroup, marker, env)
     assert run.returncode == 3, run.stderr
     assert "GINN-W-RELAY-ORPHAN" in run.stderr and "could not be read" in run.stderr, run.stderr
+    # Each unread process is named with its step and errno, and the failed join with its errno.
+    unread = [candidate.pid, tokened.pid]
+    for pid in unread:
+        assert f"  pid {pid}: open environ: {_err(errno.EACCES)}\n" in run.stderr, run.stderr
+    join = f"  join: setns above pid {candidate.pid}: {_err(errno.EPERM)}\n"
+    assert join in run.stderr, run.stderr
     text = marker.read_text(encoding="utf-8")
     assert re.fullmatch(rf"token {TOKEN}\ntime \d+\nunknown join\n", text), text
     assert tokened.poll() is None and candidate.poll() is None, "an unreadable process was killed"
@@ -424,6 +454,9 @@ def test_after_a_join_an_unreadable_process_that_started_after_the_parent_is_unk
     code, err = _finish(shell)
     assert code == 3, err
     assert "whose token could not be read" in err, err
+    # Only the young process is unread; the join succeeded, so no join line is printed.
+    assert f"  pid {young.pid}: open environ: {_err(errno.EACCES)}\n" in err, err
+    assert "  join:" not in err and f"  pid {candidate.pid}:" not in err, err
     text = marker.read_text(encoding="utf-8")
     assert re.fullmatch(rf"token {TOKEN}\ntime \d+\nunknown {young.pid}\n", text), text
     assert young.poll() is None
@@ -443,3 +476,74 @@ def test_the_helper_refuses_to_run_as_euid_zero_before_it_touches_anything(
     assert "refuses to run as root" in run.stderr, run.stderr
     assert tokened.poll() is None
     assert not marker.exists()
+
+
+@pytest.mark.fr("FR-124")
+def test_the_warning_names_each_unread_process_with_its_step_and_errno(
+    kill_bin: Path, tmp_path: Path
+) -> None:
+    """Both processes share the helper's namespace, so no join is attempted. Each environ open
+    fails with EACCES. The warning names each pid with its step and errno, then says why there
+    was no join."""
+    lib = _build_shim(tmp_path)
+    first = _sleeper({"OTHER": "1"}, tmp_path / "ready-a", namespaced=False)
+    second = _sleeper({"GINN_EXEC_TOKEN": TOKEN}, tmp_path / "ready-b", namespaced=False)
+    cgroup = _cgroup(tmp_path, first.pid, second.pid)
+    marker = tmp_path / "orphan"
+    env = {"LD_PRELOAD": str(lib), "GINN_TEST_ENVIRON_EACCES": "1"}
+    run = _run_kill(kill_bin, cgroup, marker, env)
+    assert run.returncode == 3, run.stderr
+    warning = "GINN-W-RELAY-ORPHAN: the realm's processes could not be read for their token;"
+    assert run.stderr.splitlines() == [
+        f"{warning} left running",
+        f"  pid {first.pid}: open environ: {_err(errno.EACCES)}",
+        f"  pid {second.pid}: open environ: {_err(errno.EACCES)}",
+        "  join: not attempted, no realm process is in a joinable user namespace",
+    ], run.stderr
+    assert first.poll() is None and second.poll() is None, "an unreadable process was killed"
+    text = marker.read_text(encoding="utf-8")
+    assert re.fullmatch(rf"token {TOKEN}\ntime \d+\nunknown join\n", text), text
+
+
+@pytest.mark.fr("FR-124")
+def test_a_failed_environ_read_is_named_with_the_read_step_and_its_errno(
+    kill_bin: Path, tmp_path: Path
+) -> None:
+    """The open succeeds and the read fails with EIO, so the warning names the read step."""
+    lib = _build_shim(tmp_path)
+    tokened = _sleeper({"GINN_EXEC_TOKEN": TOKEN}, tmp_path / "ready", namespaced=False)
+    cgroup = _cgroup(tmp_path, tokened.pid)
+    marker = tmp_path / "orphan"
+    env = {"LD_PRELOAD": str(lib), "GINN_TEST_ENVIRON_EIO": "1"}
+    run = _run_kill(kill_bin, cgroup, marker, env)
+    assert run.returncode == 3, run.stderr
+    assert f"  pid {tokened.pid}: read environ: {_err(errno.EIO)}\n" in run.stderr, run.stderr
+    assert "  join: not attempted" in run.stderr, run.stderr
+    assert tokened.poll() is None, "an unreadable process was killed"
+
+
+@pytest.mark.fr("FR-124")
+def test_the_unread_detail_is_bounded_to_eight_pids_and_then_a_count(
+    kill_bin: Path, tmp_path: Path
+) -> None:
+    """Ten unreadable processes: the warning names the first eight with their step and errno,
+    then counts the other two. None is killed."""
+    lib = _build_shim(tmp_path)
+    sleepers = [
+        _sleeper({"OTHER": "1"}, tmp_path / f"ready-{index}", namespaced=False)
+        for index in range(10)
+    ]
+    cgroup = _cgroup(tmp_path, *(sleeper.pid for sleeper in sleepers))
+    marker = tmp_path / "orphan"
+    env = {"LD_PRELOAD": str(lib), "GINN_TEST_ENVIRON_EACCES": "1"}
+    run = _run_kill(kill_bin, cgroup, marker, env)
+    assert run.returncode == 3, run.stderr
+    lines = run.stderr.splitlines()
+    named = [line for line in lines if line.startswith("  pid ")]
+    expected = [f"  pid {s.pid}: open environ: {_err(errno.EACCES)}" for s in sleepers[:8]]
+    assert named == expected, run.stderr
+    assert lines[-2:] == [
+        "  and 2 more unread processes",
+        "  join: not attempted, no realm process is in a joinable user namespace",
+    ], run.stderr
+    assert all(sleeper.poll() is None for sleeper in sleepers), "an unreadable process was killed"
