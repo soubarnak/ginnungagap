@@ -162,6 +162,8 @@ class FakePodman:
     """True makes the image lack `/sbin/init`: `cp_from` of it fails as podman's cp does (F3).
     Every other image path is answered from `files`, and `/sbin/init` is present by default."""
     tops: dict[str, list[tuple[int, int, str]]] = field(default_factory=dict)
+    diffs: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    """The (kind, path) rows `diff` returns for each container ID. Empty unless a test sets them."""
     log_text: dict[str, str] = field(default_factory=dict)
     images: dict[str, ImageInfo] = field(default_factory=dict)
     containers: dict[str, _Container] = field(default_factory=dict)
@@ -241,6 +243,43 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         return image
 
+    def _find_image(self, ref: str) -> ImageInfo | None:
+        """The image that `ref` names, by its name or by its ID, or None when none matches.
+
+        A name is a key of `images`. An ID is 64 lowercase hex digits, and a `sha256:` prefix on it
+        is read too, as podman reads it. Returned IDs are always the bare hex.
+        """
+        found = self.images.get(ref)
+        if found is None:
+            bare = ref.removeprefix("sha256:")
+            found = next((image for image in self.images.values() if image.id == bare), None)
+        return found
+
+    def _image_by_ref(self, ref: str) -> ImageInfo:
+        """The image that `ref` names. Nothing matching raises GINN-E-INTERNAL, as podman does."""
+        found = self._find_image(ref)
+        if found is None:
+            raise make("GINN-E-INTERNAL")
+        return found
+
+    def image_id(self, ref: str) -> str:
+        self._record("image_id", ref)
+        self._take_op_failure("image_id")
+        return self._image_by_ref(ref).id
+
+    def images_by_name(self, prefix: str) -> dict[str, ImageInfo]:
+        self._record("images_by_name", prefix)
+        self._take_op_failure("images_by_name")
+        if not prefix:
+            raise ValueError("images_by_name needs a name prefix: an empty one matches every image")
+        # A pull keeps its digest reference as the key. podman lists such an image with no tag,
+        # so it is not a name here (the CLI skips `<none>` tags the same way).
+        return {
+            name: image
+            for name, image in self.images.items()
+            if "@" not in name and name.startswith(prefix)
+        }
+
     def rmi(self, ref: str) -> None:
         self._record("rmi", ref)
         self._take_op_failure("rmi")
@@ -251,6 +290,8 @@ class FakePodman:
         self._record("create", spec.name)
         self._take_op_failure("create")
         spec.to_argv()  # validates the spec, including the privileged refusal (NFR-SEC-001)
+        if spec.image_id is not None:
+            self._image_by_ref(spec.image_id)  # podman refuses an image ID it does not hold
         if any(c.name == spec.name for c in self.containers.values()):
             raise make("GINN-E-INTERNAL")
         container_id = f"{self._next:064x}"
@@ -258,7 +299,7 @@ class FakePodman:
         self.containers[container_id] = _Container(
             id=container_id,
             name=spec.name,
-            image=spec.image_digest_ref,
+            image=spec.image_id if spec.image_id is not None else spec.image_digest_ref,
             labels=dict(spec.labels),
             passwd_entry=spec.passwd_entry,
         )
@@ -316,6 +357,48 @@ class FakePodman:
             if all(container.labels.get(k) == v for k, v in wanted.items()):
                 matches.append(self._info_for(container))
         return matches
+
+    def commit(self, container_id: str, image_name: str, *, changes: Sequence[str] = ()) -> str:
+        """Store the image under `image_name` and return its ID.
+
+        A name that already holds an image is refused, because podman would move the tag and leave
+        the old image untagged (ADR-015 Decision 13).
+
+        The labels start from the image the container was created from, when that image is held.
+        Each `LABEL key=value` change sets its key, and an empty value stays as the key with "". The
+        other instructions are recorded in `calls` and not applied, since no test reads them.
+        """
+        self._record("commit", container_id, image_name, tuple(changes))
+        self._take_op_failure("commit")
+        container = self._container(container_id)
+        if image_name in self.images:
+            # podman would move the tag and leave the old image untagged (ADR-015 Decision 13).
+            err = make("GINN-E-INTERNAL")
+            err.details["reason"] = f"the name {image_name!r} already holds an image"
+            raise err
+        base = self._find_image(container.image)
+        labels = dict(base.labels) if base is not None else {}
+        for change in changes:
+            instruction, _, rest = change.partition(" ")
+            if instruction == "LABEL":
+                key, _, value = rest.partition("=")
+                labels[key] = value
+        digest = hashlib.sha256(f"{container_id}|{image_name}|{changes!r}".encode()).hexdigest()
+        self.images[image_name] = ImageInfo(
+            id=digest,
+            digest="",
+            repo_digests=(),
+            size=_FAKE_IMAGE_SIZE,
+            created=_FAKE_IMAGE_CREATED,
+            labels=labels,
+        )
+        return digest
+
+    def diff(self, container_id: str) -> list[tuple[str, str]]:
+        self._record("diff", container_id)
+        self._take_op_failure("diff")
+        self._container(container_id)
+        return list(self.diffs.get(container_id, []))
 
     def _note_exec(
         self,

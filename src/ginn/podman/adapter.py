@@ -23,6 +23,7 @@ MAX_NETWORK_RETRIES: Final = 3
 """Retries after the first attempt. M8 wires the 5, 15 and 45 s delays into the hook (FR-120)."""
 
 _DIGEST_REF: Final = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
+_IMAGE_ID: Final = re.compile(r"[0-9a-f]{64}")
 _NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _USER: Final = re.compile(r"[0-9]+:[0-9]+")
@@ -58,6 +59,16 @@ def require_digest_ref(ref: str) -> None:
     """Raise ValueError unless `ref` is `repo@sha256:<64 hex>` (FR-011: pull by digest only)."""
     if _DIGEST_REF.fullmatch(ref) is None:
         raise ValueError(f"FR-011: image must be pulled by digest repo@sha256:<hex>, got {ref!r}")
+
+
+def require_image_id_ref(ref: str) -> None:
+    """Raise ValueError unless `ref` is an image ID: 64 lowercase hex digits, no `sha256:` prefix.
+
+    This is the one spelling of an image ID in ginn (ADR-015 Decision 4). `Podman.commit` and
+    `Podman.image_id` return it, and `ImageInfo.id` holds the same text. A prefixed ID is refused.
+    """
+    if _IMAGE_ID.fullmatch(ref) is None:
+        raise ValueError(f"ADR-015: image ID must be 64 lowercase hex digits, got {ref!r}")
 
 
 def require_arg(value: str, what: str) -> str:
@@ -112,6 +123,10 @@ class CreateSpec:
     name: str
     image_digest_ref: str
     network: str
+    image_id: str | None = None
+    """The local image the container is created from, as its 64 lowercase hex digit ID.
+    When it is set, `podman create` takes it as the image argument, in place of `image_digest_ref`
+    (ADR-015 Decision 4). The digest reference stays required: it names the pinned base image."""
     hostname: str | None = None
     user: str | None = None
     userns: str | None = None
@@ -139,13 +154,17 @@ class CreateSpec:
     cdi_spec_dir: str | None = None
     """The CDI spec directory of `cdi_devices`, passed as the global `--cdi-spec-dir` (ADR-012)."""
     entrypoint_argv: list[str] = field(default_factory=list)
+    clear_entrypoint: bool = False
+    """Pass `--entrypoint '[]'`, which clears the image's entrypoint (ADR-015 Decision 2g). It takes
+    no `entrypoint_argv` and no command: the reset create of a provisioning build has neither."""
     command: list[str] = field(default_factory=list)
 
     def to_argv(self) -> list[str]:
         """Return the `podman create` argv (without the podman binary or global flags).
 
         The order is fixed and env and labels are sorted, so equal specs give equal argv. The
-        entrypoint is passed as a JSON array to `--entrypoint`. The image comes next, and the
+        entrypoint is passed as a JSON array to `--entrypoint`, or `[]` when `clear_entrypoint` is
+        set. The image comes next: its ID when `image_id` is set, else the digest reference. The
         command, when set, follows the image as separate arguments.
         """
         _check_spec(self)
@@ -189,7 +208,9 @@ class CreateSpec:
             argv += ["--group-add", group]
         if self.entrypoint_argv:
             argv += ["--entrypoint", json.dumps(self.entrypoint_argv)]
-        argv.append(self.image_digest_ref)
+        elif self.clear_entrypoint:
+            argv += ["--entrypoint", "[]"]
+        argv.append(self.image_id if self.image_id is not None else self.image_digest_ref)
         argv += self.command
         _refuse_privileged(argv, self.caps_add)
         return argv
@@ -213,6 +234,12 @@ def _opt(argv: list[str], flag: str, value: str | None) -> None:
 
 def _check_spec(spec: CreateSpec) -> None:
     require_digest_ref(spec.image_digest_ref)
+    if spec.image_id is not None:
+        require_image_id_ref(spec.image_id)
+    if spec.clear_entrypoint and (spec.entrypoint_argv or spec.command):
+        raise ValueError("clear_entrypoint takes no entrypoint_argv and no command (ADR-015 2g)")
+    # _NAME takes the underscores of a provisioning name, ginn_provision_<realm>_g<gen>[_reset]
+    # (ADR-015 Decision 10).
     if _NAME.fullmatch(spec.name) is None:
         raise ValueError(f"container name {spec.name!r} is not a valid podman name")
     if spec.user is not None and _USER.fullmatch(spec.user) is None:
@@ -343,6 +370,26 @@ class Podman(Protocol):
 
     def image_inspect(self, ref: str) -> ImageInfo: ...
 
+    def image_id(self, ref: str) -> str:
+        """Return the full ID of the local image `ref` names, as 64 lowercase hex digits.
+
+        That is the form `require_image_id_ref` accepts, so a stored ID compares equal to the one
+        podman returns. A `ref` with no local image raises GINN-E-INTERNAL.
+        """
+        ...
+
+    def images_by_name(self, prefix: str) -> dict[str, ImageInfo]:
+        """Return each local image whose name starts with `prefix`, keyed by that name.
+
+        A name is `repository:tag`, as `podman images` prints it. The result has one entry per name.
+        An image with two matching tags appears under both, with the same `ImageInfo.id`, so a
+        caller that counts images de-duplicates by `ImageInfo.id`. Each ImageInfo comes from
+        `image_inspect`, so its labels are included (ADR-015 Decision 13). A name that podman no
+        longer knows when it is inspected is left out, because another delete may have removed it
+        after the listing. An empty prefix raises ValueError, because it would match every image.
+        """
+        ...
+
     def rmi(self, ref: str) -> None: ...
 
     def create(self, spec: CreateSpec) -> str:
@@ -359,6 +406,27 @@ class Podman(Protocol):
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
         """List all containers, optionally only those whose labels match every pair."""
+        ...
+
+    def commit(self, container_id: str, image_name: str, *, changes: Sequence[str] = ()) -> str:
+        """Commit the container to the image `image_name` and return its ID, as 64 lowercase hex.
+
+        Each entry of `changes` is one `--change` instruction in Dockerfile form, such as
+        `LABEL key=value`, `USER uid:gid` or `ENV key=value`. The commit runs with `--pause=false`
+        (ADR-015 Decision 2f). The container may be created and never started.
+
+        `image_name` must be free. A commit onto a name that already holds an image moves the tag:
+        the old image is left untagged, and `images_by_name` can no longer find it. The caller
+        checks `image_exists` first. The fake refuses such a commit, so tests catch a caller that
+        skips the check.
+        """
+        ...
+
+    def diff(self, container_id: str) -> list[tuple[str, str]]:
+        """Return the container's filesystem changes as (kind, path) pairs.
+
+        Kind is `A` (added), `C` (changed) or `D` (deleted), as `podman diff` prints it.
+        """
         ...
 
     def exec(

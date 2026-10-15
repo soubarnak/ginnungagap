@@ -95,22 +95,32 @@ def _timestamp(value: object) -> str:
 
 @dataclass(frozen=True)
 class ImageInfo:
-    """One local image, from `podman image inspect`. `digest` is the manifest digest."""
+    """One local image, from `podman image inspect`. `digest` is the manifest digest.
+
+    `id` is 64 lowercase hex digits, as podman prints it. `Podman.image_id` and `Podman.commit`
+    return the same text, the form that `require_image_id_ref` accepts. `labels` are the image's
+    labels. The ops layer reads the base digest label of a derived image from them (ADR-015
+    Decision 13).
+    """
 
     id: str
     digest: str
     repo_digests: tuple[str, ...]
     size: int
     created: str
+    labels: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_inspect(cls, obj: Mapping[str, object]) -> "ImageInfo":
+        # The labels sit in the image config. Podman may also print them at the top level, which
+        # is read only when the config holds none.
         return cls(
             id=_text(obj, "Id"),
             digest=_text(obj, "Digest"),
             repo_digests=_texts(obj, "RepoDigests"),
             size=_int(obj, "Size"),
             created=_text(obj, "Created"),
+            labels=_labels(_sub(obj, "Config"), "Labels") or _labels(obj, "Labels"),
         )
 
 

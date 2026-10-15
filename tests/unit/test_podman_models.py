@@ -55,6 +55,21 @@ def test_image_inspect_fixture_parses_digest_and_size() -> None:
 
 
 @pytest.mark.fr("IR-020")
+def test_image_labels_come_from_the_config() -> None:
+    raw = {"Id": ALPINE_ID, "Config": {"Labels": {"io.ginn.base-digest": ALPINE_MANIFEST}}}
+    assert ImageInfo.from_inspect(raw).labels == {"io.ginn.base-digest": ALPINE_MANIFEST}
+
+
+@pytest.mark.fr("IR-020")
+def test_image_labels_fall_back_to_the_top_level_key_and_keep_only_text() -> None:
+    top = ImageInfo.from_inspect({"Labels": {"io.ginn.provision": ""}, "Config": {"Labels": None}})
+    assert top.labels == {"io.ginn.provision": ""}
+    mixed = ImageInfo.from_inspect({"Config": {"Labels": {"a": 1, "b": "ok"}}})
+    assert mixed.labels == {"b": "ok"}
+    assert ImageInfo.from_inspect({}).labels == {}
+
+
+@pytest.mark.fr("IR-020")
 def test_container_inspect_fixture_parses_created_state() -> None:
     (raw,) = _load("container-inspect-alpine.json")
     container = ContainerInfo.from_inspect(raw)
