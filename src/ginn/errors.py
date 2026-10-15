@@ -17,7 +17,8 @@ GINN-E-PKG-PROTECTED (ADR-015 Decision 14), GINN-E-REALM-BOOT (ADR-015 Decision 
 GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
 GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014),
 GINN-W-RELAY-ORPHAN (FR-123, ADR-014), GINN-W-ORPHAN-UNKNOWN (FR-124, ADR-014),
-GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
+GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014).
+GINN-W-PROVISION-LEFTOVER (ADR-015 Decisions 2 and 13). `source` cites
 the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -785,6 +786,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="it holds no ginn state; once no process runs in it, 'rmdir' of that directory "
         "removes it, and a realm created again reuses it",
         source="FR-019, ADR-003 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-W-PROVISION-LEFTOVER",
+        exit_code=0,
+        summary="realm '{realm}': a provisioning or derived-image leftover was not "
+        "removed: {detail}",
+        remedy="the next provisioning of this realm removes it, and 'ginn delete {realm}' removes "
+        "every derived image of the realm",
+        source="ADR-015 Decisions 2 and 13 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-REBUILD-DEFERRED",

@@ -61,6 +61,18 @@ started again on gN, best effort. A KeyboardInterrupt is a cancel (AS-018), and 
 same way. Any other exception keeps the journal entry, and recovery (ops/recovery.py,
 `_decide_rebuild`) settles it.
 
+Image source (ADR-015 Decision 7). A services-on build runs from a derived image, so each build
+takes one of three sources. `reuse` creates the container from the record's `init_image_id`, after
+the ID check of Decision 9, with no pull and no provisioning. `provision` pulls the current pin,
+builds a new derived image with the provisioning stage (ops/provision.py), and records its ID as
+`building_init_image_id` before the start. `pinned` creates the container from the pin, as a
+services-off realm without a derived image always has. Only a `provision` build moves a pin. A
+`provision` and `reuse` builds skip the integration, which the image already holds. A provision
+build carries the locale note of its stage, and a reuse build has none. Before the swap, the derived
+images that the record does not keep are removed (Decision 13).
+A services-on build is checked after its start: its boot must reach `running` through the relay,
+and a `degraded` or late boot fails the build with GINN-E-REALM-BOOT (Decision 5).
+
 Missing packages (FR-022 AC-1). The replay installs the manifest's packages in one transaction per
 source. If the package manager refuses the set with GINN-E-PKG-MANAGER, and the refusal's output
 matches the distribution's `missing_package_regex` (`_is_missing`), each package is installed on its
@@ -98,6 +110,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 
@@ -107,10 +120,10 @@ from ginn.domain.permissions import Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_realm
-from ginn.ops._create_plan import CreateHooks, CreateRequest, _Plan, _validate
+from ginn.ops._create_plan import CreateHooks, CreateRequest, _Plan, _validate, estimate_bytes
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.create import ROLLBACK_STOP_TIMEOUT_S, STOP_TIMEOUT_S, _Create
-from ginn.ops.disk import StatVfs
+from ginn.ops.disk import StatVfs, check_free, check_free_paths, estimate_required
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
@@ -123,15 +136,24 @@ from ginn.ops.lifecycle import (
     stop_realm,
     stop_through_sv,
 )
+from ginn.ops.provision import (
+    ProvisionEnv,
+    ProvisionPlan,
+    provision_init,
+    remove_derived,
+    storage_required_bytes,
+    tmpdir_required_bytes,
+)
 from ginn.ops.recovery import OP_REBUILD, remove_below
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.aur import install_aur
-from ginn.packages.manager import name_batches, printable, run_step, shown
+from ginn.packages.manager import ROOT_USER, name_batches, printable, run_step, shown
 from ginn.packages.manifest import removed
-from ginn.podman.adapter import Podman
+from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import MOUNTINFO
 from ginn.runtime.mounts import Exists
+from ginn.runtime.provision import derived_image_prefix
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.security import seccomp
 from ginn.security.caps import TierExtras
@@ -152,6 +174,25 @@ _NO_SPACE: Final = re.compile(r"No space left on device|ENOSPC")
 """Output that says the disk is full. It is never a missing package, whatever else it says."""
 _REBUILDABLE: Final = frozenset({RealmState.STOPPED, RealmState.RUNNING})
 """The record states that a rebuild accepts. A running realm is stopped first (step 3)."""
+_RUNNING: Final = "running"
+"""What `systemctl is-system-running` prints once the boot has settled (ADR-015 Decision 5)."""
+_DEGRADED: Final = "degraded"
+"""What it prints when a unit has failed. The boot check refuses that boot at once (Decision 5)."""
+_STATE_ARGV: Final = ("systemctl", "is-system-running")
+_FAILED_ARGV: Final = ("systemctl", "--failed", "--no-legend", "--plain")
+
+
+class ImageSource(StrEnum):
+    """The image that a build's root comes from (ADR-015 Decision 7).
+
+    `reuse` creates the container from the realm's derived image, which the record names, with no
+    pull and no provisioning. `provision` pulls the current pin and builds a new derived image.
+    `pinned` pulls the current pin and creates the container from it, as before ADR-015.
+    """
+
+    REUSE = "reuse"
+    PROVISION = "provision"
+    PINNED = "pinned"
 
 
 @dataclass(frozen=True)
@@ -187,7 +228,8 @@ class RebuildResult:
     `record` is the record after the rebuild, so `generation` is gN+1. `replay_missing` names the
     packages that are no longer available upstream (FR-022), and `warnings` holds their
     GINN-W-REPLAY-MISSING notices with the others. `old_removed` is False when gN could not be
-    removed after the swap. gN is then left for recovery or `ginn delete`.
+    removed after the swap. gN is then left for recovery or `ginn delete`. The provisioning and
+    cleanup notes are GINN-W-PROVISION-LEFTOVER warnings in `warnings` (ADR-015 Decisions 2 and 13).
     """
 
     record: RealmRecord
@@ -275,6 +317,23 @@ def _replay_group(
     return refused
 
 
+class _ProvisionJournal:
+    """The journal of the provisioning stage inside a rebuild (ADR-015 Decision 13).
+
+    Each step of the stage goes to the rebuild's mutation, and then to the hook that a test uses to
+    stop there, as the rebuild's own steps do (`_mark`).
+    """
+
+    def __init__(self, mutation: Mutation, on_step: Callable[[str], None] | None) -> None:
+        self._mutation = mutation
+        self._on_step = on_step
+
+    def step(self, name: str, params: Mapping[str, Any] | None = None) -> None:
+        self._mutation.step(name, params)
+        if self._on_step is not None:
+            self._on_step(name)
+
+
 class _Rebuild(_Create):
     """The phases of one rebuild, on top of the create phases (ops/create.py).
 
@@ -282,6 +341,10 @@ class _Rebuild(_Create):
     change. Here `_update` only changes the draft, so the one save is `_swap`. The `_Create`
     phases that would register a rollback of the Realm Home or the runit directory are not called
     (`_make_home`, `_write_service`, `_check_name`, `_save_creating`, `_finish`).
+
+    `source` is the image of the build (ADR-015 Decision 7). `_init_id` is the derived image that
+    the build runs from, None for a pinned build. A provision build sets the create's `_init`,
+    `_notes` and locale note, which `_container_spec` and the `notes` property read.
     """
 
     def __init__(
@@ -294,11 +357,14 @@ class _Rebuild(_Create):
         mutation: Mutation,
         record: RealmRecord,
         lifecycle: LifecycleHooks,
+        source: ImageSource,
     ) -> None:
         super().__init__(env, podman, request, hooks, plan, mutation)
         self._record = record
         self._manifest: list[ManifestEntry] = list(record.manifest)
         self._lifecycle = lifecycle
+        self._source = source
+        self._init_id: str | None = None
         self.replay_missing: list[str] = []
         self._everything_missing: list[str] = []
 
@@ -307,26 +373,192 @@ class _Rebuild(_Create):
 
         A services-on gN+1 is started and stopped through its runit service, and a services-off one
         with podman (ADR-003). Its runit directory is written before the start, which goes through
-        it.
+        it. The image source picks the pull, the provisioning and the integration (Decision 8). A
+        services-on gN+1 is checked after its start, before the attach (Decision 5).
         """
         self._check_space()
         self._share_host_files()
-        self._pull()
+        if self._source is ImageSource.REUSE:
+            self._check_reuse()
+        else:
+            self._pull()
+        if self._source is ImageSource.PROVISION:
+            self._provision_derived()
         self._create_container()
         self._mark_building()
         self._sync_relay()
         self._service_dir()
         if self._plan.spec.services:
+            began = self._lifecycle.supervisor.clock()
             self._start_through_sv()
+            self._boot_check(began)
         else:
             self._start()
         self._attach()
         self._check_user()
-        self._integrate()
+        if self._source is ImageSource.PINNED:
+            self._integrate()
+        else:
+            self._integrated()
         self._everything()
         self._replay()
         self._stop_new()
         return self._swap()
+
+    def _check_space(self) -> None:
+        """FR-121 for the image of this build (ADR-015 Decision 11).
+
+        A pinned build keeps the create's check. A provision build needs the storage formula of its
+        stage, with the base counted, because this build pulls the pin. The image staging directory
+        must hold the init set and the Integration Package Set, and the stage checks it again before
+        its commit, so this is an earlier refusal. A reuse build pulls and provisions nothing, so it
+        needs the writable layer of the one container it creates, and nothing else (Decision 11).
+
+        The Decision 11 term for the current disk use of the realm is not added by any build. The
+        FR-020 figure counts the Realm Home only (`container_bytes` is null), so the figure that
+        would include gN's root and derived image is deferred (recorded in the docs).
+        """
+        if self._source is ImageSource.PINNED:
+            super()._check_space()
+            return
+        if self._source is ImageSource.REUSE:
+            paths = self._env.paths
+            required = estimate_required(self._plan.definition.writable_layer_bytes)
+            check_free_paths(
+                [paths.podman_root, paths.homes], required, statvfs=self._hooks.statvfs
+            )
+        if self._source is ImageSource.PROVISION:
+            definition = self._plan.definition
+            init_bytes = definition.services_estimated_installed_bytes
+            ips_bytes = definition.integration_estimated_installed_bytes
+            paths = self._env.paths
+            required = storage_required_bytes(
+                estimate_bytes(self._plan.entry),
+                init_bytes,
+                ips_bytes,
+                definition.package_cache_peak_bytes,
+            )
+            check_free_paths(
+                [paths.podman_root, paths.homes], required, statvfs=self._hooks.statvfs
+            )
+            check_free(
+                paths.image_tmp,
+                tmpdir_required_bytes(init_bytes, ips_bytes),
+                statvfs=self._hooks.statvfs,
+            )
+        self._step("space-checked")
+
+    def _provision_derived(self) -> None:
+        """Build the derived image of gN+1 with the provisioning stage (ADR-015 Decision 2).
+
+        `_pull` has already pulled and verified the pin. The record's `init_image_id` and
+        `building_init_image_id` are the keep set, so the sweep before the build cannot take the
+        live image. The stage's own rollback removes what it made when it fails. Once it returns,
+        the image is this build's, and a later failure removes it: that rollback is registered after
+        the container's, so it runs after the container is removed (newest first). The result sets
+        the create's `_init`, `_notes` and locale note, which `_container_spec` reads, so the
+        container is created from the new image. This is the rebuild's own provisioning, not the
+        create's `_provision`, which keeps no live image.
+        """
+        plan = self._plan
+        current = self._current()
+        keep = {image for image in (current.init_image_id, current.building_init_image_id) if image}
+        provision_env = ProvisionEnv(
+            podman=self._podman,
+            paths=self._env.paths,
+            sleep=self._hooks.sleep,
+            statvfs=self._hooks.statvfs,
+        )
+        provision = ProvisionPlan(
+            realm=self._request.name,
+            generation=plan.spec.generation,
+            distro=plan.definition,
+            image_digest_ref=plan.spec.image,
+            lang=self._request.host_env.get("LANG"),
+            ips_installed_bytes=plan.definition.integration_estimated_installed_bytes,
+            keep_ids=frozenset(keep),
+        )
+        journal = _ProvisionJournal(self._mutation, self._hooks.on_step)
+        result = provision_init(provision_env, provision, journal)
+        podman = self._podman
+        self._rollback.add("derived image", lambda: podman.rmi(result.image_id))
+        self._init = result
+        self._init_id = result.image_id
+        self._locale_note = result.locale_note
+        self._notes = result.notes
+        self._manifest = list(result.init_entries) + [e for e in self._manifest if not e.init]
+
+    def _check_reuse(self) -> None:
+        """Refuse a reuse build whose derived image is not the one the record names (Decision 9).
+
+        The image with the recorded ID must exist under the realm's derived-image prefix. An image
+        that is gone is GINN-E-IMAGE-DERIVED, and nothing is created from it. Nothing is pulled, so
+        the journal step `image-checked` takes the place of `pulled`.
+        """
+        init_id = self._current().init_image_id
+        if init_id is None:
+            raise RuntimeError("a reuse build runs from the derived image its record names")
+        prefix = derived_image_prefix(self._request.name)
+        held = {info.id for info in self._podman.images_by_name(prefix).values()}
+        if init_id not in held:
+            detail = f"no derived image has the recorded ID {init_id}"
+            raise make("GINN-E-IMAGE-DERIVED", realm=self._request.name.value, detail=detail)
+        self._init_id = init_id
+        # The container names the digest that its derived image was built from, not the current pin.
+        spec = replace(self._plan.spec, image=self._current().image_ref, image_id=init_id)
+        self._plan = replace(self._plan, spec=spec)
+        self._step("image-checked")
+
+    def _integrated(self) -> None:
+        """The integration of a provision or reuse build, which its image holds (Decision 8).
+
+        A provision build carries the locale note and the notes of its stage, which
+        `_provision_derived` set. A reuse build has no locale note, because the record keeps none
+        from its last build.
+        """
+        self._step("integrated")
+
+    def _boot_check(self, began: float) -> None:
+        """Wait until the services-on gN+1 reports `running`, or fail it (ADR-015 Decision 5).
+
+        The check runs through the relay (ADR-014), so the exec is `services=True`. It runs before
+        the attach and the replay, and with an empty manifest too. `began` is the supervisor's clock
+        before the start, so the start and the check share one bound of `start_wait_s`: the check
+        gets only what the start left. It reads the supervisor's clock and sleep, as
+        `start_through_sv` does. `degraded` fails at once, and any other state fails at the
+        deadline.
+        """
+        cid = self._container_id()
+        target = ExecTarget(realm=self._request.name.value, services=True, mutating=True)
+        supervisor = self._lifecycle.supervisor
+        deadline = began + self._lifecycle.start_wait_s
+        while True:
+            # systemctl exits non-zero for every state but running, so only its output is read.
+            result = self._podman.exec(cid, _STATE_ARGV, target=target, user=ROOT_USER)
+            state = result.stdout.strip()
+            if state == _RUNNING:
+                return
+            if state == _DEGRADED or supervisor.clock() >= deadline:
+                raise self._boot_failure(cid, target, state)
+            supervisor.sleep(self._lifecycle.start_poll_s)
+
+    def _boot_failure(self, cid: str, target: ExecTarget, state: str) -> GinnError:
+        """The GINN-E-REALM-BOOT error of a boot not at running, with its failed units."""
+        units: list[str] = []
+        try:
+            failed = self._podman.exec(cid, _FAILED_ARGV, target=target, user=ROOT_USER)
+            units = [line.split()[0] for line in failed.stdout.splitlines() if line.strip()]
+        except GinnError:
+            pass  # the boot error is the one to report; the unit list is only its detail
+        if state == _DEGRADED:
+            reason = "state degraded"
+        else:
+            reason = f"state {state or 'unknown'} at the deadline"
+        if units:
+            reason += f"; failed units: {', '.join(units)}"
+        err = make("GINN-E-REALM-BOOT", realm=self._request.name.value, detail=reason)
+        err.details["failed_units"] = units
+        return err
 
     def _update(self, **changes: Any) -> None:
         """Change the draft record in memory. Only `_swap` saves the draft (DR-034)."""
@@ -393,6 +625,7 @@ class _Rebuild(_Create):
                 current,
                 building_container_id=cid,
                 building_generation=self._plan.spec.generation,
+                building_init_image_id=self._init_id,
                 updated_at=utc_from_epoch(self._env.clock()),
             )
         )
@@ -475,10 +708,12 @@ class _Rebuild(_Create):
 
         The everything set is left out, because `_everything` installed it. The AUR packages are
         built through install_aur, and the native and repository ones through one install verb.
+        The init entries are left out too: provisioning installed them, and exec never does
+        (ADR-015 Decision 6).
         """
         held = set(self._plan.everything)
-        manifest = self._current().manifest
-        entries = [entry for entry in manifest if entry.name not in held]
+        manifest = self._manifest
+        entries = [entry for entry in manifest if entry.name not in held and not entry.init]
         repo = [entry.name for entry in entries if entry.source is not InstallSource.AUR]
         aur = [entry.name for entry in entries if entry.source is InstallSource.AUR]
         definition = self._plan.definition
@@ -627,12 +862,16 @@ class _Rebuild(_Create):
         attached = self._attached
         if attached is None:
             raise RuntimeError("the grants are attached before the swap")
+        current = self._current()
+        # A reuse build keeps its record's pin: only a provision build moves a pin (Decision 9).
+        reused = self._source is ImageSource.REUSE
         swapped = replace(
-            self._current(),
+            current,
             generation=plan.spec.generation,
             container_id=self._container_id(),
-            image_ref=plan.spec.image,
-            image_digest=plan.entry.digest,
+            image_ref=current.image_ref if reused else plan.spec.image,
+            image_digest=current.image_digest if reused else plan.entry.digest,
+            init_image_id=self._init_id,
             state=RealmState.STOPPED,
             previous_state=None,
             manifest=self._manifest,
@@ -646,6 +885,7 @@ class _Rebuild(_Create):
             services_at_create=plan.spec.services,
             building_container_id=None,
             building_generation=None,
+            building_init_image_id=None,
             autostart_before_off=None,
             restart_required=False,
             updated_at=utc_from_epoch(self._env.clock()),
@@ -666,6 +906,7 @@ class _Request:
     plan: _Plan
     request: CreateRequest
     old: RealmRecord
+    image_source: ImageSource
 
 
 def _load(store: RealmStore, name: RealmName) -> RealmRecord:
@@ -687,15 +928,37 @@ def _refuse(record: RealmRecord) -> None:
         )
 
 
+def _image_source(record: RealmRecord, plan: _Plan, services_only: bool) -> ImageSource:
+    """The image of a build, by the rule of ADR-015 Decision 7, applied in its order.
+
+    `reuse` when the record has a derived image and the only change is the services mode. A
+    services-on build, or a realm with a derived image, is `provision`: it re-provisions from the
+    current pin (FR-066). Any other build is `pinned`, as a services-off realm without a derived
+    image always was.
+    """
+    if record.init_image_id is not None and services_only:
+        return ImageSource.REUSE
+    if plan.spec.services or record.init_image_id is not None:
+        return ImageSource.PROVISION
+    return ImageSource.PINNED
+
+
 def _fixed(
-    env: OpEnv, record: RealmRecord, user: HostUser, group: int, hooks: RebuildHooks
+    env: OpEnv,
+    record: RealmRecord,
+    user: HostUser,
+    group: int,
+    hooks: RebuildHooks,
+    *,
+    services_only: bool = False,
 ) -> _Request:
     """The plan of a rebuild of `record`, checked before any write (FR-021).
 
     The request takes the record's tier, services mode and everything set, so the new generation has
     the create-time state the record asks for. The permissions are the record's own. The plan keeps
     only the everything names that the Install Manifest records, so a set that `ginn remove` took
-    out is not installed again (FR-021, FR-014 AC-2).
+    out is not installed again (FR-021, FR-014 AC-2). `services_only` is the start's stale reason
+    (`rebuild_for_start`); `ginn rebuild` passes False.
     """
     request = CreateRequest(
         name=record.name,
@@ -718,7 +981,8 @@ def _fixed(
         spec=replace(plan.spec, generation=record.generation + 1),
         everything=everything,
     )
-    return _Request(plan=plan, request=request, old=record)
+    source = _image_source(record, plan, services_only)
+    return _Request(plan=plan, request=request, old=record, image_source=source)
 
 
 def _host_user(env: OpEnv) -> HostUser:
@@ -779,6 +1043,27 @@ def _retire(podman: Podman, name: RealmName, swapped: RealmRecord, mutation: Mut
     return True
 
 
+def _retire_images(
+    podman: Podman, name: RealmName, swapped: RealmRecord, mutation: Mutation
+) -> list[str]:
+    """Remove the realm's derived images that the swap does not keep (Decision 13).
+
+    It runs after the containers of gN are removed. The swapped record keeps its `init_image_id`, so
+    only an older derived image goes. The notes returned are the ones that matter: a removal that
+    failed, and a kept image that a container still uses. The note that the recorded image is kept
+    is dropped. A failure is an audit note, as the removal of gN is (DR-034).
+    """
+    try:
+        removal = remove_derived(podman, name, (swapped.init_image_id,))
+    except GinnError as err:
+        mutation.add_params(old_image_error=err.code)
+        return []
+    if swapped.init_image_id is None:
+        return list(removal.notes)
+    recorded = f"kept {swapped.init_image_id[:12]}: it is recorded on the realm"
+    return [note for note in removal.notes if note != recorded]
+
+
 def _drop_service(
     paths: OwnedPaths, name: RealmName, old: RealmRecord, swapped: RealmRecord, mutation: Mutation
 ) -> None:
@@ -815,6 +1100,7 @@ def _locked(
         "distro": old.settings.distro.value,
         "generation": old.generation,
         "new_generation": fixed.plan.spec.generation,
+        "image_source": fixed.image_source.value,
     }
     with mutating(env, OP_REBUILD, name, params) as mutation:
         current = _load(store, name)
@@ -836,6 +1122,7 @@ def _locked(
             mutation,
             store.load(name),
             hooks.lifecycle,
+            fixed.image_source,
         )
         try:
             # Inside the try, so a fault at this step also returns the record to stopped.
@@ -857,11 +1144,16 @@ def _locked(
         for pkg in rebuild.replay_missing:
             mutation.warnings.append(warn("GINN-W-REPLAY-MISSING", package=pkg))
         old_removed = _retire(podman, name, swapped, mutation)
+        notes = [*rebuild.notes, *_retire_images(podman, name, swapped, mutation)]
+        for note in notes:
+            leftover = warn("GINN-W-PROVISION-LEFTOVER", realm=name.value, detail=note)
+            mutation.warnings.append(leftover)
         _drop_service(env.paths, name, old, swapped, mutation)
         mutation.step("retired")
         mutation.add_params(
             replay_missing=list(rebuild.replay_missing),
             old_removed=old_removed,
+            notes=notes,
         )
     return _Outcome(
         record=swapped,
@@ -1019,6 +1311,7 @@ def rebuild_for_start(
     gid: int | None = None,
     hooks: RebuildHooks | None = None,
     warnings: list[GinnWarning] | None = None,
+    services_only: bool = False,
 ) -> RealmRecord:
     """Rebuild stopped realm `name` into the container its record asks for (FR-066, FR-083).
 
@@ -1027,6 +1320,10 @@ def rebuild_for_start(
     caller starts the new generation after this returns. The record and the plan are read here, and
     the swap is the one write. The FR-006 and rebuild warnings are appended to `warnings`, and a
     failed rebuild rolls back and raises, as `rebuild_realm` does, with the old root kept.
+
+    `services_only` is True when the stale test failed only on its services clause, so the record
+    has no change of tier, permission or option (ADR-015 Decision 7). Such a realm with a derived
+    image is rebuilt from it (`reuse`); any other change re-provisions (`provision`, FR-066).
     """
     hooks = RebuildHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
@@ -1040,7 +1337,7 @@ def rebuild_for_start(
             allowed="stopped",
         )
     group = os.getgid() if gid is None else gid
-    fixed = _fixed(env, record, session, group, hooks)
+    fixed = _fixed(env, record, session, group, hooks, services_only=services_only)
     image = f"rebuild of {record.settings.distro.value} image"
     with image_lock(env.paths, record.settings.distro.value, image):
         outcome = _locked(env, podman, name, fixed, hooks)

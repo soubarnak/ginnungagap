@@ -106,6 +106,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-CGROUP-LEFT": 0,
     "GINN-W-REBUILD-DEFERRED": 0,
     "GINN-W-REBUILD-PENDING": 0,
+    "GINN-W-PROVISION-LEFTOVER": 0,
     "GINN-W-RELAY-ORPHAN": 0,
     "GINN-W-ORPHAN-UNKNOWN": 0,
     "GINN-W-ORPHAN-UNSETTLED": 0,
@@ -355,3 +356,21 @@ def test_the_recovered_remedy_names_both_recovery_commands() -> None:
     assert "an interrupted create is resumed with 'ginn create --resume {realm}'" in remedy
     assert "'ginn delete {realm}'" in remedy
     assert "M8" not in remedy
+
+
+@pytest.mark.fr("FR-122")
+def test_the_provision_leftover_notice_names_the_realm_the_leftover_and_the_cleanup() -> None:
+    notice = warn(
+        "GINN-W-PROVISION-LEFTOVER",
+        realm="lab",
+        detail="kept 0123456789ab: it is recorded on the realm",
+    )
+    assert notice.code == "GINN-W-PROVISION-LEFTOVER"
+    assert notice.message == (
+        "realm 'lab': a provisioning or derived-image leftover was not removed: "
+        "kept 0123456789ab: it is recorded on the realm"
+    )
+    assert notice.remedy == (
+        "the next provisioning of this realm removes it, and 'ginn delete lab' removes every "
+        "derived image of the realm"
+    )

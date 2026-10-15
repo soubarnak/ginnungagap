@@ -52,6 +52,9 @@ integration_estimated_installed_bytes = 6000393
 # ADR-015 Decision 11: the package cache during the installs, before the clean (the cache_peak of
 # the disk formula, FR-121). S-11 measured the dnf cache before clean.
 package_cache_peak_bytes = 109206482
+# ADR-015 Decision 11: the writable layer of one services-off container from the derived image,
+# after an htop install (S-11, the reuse term of the disk check, FR-121).
+writable_layer_bytes = 117756852
 
 [integration]
 packages = ["glibc-langpack-{lang}"]

@@ -810,18 +810,37 @@ def test_the_disk_formula_inputs_are_the_s11_measurements(name: str) -> None:
     assert definition.package_cache_peak_bytes == cache_peak
 
 
+# ADR-015 Decision 11: the writable layer after an htop install, from spikes/results/S-11.md.
+WRITABLE_LAYER = {
+    "arch": 676_834,
+    "debian": 23_454_481,
+    "fedora": 117_756_852,
+    "kali": 36_702_135,
+}
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_writable_layer_is_the_s11_htop_measurement(name: str) -> None:
+    assert load(name).writable_layer_bytes == WRITABLE_LAYER[name]
+
+
 @pytest.mark.fr("NFR-060")
 @pytest.mark.fr("FR-121")
 def test_the_disk_formula_inputs_are_optional_and_default_to_zero() -> None:
     fixture = from_mapping(_base(), source="fixture.toml")
     assert fixture.integration_estimated_installed_bytes == 0
     assert fixture.package_cache_peak_bytes == 0
+    assert fixture.writable_layer_bytes == 0
     raw = _base()
     raw["integration_estimated_installed_bytes"] = 4096
     raw["package_cache_peak_bytes"] = 8192
+    raw["writable_layer_bytes"] = 2048
     declared = from_mapping(raw, source="fixture.toml")
     assert declared.integration_estimated_installed_bytes == 4096
     assert declared.package_cache_peak_bytes == 8192
+    assert declared.writable_layer_bytes == 2048
 
 
 @pytest.mark.fr("NFR-060")
@@ -1318,6 +1337,9 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("cache peak is a string", _set("package_cache_peak_bytes", value="1")),
     ("cache peak is a bool", _set("package_cache_peak_bytes", value=True)),
     ("cache peak is negative", _set("package_cache_peak_bytes", value=-1)),
+    ("writable layer is a string", _set("writable_layer_bytes", value="1")),
+    ("writable layer is a bool", _set("writable_layer_bytes", value=True)),
+    ("writable layer is negative", _set("writable_layer_bytes", value=-1)),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),

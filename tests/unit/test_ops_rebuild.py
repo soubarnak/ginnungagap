@@ -28,17 +28,21 @@ from ginn.errors import GinnError, make
 from ginn.ops import create as create_ops
 from ginn.ops import lifecycle as lifecycle_ops
 from ginn.ops import rebuild as rebuild_ops
+from ginn.ops._create_plan import estimate_bytes
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import create_realm
+from ginn.ops.disk import estimate_required
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, realm_status, start_realm, stop_realm
 from ginn.ops.permissions import set_permissions, set_tier
-from ginn.ops.rebuild import RebuildHooks, RebuildResult, rebuild_realm
+from ginn.ops.provision import storage_required_bytes, tmpdir_required_bytes
+from ginn.ops.rebuild import RebuildHooks, RebuildResult, rebuild_for_start, rebuild_realm
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.service import ServiceHooks, set_autostart, set_services_mode, start_service
 from ginn.packages.aur import AurOutcome
-from ginn.podman.adapter import CreateSpec
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.idle import IdleHooks
+from ginn.runtime.provision import derived_image_prefix, install_argv
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
 from ginn.security.caps import option_keys
@@ -99,9 +103,27 @@ def home(tmp_path: Path) -> Path:
     return path
 
 
+PROVISION_PREFIX = "ginn_provision_"
+"""The name prefix of a provisioning container (ADR-015 Decision 10)."""
+
+
+def user_entries(record: RealmRecord) -> list[ManifestEntry]:
+    """The manifest without the init entries, which provisioning installs (ADR-015 Decision 6)."""
+    return [entry for entry in record.manifest if not entry.init]
+
+
+BOOT_STATE_ARGV = ("systemctl", "is-system-running")
+"""The boot check's exec in a services-on build (ADR-015 Decision 5)."""
+BOOT_FAILED_ARGV = ("systemctl", "--failed", "--no-legend", "--plain")
+"""The failed-units read of a boot that did not reach running (Decision 5)."""
+
+
 @pytest.fixture
 def fake(tmp_path: Path) -> ScriptedPodman:
-    return ScriptedPodman(root=str(tmp_path))
+    scripted = ScriptedPodman(root=str(tmp_path))
+    # A boot that settles with no failed unit is the default; a test scripts another boot itself.
+    scripted.exec_results[BOOT_STATE_ARGV] = ExecResult(0, "running\n", "")
+    return scripted
 
 
 @pytest.fixture
@@ -592,7 +614,7 @@ def test_a_services_on_realm_is_rebuilt_through_its_runit_service_and_keeps_its_
     assert record.services_at_create is True
     assert record.building_container_id is None
     assert record.building_generation is None
-    assert record.manifest == [CURL]
+    assert user_entries(record) == [CURL]
     installs = [
         c
         for c in fake.exec_calls
@@ -929,7 +951,9 @@ def test_turning_services_on_then_starting_rebuilds_into_a_services_on_generatio
     original_create = fake.create
 
     def create_checking_source(spec: CreateSpec) -> str:
-        seen.append(journald_dropin(env.paths).is_file())
+        # A provisioning container is created first, and it is not the realm's (ADR-015 Decision 2).
+        if not spec.name.startswith(PROVISION_PREFIX):
+            seen.append(journald_dropin(env.paths).is_file())
         return original_create(spec)
 
     monkeypatch.setattr(fake, "create", create_checking_source)
@@ -945,7 +969,7 @@ def test_turning_services_on_then_starting_rebuilds_into_a_services_on_generatio
     assert record.settings.services is True
     assert record.services_at_create is True
     assert record.state is RealmState.RUNNING
-    assert record.manifest == before.manifest == [CURL]
+    assert user_entries(record) == before.manifest == [CURL]
     assert record.permissions == before.permissions
     assert service_dir(env.paths, NAME).is_dir()
     assert (service_dir(env.paths, NAME) / DOWN).is_file(), "autostart is off"
@@ -1090,7 +1114,7 @@ def test_turning_services_off_then_starting_removes_the_service_directory_after_
     assert record.settings.services is False
     assert record.services_at_create is False
     assert record.state is RealmState.RUNNING
-    assert record.manifest == [CURL]
+    assert user_entries(record) == [CURL]
     assert not service_dir(env.paths, NAME).exists()
     assert fake.containers[record.container_id].state is ContainerState.RUNNING
 
@@ -1131,7 +1155,7 @@ def test_a_tier_change_on_a_running_realm_waits_for_the_restart_and_the_next_sta
     assert record.state is RealmState.RUNNING
     assert record.restart_required is False
     assert record.created_options == NESTED_NO_KVM
-    assert record.manifest == [CURL]
+    assert user_entries(record) == [CURL]
     assert record.container_id != before.container_id
     assert old_gone(fake, before.container_id)
     assert home_bytes(home) == host_before
@@ -1167,7 +1191,7 @@ def test_a_nested_toggle_enabled_on_a_custom_realm_rebuilds_at_its_next_start(
     )
     assert "device=/dev/fuse" in record.created_options
     assert "device=/dev/kvm" not in record.created_options
-    assert record.manifest == [CURL]
+    assert user_entries(record) == [CURL]
 
 
 @pytest.mark.fr("FR-063")
@@ -1704,7 +1728,7 @@ def test_turning_services_on_a_kali_realm_rebuilds_it_at_its_next_start_with_the
     assert record.generation == 2
     assert record.state is RealmState.RUNNING
     assert record.services_at_create is True
-    assert record.manifest == before.manifest
+    assert user_entries(record) == before.manifest
     everything = tuple(kali.argv(Verb.INSTALL, [EVERYTHING]))
     on_new = [c.argv for c in fake.exec_calls if c.container_id == record.container_id]
     assert on_new.count(everything) == 1
@@ -1754,12 +1778,17 @@ class _Runsv(RunitFake):
 def tracked_starts(
     monkeypatch: pytest.MonkeyPatch, fake: ScriptedPodman, runit: _Runsv
 ) -> list[tuple[str, bool]]:
-    """Record every podman start of `fake` with whether runit's `up` made it (ADR-003)."""
+    """Record every podman start of a realm container of `fake`, and whether runit's `up` made it.
+
+    The provisioning container of a build is started by podman itself, and it is not a realm
+    container (ADR-015 Decision 2), so its start is not recorded.
+    """
     starts: list[tuple[str, bool]] = []
     real_start = fake.start
 
     def start(container_id: str) -> None:
-        starts.append((container_id, runit.in_up))
+        if not fake.containers[container_id].name.startswith(PROVISION_PREFIX):
+            starts.append((container_id, runit.in_up))
         real_start(container_id)
 
     monkeypatch.setattr(fake, "start", start)
@@ -2649,3 +2678,662 @@ def test_a_failed_relay_sync_during_a_rebuild_is_a_warning_and_the_swap_stands(
     assert result.record.generation == 2
     assert result.record.state is RealmState.STOPPED
     assert "GINN-W-RELAY-SYNC" in [w.code for w in result.warnings]
+
+
+# ADR-015: the image of a build (Decision 7), the derived image (Decisions 2, 9 and 13), the boot
+# check (Decision 5) and the init entries (Decision 6). A services-on realm here is a stopped curl
+# realm turned services-on, so its first build is a `provision` build.
+
+WRONG_IMAGE_ID = "f" * 64
+"""A well-formed image ID that no derived image of the fake holds (Decision 9)."""
+
+
+def stale_rebuild(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    *,
+    runit: _Runsv | None = None,
+    services_only: bool = True,
+    warnings: list[Any] | None = None,
+    **overrides: Any,
+) -> RealmRecord:
+    """The rebuild that a start runs for NAME, through `rebuild_for_start` (FR-066, FR-083)."""
+    lifecycle = (
+        lifecycle_hooks(tmp_path, mountinfo)
+        if runit is None
+        else _supervised_lifecycle(tmp_path, mountinfo, runit)
+    )
+    hooks = rebuild_hooks(tmp_path, sleeps, mountinfo, lifecycle=lifecycle, **overrides)
+    return rebuild_for_start(
+        env,
+        fake,
+        NAME,
+        session=session(home),
+        gid=GID,
+        hooks=hooks,
+        services_only=services_only,
+        warnings=warnings,
+    )
+
+
+def derived_ids(fake: ScriptedPodman) -> set[str]:
+    """The IDs of the realm's derived images that the fake holds (ADR-015 Decision 10)."""
+    prefix = derived_image_prefix(NAME)
+    return {fake.image_id(name) for name in fake.images if name.startswith(prefix)}
+
+
+def pulls(fake: ScriptedPodman) -> int:
+    return sum(1 for call in fake.calls if call.op == "pull")
+
+
+def commits(fake: ScriptedPodman) -> int:
+    return sum(1 for call in fake.calls if call.op == "commit")
+
+
+def last_rebuild_params(env: OpEnv) -> dict[str, Any]:
+    """The audit params of the newest rebuild, which name its image source (FR-124)."""
+    return [entry for entry in env.audit.read() if entry.op == "rebuild"][-1].params
+
+
+def failed_boot(fake: ScriptedPodman, *units: str) -> None:
+    """Script a boot that reads `degraded`, with `units` as its failed units (Decision 5)."""
+    fake.exec_results[BOOT_STATE_ARGV] = ExecResult(1, "degraded\n", "")
+    listing = "".join(f"{unit} loaded failed failed {unit}\n" for unit in units)
+    fake.exec_results[BOOT_FAILED_ARGV] = ExecResult(0, listing, "")
+
+
+@pytest.mark.fr("FR-021")
+def test_a_provision_build_runs_the_new_root_from_the_derived_image_it_names(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """AC-1 for `provision`: the root keeps the settings, the permissions and the user packages.
+    It is created from the derived image its provisioning made, and the record keeps the pin it
+    verified (ADR-015 Decisions 2, 6, 7 and 9)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert record.generation == 2
+    assert record.state is RealmState.STOPPED
+    assert record.services_at_create is True
+    assert record.settings.tier is before.settings.tier
+    assert record.permissions == before.permissions
+    assert record.image_digest == before.image_digest
+    assert record.init_image_id is not None
+    assert record.building_init_image_id is None
+    assert record.init_image_id in derived_ids(fake)
+    init_names = list(load_distro("debian").services_packages)
+    assert [entry.name for entry in record.manifest if entry.init] == init_names
+    assert user_entries(record) == [CURL]
+    spec = fake.created_specs[-1]
+    assert spec.image_id == record.init_image_id
+    assert spec.image_digest_ref == before.image_ref
+    assert last_rebuild_params(env)["image_source"] == "provision"
+    replayed = [c for c in fake.exec_calls if c.container_id == record.container_id]
+    assert not any("systemd" in arg for call in replayed for arg in call.argv), (
+        "the init entries are never replayed (Decision 6)"
+    )
+
+
+@pytest.mark.fr("FR-021")
+def test_a_pinned_build_creates_its_root_from_the_pin_and_provisions_nothing(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """AC-1 for `pinned`: a services-off realm with no derived image is rebuilt from its pin, as it
+    was before ADR-015. Nothing is provisioned, so nothing is committed and no image ID is named."""
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, services_only=False)
+    assert record.generation == 2
+    assert record.state is RealmState.STOPPED
+    assert record.init_image_id is None
+    assert record.manifest == [CURL]
+    spec = fake.created_specs[-1]
+    assert spec.image_id is None
+    assert spec.image_digest_ref == before.image_ref
+    assert commits(fake) == 0
+    assert not any(tuple(c.argv) == BOOT_STATE_ARGV for c in fake.exec_calls), (
+        "a services-off build has no boot check (ADR-015 Decision 5)"
+    )
+    assert last_rebuild_params(env)["image_source"] == "pinned"
+
+
+@pytest.mark.fr("FR-021")
+def test_a_reuse_build_creates_its_root_from_the_recorded_derived_image_with_no_pull_or_commit(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """AC-1 for `reuse`: turning services off keeps the derived image and its ID. The root is
+    created from that ID, with no pull and no commit, and the record keeps its pin (Decision 9)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    pulled, committed = pulls(fake), commits(fake)
+    notices: list[Any] = []
+    record = stale_rebuild(
+        env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, warnings=notices
+    )
+    assert record.generation == 3
+    assert record.services_at_create is False
+    assert not any(
+        c.container_id == record.container_id and tuple(c.argv) == BOOT_STATE_ARGV
+        for c in fake.exec_calls
+    ), "the reused services-off root has no boot check"
+    assert not any(w.code == "GINN-W-PROVISION-LEFTOVER" for w in notices), (
+        "a successful reuse build leaves nothing behind but its recorded image"
+    )
+    assert record.init_image_id == on.init_image_id
+    assert record.image_digest == on.image_digest == before.image_digest
+    assert record.image_ref == before.image_ref
+    assert fake.created_specs[-1].image_id == on.init_image_id
+    assert (pulls(fake), commits(fake)) == (pulled, committed)
+    assert on.init_image_id in derived_ids(fake)
+    assert last_rebuild_params(env)["image_source"] == "reuse"
+
+
+@pytest.mark.fr("FR-021")
+def test_a_reuse_build_refuses_a_recorded_image_id_that_no_derived_image_holds(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Decision 9: a reuse build creates nothing from an ID that the image store does not hold, and
+    the derived image it did not use is not removed."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    RealmStore(env.paths).save(replace(stored(env), init_image_id=WRONG_IMAGE_ID))
+    created = len(fake.created_specs)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert caught.value.code == "GINN-E-IMAGE-DERIVED"
+    assert len(fake.created_specs) == created, "nothing is created from the refused ID"
+    assert stored(env).generation == 2
+    assert stored(env).state is RealmState.STOPPED
+    assert on.init_image_id in derived_ids(fake)
+
+
+@pytest.mark.fr("FR-021")
+def test_a_degraded_boot_fails_the_build_names_its_failed_units_and_keeps_the_old_root(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """AC-2 with GINN-E-REALM-BOOT: a boot that reads `degraded` fails the build at once, the failed
+    units are in the error, and the derived image the build made is removed with the rollback."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    failed_boot(fake, "foo.service", "bar.service")
+    set_services_mode(env, NAME, on=True)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    err = caught.value
+    assert err.code == "GINN-E-REALM-BOOT"
+    assert err.details["failed_units"] == ["foo.service", "bar.service"]
+    assert "foo.service, bar.service" in err.message
+    assert stored(env).generation == 1
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id is None
+    assert derived_ids(fake) == set()
+    assert generation_of(fake, 2) == []
+    assert before.container_id in fake.containers
+
+
+@pytest.mark.fr("FR-021")
+def test_a_services_on_build_is_checked_for_running_before_its_attach_even_with_no_packages(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The boot check runs through the relay, once for a boot that is running at once, before the
+    attach. It runs with an empty user manifest too (ADR-015 Decision 5)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=())
+    set_services_mode(env, NAME, on=True)
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    checks = [i for i, c in enumerate(fake.exec_calls) if tuple(c.argv) == BOOT_STATE_ARGV]
+    assert len(checks) == 1
+    assert fake.exec_calls[checks[0]].target == ExecTarget(
+        realm=NAME.value, services=True, mutating=True
+    )
+    attaches = [i for i, c in enumerate(fake.exec_calls) if tuple(c.argv) == RUN_USER_STAT]
+    assert attaches and checks[0] < attaches[0], "the boot check comes before the attach"
+    assert user_entries(record) == []
+    assert record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-021")
+def test_a_boot_still_starting_at_the_deadline_fails_the_build(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """A boot that does not reach running within the start's wait fails with GINN-E-REALM-BOOT,
+    and the detail says the state it was in (ADR-015 Decision 5)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    fake.exec_results[BOOT_STATE_ARGV] = ExecResult(1, "starting\n", "")
+    set_services_mode(env, NAME, on=True)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert caught.value.code == "GINN-E-REALM-BOOT"
+    assert "state starting at the deadline" in caught.value.message
+    assert caught.value.details["failed_units"] == []
+    assert stored(env).generation == 1
+
+
+@pytest.mark.fr("FR-022")
+def test_an_init_package_that_provisioning_refuses_fails_the_build_and_is_not_a_missing_replay(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The init set is never replayed, so a refusal of it fails the build (FR-022). The refusal
+    here names a missing package, which a replay would turn into GINN-W-REPLAY-MISSING. The build
+    raises instead, and the old root and the record are unchanged."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    distro = load_distro("debian")
+    argv = install_argv(distro, distro.services_packages)
+    assert argv is not None
+    fake.exec_results[tuple(argv)] = ExecResult(100, "", "E: Unable to locate package systemd\n")
+    set_services_mode(env, NAME, on=True)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo)
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert stored(env).generation == 1
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id is None
+    assert derived_ids(fake) == set()
+
+
+@pytest.mark.fr("NFR-031")
+@pytest.mark.fr("FR-021")
+def test_a_reuse_build_that_fails_keeps_the_old_root_and_the_derived_image_it_runs_from(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """AC-2 for `reuse`: a failed reuse build removes the root it made, and never the derived image,
+    which the record still names and the old root still runs from."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    with pytest.raises(GinnError):
+        stale_rebuild(
+            env,
+            fake,
+            home,
+            tmp_path,
+            sleeps,
+            mountinfo,
+            runit=runit,
+            on_step=_raise_at("started", make("GINN-E-INTERNAL")),
+        )
+    assert stored(env).generation == 2
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id == on.init_image_id
+    assert on.init_image_id in derived_ids(fake)
+    assert generation_of(fake, 3) == []
+
+
+@pytest.mark.fr("FR-021")
+def test_a_rebuild_of_a_realm_with_a_derived_image_provisions_it_again_and_removes_the_old_one(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """`ginn rebuild` is a `provision` build for a realm with a derived image (Decision 7). The new
+    image replaces the old one, which the swap removes after its containers (Decision 13)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    first = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    result = rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    )
+    record = result.record
+    assert record.generation == 3
+    assert record.init_image_id not in (None, first.init_image_id)
+    assert record.init_image_id in derived_ids(fake)
+    assert first.init_image_id not in derived_ids(fake)
+    assert last_rebuild_params(env)["image_source"] == "provision"
+    assert user_entries(record) == [CURL]
+
+
+@pytest.mark.fr("FR-066")
+def test_a_tier_change_of_a_realm_with_a_derived_image_reprovisions_it_from_the_current_pin(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """A tier change is not a services-only change, so its start re-provisions the realm (FR-066),
+    even though the realm has a derived image. The image it had goes after the swap."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    first = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_tier(env, NAME, Tier.DEVELOPMENT)
+    committed = commits(fake)
+    hooks = replace(
+        _nested_hooks(tmp_path, sleeps, mountinfo),
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    )
+    record = rebuild_for_start(
+        env, fake, NAME, session=session(home), gid=GID, hooks=hooks, services_only=False
+    )
+    assert record.generation == 3
+    assert record.settings.tier is Tier.DEVELOPMENT
+    assert commits(fake) > committed, "the tier change provisions a new derived image"
+    assert record.init_image_id not in (None, first.init_image_id)
+    assert first.init_image_id not in derived_ids(fake)
+    assert last_rebuild_params(env)["image_source"] == "provision"
+
+
+def storage_formula(distro: str) -> tuple[int, int]:
+    """The storage formula of a services-on build of `distro`, and the staging formula of its commit
+    (ADR-015 Decision 11), from the pinned entry and the distribution data."""
+    entry = trust.load().entry(distro)
+    definition = load_distro(distro)
+    storage = storage_required_bytes(
+        estimate_bytes(entry),
+        definition.services_estimated_installed_bytes,
+        definition.integration_estimated_installed_bytes,
+        definition.package_cache_peak_bytes,
+    )
+    staging = tmpdir_required_bytes(
+        definition.services_estimated_installed_bytes,
+        definition.integration_estimated_installed_bytes,
+    )
+    return storage, staging
+
+
+@pytest.mark.fr("FR-121")
+def test_a_provision_build_is_refused_before_its_pull_when_the_storage_formula_does_not_fit(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 11: a provision build needs the create formula of its stage, with the base
+    counted, the init set and the Integration Package Set twice, and the package cache peak. The
+    rebuild refuses before its pull, and the old root is kept."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    pulled, committed = pulls(fake), commits(fake)
+    storage, _ = storage_formula("debian")
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, statvfs=_statvfs(0))
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{storage} bytes"
+    assert (pulls(fake), commits(fake)) == (pulled, committed)
+    assert stored(env).generation == 1
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id is None
+
+
+@pytest.mark.fr("FR-121")
+def test_a_provision_build_is_refused_before_its_pull_when_the_image_staging_directory_is_short(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 11: the image copy of a commit is staged in the image staging directory,
+    which has its own check with the init set and the Integration Package Set. A short directory is
+    refused before the pull, even when the storage has room."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    staging_dir = env.paths.image_tmp
+    staging_dir.mkdir(parents=True, exist_ok=True)
+
+    def statvfs(path: Any) -> SimpleNamespace:
+        free = 0 if str(path) == str(staging_dir) else AMPLE
+        return SimpleNamespace(f_bavail=free, f_frsize=1)
+
+    pulled, committed = pulls(fake), commits(fake)
+    _, staging = storage_formula("debian")
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, statvfs=statvfs)
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{staging} bytes"
+    assert caught.value.details["path"] == str(staging_dir)
+    assert (pulls(fake), commits(fake)) == (pulled, committed)
+    assert stored(env).generation == 1
+
+
+@pytest.mark.fr("FR-121")
+def test_a_reuse_build_is_refused_when_the_writable_layer_of_its_container_does_not_fit(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 11: a reuse build needs the writable layer of the one container it creates.
+    With less free than that, it is refused before its container is created, and the old root and
+    the derived image it runs from are kept. The current disk use term is not added (deferred)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    layer = estimate_required(load_distro("debian").writable_layer_bytes)
+    created = len(fake.created_specs)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(
+            env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, statvfs=_statvfs(layer - 1)
+        )
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{layer} bytes"
+    assert len(fake.created_specs) == created, "no container is created from the derived image"
+    assert stored(env).generation == 2
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id == on.init_image_id
+    assert on.init_image_id in derived_ids(fake)
+
+
+@pytest.mark.fr("FR-121")
+def test_a_reuse_build_needs_its_writable_layer_and_no_base_or_init_bytes(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 11: the free space that a reuse build needs is its writable layer, and no
+    base or init bytes. With exactly that free, far less than the base estimate, it goes on."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    layer = estimate_required(load_distro("debian").writable_layer_bytes)
+    assert layer < estimate_bytes(trust.load().entry("debian")), "the base is far larger"
+    record = stale_rebuild(
+        env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, statvfs=_statvfs(layer)
+    )
+    assert record.generation == 3
+    assert record.init_image_id == on.init_image_id
+    assert fake.created_specs[-1].image_id == on.init_image_id
+    assert last_rebuild_params(env)["image_source"] == "reuse"
+
+
+@pytest.mark.fr("FR-021")
+def test_a_reuse_build_names_the_digest_its_derived_image_was_built_from_not_the_current_pin(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 9: the reuse container names the digest that its derived image was built
+    from, which the record holds. The pin has moved since, so the record's old digest is the one the
+    container names, and the record keeps it. The current pin is not used."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    old_digest = "sha256:" + "c" * 64
+    old_ref = before.image_ref.rsplit("@", 1)[0] + "@" + old_digest
+    assert old_ref != before.image_ref, "the test moves the pin the record names"
+    set_services_mode(env, NAME, on=False)
+    RealmStore(env.paths).save(replace(stored(env), image_ref=old_ref, image_digest=old_digest))
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert record.generation == 3
+    assert fake.created_specs[-1].image_digest_ref == old_ref
+    assert fake.created_specs[-1].image_id == on.init_image_id
+    assert record.image_ref == old_ref
+    assert record.image_digest == old_digest
+
+
+@pytest.mark.fr("FR-021")
+def test_the_boot_check_gets_only_the_budget_that_the_start_left(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-015 Decision 5: the start and the boot check share one bound of `start_wait_s`. Here the
+    start takes 50 s of the 60 s, so the boot check polls for the 10 s that are left, and not for a
+    fresh 60 s. It checks once at each second, and the last check is at the deadline."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    real_start = fake.start
+
+    def slow_start(container_id: str) -> None:
+        if not fake.containers[container_id].name.startswith(PROVISION_PREFIX):
+            runit.clock.advance(50)
+        real_start(container_id)
+
+    monkeypatch.setattr(fake, "start", slow_start)
+    fake.exec_results[BOOT_STATE_ARGV] = ExecResult(1, "starting\n", "")
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert caught.value.code == "GINN-E-REALM-BOOT"
+    assert "at the deadline" in caught.value.message
+    boots = [c for c in fake.exec_calls if tuple(c.argv) == BOOT_STATE_ARGV]
+    assert len(boots) == 11, "one check at each second of the 10 s left, the last at the deadline"
+
+
+@pytest.mark.fr("FR-122")
+def test_a_provisioning_leftover_comes_back_as_a_warning_of_the_build(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 2: a stage removal that fails leaves its image, and the build still
+    completes. The note of the leftover comes back as a GINN-W-PROVISION-LEFTOVER warning in the
+    list that `rebuild_for_start` appends to, so the start shows it."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    fake.fail_ops["rmi"] = "GINN-E-INTERNAL"
+    notices: list[Any] = []
+    record = stale_rebuild(
+        env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, warnings=notices
+    )
+    leftovers = [w for w in notices if w.code == "GINN-W-PROVISION-LEFTOVER"]
+    assert leftovers, "the failed removal is a warning"
+    assert leftovers[0].message.startswith(
+        f"realm '{NAME.value}': a provisioning or derived-image leftover was not removed: "
+    )
+    assert record.generation == 2
+    assert record.state is RealmState.STOPPED
+    assert record.init_image_id is not None
+
+
+@pytest.mark.fr("FR-021")
+def test_the_swap_clears_the_building_init_image_id_and_names_the_same_derived_image(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-015 Decision 6: `building_init_image_id` is written before the start of a provision
+    build, and the swap clears it while it sets `init_image_id` to the same image. The record read
+    at `swapping` still holds the building ID, so the clear is the swap's own write."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    at_swap: list[str | None] = []
+
+    def on_step(step: str) -> None:
+        if step == "swapping":
+            at_swap.append(stored(env).building_init_image_id)
+
+    record = stale_rebuild(
+        env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, on_step=on_step
+    )
+    assert at_swap and at_swap[0] is not None, "the building ID is recorded before the swap"
+    assert at_swap[0] == record.init_image_id
+    assert record.building_init_image_id is None
+    assert stored(env).building_init_image_id is None
