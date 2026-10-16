@@ -46,6 +46,7 @@ from ginn.packages.manager import (
     parse_names,
     parse_removals,
     printable,
+    refresh_for_verb,
     removal_dependents,
     run_check,
     run_step,
@@ -294,6 +295,64 @@ def test_run_step_raises_the_mapped_error_on_a_non_zero_status() -> None:
         )
     assert caught.value.code == "GINN-E-PKG-MANAGER"
     assert caught.value.details["step"] == "install"
+
+
+@pytest.mark.fr("FR-040")
+def test_refresh_for_verb_refreshes_only_a_verb_the_data_lists_in_refresh_before() -> None:
+    fake = FakePodman()
+    cid = _running(fake)
+    debian = _definition("debian")
+    refresh = debian.argv(Verb.REFRESH)
+    _canned(fake, refresh, 0, "")
+    assert debian.refresh_before and Verb.REMOVE not in debian.refresh_before
+    kwargs: dict[str, Any] = {"realm": REALM, "retry_hook": None, "target": DIRECT_TARGET}
+    assert refresh_for_verb(fake, cid, debian, Verb.INSTALL, **kwargs) is True
+    assert refresh_for_verb(fake, cid, debian, Verb.REMOVE, **kwargs) is False
+    assert [tuple(call.argv) for call in fake.exec_calls] == [tuple(refresh)]
+    assert fake.exec_calls[0].user == ROOT_USER
+    assert fake.exec_calls[0].env == dict(LOCALE)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("name", ["arch", "fedora"])
+def test_refresh_for_verb_never_refreshes_before_an_install_where_the_data_does_not(
+    name: str,
+) -> None:
+    fake = FakePodman()
+    cid = _running(fake)
+    definition = _definition(name)
+    assert Verb.INSTALL not in definition.refresh_before
+    ran = refresh_for_verb(
+        fake,
+        cid,
+        definition,
+        Verb.INSTALL,
+        realm=REALM,
+        retry_hook=None,
+        target=DIRECT_TARGET,
+    )
+    assert ran is False
+    assert fake.exec_calls == []
+
+
+@pytest.mark.fr("FR-040")
+def test_a_refused_refresh_raises_the_install_error_at_the_refresh_step() -> None:
+    fake = FakePodman()
+    cid = _running(fake)
+    definition = _definition("debian")
+    _canned(fake, definition.argv(Verb.REFRESH), 100, "", "E: Failed to fetch\n")
+    with pytest.raises(GinnError) as caught:
+        refresh_for_verb(
+            fake,
+            cid,
+            definition,
+            Verb.INSTALL,
+            realm=REALM,
+            retry_hook=None,
+            target=DIRECT_TARGET,
+        )
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert caught.value.details["step"] == "refresh"
 
 
 @pytest.mark.fr("FR-120")

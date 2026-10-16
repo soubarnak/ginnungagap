@@ -1735,6 +1735,13 @@ def test_a_services_on_kali_realm_replays_its_package_and_reinstalls_the_everyth
     assert on_new.count(everything) == 1
     assert on_new.count(replayed) == 1
     assert (service_dir(env.paths, KALI) / DOWN).is_file()
+    # The provisioning clean removed the lists, so the refresh comes before the estimate that reads
+    # them, and before the everything install (ADR-011, ADR-015 Decision 3).
+    calls = _build_calls(fake, record)
+    refreshes = _refresh_indexes(calls, "kali")
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(tuple(kali.argv(Verb.RESOLVE, [EVERYTHING])))
+    assert refreshes[0] < calls.index(everything)
 
 
 @pytest.mark.fr("FR-083")
@@ -3378,3 +3385,288 @@ def test_the_swap_clears_the_building_init_image_id_and_names_the_same_derived_i
     assert at_swap[0] == record.init_image_id
     assert record.building_init_image_id is None
     assert stored(env).building_init_image_id is None
+
+
+# The package lists of a replay (FR-022, ADR-011, ADR-015 Decision 3). The provisioning clean
+# removes the lists from a derived image, so a replay refreshes them before its first repository
+# install. A refusal is read as a missing package only after that refresh.
+
+
+def _refresh_argv(distro: str = DISTRO) -> tuple[str, ...]:
+    return tuple(load_distro(distro).argv(Verb.REFRESH))
+
+
+def _install_argv(distro: str, names: list[str]) -> tuple[str, ...]:
+    return tuple(load_distro(distro).argv(Verb.INSTALL, names))
+
+
+def _build_calls(fake: ScriptedPodman, record: RealmRecord) -> list[tuple[str, ...]]:
+    """The argvs of the execs in the container that `record` names, in the order they ran."""
+    return [tuple(c.argv) for c in fake.exec_calls if c.container_id == record.container_id]
+
+
+def _refresh_indexes(calls: list[tuple[str, ...]], distro: str = DISTRO) -> list[int]:
+    refresh = _refresh_argv(distro)
+    return [index for index, argv in enumerate(calls) if argv == refresh]
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+def test_a_pinned_rebuild_refreshes_once_and_the_integration_refresh_is_the_only_one(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """A services-off rebuild is PINNED. Its create integration refreshes the lists (create.py,
+    `_integrate`), so the replay finds them fresh and adds no second refresh."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl", "git"))
+    result = rebuild(env, fake, home, tmp_path, sleeps, mountinfo)
+    calls = _build_calls(fake, result.record)
+    refreshes = _refresh_indexes(calls)
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(_install_argv(DISTRO, ["curl", "git"]))
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+def test_a_provision_rebuild_refreshes_the_lists_once_before_its_replay(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Turning services on provisions a derived image, whose lists the clean removed. The build
+    refreshes once, before the replay of both packages in one call."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl", "git"))
+    set_services_mode(env, NAME, on=True)
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert last_rebuild_params(env)["image_source"] == "provision"
+    calls = _build_calls(fake, record)
+    refreshes = _refresh_indexes(calls)
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(_install_argv(DISTRO, ["curl", "git"]))
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+def test_a_reuse_rebuild_refreshes_the_lists_once_because_its_derived_image_has_none(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Turning services off keeps the derived image (REUSE, ADR-015 Decision 7). That image was
+    cleaned of its lists, so the replay refreshes them first, as a provision build does."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl", "git"))
+    set_services_mode(env, NAME, on=True)
+    stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    record = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert last_rebuild_params(env)["image_source"] == "reuse"
+    calls = _build_calls(fake, record)
+    refreshes = _refresh_indexes(calls)
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(_install_argv(DISTRO, ["curl", "git"]))
+
+
+@pytest.mark.fr("FR-022")
+def test_a_rebuild_with_no_repository_package_runs_no_refresh(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Only the init entries are in the manifest, so no repository install runs and no refresh
+    runs. A rebuild with nothing to install stays network-free (ADR-011)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=())
+    set_services_mode(env, NAME, on=True)
+    provisioned = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert _refresh_indexes(_build_calls(fake, provisioned)) == []
+    set_services_mode(env, NAME, on=False)
+    reused = stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert _refresh_indexes(_build_calls(fake, reused)) == []
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize(
+    ("output", "code"),
+    [
+        ("E: Failed to fetch http://deb.example.org/debian/dists/Release\n", "GINN-E-PKG-MANAGER"),
+        ("Temporary failure resolving 'deb.example.org'\n", "GINN-E-NETWORK"),
+    ],
+    ids=["refused", "network"],
+)
+def test_a_refresh_that_fails_before_the_replay_is_its_own_error(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    output: str,
+    code: str,
+) -> None:
+    """A refused refresh is the install's own error, GINN-E-PKG-MANAGER, or GINN-E-NETWORK after the
+    FR-120 retries. The replay never runs, so no package is read as missing and none is reinstalled.
+    The old root stays as it was (NFR-031)."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    set_services_mode(env, NAME, on=False)
+    before = stored(env)
+    fake.exec_results[_refresh_argv()] = ExecResult(100, "", output)
+    start = len(fake.exec_calls)
+    warnings: list[Any] = []
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, warnings=warnings)
+    assert caught.value.code == code
+    assert caught.value.details["step"] == "refresh"
+    assert warnings == []
+    assert stored(env).state is RealmState.STOPPED
+    assert root_fields(stored(env)) == root_fields(before)
+    later = [tuple(c.argv) for c in fake.exec_calls[start:]]
+    assert _install_argv(DISTRO, ["curl"]) not in later
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+def test_a_package_still_missing_after_a_fresh_refresh_is_reported_and_refreshed_once(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The refresh ran and the refusal still names the package with the distribution's message, so
+    it is GINN-W-REPLAY-MISSING, and the others install. The name-by-name retry does not refresh
+    again."""
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl", "gone"))
+    set_services_mode(env, NAME, on=True)
+    stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    gone = ExecResult(100, "", "E: Unable to locate package gone\n")
+    fake.exec_results[_install_argv(DISTRO, ["curl", "gone"])] = gone
+    fake.exec_results[_install_argv(DISTRO, ["gone"])] = gone
+    set_services_mode(env, NAME, on=False)
+    warnings: list[Any] = []
+    record = stale_rebuild(
+        env, fake, home, tmp_path, sleeps, mountinfo, runit=runit, warnings=warnings
+    )
+    assert [(w.code, w.message) for w in warnings] == [
+        ("GINN-W-REPLAY-MISSING", "package gone is no longer available upstream")
+    ]
+    assert [entry.name for entry in user_entries(record)] == ["curl"]
+    calls = _build_calls(fake, record)
+    refreshes = _refresh_indexes(calls)
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(_install_argv(DISTRO, ["curl", "gone"]))
+
+
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("distro", ["arch", "debian", "fedora"])
+def test_a_services_on_rebuild_refreshes_only_where_its_distribution_data_lists_install(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    distro: str,
+) -> None:
+    """ADR-011: `refresh_before` lists install on Debian and Kali only. Arch and Fedora replay with
+    no refresh, as their data says, and their replay installs the same as before."""
+    name = RealmName(distro)
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps, name=name)
+    # A services-on create refuses --with packages (ADR-003), so the realm is made services-off and
+    # turned on, and its rebuild provisions the derived image and replays the package.
+    create_realm(
+        env,
+        fake,
+        request(home, name=distro, distro=distro, with_packages=("curl",)),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn"),
+    )
+    set_services_mode(env, name, on=True)
+    result = rebuild_realm(
+        env,
+        fake,
+        name,
+        session=session(home),
+        gid=GID,
+        hooks=rebuild_hooks(
+            tmp_path,
+            sleeps,
+            mountinfo,
+            lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+        ),
+    )
+    calls = _build_calls(fake, result.record)
+    assert len(_refresh_indexes(calls, distro)) == (1 if distro == "debian" else 0)
+    assert _install_argv(distro, ["curl"]) in calls, "the replay installs the package"
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-022")
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("transition", ["provision", "reuse"])
+def test_a_kali_rebuild_with_only_the_everything_set_refreshes_once_before_its_estimate(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    transition: str,
+) -> None:
+    """A Kali realm whose manifest holds only the everything set, and no user package. Its rebuild
+    refreshes the lists exactly once, before the estimate's RESOLVE and the everything install. A
+    provision build and a reuse build both run from a cleaned image, so both need the refresh
+    (ADR-011, ADR-015 Decision 3, FR-014 AC-1)."""
+    before = _kali_services_realm(env, fake, home, tmp_path, sleeps, mountinfo)
+    assert [entry.name for entry in before.manifest if not entry.init] == [EVERYTHING]
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps, name=KALI)
+    hooks = rebuild_hooks(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    )
+    if transition == "reuse":
+        set_services_mode(env, KALI, on=False)
+        record = rebuild_for_start(
+            env,
+            fake,
+            KALI,
+            session=session(home),
+            gid=GID,
+            hooks=hooks,
+            services_only=True,
+        )
+        assert last_rebuild_params(env)["image_source"] == "reuse"
+    else:
+        result = rebuild_realm(env, fake, KALI, session=session(home), gid=GID, hooks=hooks)
+        record = result.record
+        assert last_rebuild_params(env)["image_source"] == "provision"
+        assert result.replay_missing == ()
+    kali = load_distro("kali")
+    calls = _build_calls(fake, record)
+    refreshes = _refresh_indexes(calls, "kali")
+    assert len(refreshes) == 1
+    assert refreshes[0] < calls.index(tuple(kali.argv(Verb.RESOLVE, [EVERYTHING])))
+    assert refreshes[0] < calls.index(tuple(kali.argv(Verb.INSTALL, [EVERYTHING])))
+    assert [entry.name for entry in record.manifest if not entry.init] == [EVERYTHING]

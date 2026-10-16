@@ -69,14 +69,17 @@ builds a new derived image with the provisioning stage (ops/provision.py), and r
 services-off realm without a derived image always has. Only a `provision` build moves a pin. A
 `provision` and `reuse` builds skip the integration, which the image already holds. A provision
 build carries the locale note of its stage, and a reuse build has none. Before the swap, the derived
-images that the record does not keep are removed (Decision 13).
+images that the record does not keep are removed (Decision 13). A `provision` or `reuse` build
+refreshes the package lists once before its everything set and its replay (`_refresh_lists`),
+because the image's clean removed them. A `pinned` build's integration has refreshed them already.
 A services-on build is checked after its start: its boot must reach `running` through the relay,
 and a `degraded` or late boot fails the build with GINN-E-REALM-BOOT (Decision 5).
 
 Missing packages (FR-022 AC-1). The replay installs the manifest's packages in one transaction per
 source. If the package manager refuses the set with GINN-E-PKG-MANAGER, and the refusal's output
 matches the distribution's `missing_package_regex` (`_is_missing`), each package is installed on its
-own. A package that is refused again with that evidence is no longer available upstream. It gets a
+own. Such a refusal counts only after the lists were refreshed (`_refresh_lists`, ADR-011). A
+package that is refused again with that evidence is no longer available upstream. It gets a
 GINN-W-REPLAY-MISSING warning and leaves the new manifest, and the swap still completes. This holds
 for every package, the last one included: a manifest whose packages are all gone completes with an
 empty manifest and one warning each. A package manager's transaction is all or nothing, so the
@@ -147,7 +150,14 @@ from ginn.ops.provision import (
 from ginn.ops.recovery import OP_REBUILD, remove_below
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.aur import install_aur
-from ginn.packages.manager import ROOT_USER, name_batches, printable, run_step, shown
+from ginn.packages.manager import (
+    ROOT_USER,
+    name_batches,
+    printable,
+    refresh_for_verb,
+    run_step,
+    shown,
+)
 from ginn.packages.manifest import removed
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
@@ -400,6 +410,7 @@ class _Rebuild(_Create):
             self._integrate()
         else:
             self._integrated()
+        self._refresh_lists()
         self._everything()
         self._replay()
         self._stop_new()
@@ -704,13 +715,45 @@ class _Rebuild(_Create):
                 warn("GINN-W-RUN-USER-PENDING", realm=self._request.name.value)
             )
 
+    def _refresh_lists(self) -> None:
+        """Refresh the package lists once, before the build's first package install (ADR-011).
+
+        The everything set's estimate and install, and the replay, all read the lists, so one
+        refresh comes before them. A PINNED build needs none: its create integration (`_integrate`)
+        has refreshed them. A REUSE or PROVISION build's image came from the provisioning stage,
+        whose clean removed the lists (ADR-015 Decision 3), and it skips the integration. Without
+        this refresh apt says `Unable to locate package`, which `_is_missing` reads as a package
+        gone upstream (FR-022). The refresh runs outside `_replay_group`, so its failure is the
+        install's own error (GINN-E-PKG-MANAGER or GINN-E-NETWORK), never a missing package.
+        """
+        if self._source is ImageSource.PINNED or not self._replays_packages():
+            return
+        refresh_for_verb(
+            self._podman,
+            self._container_id(),
+            self._plan.definition,
+            Verb.INSTALL,
+            realm=self._request.name.value,
+            retry_hook=self._retry,
+            target=self._target(mutating=True),
+            on_ack=self._exec_acked,
+        )
+
+    def _replays_packages(self) -> bool:
+        """True when this build installs a package: the everything set, or a manifest entry that is
+        not an init entry (`_replay` installs those, AUR ones included, and an AUR build runs the
+        distribution's install verb too)."""
+        if self._plan.everything:
+            return True
+        return any(not entry.init for entry in self._manifest)
+
     def _replay(self) -> None:
         """Install the manifest's packages into gN+1, and drop the ones that are gone (FR-022).
 
         The everything set is left out, because `_everything` installed it. The AUR packages are
         built through install_aur, and the native and repository ones through one install verb.
         The init entries are left out too: provisioning installed them, and exec never does
-        (ADR-015 Decision 6).
+        (ADR-015 Decision 6). The lists were refreshed before this (`_refresh_lists`).
         """
         held = set(self._plan.everything)
         manifest = self._manifest

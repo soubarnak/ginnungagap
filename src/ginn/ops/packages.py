@@ -83,6 +83,7 @@ from ginn.packages.manager import (
     explicit_packages,
     name_batches,
     printable,
+    refresh_for_verb,
     removal_dependents,
     remove_passes,
     run_step,
@@ -372,18 +373,16 @@ def _install_body(
     retry = _retry(hooks)
     realm = name.value
     target = ExecTarget(realm=realm, services=bool(current.services_at_create), mutating=True)
-    if Verb.INSTALL in definition.refresh_before:
-        run_step(
-            podman,
-            cid,
-            definition,
-            definition.argv(Verb.REFRESH),
-            realm=realm,
-            step="refresh",
-            retry_hook=retry,
-            target=target,
-            on_ack=_acked(mutation),
-        )
+    if refresh_for_verb(
+        podman,
+        cid,
+        definition,
+        Verb.INSTALL,
+        realm=realm,
+        retry_hook=retry,
+        target=target,
+        on_ack=_acked(mutation),
+    ):
         mutation.step("refreshed")
     try:
         # A relay route installs in calls of its own size. A failed call leaves the earlier ones

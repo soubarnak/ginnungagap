@@ -114,11 +114,19 @@ class SimulatedCrash(Exception):
     """Stands for a SIGKILL inside a rebuild step. It is not a GinnError, so the journal stays."""
 
 
-def _inject(step: str, kind: str) -> Any:
-    """A hook that faults at `step`, once, in the way `kind` names."""
+def _inject(step: str, kind: str, occurrence: int = 1) -> Any:
+    """A hook that faults at the `occurrence`-th call named `step`, once, in the way `kind` names.
+
+    The default is the first call. A step that runs more than once in a build, such as `exec-acked`
+    (the refresh's ack and then each replay install's), is faulted at a later call by its number.
+    """
+    seen: list[str] = []
 
     def hook(name: str) -> None:
         if name != step:
+            return
+        seen.append(name)
+        if len(seen) != occurrence:
             return
         if kind == "error":
             raise make("GINN-E-INTERNAL")
@@ -336,6 +344,17 @@ TRANSITION_CASES: tuple[tuple[str, str, str, str], ...] = tuple(
     for kind in KINDS
     for previous in (REUSE_PREVIOUS if transition == "reuse" else PREVIOUS)
 )
+EXEC_ACK_OCCURRENCES: tuple[int, ...] = (1, 2)
+"""The `exec-acked` calls of a build that replays one package. The refresh's ack is the first, and
+the replay install's is the second (ADR-011, FR-122). A fault at the first lands before any package
+is installed, and one at the second lands while the replay runs."""
+EXEC_ACK_CASES: tuple[tuple[str, int, str, str], ...] = tuple(
+    (transition, occurrence, kind, previous)
+    for transition in ("to-on", "reuse")
+    for occurrence in EXEC_ACK_OCCURRENCES
+    for kind in KINDS
+    for previous in (REUSE_PREVIOUS if transition == "reuse" else PREVIOUS)
+)
 SAVE_POINTS: tuple[str, ...] = ("building", "swap")
 """The two record saves of a rebuild: the one that records the building container, and the swap."""
 SAVE_CASES: tuple[tuple[str, str, str, str], ...] = tuple(
@@ -544,6 +563,77 @@ def test_a_fault_at_every_step_of_a_services_mode_change_leaves_the_old_root_usa
                 sleeps,
                 mountinfo,
                 on_step=_inject(step, kind),
+                lifecycle=lifecycle,
+            )
+    _check_settled(
+        env,
+        fake,
+        home,
+        tmp_path,
+        mountinfo,
+        lifecycle,
+        before=before,
+        kind=kind,
+        previous=previous,
+        runit_before=runit_before,
+        home_before=home_before,
+    )
+
+
+@pytest.mark.fr("NFR-031")
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize(
+    ("transition", "occurrence", "kind", "previous"),
+    EXEC_ACK_CASES,
+    ids=[f"{t}-exec-ack-{n}-{k}-{p}" for t, n, k, p in EXEC_ACK_CASES],
+)
+def test_a_fault_at_each_exec_ack_of_a_services_mode_change_leaves_the_old_root_usable(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    transition: str,
+    occurrence: int,
+    kind: str,
+    previous: str,
+) -> None:
+    """The refresh's ack, which is the first `exec-acked`, and the replay install's, which is the
+    second. A build that turns services on, or reuses the derived image, runs both (ADR-011). A
+    fault at either leaves the same state and the same recovery as a fault at any other step."""
+    before, lifecycle = _transition_realm(
+        env, fake, home, tmp_path, sleeps, mountinfo, transition, running=previous == "running"
+    )
+    runit_before = _runit_state(env)
+    home_before = _home_tree(env)
+    hook = _inject("exec-acked", kind, occurrence)
+    with pytest.raises(_expected(kind)):
+        if transition == "reuse":
+            rebuild_for_start(
+                env,
+                fake,
+                NAME,
+                session=session(home),
+                gid=base.GID,
+                hooks=base.rebuild_hooks(
+                    tmp_path,
+                    sleeps,
+                    mountinfo,
+                    on_step=hook,
+                    lifecycle=lifecycle,
+                ),
+                services_only=True,
+            )
+        else:
+            rebuild(
+                env,
+                fake,
+                home,
+                tmp_path,
+                sleeps,
+                mountinfo,
+                on_step=hook,
                 lifecycle=lifecycle,
             )
     _check_settled(

@@ -248,6 +248,40 @@ def run_step(
     return result
 
 
+def refresh_for_verb(
+    podman: Podman,
+    container_id: str,
+    definition: DistroDef,
+    verb: Verb,
+    *,
+    realm: str,
+    retry_hook: RetryHook | None,
+    target: ExecTarget,
+    on_ack: Callable[[int], None] | None = None,
+) -> bool:
+    """Run `refresh` before `verb` when the distribution's data lists `verb` in `refresh_before`.
+
+    Return True when the refresh ran, so the caller can journal it. The install (ops/packages.py)
+    and the replay of a rebuild (ops/rebuild.py) both call it, so they keep one rule (ADR-011):
+    Debian and Kali refresh their lists before an install, and Arch and Fedora do not. A failed
+    refresh raises as `run_step` does, so it is never read as a missing package (FR-022).
+    """
+    if verb not in definition.refresh_before:
+        return False
+    run_step(
+        podman,
+        container_id,
+        definition,
+        definition.argv(Verb.REFRESH),
+        realm=realm,
+        step="refresh",
+        retry_hook=retry_hook,
+        target=target,
+        on_ack=on_ack,
+    )
+    return True
+
+
 def refused(realm: str, step: str, detail: str) -> GinnError:
     """GINN-E-PKG-MANAGER for output that is not read, with the step and the reason."""
     err = make("GINN-E-PKG-MANAGER", realm=realm)
