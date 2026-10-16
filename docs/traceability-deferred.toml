@@ -311,7 +311,7 @@ reason = "unit tests run for tools/measure; the RSS budget for the helpers needs
 id = "NFR-003"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). That run predates F6 (machine-id copy and logind mask, CL-28, ADR-007 D8), which is unit-tested and whose host re-gate is pending. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). debian and fedora are refused at create with GINN-E-NO-INIT (F1, F3). The musl leg is not run."
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). Host figures (VmRSS median, 40 MiB budget, services on). Phase B (2026-10-16, code 5622ffc, 10 runs): debian 30.23, fedora 48.68 (FAIL), kali 27.64, arch 31.76 MiB. Run 6 (2026-10-16, code 76fb921, after T7.30 to T7.32, 10 runs on fedora): fedora 24.07 MiB PASS. Run 6 regression (3 runs each): debian 28.07, kali 27.79, arch 31.71 MiB, all PASS. The T7.7 figure of 87.11 MiB for arch (2026-10-14, before F6) is superseded. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). Tables: spikes/results/T7.27-adr015-real.md. The musl leg is not run."
 
 [[deferred]]
 id = "NFR-004"
@@ -339,7 +339,8 @@ reason = "the create was timed once on a Void host with debian, zero packages an
 [[deferred]]
 id = "NFR-008"
 milestone = "M10"
-reason = "not covered yet: no test carries the marker, and no realm total is measured. S-10 measured one addition (the Arch locale archive, 3,064,432 bytes), and S-11 measured the init-set deltas per distribution (ADR-015 Decision 11). The per-distribution check is ADR-015 host gates T7.27 items 5 and 13. tools/measure/ does not cover NFR-008 yet (T10.4)"
+partial = true
+reason = "partly covered: T7.27 phase B (spikes/results/T7.27-adr015-real.md) measured a new services-on realm on all four distributions after create and at steady state, and each passes the target of official image size plus 200 MiB on podman's accounting (test_nfr008_disk_use_of_a_new_realm_per_distribution). Still open: arch fails an upper bound that counts the base twice, and debian's derived size is smaller than its base, so how a shared base counts is not settled. tools/measure/ does not cover NFR-008 yet (T10.4). S-10 and S-11 measured the earlier deltas (ADR-015 Decision 11)."
 
 [[deferred]]
 id = "NFR-009"
