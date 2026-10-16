@@ -9,9 +9,8 @@ convention; cli.py maps the same way a signal that ends podman itself (IR-011 na
 
 The steps, in order:
 
-1. The record is read (FR-025: GINN-E-NO-SUCH-REALM). A Kali realm is refused with
-   GINN-E-NOT-SUPPORTED-YET, and a state that does not allow enter with GINN-E-REALM-STATE
-   (DR-020). Both come before any podman call.
+1. The record is read (FR-025: GINN-E-NO-SUCH-REALM), and a state that does not allow enter is
+   refused with GINN-E-REALM-STATE (DR-020). Both come before any podman call.
 2. The session is read from the host (runtime/env.py). Proxy values stay in podman's environment,
    and the argv carries only their names (ADR-004 amendment).
 3. One `podman ps` answers whether the container runs. Its state and its pid come from that one
@@ -93,7 +92,7 @@ from ginn.runtime._enter_plan import exec_home, exec_user, login_argv, share_aft
 from ginn.runtime.attach import Admit, admission, needs_reattach, reattach
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.realm_security import agent_enabled, session_extras, stored_gpg_extra
-from ginn.runtime.spec import KALI, LABEL_REALM
+from ginn.runtime.spec import LABEL_REALM
 from ginn.security._proc import Proc
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
@@ -118,8 +117,6 @@ _PODMAN_EXEC_EXITS: Final = frozenset({PODMAN_ERROR_EXIT, 255})
 that is not running with 255 and returns it as a result, not as an error (ADR-014, amendment of
 2026-10-15). The listing decides which it was, so a 255 from a running realm's command is returned
 unchanged."""
-_KALI_MILESTONE: Final = "M10"
-"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 _STOPPED_SINCE_LOOK: Final = "the realm stopped after the pre-check"
 """The `noop` reason when the realm stopped between the look and the lock."""
 
@@ -240,13 +237,6 @@ def _look(
     the command has done both, and the app is released once, by that first look's owner.
     """
     record = _load(RealmStore(env.paths, env.clock), name)
-    if record.settings.distro.value == KALI:
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=name.value,
-            feature="a Kali realm",
-            milestone=_KALI_MILESTONE,
-        )
     if record.state not in _ENTERABLE:
         raise make(
             "GINN-E-REALM-STATE",

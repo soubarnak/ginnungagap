@@ -3,9 +3,10 @@
 
 Every test runs on FakePodman, through the `world` fixture of tests/unit/realm_cli_support.py. No
 package manager runs. Covered: the argv and the root user under the locale, the refresh rule of
-ADR-011, the refusals before any side effect (names, --aur, Kali, the realm state, a held lock),
-the failure codes, the FR-120 retry, the remove dry run that refuses a dependent removal, and the
-manifest and audit entries of each operation.
+ADR-011, the refusals before any side effect (names, --aur, the realm state, a held lock), the
+failure codes, the FR-120 retry, the remove dry run that refuses a dependent removal, the manifest
+and audit entries of each operation, and the Kali install and remove, which run the Debian steps
+(kali.toml, ADR-011).
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ GID = 1000
 
 DEB = "deb"
 ARCH = "arch"
+KALI = "kali"
 EXIT_SIGNATURE = 65
 
 
@@ -293,20 +295,33 @@ def test_a_failed_aur_build_restores_the_realm_and_leaves_the_manifest_alone(wor
 
 
 @pytest.mark.fr("FR-040")
-def test_kali_is_refused_until_its_milestone_as_enter_refuses_it(world: World) -> None:
-    make_realm(world, "kali", RealmState.RUNNING, running=True, distro="kali")
-    with pytest.raises(GinnError) as caught:
-        install_packages(
-            _env(world),
-            world.fake,
-            RealmName("kali"),
-            ["htop"],
-            aur=False,
-            session=_session(world),
-            hooks=_hooks(world),
-        )
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert world.fake.calls == []
+@pytest.mark.fr("FR-042")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-124")
+def test_kali_install_refreshes_then_installs_as_root_like_debian(world: World) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    env = _env(world)
+    record = install_packages(
+        env,
+        world.fake,
+        RealmName(KALI),
+        ["htop"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+    )
+    # Kali lists `install` in refresh_before, as Debian does (kali.toml, ADR-011).
+    assert _execs(world) == [
+        _argv("kali", Verb.REFRESH),
+        _argv("kali", Verb.INSTALL, "htop"),
+        DESKTOP_LIST,
+    ]
+    for call in world.fake.exec_calls:
+        assert call.user == "0:0"
+    assert record.manifest == [_ginn("htop")]
+    (entry,) = _audit(env, "install")
+    assert entry.outcome == "ok"
+    assert entry.params["packages"] == ["htop"]
 
 
 @pytest.mark.fr("FR-040")
@@ -469,6 +484,31 @@ def test_remove_runs_the_dry_run_then_removes_and_drops_the_entry(world: World) 
         DESKTOP_LIST,
     ]
     assert _manifest(world, DEB) == []
+    (entry,) = _audit(env, "remove")
+    assert entry.outcome == "ok"
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.fr("DR-007")
+def test_kali_remove_runs_the_dry_run_then_removes_like_debian(world: World) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    store = RealmStore(world.paths)
+    record = stored(world, KALI)
+    store.save(_with_manifest(record, [_ginn("htop")]))
+    world.fake.exec_results[_argv("kali", Verb.REMOVE_CHECK, "htop")] = ExecResult(
+        0, "Remv htop [3.3]\n", ""
+    )
+    env = _env(world)
+    remove_packages(
+        env, world.fake, RealmName(KALI), ["htop"], session=_session(world), hooks=_hooks(world)
+    )
+    # Kali defines remove-check, the dry run that ADR-011 requires before remove.
+    assert _execs(world) == [
+        _argv("kali", Verb.REMOVE_CHECK, "htop"),
+        _argv("kali", Verb.REMOVE, "htop"),
+        DESKTOP_LIST,
+    ]
+    assert _manifest(world, KALI) == []
     (entry,) = _audit(env, "remove")
     assert entry.outcome == "ok"
 

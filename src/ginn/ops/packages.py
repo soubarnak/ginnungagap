@@ -7,8 +7,7 @@ through the verbs of packages/manager.py. Each one is a mutating operation. Its 
 realm lock, journals its steps and writes one audit entry with the packages and the `aur` flag.
 
 Order of an install, and why:
-1. The record is read (FR-025). A Kali realm is refused with GINN-E-NOT-SUPPORTED-YET (M10), as
-   enter refuses it.
+1. The record is read (FR-025).
 2. Each name is checked against DR-003 (PackageName) before any side effect (FR-040 AC-2,
    NFR-SEC-005). No names is GINN-E-USAGE.
 3. `--aur` is checked. On a distribution other than Arch it is GINN-E-OPTION-INVALID. On Arch the
@@ -92,7 +91,7 @@ from ginn.packages.manager import (
 from ginn.packages.manifest import installed, removed
 from ginn.podman.adapter import ExecTarget, Podman, RetryHook
 from ginn.podman.models import ContainerState
-from ginn.runtime.spec import KALI, LABEL_REALM
+from ginn.runtime.spec import LABEL_REALM
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -102,8 +101,6 @@ OP_REMOVE: Final = "remove"
 """The audit operation name of `ginn remove` (FR-124)."""
 AUR_DISTRO: Final = "arch"
 """The one distribution whose AUR packages `--aur` names (FR-043)."""
-KALI_MILESTONE: Final = "M10"
-"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 _ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmState.FAILED})
 """The record states that an install or a remove accepts. Any other state is GINN-E-REALM-STATE."""
 _HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
@@ -140,16 +137,6 @@ def _checked(record: RealmRecord, packages: Sequence[str]) -> list[str]:
     for raw in packages:
         PackageName(raw, record.settings.distro)
     return list(dict.fromkeys(packages))
-
-
-def _refuse_kali(record: RealmRecord) -> None:
-    if record.settings.distro.value == KALI:
-        raise make(
-            "GINN-E-NOT-SUPPORTED-YET",
-            realm=record.name.value,
-            feature="a package change in a Kali realm",
-            milestone=KALI_MILESTONE,
-        )
 
 
 def _refuse_non_arch_aur(distro: DistroId) -> None:
@@ -562,7 +549,6 @@ def install_packages(
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
-    _refuse_kali(record)
     names = _checked(record, packages)
     if aur:
         _refuse_non_arch_aur(record.settings.distro)
@@ -625,7 +611,6 @@ def remove_packages(
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
-    _refuse_kali(record)
     names = _checked(record, packages)
     _refuse_protected(record, names)
     definition = load_distro(record.settings.distro.value)

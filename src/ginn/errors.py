@@ -484,7 +484,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=2,
         summary="realm '{realm}' cannot be used yet: {feature} arrives in {milestone}",
         remedy="use a realm this build can run; docs/roadmap.md lists the milestones",
-        source="FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code)",
+        source="ADR-003, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-SUPERVISOR-DOWN",

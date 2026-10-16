@@ -7,7 +7,7 @@ paths under tmp_path answer, so an attach runs for real. No test runs podman, su
 socket on the test host never becomes a grant.
 
 Covered: the exit status of the command, the login shell and the argv, `--root` as container root,
-HOME and the workdir, the proxy names as `--env NAME`, the refusals (unknown realm, Kali, the DR-020
+HOME and the workdir, the proxy names as `--env NAME`, the refusals (unknown realm, the DR-020
 states), auto-start, the lazy re-attach (only when a host source changed, none otherwise), a failed
 re-attach that leaves the realm running, a services-on realm that is never stopped, a stop that
 races the pre-check, and the share list rebuilt at enter.
@@ -488,9 +488,26 @@ def test_an_unknown_realm_is_refused_before_any_podman_call(
     assert fake.calls == []
 
 
-@pytest.mark.fr("FR-026")
-@pytest.mark.fr("FR-027")
-def test_a_kali_realm_is_refused_with_a_catalogued_error_and_no_podman_call(
+@pytest.mark.fr("FR-049")
+@pytest.mark.fr("IR-011")
+def test_a_kali_realm_runs_a_command_and_returns_its_status_like_debian(
+    env: OpEnv,
+    fake: EnterPodman,
+    user: HostUser,
+    lifecycle_hooks: LifecycleHooks,
+) -> None:
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, distro="kali")
+    command = ["sh", "-c", "exit 3"]
+    fake.exec_results[tuple(command)] = ExecResult(3, "", "")
+
+    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=command) == 3
+
+    assert exec_call(fake).argv == tuple(command)
+
+
+@pytest.mark.fr("FR-017")
+@pytest.mark.fr("FR-048")
+def test_a_stopped_kali_realm_starts_then_opens_the_login_shell_like_debian(
     env: OpEnv,
     fake: EnterPodman,
     user: HostUser,
@@ -498,12 +515,11 @@ def test_a_kali_realm_is_refused_with_a_catalogued_error_and_no_podman_call(
 ) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, distro="kali")
 
-    with pytest.raises(GinnError) as info:
-        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
+    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks)) == 0
 
-    assert info.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert info.value.details["milestone"] == "M10"
-    assert fake.calls == []
+    assert fake.ops().count("start") == 1
+    assert exec_call(fake).argv == ("/bin/bash", "-l")
+    assert stored(env, "lab").state is RealmState.RUNNING
 
 
 @pytest.mark.fr("DR-020")
