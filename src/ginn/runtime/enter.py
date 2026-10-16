@@ -34,12 +34,14 @@ The steps, in order:
 6. `podman exec` runs the command as the realm user (`--user uid:gid`, or `0:0` under `--root`),
    with HOME and the workdir at the host home path (FR-048). Under `--root` both are `/root`
    (`ROOT_HOME`). The session environment is passed, and the proxy names go as `--env NAME`
-   (ADR-004 amendment). A status of 125 is podman's own failure or the command's own 125, so enter
-   reads the listing once more. If the container no longer runs, GINN-E-REALM-STATE is raised.
-   Otherwise the status comes back unchanged. The exec is never retried. Under `--root`, the
-   `root_session` hook (EnterHooks) wraps the exec: it receives the record, the container and the
-   exec as a callable, and it returns the status of that exec. The hook records the packages that
-   a root session installs (FR-042 AC-1). Without the hook, or without `--root`, nothing wraps it.
+   (ADR-004 amendment). A status of 125 or 255 may be podman's own failure, so enter reads the
+   listing once more. Podman 5.8.8 answers an exec on a stopped container with 255 (ADR-014). If
+   the container no longer runs, GINN-E-REALM-STATE is raised. Otherwise the status comes back
+   unchanged, so the command's own 125 or 255 passes through. The exec is never retried. Under
+   `--root`, the `root_session` hook (EnterHooks) wraps the exec: it receives the record, the
+   container and the exec as a callable, and it returns the status of that exec. The hook records
+   the packages that a root session installs (FR-042 AC-1). Without the hook, or without `--root`,
+   nothing wraps it.
 
 A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm keeps running, since
 enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
@@ -63,9 +65,9 @@ registration.
 
 Decisions and open items (see the report): a user exec's workdir is the host home, not the host
 working directory; `--root` uses `/root` for HOME and the workdir, since a root write into the bound
-Realm Home would land on a subordinate uid (FR-042); a 125 is returned unchanged, and the CLI maps a
-ginn-side failure to EXEC_GINN_FAILURE (IR-011, T4.11); the pid comes from the listing, as ADR-010's
-amendment of 2026-10-13 decides.
+Realm Home would land on a subordinate uid (FR-042); a 125 or 255 is returned unchanged while the
+realm runs, and the CLI maps a ginn-side failure to EXEC_GINN_FAILURE (IR-011, T4.11); the pid
+comes from the listing, as ADR-010's amendment of 2026-10-13 decides.
 """
 
 import os
@@ -111,6 +113,11 @@ _ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmStat
 """The record states an enter accepts. Any other state is refused with GINN-E-REALM-STATE."""
 _HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
 """The container states that mean the process is not running. Any other state is running."""
+_PODMAN_EXEC_EXITS: Final = frozenset({PODMAN_ERROR_EXIT, 255})
+"""The exec statuses that may be podman's own failure. Podman 5.8.8 answers an exec on a container
+that is not running with 255 and returns it as a result, not as an error (ADR-014, amendment of
+2026-10-15). The listing decides which it was, so a 255 from a running realm's command is returned
+unchanged."""
 _KALI_MILESTONE: Final = "M10"
 """The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 _STOPPED_SINCE_LOOK: Final = "the realm stopped after the pre-check"
@@ -578,7 +585,7 @@ def _enter_look(
         status = hooks.root_session(record, cid, run)
     else:
         status = run()
-    if status == PODMAN_ERROR_EXIT and not _running(_listed(podman, name, cid)):
+    if status in _PODMAN_EXEC_EXITS and not _running(_listed(podman, name, cid)):
         raise make(
             "GINN-E-REALM-STATE",
             realm=name.value,

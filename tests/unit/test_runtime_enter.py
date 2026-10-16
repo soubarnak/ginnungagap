@@ -128,12 +128,15 @@ class AtTheLockedListing(EnterPodman):
 
 
 class StopsDuringExec(EnterPodman):
-    """The container stops as the exec starts, and podman reports its own failure (125)."""
+    """The container stops as the exec starts, and podman reports the failure as `exec_status`:
+    125 for its own failure, or 255 as podman 5.8.8 answers an exec on a stopped container."""
+
+    exec_status: int = PODMAN_ERROR_EXIT
 
     def exec_interactive(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> int:
         self.stop(container_id, 0)
         self._record("exec_interactive", container_id, tuple(argv))
-        return PODMAN_ERROR_EXIT
+        return self.exec_status
 
 
 class FakeTime:
@@ -1143,33 +1146,35 @@ def test_a_lock_that_finds_no_work_records_a_noop_step_and_attaches_nothing(
 
 @pytest.mark.fr("DR-020")
 @pytest.mark.fr("IR-011")
-def test_a_125_with_the_container_still_running_is_returned_unchanged(
+@pytest.mark.parametrize("status", [PODMAN_ERROR_EXIT, 255])
+def test_a_125_or_255_with_the_container_still_running_is_returned_unchanged(
     env: OpEnv,
     fake: EnterPodman,
     user: HostUser,
     lifecycle_hooks: LifecycleHooks,
+    status: int,
 ) -> None:
-    """The command's own 125 and podman's 125 look the same. With the realm still running, enter
-    returns the status and does not guess (IR-011)."""
+    """The command's own status and podman's failure look the same. With the realm still running,
+    enter returns the status and does not guess (IR-011)."""
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
-    fake.exec_results[("false",)] = ExecResult(PODMAN_ERROR_EXIT, "", "")
+    fake.exec_results[("false",)] = ExecResult(status, "", "")
 
-    assert (
-        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["false"])
-        == PODMAN_ERROR_EXIT
-    )
+    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["false"]) == status
     assert fake.ops().count("exec_interactive") == 1
 
 
 @pytest.mark.fr("DR-020")
 @pytest.mark.fr("IR-011")
-def test_a_125_after_the_container_stopped_is_a_realm_state_error_and_is_not_retried(
+@pytest.mark.parametrize("status", [PODMAN_ERROR_EXIT, 255])
+def test_a_125_or_255_after_the_container_stopped_is_a_realm_state_error_and_is_not_retried(
     env: OpEnv,
     lifecycle_hooks: LifecycleHooks,
     tmp_path: Path,
     user: HostUser,
+    status: int,
 ) -> None:
     fake = StopsDuringExec(root=str(tmp_path))
+    fake.exec_status = status
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
 
     with pytest.raises(GinnError) as info:

@@ -108,6 +108,8 @@ REMOVE_WIDENERS = frozenset(
 DEBIAN_REFRESHED = frozenset(
     {Verb.INSTALL, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.RESOLVE, Verb.ESTIMATE}
 )
+# The verbs a refresh may not precede: every verb but the five that read the sync data (ADR-011).
+REFRESH_REFUSED = sorted(verb.value for verb in Verb if verb not in DEBIAN_REFRESHED)
 NAMES = ["a;b", "$(id)", "x y", "pkg{lang}", "`id`", "a&&b", "*", "gimp|cat"]
 
 
@@ -525,6 +527,29 @@ def test_refresh_before_lists_only_the_verbs_a_metadata_refresh_makes_safe(
     name: str, expected: frozenset[Verb]
 ) -> None:
     assert load(name).refresh_before == expected
+
+
+@pytest.mark.fr("FR-023")
+@pytest.mark.fr("NFR-060")
+def test_refresh_before_accepts_every_verb_that_reads_the_sync_data() -> None:
+    raw = _base()
+    raw["refresh_before"] = sorted(verb.value for verb in DEBIAN_REFRESHED)
+    assert from_mapping(raw, source="fixture.toml").refresh_before == DEBIAN_REFRESHED
+
+
+@pytest.mark.fr("FR-023")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("name", REFRESH_REFUSED)
+def test_refresh_before_refuses_a_verb_that_reads_no_sync_data(name: str) -> None:
+    # A refresh only fetches the lists, so a verb that reads none gains nothing from it, and clean
+    # empties them (ADR-011). The refusal holds even next to a valid entry, here install.
+    raw = _base()
+    raw["refresh_before"] = ["install", name]
+    with pytest.raises(GinnError) as info:
+        from_mapping(raw, source="fixture.toml")
+    assert info.value.code == "GINN-E-DISTRO-DATA"
+    assert info.value.details["field"] == "refresh_before"
+    assert name in info.value.details["rule"]
 
 
 @pytest.mark.fr("FR-040")

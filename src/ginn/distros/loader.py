@@ -28,8 +28,8 @@ asks for an undefined one anyway gets GINN-E-INTERNAL: callers check the flag fi
 takes no packages, and no placeholder. `clean` takes no placeholder either.
 Every other verb is one argv. `refresh`
 loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
-lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
-refreshes what it needs:
+lists the verbs the caller runs `refresh` before (ADR-011). Only the verbs in `_REFRESH_PRECEDES`
+may be listed. The list is empty where the verb already refreshes what it needs:
 - Arch never refreshes the sync database outside a full upgrade (`upgrade` is `pacman -Syu`),
   because Arch does not support partial upgrades. Its `check-updates` syncs a scratch database
   selected by `--dbpath`, so the realm's own sync database is never written (ADR-011).
@@ -179,6 +179,12 @@ _OPTIONAL_VERB_KEYS: Final = frozenset(
     {Verb.REMOVE_CHECK.value, Verb.DB_CHECK.value, Verb.CLEAN.value}
 )
 _REQUIRED_VERB_KEYS: Final = frozenset(verb.value for verb in Verb) - _OPTIONAL_VERB_KEYS
+# The verbs a metadata refresh may precede (ADR-011): the ones that read the realm's sync data. The
+# verbs that need no lists (remove, remove-check, list-explicit, db-check) are not in it, and clean
+# is not either, because it empties the lists that a refresh would have fetched.
+_REFRESH_PRECEDES: Final = frozenset(
+    {Verb.INSTALL, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.RESOLVE, Verb.ESTIMATE}
+)
 
 
 class UpdateStatus(StrEnum):
@@ -262,9 +268,9 @@ class DistroDef:
     `signature_error` and `stale_metadata` are matched with search against the package manager's
     output (FR-012, ADR-011). `missing_package` is matched the same way, and None when the data
     omits the key (FR-022 AC-1). `refresh_before` lists the verbs that the caller runs `refresh`
-    before (ADR-011). `check_fatal_warnings` are matched with search against each stderr line of the
-    check-updates query, and a match makes the check fail closed (ADR-011). It is empty when the
-    data omits the key.
+    before (ADR-011), each one in `_REFRESH_PRECEDES`. `check_fatal_warnings` are matched with
+    search against each stderr line of the check-updates query, and a match makes the check fail
+    closed (ADR-011). It is empty when the data omits the key.
     """
 
     id: str
@@ -809,6 +815,10 @@ def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:
             raise reader.fail("refresh_before", f"unknown verb {name!r}")
         if name == Verb.REFRESH.value:
             raise reader.fail("refresh_before", "must not list refresh; it is the metadata load")
+        if Verb(name) not in _REFRESH_PRECEDES:
+            allowed = ", ".join(sorted(verb.value for verb in _REFRESH_PRECEDES))
+            rule = f"{name!r} reads no sync data; only {allowed} may follow a refresh"
+            raise reader.fail("refresh_before", rule)
     if len(set(names)) != len(names):
         raise reader.fail("refresh_before", "must not repeat a verb")
     return frozenset(Verb(name) for name in names)
