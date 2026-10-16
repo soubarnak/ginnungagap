@@ -61,6 +61,8 @@ from ginn.runtime.provision import (
     derived_image_name,
     install_argv,
     integration_step_argvs,
+    keep_id_entry_check_argv,
+    keep_id_entry_drop_argv,
     refresh_argv,
     stage_image_name,
 )
@@ -609,6 +611,29 @@ def test_a_services_on_create_makes_the_container_from_the_derived_image_and_sto
 
 
 @pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+def test_a_services_on_create_drops_the_keep_id_line_of_the_realm_uid_before_the_commit(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.30: the derived image must not keep podman's keep-id line for the realm uid. The realm
+    container's `--passwd-entry` is written only when the uid is absent, so a kept line would fail
+    its user check. The drop runs in the provisioning container, before the stage commit."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    drop = tuple(keep_id_entry_drop_argv(UID))
+    drops = [i for i, call in enumerate(fake.calls) if call.op == "exec" and call.args[1] == drop]
+    commits = [i for i, call in enumerate(fake.calls) if call.op == "commit"]
+    assert len(drops) == 1
+    assert drops[0] < commits[0]
+    assert fake.exec_calls[[c.argv for c in fake.exec_calls].index(drop)].user == "0:0"
+
+
+@pytest.mark.fr("FR-080")
 def test_a_services_on_create_writes_its_init_entries_and_the_derived_id_at_finish(
     env: OpEnv,
     fake: ScriptedPodman,
@@ -644,9 +669,10 @@ def test_the_services_on_set_is_the_refresh_the_init_set_the_integration_set_and
     name: str,
 ) -> None:
     """FR-010 for a services-on realm: the stage runs the refresh, the init set, the Integration
-    Package Set with its locale step, and the clean steps, in that order, in its own container. Arch
-    has no init set, but it still provisions, for the Integration Package Set and the commit
-    (ADR-015 Decision 3). The realm container runs none of them."""
+    Package Set with its locale step, the keep-id drop of the realm uid and its getent check
+    (T7.30), and the clean steps, in that order, in its own container. Arch has no init set, but it
+    still provisions, for the Integration Package Set and the commit (ADR-015 Decision 3). The realm
+    container runs none of them."""
     distro = load_distro(name)
     integration = distro.integration_set("en_US.UTF-8")
     expected: list[list[str]] = [refresh_argv(distro)]
@@ -656,6 +682,8 @@ def test_the_services_on_set_is_the_refresh_the_init_set_the_integration_set_and
     if integration.packages:
         expected.append(distro.argv(Verb.INSTALL, integration.packages))
     expected.extend(integration_step_argvs(integration))
+    expected.append(keep_id_entry_drop_argv(UID))
+    expected.append(keep_id_entry_check_argv(UID))
     expected.extend(clean_argvs(distro))
     hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
     wanted = request(home, name=name, distro=name, services=True, host_env={"LANG": "en_US.UTF-8"})

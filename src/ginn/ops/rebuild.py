@@ -477,6 +477,7 @@ class _Rebuild(_Create):
             lang=self._request.host_env.get("LANG"),
             ips_installed_bytes=plan.definition.integration_estimated_installed_bytes,
             keep_ids=frozenset(keep),
+            uid=plan.spec.uid,
         )
         journal = _ProvisionJournal(self._mutation, self._hooks.on_step)
         result = provision_init(provision_env, provision, journal)

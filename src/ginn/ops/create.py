@@ -496,6 +496,7 @@ class _Create:
             lang=self._request.host_env.get("LANG"),
             ips_installed_bytes=definition.integration_estimated_installed_bytes,
             keep_ids=frozenset(),
+            uid=plan.spec.uid,
         )
         # Registered before the stage runs. The undo finds nothing until the stage commits an image,
         # so an interrupt right after the stage returns, before `self._init` is set, leaves none.

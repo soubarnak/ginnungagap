@@ -42,11 +42,13 @@ from ginn.ops.provision import (
     verify_derived_id,
 )
 from ginn.podman.adapter import CreateSpec, ExecTarget
-from ginn.podman.models import ImageInfo
+from ginn.podman.models import ExecResult, ImageInfo
 from ginn.runtime.provision import (
     derived_image_name,
     derived_image_prefix,
     init_set_hash,
+    keep_id_entry_check_argv,
+    keep_id_entry_drop_argv,
     provision_create_spec,
     provision_name,
     reset_name,
@@ -68,6 +70,8 @@ STAGE = stage_image_name(REALM, GENERATION)
 PROVISION = provision_name(REALM, GENERATION)
 RESET = reset_name(REALM, GENERATION)
 EXEC_TARGET = ExecTarget(realm="ginnrealm", services=False, mutating=True)
+UID = 1000
+"""The host uid of the realm user, whose keep-id passwd line the stage removes (T7.30)."""
 BYPASS_TOKENS = (
     "nogpgcheck",
     "gpgcheck=0",
@@ -192,6 +196,7 @@ def _world(
         lang=lang,
         ips_installed_bytes=ADR_IPS_BYTES,
         keep_ids=keep_ids,
+        uid=UID,
     )
     return fake, env, plan, _Journal()
 
@@ -276,6 +281,79 @@ def test_the_stage_runs_its_steps_in_adr_order_and_leaves_one_derived_image(
     assert list(argvs[-len(clean) :]) == clean
 
 
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+def test_the_stage_drops_the_keep_id_line_of_the_realm_uid_before_the_stage_commit(
+    paths: OwnedPaths,
+) -> None:
+    """T7.30: podman's keep-id line for the realm uid must not reach the derived image. A realm
+    create keeps a line that is already there, so the user check would fail on every rebuild."""
+    fake, env, plan, journal = _world(paths)
+    provision_init(env, plan, journal)
+    drop = tuple(keep_id_entry_drop_argv(UID))
+    drops = [i for i, call in enumerate(fake.calls) if call.op == "exec" and call.args[1] == drop]
+    commits = [
+        i for i, call in enumerate(fake.calls) if call.op == "commit" and call.args[1] == STAGE
+    ]
+    assert len(drops) == 1 and len(commits) == 1
+    assert drops[0] < commits[0]
+    argvs = [call.argv for call in fake.exec_calls]
+    install = tuple(DEBIAN.argv(Verb.INSTALL, DEBIAN.services_packages))
+    check = tuple(keep_id_entry_check_argv(UID))
+    clean = tuple(DEBIAN.clean_steps[0])
+    assert argvs.index(install) < argvs.index(drop) < argvs.index(check) < argvs.index(clean)
+    assert fake.exec_calls[argvs.index(drop)].user == "0:0"
+    assert fake.exec_calls[argvs.index(check)].user == "0:0"
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+def test_a_getent_that_finds_no_account_at_the_uid_lets_the_stage_commit(paths: OwnedPaths) -> None:
+    """T7.30: exit 2 is the only proof that the uid has no account, and the stage then commits."""
+    fake, env, plan, journal = _world(paths)
+    fake.exec_results[tuple(keep_id_entry_check_argv(UID))] = ExecResult(2, "", "")
+    result = provision_init(env, plan, journal)
+    assert result.image_id == fake.images[DERIVED].id
+    assert any(call.op == "commit" and call.args[1] == STAGE for call in fake.calls)
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+@pytest.mark.parametrize("found", [0, 1])
+def test_an_account_at_the_uid_after_the_drop_refuses_the_stage_before_any_commit(
+    paths: OwnedPaths, found: int
+) -> None:
+    """T7.30: a base image that already has an account at the host uid, or a line the drop left,
+    is refused before the stage commit. No stage or derived image is made, and nothing is left."""
+    fake, env, plan, journal = _world(paths)
+    fake.exec_results[tuple(keep_id_entry_check_argv(UID))] = ExecResult(
+        found, "builder:x:1000:1000::/home/builder:/bin/sh\n", ""
+    )
+    with pytest.raises(GinnError) as info:
+        provision_init(env, plan, journal)
+    assert info.value.code == "GINN-E-INTERNAL"
+    assert not [call for call in fake.calls if call.op == "commit"]
+    assert STAGE not in fake.images
+    assert DERIVED not in fake.images
+    assert _leftovers(fake) == []
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+def test_a_failed_drop_is_an_internal_error_and_no_stage_image_is_committed(
+    paths: OwnedPaths,
+) -> None:
+    fake, env, plan, journal = _world(paths)
+    fake.exec_results[tuple(keep_id_entry_drop_argv(UID))] = ExecResult(
+        1, "", "sed: can't read /etc/passwd\n"
+    )
+    with pytest.raises(GinnError) as info:
+        provision_init(env, plan, journal)
+    assert info.value.code == "GINN-E-INTERNAL"
+    assert STAGE not in fake.images
+    assert _leftovers(fake) == []
+
+
 @pytest.mark.fr("NFR-SEC-005")
 @pytest.mark.fr("CR-007")
 def test_every_exec_is_an_argv_list_as_root_with_the_services_off_target(
@@ -329,10 +407,11 @@ def test_arch_provisions_for_its_integration_set_with_an_empty_init_set(paths: O
     result = provision_init(env, plan, journal)
     assert result.init_entries == ()
     assert STEP_INIT_INSTALLED in journal.steps
-    # No init install runs: refresh, then the Integration Package Set, its locale steps and clean.
+    # No init install runs: refresh, then the Integration Package Set, its locale steps, the keep-id
+    # drop and its getent check (T7.30), and clean.
     integration = ARCH.integration_set("C.UTF-8")
     expected = 1 + (1 if integration.packages else 0) + len(integration.steps)
-    expected += len(ARCH.clean_steps)
+    expected += 2 + len(ARCH.clean_steps)
     assert len(fake.exec_calls) == expected
     assert fake.exec_calls[0].argv == tuple(ARCH.argv(Verb.REFRESH))
 

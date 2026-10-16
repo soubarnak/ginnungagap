@@ -42,7 +42,7 @@ from ginn.packages.aur import AurOutcome
 from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.runtime.idle import IdleHooks
-from ginn.runtime.provision import derived_image_prefix, install_argv
+from ginn.runtime.provision import derived_image_prefix, install_argv, keep_id_entry_drop_argv
 from ginn.runtime.realm_security import SecurityHooks
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
 from ginn.security.caps import option_keys
@@ -630,6 +630,47 @@ def test_a_services_on_realm_is_rebuilt_through_its_runit_service_and_keeps_its_
     assert service_dir(env.paths, NAME).is_dir()
     assert down.is_file(), "the directory is kept as it was, with down present"
     assert generation_of(fake, 1) == []
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-048")
+def test_a_services_on_rebuild_drops_the_keep_id_line_of_its_uid_in_its_provisioning(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7.30: a services-on rebuild provisions a new derived image, and the drop of the realm uid's
+    keep-id line runs in that provisioning, before its commit. Without it, the rebuilt realm keeps
+    podman's keep-id line and fails GINN-E-REALM-USER. Only the calls of the rebuild are counted."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program="/usr/bin/ginn")
+    before = _create_services(env, fake, home, hooks)
+    RealmStore(env.paths).save(replace(before, manifest=[CURL]))
+    runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    tracked_starts(monkeypatch, fake, runit)
+    mark = len(fake.calls)
+    exec_mark = len(fake.exec_calls)
+    rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        lifecycle=_supervised_lifecycle(tmp_path, mountinfo, runit),
+    )
+    drop = tuple(keep_id_entry_drop_argv(UID))
+    rebuilt = list(enumerate(fake.calls))[mark:]
+    drops = [i for i, call in rebuilt if call.op == "exec" and call.args[1] == drop]
+    commits = [i for i, call in rebuilt if call.op == "commit"]
+    assert len(drops) == 1
+    assert drops[0] < commits[0]
+    (drop_call,) = [c for c in fake.exec_calls[exec_mark:] if c.argv == drop]
+    assert drop_call.user == "0:0"
 
 
 @pytest.mark.fr("FR-021")

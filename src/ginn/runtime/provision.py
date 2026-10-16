@@ -10,7 +10,9 @@ for that stage. It runs no podman and writes nothing:
 - the names and labels of each provisioning object, which the sweeps match (Decision 10);
 - the provisioning create (Decision 2b) and the reset create from the stage image (Decision 2g);
 - the stage and final commit `--change` lists (Decisions 2f and 2g);
-- the in-container steps, as argv lists built from the distribution data (Decision 3);
+- the in-container steps, as argv lists built from the distribution data (Decision 3), and the
+  removal of podman's keep-id passwd line before the stage commit, and its getent check
+  (Decision 2i);
 - the removal order of Decision 2h, as data.
 
 The argv goes to the adapter (`Podman.create`, `Podman.commit`, `Podman.exec`), which adds the
@@ -238,6 +240,44 @@ def clean_argvs(distro: DistroDef) -> list[list[str]]:
     return [list(step) for step in distro.clean_steps]
 
 
+GETENT_NOT_FOUND: Final = 2
+"""The exit status of `getent passwd <uid>` when no account has the uid (ADR-015 Decision 2i)."""
+
+
+def _checked_uid(uid: int) -> int:
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid < 0:
+        raise ValueError(f"the keep-id uid must be a non-negative int, not {uid!r}")
+    return uid
+
+
+def keep_id_entry_drop_argv(uid: int) -> list[str]:
+    """The argv that removes the keep-id passwd line of `uid` from the provisioning container
+    (ADR-015 Decision 2i, T7.30).
+
+    Under `--userns keep-id`, podman writes a default line for the uid into the container's
+    /etc/passwd when the image has no entry for it: `<name>:*:<uid>:<gid>:<GECOS>:/:/bin/sh`. The
+    provisioning container has no `--passwd-entry` (Decision 2b), so the line reaches the stage
+    commit and then the derived image. A realm container made from that image keeps the line,
+    because podman writes its `--passwd-entry` only when the uid is absent, and the user check then
+    fails (GINN-E-REALM-USER). Removing the line before the commit leaves the derived image with no
+    line for the realm's uid.
+
+    The pattern matches the uid field and the `*` password field. Podman's line has the `*`, and
+    the accounts of a pinned base have `x`, so no account of the base is removed.
+    """
+    return ["sed", "-i", rf"/^[^:]*:\*:{_checked_uid(uid)}:/d", "/etc/passwd"]
+
+
+def keep_id_entry_check_argv(uid: int) -> list[str]:
+    """The argv that proves no account has the uid any more (ADR-015 Decision 2i, T7.30).
+
+    `getent passwd <uid>` exits `GETENT_NOT_FOUND` only when the container has no account for the
+    uid. Any other status, 0 included, means a line is still there, from podman or from the pinned
+    base, and the stage is refused before its commit.
+    """
+    return ["getent", "passwd", str(_checked_uid(uid))]
+
+
 def removal_steps(
     realm: RealmName, generation: int, stage_image_id: str
 ) -> tuple[tuple[Literal["container", "image"], str], ...]:
@@ -284,6 +324,7 @@ def _init_and_base_labels(init_set: str, base_digest: str) -> list[str]:
 
 __all__ = [
     "DERIVED_IMAGE_PREFIX",
+    "GETENT_NOT_FOUND",
     "LABEL_BASE_DIGEST",
     "LABEL_INIT_SET",
     "LABEL_PROVISION",
@@ -296,6 +337,8 @@ __all__ = [
     "init_set_hash",
     "install_argv",
     "integration_step_argvs",
+    "keep_id_entry_check_argv",
+    "keep_id_entry_drop_argv",
     "manifest_digest",
     "provision_create_spec",
     "provision_label",

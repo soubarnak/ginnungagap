@@ -11,6 +11,8 @@ ADR-015 Decision 2:
   signature checks on (FR-012, NFR-SEC-005), and each exec carries the services-off target
   (ADR-014);
 - `check_init` refuses an image with no `/sbin/init` (GINN-E-NO-INIT) before the commit;
+- podman's keep-id passwd line of the realm uid is removed from the provisioning container, so
+  the derived image carries no line for the uid, and getent proves it (T7.30, ADR-015 Decision 2i);
 - a stage commit, then a reset container and its commit, give the derived image. It keeps the
   pinned user and environment, has a null entrypoint and command, and carries no realm label
   (CR-007). Its ID is checked (DR-040);
@@ -51,9 +53,11 @@ from ginn.podman.adapter import (
     Podman,
     require_image_id_ref,
 )
-from ginn.podman.models import ImageInfo
+from ginn.podman.models import ExecResult, ImageInfo
 from ginn.runtime.provision import (
+    GETENT_NOT_FOUND,
     LABEL_PROVISION,
+    ROOT_USER,
     clean_argvs,
     derived_image_name,
     derived_image_prefix,
@@ -61,6 +65,8 @@ from ginn.runtime.provision import (
     init_set_hash,
     install_argv,
     integration_step_argvs,
+    keep_id_entry_check_argv,
+    keep_id_entry_drop_argv,
     manifest_digest,
     provision_create_spec,
     provision_name,
@@ -135,6 +141,9 @@ class ProvisionPlan:
     `building_init_image_id` (ADR-015 Decision 13). A leftover of any generation with one of these
     IDs stays. A rebuild passes its live image here, so the sweep before the build cannot take it.
     """
+    uid: int
+    """The host uid of the realm user. The keep-id passwd line of this uid is removed from the
+    provisioning container before the stage commit (ADR-015 Decision 2i, T7.30)."""
 
 
 @dataclass(frozen=True)
@@ -357,6 +366,7 @@ class _Stage:
         self._create_provisioning()
         self._install()
         self._require_init()
+        self._drop_keep_id_entry()
         self._clean()
         self._check_staging()
         stage_id = self._stage(changes)
@@ -452,6 +462,33 @@ class _Stage:
             image=self._plan.image_digest_ref,
             realm=self._realm,
         )
+
+    def _drop_keep_id_entry(self) -> None:
+        """Remove podman's keep-id line of the realm uid, then prove it is gone (ADR-015 2i).
+
+        Podman writes that line into the provisioning container's /etc/passwd, because the container
+        is keep-id with no `--passwd-entry`. The stage commit would bake it into the derived image,
+        and the realm's create would then keep it (GINN-E-REALM-USER). Both steps run as root, and
+        neither is a package step, so neither goes through `run_step`. A failed drop is an internal
+        error. So is a getent that does not exit GETENT_NOT_FOUND: an account at the uid is still
+        there, from podman or from the pinned base, and the stage is refused before its commit.
+        Nothing is retried.
+        """
+        dropped = self._root_exec(keep_id_entry_drop_argv(self._plan.uid))
+        if dropped.exit_code != 0:
+            raise _internal(
+                f"the keep-id passwd line was not removed (exit {dropped.exit_code}): "
+                f"{dropped.stderr.strip()}"
+            )
+        found = self._root_exec(keep_id_entry_check_argv(self._plan.uid))
+        if found.exit_code != GETENT_NOT_FOUND:
+            raise _internal(
+                f"an account still has uid {self._plan.uid} in the provisioning container "
+                f"(getent exit {found.exit_code}): {found.stdout.strip()}"
+            )
+
+    def _root_exec(self, argv: list[str]) -> ExecResult:
+        return self._podman.exec(self._container(), argv, target=self._target, user=ROOT_USER)
 
     def _clean(self) -> None:
         for argv in self._argvs.clean:

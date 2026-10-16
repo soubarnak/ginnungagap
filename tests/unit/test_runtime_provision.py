@@ -6,6 +6,8 @@ will send. The argv must match the goldens exactly, because podman reads each el
 """
 
 import hashlib
+import subprocess  # noqa: S404 - fixed argv lists only, never a shell (NFR-SEC-005)
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,7 @@ from ginn.distros.loader import Verb
 from ginn.domain.names import RealmName
 from ginn.errors import GinnError
 from ginn.runtime.provision import (
+    GETENT_NOT_FOUND,
     clean_argvs,
     derived_image_name,
     derived_image_prefix,
@@ -22,6 +25,8 @@ from ginn.runtime.provision import (
     init_set_hash,
     install_argv,
     integration_step_argvs,
+    keep_id_entry_check_argv,
+    keep_id_entry_drop_argv,
     manifest_digest,
     provision_create_spec,
     provision_label,
@@ -431,3 +436,50 @@ def test_the_removal_order_is_reset_then_stage_by_id_then_provision() -> None:
     )
     with pytest.raises(ValueError, match="ADR-015"):
         removal_steps(REALM, GEN, "sha256:" + STAGE_ID)
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+def test_the_keep_id_drop_is_a_fixed_sed_argv_on_the_uid_field() -> None:
+    argv = keep_id_entry_drop_argv(1000)
+    assert argv == ["sed", "-i", r"/^[^:]*:\*:1000:/d", "/etc/passwd"]
+    assert all(type(arg) is str for arg in argv)
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+def test_the_real_sed_argv_removes_only_podman_line_of_the_uid(tmp_path: Path) -> None:
+    """The drop argv runs for real, with no shell, on a passwd file. The `*` line of the uid goes;
+    an `x` line of the same uid (a pinned base's own account) and a `*` line of uid 10000 stay."""
+    passwd = tmp_path / "passwd"
+    passwd.write_text(
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "soubarna:*:1000:1000:Soubarna:/:/bin/sh\n"
+        "builder:x:1000:1000::/home/builder:/bin/sh\n"
+        "big:*:10000:10000:big:/:/bin/sh\n",
+        encoding="utf-8",
+    )
+    argv = [*keep_id_entry_drop_argv(1000)[:-1], str(passwd)]
+    subprocess.run(  # noqa: S603 - fixed argv, no shell
+        argv, check=True, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30
+    )
+    assert passwd.read_text(encoding="utf-8") == (
+        "root:x:0:0:root:/root:/bin/bash\n"
+        "builder:x:1000:1000::/home/builder:/bin/sh\n"
+        "big:*:10000:10000:big:/:/bin/sh\n"
+    )
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+def test_the_getent_check_is_a_fixed_argv_that_passes_only_on_exit_two() -> None:
+    assert keep_id_entry_check_argv(1000) == ["getent", "passwd", "1000"]
+    assert GETENT_NOT_FOUND == 2
+    assert all(type(arg) is str for arg in keep_id_entry_check_argv(1000))
+
+
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("bad", [-1, True, "1000", 1000.0])
+def test_a_keep_id_uid_that_is_not_a_non_negative_int_is_refused(bad: int | str | float) -> None:
+    with pytest.raises(ValueError, match="non-negative int"):
+        keep_id_entry_drop_argv(bad)  # type: ignore[arg-type]
