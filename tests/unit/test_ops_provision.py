@@ -55,6 +55,7 @@ from ginn.runtime.provision import (
     stage_image_name,
 )
 from ginn.store.paths import OwnedPaths
+from ginn.trust import manifest as trust
 from tests.fakes.fake_podman import FakePodman
 
 PIN_DIGEST = "sha256:" + "a" * 64
@@ -82,8 +83,6 @@ BYPASS_TOKENS = (
     "SigLevel",
 )
 """Words that would turn a signature check off in any package manager's argv (FR-012)."""
-ADR_BASE_BYTES = 81_256_893
-ADR_CACHE_PEAK_BYTES = 21_576_652
 ADR_IPS_BYTES = 23_975_936
 
 
@@ -595,26 +594,79 @@ def test_a_failed_stage_commit_is_image_derived_and_leaves_nothing_behind(
     assert set(fake.images) == {PIN_REF}
 
 
+MEASURED_PEAK_BYTES = {
+    "debian": 347_488_256,
+    "fedora": 519_958_528,
+    "kali": 520_736_768,
+    "arch": 1_347_932_160,
+}
+"""T7.33: the allocated growth of the podman root at the peak of a services-on create from empty
+storage, on podman 5.8.8 with ext4 4 KiB blocks, measured with `du -x` (ADR-015 Decision 11)."""
+
+
 @pytest.mark.fr("FR-121")
-def test_the_storage_formula_matches_the_adr_worked_example_for_debian() -> None:
-    raw = ADR_BASE_BYTES + 2 * (DEBIAN.services_estimated_installed_bytes + ADR_IPS_BYTES)
-    raw += ADR_CACHE_PEAK_BYTES
-    assert raw == 189_117_833
-    # The 1.10 margin rounds up (ADR-015 Decision 11): 189,117,833 x 1.10 = 208,029,616.3.
-    assert storage_required_bytes(
-        ADR_BASE_BYTES,
-        DEBIAN.services_estimated_installed_bytes,
-        ADR_IPS_BYTES,
-        ADR_CACHE_PEAK_BYTES,
-    ) == estimate_required(raw)
-    assert estimate_required(raw) == 208_029_617
+def test_the_storage_formula_takes_the_end_state_of_a_debian_create() -> None:
+    base = DEBIAN.base_layer_allocated_bytes
+    stage = DEBIAN.stage_layer_allocated_bytes
+    assert (base, stage) == (87_920_640, 43_008_000)
+    # Three base-sized layers (the pulled layer, the keep-id copy, the realm's flattened copy) and
+    # two stage layers (the stage and the realm's copy of it): 3 x 87,920,640 + 2 x 43,008,000.
+    end_state = 3 * base + 2 * stage
+    assert end_state == 349_777_920
+    required = storage_required_bytes(
+        base,
+        stage,
+        DEBIAN.package_cache_peak_bytes,
+        download_bytes=trust.load().entry("debian").compressed_size_bytes,
+        base_pulled=True,
+    )
+    assert required == estimate_required(end_state) == 384_755_712
     assert tmpdir_required_bytes(19_166_208, ADR_IPS_BYTES) == 47_456_359
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize("distro", sorted(MEASURED_PEAK_BYTES))
+def test_the_storage_formula_bounds_each_measured_peak(distro: str) -> None:
+    """ADR-015 Decision 11 (T7.33): the formula with the 1.10 margin is at or above the measured
+    peak of a services-on create on every distribution. The end state is the largest term, so the
+    formula is the end state with the base pulled, times the margin."""
+    definition = load(distro)
+    base = definition.base_layer_allocated_bytes
+    stage = definition.stage_layer_allocated_bytes
+    required = storage_required_bytes(
+        base,
+        stage,
+        definition.package_cache_peak_bytes,
+        download_bytes=trust.load().entry(distro).compressed_size_bytes,
+        base_pulled=True,
+    )
+    assert required == estimate_required(3 * base + 2 * stage), distro
+    peak = MEASURED_PEAK_BYTES[distro]
+    assert required >= peak, (distro, required, peak)
+    # The headroom is at least 10 percent of the measured peak on every distribution.
+    assert required * 100 >= peak * 110, (distro, required, peak)
+
+
+@pytest.mark.fr("FR-121")
+def test_the_storage_formula_takes_the_largest_of_its_three_points() -> None:
+    # The provisioning point wins: two base layers, a large cache and no stage.
+    assert storage_required_bytes(1_000, 0, 10_000, download_bytes=0, base_pulled=True) == 13_200
+    # The pull point wins: a download larger than the layers.
+    assert storage_required_bytes(1_000, 0, 0, download_bytes=50_000, base_pulled=True) == 56_100
+    # The base is in storage: the copy is counted, the pull is not, so the end state is 2B + 2S.
+    assert storage_required_bytes(1_000, 500, 0, download_bytes=50_000, base_pulled=False) == 3_300
 
 
 @pytest.mark.fr("FR-121")
 def test_the_formulas_refuse_a_negative_estimate() -> None:
     with pytest.raises(ValueError):
-        storage_required_bytes(-1, 0, 0, 0)
+        storage_required_bytes(-1, 0, 0, download_bytes=0, base_pulled=True)
+    with pytest.raises(ValueError):
+        storage_required_bytes(0, -1, 0, download_bytes=0, base_pulled=True)
+    with pytest.raises(ValueError):
+        storage_required_bytes(0, 0, -1, download_bytes=0, base_pulled=False)
+    with pytest.raises(ValueError):
+        storage_required_bytes(0, 0, 0, download_bytes=-1, base_pulled=True)
     with pytest.raises(ValueError):
         tmpdir_required_bytes(0, -1)
 

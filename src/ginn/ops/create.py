@@ -110,7 +110,6 @@ from ginn.ops._create_plan import (
     SizeEstimate,
     _Plan,
     _validate,
-    estimate_bytes,
     human_bytes,
     required_bytes,
 )
@@ -126,6 +125,7 @@ from ginn.ops.provision import (
     check_init,
     provision_init,
     remove_derived,
+    require_storage_layers,
     storage_required_bytes,
 )
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
@@ -223,21 +223,22 @@ def _storage_required(plan: _Plan, *, base_in_storage: bool) -> int:
     """The podman storage that a create needs before its first effect (FR-121).
 
     A services-off create needs the base estimate times 1.10, as it always did. A services-on create
-    needs the disk formula of ADR-015 Decision 11, which holds the base once, the init set and the
-    Integration Package Set twice (the layer and the commit), and the package cache. The base term
-    is left out when the pinned image is already in storage, so a resume pays only for the rest.
-    The base term is `estimate_bytes`, the download plus the installed estimate. It is above the
-    measured base of ADR-015 Decision 11 on purpose: the pull counts the download too.
+    needs the storage formula of ADR-015 Decision 11 (`storage_required_bytes`), with the measured
+    base and stage layers of the distribution data (T7.33). `base_in_storage` says that the pinned
+    image is already here, so no pull is counted and the base layer is not new bytes. The keep-id
+    copy of the base is still counted, as a worst case. A services-on create whose distribution
+    data has no measured layer is refused first (`require_storage_layers`).
     """
     if not plan.spec.services:
         return required_bytes(plan.entry)
     definition = plan.definition
-    base = 0 if base_in_storage else estimate_bytes(plan.entry)
+    require_storage_layers(definition)
     return storage_required_bytes(
-        base,
-        definition.services_estimated_installed_bytes,
-        definition.integration_estimated_installed_bytes,
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
         definition.package_cache_peak_bytes,
+        download_bytes=plan.entry.compressed_size_bytes,
+        base_pulled=not base_in_storage,
     )
 
 
@@ -1016,7 +1017,6 @@ __all__ = [
     "CreateResult",
     "SizeEstimate",
     "create_realm",
-    "estimate_bytes",
     "human_bytes",
     "required_bytes",
 ]

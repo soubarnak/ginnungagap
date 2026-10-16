@@ -123,7 +123,7 @@ from ginn.domain.permissions import Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_realm
-from ginn.ops._create_plan import CreateHooks, CreateRequest, _Plan, _validate, estimate_bytes
+from ginn.ops._create_plan import CreateHooks, CreateRequest, _Plan, _validate
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.create import ROLLBACK_STOP_TIMEOUT_S, STOP_TIMEOUT_S, _Create
 from ginn.ops.disk import StatVfs, check_free, check_free_paths, estimate_required
@@ -144,6 +144,7 @@ from ginn.ops.provision import (
     ProvisionPlan,
     provision_init,
     remove_derived,
+    require_storage_layers,
     storage_required_bytes,
     tmpdir_required_bytes,
 )
@@ -440,14 +441,18 @@ class _Rebuild(_Create):
             )
         if self._source is ImageSource.PROVISION:
             definition = self._plan.definition
+            # The formula is used for a services-off provision too (a realm with a derived image),
+            # so the measured layers are required here whatever the services mode.
+            require_storage_layers(definition)
             init_bytes = definition.services_estimated_installed_bytes
             ips_bytes = definition.integration_estimated_installed_bytes
             paths = self._env.paths
             required = storage_required_bytes(
-                estimate_bytes(self._plan.entry),
-                init_bytes,
-                ips_bytes,
+                definition.base_layer_allocated_bytes,
+                definition.stage_layer_allocated_bytes,
                 definition.package_cache_peak_bytes,
+                download_bytes=self._plan.entry.compressed_size_bytes,
+                base_pulled=True,
             )
             check_free_paths(
                 [paths.podman_root, paths.homes], required, statvfs=self._hooks.statvfs

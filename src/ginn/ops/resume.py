@@ -65,7 +65,7 @@ from ginn.ops._create_plan import CreateHooks, CreateRequest, _validate
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateResult, _Create, run_journaled
 from ginn.ops.delete import remove_image
-from ginn.ops.provision import remove_derived
+from ginn.ops.provision import remove_derived, require_storage_layers
 from ginn.podman.adapter import Podman
 from ginn.services.runit_user import remove_service, service_dir
 from ginn.services.supervise import signal_runsv_down
@@ -255,9 +255,13 @@ class _Resume(_Create):
         create records it. A missing image is downloaded, and then the full check runs.
 
         A services-on resume provisions again, so the stage's terms are always checked (ADR-015
-        Decision 11). The base term is left out only when the image is in storage. A create has no
-        reuse branch, since it always provisions, so no reuse term applies here.
+        Decision 11). Only the pull is left out when the image is in storage. The keep-id copy of
+        the base and the flattened copy of the derived image still count. A create has no reuse
+        branch, since it always provisions, so no reuse term applies here. The measured layers are
+        checked before the first podman call (`require_storage_layers`).
         """
+        if self._plan.spec.services:
+            require_storage_layers(self._plan.definition)
         local = self._podman.image_exists(self._plan.spec.image)
         if local and not self._plan.spec.services:
             self._step("space-checked")

@@ -26,6 +26,7 @@ from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks, CreateResult, create_realm
+from ginn.ops.provision import storage_required_bytes
 from ginn.ops.recovery import OUTCOME_BROKEN, recover
 from ginn.ops.resume import resume_create
 from ginn.podman.adapter import CreateSpec
@@ -916,21 +917,30 @@ def test_a_services_on_resume_checks_the_provisioning_terms_even_with_its_image_
     mountinfo: Path,
 ) -> None:
     """A services-off resume with its image in storage checks no space. A services-on resume
-    provisions again, so the init set, the Integration Package Set and the cache are checked, with
-    the base term left out (ADR-015 Decision 11). Free space below that refuses before any removal.
-    """
+    provisions again, so the storage formula is checked with the pull left out (ADR-015 Decision 11,
+    T7.33). The keep-id copy of the base and the flattened copy still count. Free space just below
+    that figure refuses before any removal."""
     _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
     assert _load(env).image_ref in fake.images
     containers = dict(fake.containers)
+    definition = load_distro("debian")
+    needed = storage_required_bytes(
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
+        definition.package_cache_peak_bytes,
+        download_bytes=trust.load().entry("debian").compressed_size_bytes,
+        base_pulled=False,
+    )
 
     with pytest.raises(GinnError) as excinfo:
         _resume(
             env,
             fake,
             home,
-            _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(100_000_000)),
+            _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1)),
         )
 
     assert excinfo.value.code == "GINN-E-DISK-SPACE"
+    assert excinfo.value.details["needed"] == f"{needed} bytes"
     assert fake.containers == containers
     assert _load(env).state is RealmState.BROKEN

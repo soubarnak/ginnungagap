@@ -703,17 +703,19 @@ def test_a_services_on_create_needs_the_disk_formula_before_its_pull(
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    """ADR-015 Decision 11: the free space covers the base estimate, but not the init set, the
-    Integration Package Set and the package cache. The create refuses before its pull. A
-    services-off create with the same free space goes on: it needs only the base estimate."""
+    """ADR-015 Decision 11: the free space covers the base estimate, but not the copies of the base,
+    the stage layer and the package cache of a services-on create (T7.33). The create refuses before
+    its pull. A services-off create with the same free space goes on: it needs only the base
+    estimate."""
     entry = trust.load().entry("debian")
     definition = load_distro("debian")
     base_only = required_bytes(entry)
     formula = storage_required_bytes(
-        _create_plan.estimate_bytes(entry),
-        definition.services_estimated_installed_bytes,
-        definition.integration_estimated_installed_bytes,
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
         definition.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
     )
     assert base_only < formula
     hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(base_only))
@@ -722,6 +724,37 @@ def test_a_services_on_create_needs_the_disk_formula_before_its_pull(
     assert caught.value.code == "GINN-E-DISK-SPACE"
     assert caught.value.details["needed"] == f"{formula} bytes"
     assert "pull" not in ops_of(fake)
+    assert_nothing_left(env, fake)
+    result = create_realm(env, fake, request(home), hooks=hooks)
+    assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("field", ["base_layer_allocated_bytes", "stage_layer_allocated_bytes"])
+def test_a_services_on_create_refuses_missing_layer_sizes_before_any_podman_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """NFR-060, ADR-015 Decision 11: the loader defaults the measured layer sizes to 0, so a
+    fixture loads without them. A services-on create would estimate near zero from them, so it
+    refuses before its first podman call with GINN-E-DISTRO-DATA, which names the file and the key.
+    A services-off create of the same distribution does not read them, and goes on."""
+    shipped = load_distro("debian")
+    monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-DISTRO-DATA"
+    assert caught.value.details["file"] == shipped.source
+    assert caught.value.details["field"] == field
+    assert fake.calls == []
     assert_nothing_left(env, fake)
     result = create_realm(env, fake, request(home), hooks=hooks)
     assert result.record.state is RealmState.STOPPED

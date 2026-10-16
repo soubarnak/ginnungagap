@@ -52,6 +52,12 @@ package_cache_peak_bytes = 21576652
 # ADR-015 Decision 11: the writable layer of one services-off container from the derived image,
 # after an htop install (S-11, the reuse term of the disk check, FR-121).
 writable_layer_bytes = 23454481
+# ADR-015 Decision 11 (T7.33): the allocated bytes of the pinned base layer (the pulled layer)
+# and of the stage layer (the provisioning commit), measured on podman 5.8.8 on ext4 with 4 KiB
+# blocks on 2026-10-16. Reproduced across two runs. Tied to the pin in trust.toml: a pin rotation
+# (ADR-005) re-measures both.
+base_layer_allocated_bytes = 87920640
+stage_layer_allocated_bytes = 43008000
 
 [integration]
 packages = ["ca-certificates", "locales"]

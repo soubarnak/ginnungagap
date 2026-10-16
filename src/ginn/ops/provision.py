@@ -23,7 +23,8 @@ does (FR-120, DR-018). A SIGKILL cannot roll back. `sweep_provisions` and `remov
 it leaves, and recovery and resume call them (FR-122, ADR-015 Decision 13).
 
 Disk (FR-121). `storage_required_bytes` and `tmpdir_required_bytes` are the formulas of ADR-015
-Decision 11. The commit stages its image copy in `paths.image_tmp`, so that directory is checked
+Decision 11, and `require_storage_layers` refuses a distribution whose measured layers are 0. The
+commit stages its image copy in `paths.image_tmp`, so that directory is checked
 with its own formula before the stage commit. The storage formula belongs to the caller's precheck,
 before the pull, because this stage runs after the base is already in storage.
 
@@ -222,21 +223,66 @@ def verify_derived_id(podman: Podman, realm: str, name: str, expected_id: str) -
         raise make("GINN-E-IMAGE-DERIVED", realm=realm, detail=detail)
 
 
+def require_storage_layers(definition: DistroDef) -> None:
+    """Refuse a distribution whose measured layer sizes are missing, before any podman call.
+
+    The loader defaults `base_layer_allocated_bytes` and `stage_layer_allocated_bytes` to 0, so a
+    fixture loads without them (NFR-060). Shipped data sets both. A services-on create, and a
+    provision build, feed them to `storage_required_bytes`, where a 0 gives a near-zero estimate.
+    So the caller checks them first, and this raises GINN-E-DISTRO-DATA, which names the file and
+    the key (FR-121, ADR-015 Decision 11).
+    """
+    layers = (
+        ("base_layer_allocated_bytes", definition.base_layer_allocated_bytes),
+        ("stage_layer_allocated_bytes", definition.stage_layer_allocated_bytes),
+    )
+    for field, value in layers:
+        if value == 0:
+            raise make(
+                "GINN-E-DISTRO-DATA",
+                file=definition.source,
+                field=field,
+                rule="is 0; a build that provisions needs the measured layer size (FR-121)",
+            )
+
+
 def storage_required_bytes(
-    base_bytes: int, init_bytes: int, ips_bytes: int, cache_peak_bytes: int
+    base_bytes: int,
+    stage_bytes: int,
+    cache_peak_bytes: int,
+    *,
+    download_bytes: int,
+    base_pulled: bool,
 ) -> int:
     """The podman storage that a services-on create needs (FR-121, ADR-015 Decision 11).
 
-    It is `base + 2 x (init + ips) + cache_peak`, times the 1.10 margin, rounded up. The base is
-    counted once, because it is shared. The factor 2 covers the provisioning container's layer and
-    the committed layer, which exist together during the commit. `cache_peak` is the package cache
-    during the installs, before the clean. There is no keep-id term (S-11).
+    The sizes are measured (T7.33, podman 5.8.8, allocated bytes on ext4): `base_bytes` is the base
+    layer, `stage_bytes` the stage layer after the clean (the init set, the Integration Package Set,
+    the locale steps and the refresh residue), and `cache_peak_bytes` the bytes that the clean
+    removes, so the provisioning layer before the clean is the stage plus the cache.
+    `download_bytes` is the compressed base, which the pull holds while it writes the layer.
+
+    A keep-id container gets its own copy of the layers it runs from (T7.33), so the new
+    base-sized layers are the pulled layer, when `base_pulled`, and the keep-id copy of the base at
+    the provisioning create. `copies` counts them. The realm create then makes a flattened copy of
+    the derived image, which is one more base-sized layer and the stage. The need is the largest of
+    three points: the pull (download and layer), the provisioning (the copies, the cache and the
+    stage) and the end state (the copies, the stage and the flattened copy, which is the largest
+    term on every measured distribution). Without `base_pulled`, the copy is taken as absent, so
+    the bound holds when no container has used the base yet. A cached copy makes the need smaller.
+    The result is the peak times the 1.10 margin, rounded up.
     """
-    for value in (base_bytes, init_bytes, ips_bytes, cache_peak_bytes):
+    for value in (base_bytes, stage_bytes, cache_peak_bytes, download_bytes):
         if value < 0:
             raise ValueError(f"FR-121: a size estimate is not negative, got {value}")
-    total = base_bytes + 2 * (init_bytes + ips_bytes) + cache_peak_bytes
-    return estimate_required(total)
+    copies = 2 if base_pulled else 1
+    peak = max(
+        copies * base_bytes + stage_bytes + cache_peak_bytes,
+        (copies + 1) * base_bytes + 2 * stage_bytes,
+    )
+    if base_pulled:
+        peak = max(peak, download_bytes + base_bytes)
+    return estimate_required(peak)
 
 
 def tmpdir_required_bytes(init_bytes: int, ips_bytes: int) -> int:
@@ -667,6 +713,7 @@ __all__ = [
     "check_init",
     "provision_init",
     "remove_derived",
+    "require_storage_layers",
     "storage_required_bytes",
     "sweep_provisions",
     "tmpdir_required_bytes",

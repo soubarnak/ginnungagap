@@ -816,9 +816,10 @@ CLEAN_ARGV = {
     "kali": _APT_CLEAN,
 }
 # The inputs of the disk formula of a services-on create (FR-121, ADR-015 Decision 11): the
-# installed bytes of the Integration Package Set, and the package cache before the clean. S-11's.
+# installed bytes of the Integration Package Set, and the bytes the clean removes. S-11's, except
+# arch's cache, which T7.33 measured.
 DISK_INPUTS: dict[str, tuple[int, int]] = {
-    "arch": (0, 2_606_348),
+    "arch": (0, 5_560_284),
     "debian": (23_975_936, 21_576_652),
     "fedora": (6_000_393, 109_206_482),
     "kali": (24_147_968, 34_431_137),
@@ -858,29 +859,55 @@ def test_the_disk_formula_inputs_are_optional_and_default_to_zero() -> None:
     assert fixture.integration_estimated_installed_bytes == 0
     assert fixture.package_cache_peak_bytes == 0
     assert fixture.writable_layer_bytes == 0
+    assert fixture.base_layer_allocated_bytes == 0
+    assert fixture.stage_layer_allocated_bytes == 0
     raw = _base()
     raw["integration_estimated_installed_bytes"] = 4096
     raw["package_cache_peak_bytes"] = 8192
     raw["writable_layer_bytes"] = 2048
+    raw["base_layer_allocated_bytes"] = 16384
+    raw["stage_layer_allocated_bytes"] = 1024
     declared = from_mapping(raw, source="fixture.toml")
     assert declared.integration_estimated_installed_bytes == 4096
     assert declared.package_cache_peak_bytes == 8192
     assert declared.writable_layer_bytes == 2048
+    assert declared.base_layer_allocated_bytes == 16384
+    assert declared.stage_layer_allocated_bytes == 1024
+
+
+# ADR-015 Decision 11 (T7.33): the allocated base and stage layers, from the traces of 2026-10-16.
+MEASURED_LAYERS = {
+    "arch": (434_233_344, 35_004_416),
+    "debian": (87_920_640, 43_008_000),
+    "fedora": (151_834_624, 35_848_192),
+    "kali": (136_224_768, 57_520_128),
+}
 
 
 @pytest.mark.fr("NFR-060")
 @pytest.mark.fr("FR-121")
-def test_the_disk_formula_gives_the_adr_worked_example_for_debian() -> None:
-    """ADR-015 Decision 11: debian's services-on create needs 189,117,833 bytes before the 1.10
-    factor, and 208,029,617 with it. The base's size is S-11's measured image size."""
+@pytest.mark.parametrize("name", SHIPPED)
+def test_the_measured_layers_are_the_t733_figures(name: str) -> None:
+    definition = load(name)
+    base, stage = MEASURED_LAYERS[name]
+    assert definition.base_layer_allocated_bytes == base
+    assert definition.stage_layer_allocated_bytes == stage
+
+
+@pytest.mark.fr("NFR-060")
+@pytest.mark.fr("FR-121")
+def test_the_disk_formula_gives_the_measured_end_state_for_debian() -> None:
+    """ADR-015 Decision 11 (T7.33): debian's services-on create ends with three base-sized layers
+    and two stage layers, 349,777,920 bytes, and 384,755,712 with the 1.10 factor."""
     debian = load("debian")
     required = storage_required_bytes(
-        81_256_893,
-        debian.services_estimated_installed_bytes,
-        debian.integration_estimated_installed_bytes,
+        debian.base_layer_allocated_bytes,
+        debian.stage_layer_allocated_bytes,
         debian.package_cache_peak_bytes,
+        download_bytes=29_843_347,
+        base_pulled=True,
     )
-    assert required == 208_029_617
+    assert required == 384_755_712
 
 
 @pytest.mark.fr("FR-013")
@@ -1365,6 +1392,12 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("writable layer is a string", _set("writable_layer_bytes", value="1")),
     ("writable layer is a bool", _set("writable_layer_bytes", value=True)),
     ("writable layer is negative", _set("writable_layer_bytes", value=-1)),
+    ("base layer is a string", _set("base_layer_allocated_bytes", value="1")),
+    ("base layer is a bool", _set("base_layer_allocated_bytes", value=True)),
+    ("base layer is negative", _set("base_layer_allocated_bytes", value=-1)),
+    ("stage layer is a string", _set("stage_layer_allocated_bytes", value="1")),
+    ("stage layer is a bool", _set("stage_layer_allocated_bytes", value=True)),
+    ("stage layer is negative", _set("stage_layer_allocated_bytes", value=-1)),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),

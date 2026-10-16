@@ -81,10 +81,17 @@ it is 0 exactly when the set is empty. Arch's set is empty, because its image al
 
 `integration_estimated_installed_bytes` and `package_cache_peak_bytes` are the other two inputs of
 the disk formula of a services-on create (FR-121, ADR-015 Decision 11). The first is the installed
-size of the Integration Package Set, and the second is the package cache during the installs,
-before the clean. Arch's first is 0, because its image already holds the set. `writable_layer_bytes`
-is the writable layer of one services-off container after an htop install, the term of a reuse
-build's check. All three are optional non-negative integers, and each defaults to 0.
+size of the Integration Package Set, and the second is the bytes that the clean removes from the
+provisioning layer (the package cache, and on debian, kali and fedora the lists). Arch's first is 0,
+because its image already holds the set. `writable_layer_bytes` is the writable layer of one
+services-off container after an htop install, the term of a reuse build's check. All three are
+optional non-negative integers, and each defaults to 0.
+
+`base_layer_allocated_bytes` and `stage_layer_allocated_bytes` are the allocated bytes of the base
+layer and of the stage layer, measured on podman 5.8.8 on ext4 (T7.33, ADR-015 Decision 11). They
+are the base and stage terms of the services-on storage formula. Arch's stage layer is not 0 with
+an empty init set, because the refresh leaves its sync databases in it. Both are optional
+non-negative integers, and each defaults to 0.
 
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
 distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
@@ -150,6 +157,8 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
         "integration_estimated_installed_bytes",
         "package_cache_peak_bytes",
         "writable_layer_bytes",
+        "base_layer_allocated_bytes",
+        "stage_layer_allocated_bytes",
     }
 )
 # The keys that read the db-check result. A file that defines the db-check verb must define them.
@@ -314,12 +323,21 @@ class DistroDef:
     """The installed size of the Integration Package Set, the `ips_delta` of the disk formula
     (FR-121, ADR-015 Decision 11), measured in S-11. 0 where the image already holds the set."""
     package_cache_peak_bytes: int = 0
-    """The package cache during the installs, before the clean: the `cache_peak` of the disk formula
-    (FR-121, ADR-015 Decision 11), measured in S-11."""
+    """The bytes that the clean steps remove from the provisioning layer: the `cache_peak` of the
+    disk formula (FR-121, ADR-015 Decision 11). Measured in S-11, and on arch in T7.33."""
     writable_layer_bytes: int = 0
     """The writable layer of one services-off container from the derived image, after an htop
     install, measured in S-11. It is the term of a reuse build's disk check (FR-121, ADR-015
     Decision 11). 0 is no term."""
+    base_layer_allocated_bytes: int = 0
+    """The allocated bytes of the pinned base layer, measured on podman 5.8.8 on ext4 with 4 KiB
+    blocks (T7.33). It is the base term of the services-on storage formula (FR-121, ADR-015
+    Decision 11). 0 is no term."""
+    stage_layer_allocated_bytes: int = 0
+    """The allocated bytes of the stage layer, which holds the init set, the Integration Package
+    Set, the locale steps and the refresh residue (arch's sync databases), measured on podman 5.8.8
+    on ext4 with 4 KiB blocks (T7.33). It is the stage term of the services-on storage formula
+    (FR-121, ADR-015 Decision 11). 0 is no term."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -674,6 +692,8 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         ),
         package_cache_peak_bytes=_disk_bytes(reader, raw, "package_cache_peak_bytes"),
         writable_layer_bytes=_disk_bytes(reader, raw, "writable_layer_bytes"),
+        base_layer_allocated_bytes=_disk_bytes(reader, raw, "base_layer_allocated_bytes"),
+        stage_layer_allocated_bytes=_disk_bytes(reader, raw, "stage_layer_allocated_bytes"),
     )
 
 

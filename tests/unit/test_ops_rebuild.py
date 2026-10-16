@@ -25,6 +25,7 @@ from ginn.distros import load as load_distro
 from ginn.domain import InstallMethod, InstallSource, ManifestEntry, RealmName, RealmState, Tier
 from ginn.domain.permissions import Toggle, effective_toggles
 from ginn.errors import GinnError, make
+from ginn.ops import _create_plan
 from ginn.ops import create as create_ops
 from ginn.ops import lifecycle as lifecycle_ops
 from ginn.ops import rebuild as rebuild_ops
@@ -3136,10 +3137,11 @@ def storage_formula(distro: str) -> tuple[int, int]:
     entry = trust.load().entry(distro)
     definition = load_distro(distro)
     storage = storage_required_bytes(
-        estimate_bytes(entry),
-        definition.services_estimated_installed_bytes,
-        definition.integration_estimated_installed_bytes,
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
         definition.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
     )
     staging = tmpdir_required_bytes(
         definition.services_estimated_installed_bytes,
@@ -3157,9 +3159,10 @@ def test_a_provision_build_is_refused_before_its_pull_when_the_storage_formula_d
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    """ADR-015 Decision 11: a provision build needs the create formula of its stage, with the base
-    counted, the init set and the Integration Package Set twice, and the package cache peak. The
-    rebuild refuses before its pull, and the old root is kept."""
+    """ADR-015 Decision 11 (T7.33): a provision build needs the storage formula of its stage. The
+    pulled base, its keep-id copy and the flattened copy of the derived image are base-sized, the
+    stage layer counts twice, and the package cache peak is added. The rebuild refuses before its
+    pull, and the old root is kept."""
     make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
     set_services_mode(env, NAME, on=True)
     pulled, committed = pulls(fake), commits(fake)
@@ -3204,6 +3207,39 @@ def test_a_provision_build_is_refused_before_its_pull_when_the_image_staging_dir
     assert caught.value.details["path"] == str(staging_dir)
     assert (pulls(fake), commits(fake)) == (pulled, committed)
     assert stored(env).generation == 1
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("field", ["base_layer_allocated_bytes", "stage_layer_allocated_bytes"])
+def test_a_provision_build_refuses_missing_layer_sizes_before_any_podman_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """NFR-060, ADR-015 Decision 11: a provision build feeds the measured layers to the storage
+    formula. Where the distribution data has none (the loader's default of 0), the build refuses
+    before its first podman call, with GINN-E-DISTRO-DATA that names the file and the key. The
+    realm keeps its generation and its state."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    shipped = load_distro("debian")
+    monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
+    calls = len(fake.calls)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo)
+    assert caught.value.code == "GINN-E-DISTRO-DATA"
+    assert caught.value.details["file"] == shipped.source
+    assert caught.value.details["field"] == field
+    assert len(fake.calls) == calls
+    assert stored(env).generation == 1
+    assert stored(env).state is RealmState.STOPPED
+    assert stored(env).init_image_id is None
 
 
 @pytest.mark.fr("FR-121")
