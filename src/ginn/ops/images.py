@@ -137,7 +137,8 @@ def _held_by_derived(podman: Podman, ref: str, info: ImageInfo | None) -> str | 
         if name == ref or derived.id == info.id:
             continue
         if derived.labels.get(LABEL_BASE_DIGEST, "") in digests:
-            return f"image kept: derived image {name} is built on it"
+            realm = name.removeprefix(DERIVED_IMAGE_PREFIX).partition(":")[0]
+            return f"image kept: realm {realm}'s derived image {name} is built on this base"
     return None
 
 

@@ -13,7 +13,10 @@ audited and journaled (DR-032, FR-124). A diff with no new name writes nothing, 
 
 The exec status is the command's own status (IR-011), so nothing here raises after the session has
 run. A failed read, a name that is not a valid package name, or a failed write becomes a
-GINN-W-MANIFEST-UNRECORDED warning through `notify`, and the status comes back unchanged.
+GINN-W-MANIFEST-UNRECORDED warning through `notify`, and the status comes back unchanged. A realm
+that stopped inside its session is refused by runtime/enter.py with GINN-E-REALM-STATE, raised out
+of `run`. When the before-read worked, that error gets a note that the session's packages may be
+unrecorded, and it still propagates. No GINN-W-MANIFEST-UNRECORDED warning is made for it.
 """
 
 from collections.abc import Callable
@@ -57,6 +60,14 @@ def _describe(exc: Exception) -> str:
 def _unrecorded(realm: str, detail: str) -> GinnWarning:
     """The warning. Its detail is built from escaped parts, so it is not escaped again."""
     return warn(UNRECORDED_CODE, realm=realm, detail=detail)
+
+
+def _unrecorded_after_stop(realm: str) -> str:
+    """The note on a GINN-E-REALM-STATE that ended a session whose command ran (FR-042 AC-1)."""
+    return (
+        "packages changed in this session may be unrecorded in the Install Manifest; "
+        f"run 'ginn install {realm} PACKAGE' for each one the session installed"
+    )
 
 
 def _listed(
@@ -110,7 +121,15 @@ def _recorded_session(
     definition = load_distro(record.settings.distro.value)
     target = ExecTarget(realm=realm, services=bool(record.services_at_create), mutating=False)
     before, reason = _listed(podman, cid, definition, realm, target)
-    status = run()
+    try:
+        status = run()
+    except GinnError as err:
+        # enter refuses a realm that stopped inside the exec, so the command ran. The packages it
+        # installed are read only after the session, which never happens here. A failed before-read
+        # means no diff was possible, so the note is added only when the diff could have run.
+        if before is not None and err.code == "GINN-E-REALM-STATE":
+            err.add_note(_unrecorded_after_stop(realm))
+        raise
     if before is None:
         notify(_unrecorded(realm, f"the packages before the session are unknown: {reason}"))
         return status

@@ -35,12 +35,13 @@ The steps, in order:
    (`ROOT_HOME`). The session environment is passed, and the proxy names go as `--env NAME`
    (ADR-004 amendment). A status of 125 or 255 may be podman's own failure, so enter reads the
    listing once more. Podman 5.8.8 answers an exec on a stopped container with 255 (ADR-014). If
-   the container no longer runs, GINN-E-REALM-STATE is raised. Otherwise the status comes back
-   unchanged, so the command's own 125 or 255 passes through. The exec is never retried. Under
-   `--root`, the `root_session` hook (EnterHooks) wraps the exec: it receives the record, the
-   container and the exec as a callable, and it returns the status of that exec. The hook records
-   the packages that a root session installs (FR-042 AC-1). Without the hook, or without `--root`,
-   nothing wraps it.
+   the container no longer runs, GINN-E-REALM-STATE is raised inside the exec step. Otherwise the
+   status comes back unchanged, so the command's own 125 or 255 passes through. The exec is never
+   retried. Under `--root`, the `root_session` hook (EnterHooks) wraps the exec: it receives the
+   record, the container and the exec as a callable, and it returns the status of that exec, or it
+   propagates the GINN-E-REALM-STATE of a stopped realm, so no status reaches the hook. The hook
+   records the packages that a root session installs (FR-042 AC-1). Without the hook, or without
+   `--root`, nothing wraps it.
 
 A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm keeps running, since
 enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
@@ -150,8 +151,10 @@ class EnterHooks:
     runs, so the caller can show it first (the command's own output comes after). `root_session`
     wraps the exec of a `--root` session: it is called with the record, the container id and a
     callable that runs the exec, and it returns that exec's status. It is never called without
-    `--root`, so the non-root path costs nothing (NFR-004). `kill` sends a signal to the command's
-    client while it runs (FR-068); a test replaces it to see what is forwarded.
+    `--root`, so the non-root path costs nothing (NFR-004). A stopped realm raises
+    GINN-E-REALM-STATE through it, and the hook may add a note to that error (ops/native.py). `kill`
+    sends a signal to the command's client while it runs (FR-068); a test replaces it to see what is
+    forwarded.
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
@@ -569,21 +572,22 @@ def _enter_look(
         finally:
             client.exited()
         _observe(hooks, "exec", hooks.clock() - exec_started)
+        if status in _PODMAN_EXEC_EXITS and not _running(_listed(podman, name, cid)):
+            # Inside the exec, so a root session's hook gets the refusal and no status. The command
+            # ran before this check, so the hook adds a note to the refusal (ops/native.py). It
+            # does not read the packages after the session, because the realm no longer runs.
+            raise make(
+                "GINN-E-REALM-STATE",
+                realm=name.value,
+                state="stopped",
+                action=action,
+                allowed="running",
+            )
         return status
 
     if root and hooks.root_session is not None:
-        status = hooks.root_session(record, cid, run)
-    else:
-        status = run()
-    if status in _PODMAN_EXEC_EXITS and not _running(_listed(podman, name, cid)):
-        raise make(
-            "GINN-E-REALM-STATE",
-            realm=name.value,
-            state="stopped",
-            action=action,
-            allowed="running",
-        )
-    return status
+        return hooks.root_session(record, cid, run)
+    return run()
 
 
 def _noop(mutation: Mutation, reason: str) -> None:

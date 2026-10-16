@@ -55,7 +55,9 @@ def test_a_base_with_a_derived_image_built_on_it_is_kept_and_the_note_names_that
     outcome, code, notes = remove_image(fake, BASE)
 
     assert (outcome, code) == ("kept", None)
-    assert notes == ["image kept: derived image localhost/ginn-init-lab:g1 is built on it"]
+    assert notes == [
+        "image kept: realm lab's derived image localhost/ginn-init-lab:g1 is built on this base"
+    ]
     assert BASE in fake.images
     assert "rmi" not in fake.ops()
 
@@ -86,7 +88,9 @@ def test_a_derived_image_named_by_the_repo_digest_of_the_base_keeps_it(fake: Fak
     outcome, code, notes = remove_image(fake, BASE)
 
     assert (outcome, code) == ("kept", None)
-    assert notes == ["image kept: derived image localhost/ginn-init-lab:g1 is built on it"]
+    assert notes == [
+        "image kept: realm lab's derived image localhost/ginn-init-lab:g1 is built on this base"
+    ]
     assert BASE in fake.images
 
 
