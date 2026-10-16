@@ -5,6 +5,11 @@ Run with `GINN_INTEGRATION=1 .venv/bin/pytest tests/integration/test_adr015_real
 Void glibc host with the ginn supervisor running. The verdicts and numbers are in
 spikes/results/T7.27-adr015-real.md.
 
+Phase C (items 5, 9, 10, 11 and 14) runs as its own invocation, `-k phasec`, and phase D as
+`-k phased`, as run 7 did. A full-module run skips arch for items 5, 9, 10 and 11: the module-scoped
+svc and idle_set arch realms are still alive when build[arch] starts, so the pinned base is present,
+and the build fixture skips that distribution. No fixture change is made for this.
+
 The gate drives the product CLI through the launcher of the T7.7 gate (test_services_real.py):
 ginn from this checkout, helpers from native/build. Every realm is named `t727-...`, and the module
 removes them at the start and at the end. Nothing here names the user's own storage or /run/user.
@@ -29,7 +34,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -46,6 +51,7 @@ from ginn.services._exec_lock import exec_lock_dir
 from ginn.services.exec_relay import exec_service_dir, exec_socket
 from ginn.services.supervisor import parse_status
 from ginn.store.paths import OwnedPaths
+from ginn.trust import pull_reference
 from tests.integration.conftest import REPO, run_tool, tool
 from tests.integration.test_services_real import (
     Ran,
@@ -245,13 +251,41 @@ def sweep(launcher: Path, paths: OwnedPaths) -> list[str]:
 
 
 def leftovers(paths: OwnedPaths) -> dict[str, list[str]]:
-    """Images and containers of this module left in ginn's storage (ADR-015 Decisions 10, 13)."""
-    images = podman(paths, ["images", "--format", "{{.Repository}}:{{.Tag}}"]).split()
-    containers = podman(paths, ["ps", "-a", "--format", "{{.Names}}"]).split()
+    """Images and containers of this module left in ginn's storage (ADR-015 Decisions 10, 13).
+
+    It reads the product environment, as `heal_leftovers` does, so both see the same storage.
+    """
+    images = product_podman(paths, ["images", "--format", "{{.Repository}}:{{.Tag}}"]).split()
+    containers = product_podman(paths, ["ps", "-a", "--format", "{{.Names}}"]).split()
     return {
         "images": [i for i in images if PREFIX in i],
         "containers": [c for c in containers if PREFIX in c],
     }
+
+
+PROBE = "t727-change-probe"
+"""The item 14 scratch container (the `commit --change` probe). A crashed run leaves it behind."""
+PROBE_IMAGE = "localhost/t727-change-probe:1"
+"""The scratch image of PROBE. Item 14 removes it, and the launcher removes it after a crash."""
+
+
+def heal_leftovers(paths: OwnedPaths) -> None:
+    """Remove what a crashed earlier run of this module left: exact t727 names only (item 4).
+
+    The probe container and image of item 14, then the provisioning containers and the derived
+    images of the t727 realms. A container goes before its image, since a container holds it. Each
+    removal ignores its status: the leftovers check after this call is what proves the removal.
+    """
+    product_run(paths, ["rm", "-f", PROBE])
+    product_run(paths, ["rmi", "-f", PROBE_IMAGE])
+    containers = product_podman(paths, ["ps", "-a", "--format", "{{.Names}}"]).split()
+    for container in containers:
+        if container.startswith(f"ginn_provision_{PREFIX}"):
+            product_run(paths, ["rm", "-f", container])
+    images = product_podman(paths, ["images", "--format", "{{.Repository}}:{{.Tag}}"]).split()
+    for image in images:
+        if image.startswith(f"localhost/ginn-init-{PREFIX}"):
+            product_run(paths, ["rmi", "-f", image])
 
 
 DEFERRAL = "GINN-W-REBUILD-DEFERRED"
@@ -279,6 +313,46 @@ def assert_clean(ran: Ran, label: str) -> None:
     assert DEFERRAL not in ran.codes(), f"{label}: {DEFERRAL} (the start ran the old root)"
 
 
+def run_ginn_env(
+    launcher: Path, extra: Mapping[str, str], *args: str, timeout: float = 900.0
+) -> Ran:
+    """`ginn --json` as `ginn()` runs it, with `extra` in the environment of this one call only.
+
+    The test process's own environment is not changed, so every later call and every cleanup runs
+    without `extra`. The JSON reading is that of `ginn()`.
+    """
+    env = {
+        **os.environ,
+        "PATH": f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}",
+        **extra,
+    }
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(launcher), "--json", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+        cwd="/tmp",  # noqa: S108 - a working directory, not a temp file
+        timeout=timeout,
+        check=False,
+    )
+    lines = (done.stdout + "\n" + done.stderr).splitlines()
+    objects = [json.loads(line) for line in lines if line.startswith("{")]
+    body: dict[str, Any] = next((o for o in reversed(objects) if "progress" not in o), {})
+    return Ran(done.returncode, body)
+
+
+def teardown_step(
+    failed: list[str], label: str, step: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    """Run one teardown step. A failure is recorded in `failed`, so the steps after it still run."""
+    try:
+        return step(*args, **kwargs)
+    except Exception as exc:
+        failed.append(f"{label}: {exc!r}"[:300])
+        return None
+
+
 @pytest.fixture(scope="module")
 def paths() -> OwnedPaths:
     return OwnedPaths.from_env()
@@ -289,44 +363,65 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
     """The gate's ginn command (the T7.7 launcher), with the relay service of this gate tracked."""
     run_tool([tool("make"), "-C", str(REPO / "native")])
     base = Path(tempfile.mkdtemp(prefix="ginn-t727-", dir="/tmp"))  # noqa: S108 - mkdtemp, 0700
-    bin_dir = base / "bin"
-    bin_dir.mkdir(mode=0o700)
-    script = write_launcher(bin_dir)
-    if FROZEN_SRC:
-        # Run the product from the frozen copy of the committed code, not the worktree's src.
-        text = script.read_text(encoding="utf-8")
-        script.write_text(text.replace(str(REPO / "src"), FROZEN_SRC), encoding="utf-8")
-    # The step seam (Phases C and D): each create step is appended to STEP_LOG_ENV when that is set,
-    # and the process is SIGKILLed after the step named by KILL_ENV. Unset, it changes nothing.
-    text = script.read_text(encoding="utf-8")
-    script.write_text(
-        text.replace("if __name__ == '__main__':", SEAM_PATCH + "if __name__ == '__main__':"),
-        encoding="utf-8",
-    )
     exec_existed = exec_lock_dir(paths).is_dir()
     relay_existed = (paths.sv / "_exec").exists()
-    _CREATED.clear()
-    # A realm or image of an earlier run would collide with this run's names, so none may remain.
-    kept = sweep(script, paths)
-    assert kept == [], f"t727 realms from an earlier run could not be removed: {kept}"
-    assert leftovers(paths) == {"images": [], "containers": []}, "t727 leftovers before the gate"
+    failed: list[str] = []
+    script: Path | None = None
     try:
+        bin_dir = base / "bin"
+        bin_dir.mkdir(mode=0o700)
+        script = write_launcher(bin_dir)
+        if FROZEN_SRC:
+            # Run the product from the frozen copy of the committed code, not the worktree's src.
+            text = script.read_text(encoding="utf-8")
+            script.write_text(text.replace(str(REPO / "src"), FROZEN_SRC), encoding="utf-8")
+        # The step seam (Phases C and D): each create step is appended to STEP_LOG_ENV when that is
+        # set, and the process is SIGKILLed after the step named by KILL_ENV. Unset, it changes
+        # nothing.
+        text = script.read_text(encoding="utf-8")
+        script.write_text(
+            text.replace("if __name__ == '__main__':", SEAM_PATCH + "if __name__ == '__main__':"),
+            encoding="utf-8",
+        )
+        _CREATED.clear()
+        # A realm or image of an earlier run would collide with this run's names, so none may
+        # remain. The sweep removes the realms, and heal_leftovers the crashed run's probe.
+        kept = sweep(script, paths)
+        assert kept == [], f"t727 realms from an earlier run could not be removed: {kept}"
+        heal_leftovers(paths)
+        assert leftovers(paths) == {"images": [], "containers": []}, (
+            "t727 leftovers before the gate"
+        )
         yield script
     finally:
-        left = sweep(script, paths)
-        remaining = leftovers(paths)
-        remove_exec_leftovers(paths, _CREATED, exec_existed=exec_existed)
+        # Every step runs, even after one fails. The failures are asserted at the end.
+        left: list[str] = []
+        remaining: dict[str, list[str]] = {"images": [], "containers": []}
+        if script is not None:
+            left = teardown_step(failed, "sweep", sweep, script, paths) or []
+            remaining = teardown_step(failed, "leftovers", leftovers, paths) or remaining
+        teardown_step(
+            failed,
+            "remove exec leftovers",
+            remove_exec_leftovers,
+            paths,
+            _CREATED,
+            exec_existed=exec_existed,
+        )
         if not relay_existed:
             # The relay `_exec` service is made by the first services-on start (ADR-014). It goes
             # with this module when it was absent before, as in the T7.7 gate.
-            _retire(exec_service_dir(paths))
+            teardown_step(failed, "retire relay service", _retire, exec_service_dir(paths))
             for stale in sorted(paths.sv.glob("._exec.*")):
-                shutil.rmtree(stale, ignore_errors=True)
+                teardown_step(
+                    failed, "stale relay directory", shutil.rmtree, stale, ignore_errors=True
+                )
             with contextlib.suppress(OSError):
                 (paths.sv / ".exec-relay.lock").unlink()
             with contextlib.suppress(OSError):
                 exec_socket(paths).unlink()
-        shutil.rmtree(base, ignore_errors=True)
+        teardown_step(failed, "remove the gate directory", shutil.rmtree, base, ignore_errors=True)
+        assert failed == [], f"t727 teardown steps failed: {failed}"
         assert left == [], "t727 realms could not be removed after the gate"
         assert remaining == {"images": [], "containers": []}, f"t727 leftovers: {remaining}"
 
@@ -604,34 +699,27 @@ def disk_use(launcher: Path, paths: OwnedPaths, name: str) -> dict[str, Any]:
     target is that size plus 200 MiB. `bound_bytes` adds the base once more, as an upper bound for
     the case where podman's derived size leaves out the base layers.
     """
-    derived = container_image_id(paths, name)
+    derived = realm_image(paths, name)
     derived_size = int(
-        podman(paths, ["image", "inspect", "--format", "{{.Size}}", derived]).strip()
+        product_podman(paths, ["image", "inspect", "--format", "{{.Size}}", derived]).strip()
     )
-    labels = json.loads(
-        podman(paths, ["image", "inspect", "--format", "{{json .Labels}}", derived])
-    )
-    digest = str(labels.get("io.ginn.base-digest", ""))
-    base_id: str | None = None
-    if digest:
-        listing = podman(paths, ["image", "ls", "--digests", "--format", "{{.ID}} {{.Digest}}"])
-        for line in listing.splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1] == digest:
-                base_id = parts[0]
-                break
+    digest = str(image_labels(paths, derived).get(LABEL_BASE_DIGEST, ""))
+    base_id = image_id_of_digest(paths, digest) if digest else None
     base_size = None
     if base_id is not None:
         base_size = int(
-            podman(paths, ["image", "inspect", "--format", "{{.Size}}", base_id]).strip()
+            product_podman(paths, ["image", "inspect", "--format", "{{.Size}}", base_id]).strip()
         )
-    size_text = podman(
+    size_text = product_podman(
         paths,
-        ["container", "inspect", "--size", "--format", "{{.SizeRw}}", container_id(paths, name)],
+        ["container", "inspect", "--size", "--format", "{{.SizeRw}}", realm_cid(paths, name)],
     ).strip()
-    writable = int(size_text) if size_text.isdigit() else 0
+    assert size_text.isdigit(), f"podman reports no SizeRw for {name}: {size_text!r}"
+    writable = int(size_text)
     disk = run_ginn(launcher, "status", name).body.get("disk") or {}
-    home = int(disk.get("realm_home_bytes") or 0)
+    home_text = disk.get("realm_home_bytes")
+    assert home_text is not None, f"ginn status reports no realm_home_bytes for {name}: {disk}"
+    home = int(home_text)
     total = derived_size + writable + home
     target = None if base_size is None else base_size + NFR008_MARGIN_BYTES
     bound = None if base_size is None else total + base_size
@@ -691,6 +779,16 @@ def unit_profile(launcher: Path, name: str) -> dict[str, Any]:
         launcher, name, "systemctl --failed --no-legend --plain | cut -d ' ' -f1"
     ).split()
     return {"active_count": len(active), "active_units": active, "failed_units": failed}
+
+
+def assert_attributed(attribution: dict[str, Any], label: str) -> None:
+    """A sample counts only when its attribution found the realm's cgroup processes, its runsv and
+    its ginn-wait. An empty role means the attribution missed part of the realm (item 6), so the
+    sample fails.
+    """
+    helpers = attribution["helpers"]
+    missing = [role for role in ("cgroup", "runsv", "ginn-wait") if not helpers[role]]
+    assert not missing, f"{label}: no process found for {missing}; the sample is not attributed"
 
 
 @pytest.fixture(scope="module", params=DISTROS)
@@ -754,6 +852,7 @@ def test_nfr003_idle_rss_services_on_per_distribution(
         settle = time.monotonic() - returned
         host = host_memory()
         attribution = realm_rss(paths, name)
+        assert_attributed(attribution, f"{distro} nfr003 run {run}")
         kib = attribution["kib"]
         rows.append(
             {
@@ -823,6 +922,9 @@ def test_nfr008_disk_use_of_a_new_realm_per_distribution(
         run_ginn(launcher, "stop", name)
         run_ginn(launcher, "delete", name, "--purge-home", "--yes")
     assert after["target_bytes"] is not None, "NFR-008: the realm's pinned base is not found"
+    assert steady["target_bytes"] is not None, (
+        "NFR-008: the realm's pinned base is not found at steady state"
+    )
     verdict_after = "PASS" if after["total_bytes"] <= after["target_bytes"] else "FAIL"
     verdict_steady = "PASS" if steady["total_bytes"] <= steady["target_bytes"] else "FAIL"
     print(
@@ -859,7 +961,10 @@ def test_nfr021_five_concurrent_idle_realms_per_distribution(
         due = last_returned + SETTLE_S + index * NFR021_SAMPLE_GAP_S
         time.sleep(max(0.0, due - time.monotonic()))
         states = {name: realm_state(launcher, name)[0] for name in names}
-        vm = {name: realm_rss(paths, name)["kib"]["VmRSS"] for name in names}
+        attributed = {name: realm_rss(paths, name) for name in names}
+        for name, attribution in attributed.items():
+            assert_attributed(attribution, f"{distro} {name} nfr021 sample {index + 1}")
+        vm = {name: attributed[name]["kib"]["VmRSS"] for name in names}
         relay = relay_listener_rss()
         samples.append(
             {
@@ -906,6 +1011,15 @@ PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_prox
 DUMMY_PROXY = "http://proxy.invalid:3128"
 """A dummy proxy for item 14. Nothing listens there, so a pull under it would fail. Item 14 creates
 only from a base that is already present."""
+PROXY_ENV = {
+    "HTTP_PROXY": DUMMY_PROXY,
+    "HTTPS_PROXY": DUMMY_PROXY,
+    "http_proxy": DUMMY_PROXY,
+    "https_proxy": DUMMY_PROXY,
+    "NO_PROXY": "*",
+    "no_proxy": "*",
+}
+"""The environment of item 14's one create, for that call only. NO_PROXY=* sends its pull direct."""
 STEP_LOG_ENV = "GINN_T727_STEP_LOG"
 """When set, every create step is appended to this file, one step per line (the step seam)."""
 KILL_ENV = "GINN_T727_KILL_AT"
@@ -1014,10 +1128,12 @@ def realm_image(paths: OwnedPaths, name: str) -> str:
 
 
 def image_labels(paths: OwnedPaths, image: str) -> dict[str, str]:
-    """The labels of an image, as podman reads them (product environment)."""
-    labels: dict[str, str] = json.loads(
-        product_podman(paths, ["image", "inspect", "--format", "{{json .Labels}}", image])
-    )
+    """The labels of an image, as podman reads them (product environment).
+
+    podman prints `null` for an unlabelled image, so the `or {}` keeps a `.get` on the result safe.
+    """
+    raw = product_podman(paths, ["image", "inspect", "--format", "{{json .Labels}}", image])
+    labels: dict[str, str] = json.loads(raw) or {}
     return labels
 
 
@@ -1029,16 +1145,45 @@ def image_env(paths: OwnedPaths, image: str) -> list[str]:
     return env
 
 
-def base_id_of(paths: OwnedPaths, derived: str) -> str | None:
-    """The local image whose manifest digest is the derived image's `io.ginn.base-digest`."""
-    digest = str(image_labels(paths, derived).get(LABEL_BASE_DIGEST, ""))
-    if not digest:
-        return None
+def image_id_of_digest(paths: OwnedPaths, digest: str) -> str | None:
+    """The short ID of the local image whose manifest digest is `digest`, or None."""
     listing = product_podman(paths, ["image", "ls", "--digests", "--format", "{{.ID}} {{.Digest}}"])
     for line in listing.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == digest:
             return parts[0]
+    return None
+
+
+def base_id_of(paths: OwnedPaths, derived: str) -> str | None:
+    """The local image whose manifest digest is the derived image's `io.ginn.base-digest`."""
+    digest = str(image_labels(paths, derived).get(LABEL_BASE_DIGEST, ""))
+    if not digest:
+        return None
+    return image_id_of_digest(paths, digest)
+
+
+def pinned_base_id(paths: OwnedPaths, distro: str) -> str | None:
+    """The local image of the pinned base of `distro`: the digest of its Trust Manifest pin."""
+    return image_id_of_digest(paths, pull_reference(distro).rpartition("@")[2])
+
+
+def base_holder(launcher: Path, paths: OwnedPaths, base_id: str) -> str | None:
+    """The name of a realm that runs the base, or a derived image built on it, when one is known.
+
+    The IDs are compared by their first twelve characters: `ps` and `inspect` print the full ID.
+    """
+    for realm in run_ginn(launcher, "list").body.get("realms", []):
+        name = str(realm.get("name", ""))
+        try:
+            image = realm_image(paths, name)
+        except IndexError:
+            continue  # the realm has no container
+        if image[:12] == base_id[:12]:
+            return name
+        built_on = base_id_of(paths, image) or ""
+        if built_on[:12] == base_id[:12]:
+            return name
     return None
 
 
@@ -1053,20 +1198,38 @@ def provision_leftovers(paths: OwnedPaths, name: str) -> dict[str, list[str]]:
 
 
 def tmp_entries(directory: Path) -> dict[str, tuple[int, int, int]]:
-    """Each entry of `directory` as name -> (owner uid, mtime in ns, size), links not followed."""
+    """Each entry of `directory` as name -> (owner uid, mtime in ns, size), links not followed.
+
+    Read only (scandir and lstat). An entry removed after it was listed is skipped.
+    """
     found: dict[str, tuple[int, int, int]] = {}
-    for entry in os.scandir(directory):
-        st = entry.stat(follow_symlinks=False)
-        found[entry.name] = (st.st_uid, st.st_mtime_ns, st.st_size)
+    with os.scandir(directory) as scan:
+        for entry in scan:
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            found[entry.name] = (st.st_uid, st.st_mtime_ns, st.st_size)
     return found
 
 
+def named_for_ginn(name: str) -> bool:
+    """True when an entry name carries a hint of podman's, buildah's or ginn's storage."""
+    return any(
+        hint in name for hint in ("podman", "containers", "storage", "ginn", "libpod", "buildah")
+    )
+
+
 def ginn_changes(
-    before: dict[str, tuple[int, int, int]], after: dict[str, tuple[int, int, int]]
+    before: dict[str, tuple[int, int, int]],
+    after: dict[str, tuple[int, int, int]],
+    sampled: Iterable[str] = (),
 ) -> dict[str, dict[str, Any]]:
     """The entries that appeared or changed in the window and that this user owns (ginn's uid).
 
-    Entries of other owners are not ginn's: the system and other users write to /var/tmp too.
+    `sampled` names the owned entries that a StorageWatch listing saw during the window. An entry
+    that appeared and went again between the two listings is found only that way. Entries of other
+    owners are not ginn's: the system and other users write to /var/tmp too.
     """
     uid = os.getuid()
     changes: dict[str, dict[str, Any]] = {}
@@ -1078,9 +1241,17 @@ def ginn_changes(
                 "new": name not in before,
                 "uid": value[0],
                 "size": value[2],
-                "named_for_ginn": any(
-                    hint in name for hint in ("podman", "containers", "storage", "ginn", "libpod")
-                ),
+                "named_for_ginn": named_for_ginn(name),
+                "sampled_only": False,
+            }
+    for name in sampled:
+        if name not in before and name not in changes:
+            changes[name] = {
+                "new": True,
+                "uid": uid,
+                "size": None,
+                "named_for_ginn": named_for_ginn(name),
+                "sampled_only": True,
             }
     return changes
 
@@ -1091,21 +1262,47 @@ def image_copy_dir(paths: OwnedPaths) -> str:
     return str(info.get("store", {}).get("imageCopyTmpDir", ""))
 
 
+MIN_SAMPLES = 3
+"""The fewest successful storage samples a peak may rest on. The watch samples every 3 s, so a build
+that yields fewer than three has no measured peak, and its zero must not pass (item 2)."""
+
+
+def assert_sampled(label: str, samples: int, elapsed_s: float, errors: Sequence[str]) -> None:
+    """Fail when the watch took too few successful samples for its peak to mean anything (item 2).
+
+    A zero peak from no samples is not a measurement, so it must not pass.
+    """
+    assert samples >= MIN_SAMPLES, (
+        f"{label}: {samples} storage samples in {elapsed_s:.1f} s, below {MIN_SAMPLES}; "
+        f"errors: {list(errors)[:2]}"
+    )
+
+
 class StorageWatch:
-    """Samples the podman storage size and the image tmpdir every `interval` seconds of a build.
+    """Samples the podman storage size, the image tmpdir and the owned entries of /var/tmp every
+    `interval` seconds of a build.
 
     The size is counted inside `podman unshare` (du_bytes), so the keep-id layers are included. The
     peak is the largest sample less the size before the build. A failed sample is recorded, not
-    fatal. Nothing is deleted here.
+    fatal. `var_known` holds the /var/tmp names there were before the build. Each other entry that
+    this user owns and that a sample sees goes into `var_tmp_seen` (read only, nothing is removed).
     """
 
-    def __init__(self, paths: OwnedPaths, interval: float = 3.0) -> None:
+    def __init__(
+        self,
+        paths: OwnedPaths,
+        interval: float = 3.0,
+        var_known: frozenset[str] = frozenset(),
+    ) -> None:
         self.paths = paths
         self.interval = interval
         self.baseline = 0
         self.sizes: list[int] = []
         self.errors: list[str] = []
         self.image_tmp_seen: set[str] = set()
+        self.var_known = var_known
+        self.var_tmp_seen: set[str] = set()
+        self.var_listings = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -1126,10 +1323,19 @@ class StorageWatch:
                 self.errors.append(f"{type(exc).__name__}: {exc}"[:200])
             with contextlib.suppress(OSError):
                 self.image_tmp_seen.update(os.listdir(self.paths.image_tmp))
+            with contextlib.suppress(OSError):
+                listed = tmp_entries(VAR_TMP)
+                self.var_listings += 1
+                uid = os.getuid()
+                self.var_tmp_seen.update(
+                    name
+                    for name, value in listed.items()
+                    if value[0] == uid and name not in self.var_known
+                )
             self._stop.wait(self.interval)
 
     def peak(self) -> int:
-        """The largest storage growth over the baseline, or 0 when no sample was taken."""
+        """The largest storage growth over the baseline. Callers assert `assert_sampled` first."""
         return max(self.sizes, default=self.baseline) - self.baseline
 
 
@@ -1172,6 +1378,7 @@ class Build:
     image_copy_dir: str
     var_changes: dict[str, dict[str, Any]]
     var_other_changes: int
+    var_listings: int
     steps: list[str]
     disk: dict[str, Any]
 
@@ -1192,10 +1399,19 @@ def build(
 ) -> Iterator[Build]:
     """A services-on create of one distribution, from no base (a real pull and a real commit).
 
-    The create runs under StorageWatch and the step log. /var/tmp is listed before and after it.
-    The realm is deleted at the module's end, with its Realm Home.
+    The create runs under StorageWatch and the step log. /var/tmp is listed before and after it, and
+    during it by each sample. The realm is deleted at the module's end, with its Realm Home. When
+    the pinned base is already in ginn storage, the distribution is skipped: its items need a real
+    pull, and the skip names the realm that holds the base when one is known.
     """
     distro = str(request.param)
+    base_id = pinned_base_id(paths, distro)
+    if base_id is not None:
+        holder = base_holder(launcher, paths, base_id)
+        pytest.skip(
+            f"{distro}: the pinned base {base_id} is already in ginn storage, held by realm "
+            f"{holder or 'unknown'}. Items 5, 9 and the item 8 shared-base guard need a real pull."
+        )
     name = f"{PREFIX}{distro}-prov"
     _CREATED.append(name)
     steps_file = gate_dir / f"{distro}-steps.txt"
@@ -1203,15 +1419,15 @@ def build(
     image_copy_before = image_copy_dir(paths)
     began = time.monotonic()
     with (
-        StorageWatch(paths) as watch,
+        StorageWatch(paths, var_known=frozenset(var_before)) as watch,
         mock.patch.dict(os.environ, {STEP_LOG_ENV: str(steps_file)}),
     ):
         created = run_ginn(
             launcher, "create", distro, "--name", name, "--services", "on", timeout=CREATE_TIMEOUT
         )
     elapsed = time.monotonic() - began
-    var_after = tmp_entries(VAR_TMP)
     try:
+        var_after = tmp_entries(VAR_TMP)
         assert created.rc == 0, created.error_text()
         disk = disk_use(launcher, paths, name)
         base = disk["base_bytes"]
@@ -1220,7 +1436,7 @@ def build(
         init_b = definition.services_estimated_installed_bytes
         ips_b = definition.integration_estimated_installed_bytes
         cache_b = definition.package_cache_peak_bytes
-        changes = ginn_changes(var_before, var_after)
+        changes = ginn_changes(var_before, var_after, watch.var_tmp_seen)
         others = sum(
             1
             for key, value in var_after.items()
@@ -1247,6 +1463,7 @@ def build(
             image_copy_dir=image_copy_before,
             var_changes=changes,
             var_other_changes=others,
+            var_listings=watch.var_listings,
             steps=steps,
             disk=disk,
         )
@@ -1274,20 +1491,32 @@ def test_phasec_dry_podman_env_and_unshare(launcher: Path, paths: OwnedPaths) ->
 
 @pytest.mark.fr("FR-121")
 def test_phasec_item9_image_copy_stays_out_of_var_tmp(build: Build) -> None:
-    """Item 9: during a real pull and commit, nothing that ginn owns lands in /var/tmp.
+    """Item 9: during a real pull and commit, no entry that ginn or podman names lands in /var/tmp.
 
     The product env sets TMPDIR and containers.conf to paths.image_tmp, and `podman info` reports
-    that directory. /var/tmp is listed before and after the create. Only entries owned by this user
-    are compared, since the system writes to /var/tmp too. Nothing is deleted there.
+    that directory. /var/tmp is listed before and after the create, and by every storage sample
+    during it. Only entries owned by this user are compared, since the system and the user's other
+    programs write to /var/tmp too. The test fails only on a new owned entry whose name carries a
+    podman, buildah or ginn hint. Every other new owned entry is printed as a T727_VARTMP_OTHER line
+    for a manual check, and it does not fail. The sampled listing finds an entry that appeared and
+    went again between the two listings, but not one that lived less than a sample interval (3 s).
+    Nothing is deleted there.
     """
-    changes = json.dumps(build.var_changes, sort_keys=True)
+    named = {name: change for name, change in build.var_changes.items() if change["named_for_ginn"]}
+    other = {
+        name: change for name, change in build.var_changes.items() if not change["named_for_ginn"]
+    }
+    for name, change in sorted(other.items()):
+        print(f"T727_VARTMP_OTHER {build.distro} {name} {json.dumps(change, sort_keys=True)}")
     print(
         f"T727_ITEM9 {build.distro} info_copy_dir={build.image_copy_dir} "
-        f"image_tmp={build.image_tmp} seen_in_image_tmp={build.image_tmp_seen} changes={changes} "
-        f"other_owner_changes={build.var_other_changes} elapsed_s={build.elapsed_s}"
+        f"image_tmp={build.image_tmp} seen_in_image_tmp={build.image_tmp_seen} "
+        f"named_changes={json.dumps(named, sort_keys=True)} other_changes={len(other)} "
+        f"other_owner_changes={build.var_other_changes} var_listings={build.var_listings} "
+        f"elapsed_s={build.elapsed_s}"
     )
     assert build.image_copy_dir == build.image_tmp, build.image_copy_dir
-    assert build.var_changes == {}, build.var_changes
+    assert named == {}, named
 
 
 @pytest.mark.fr("FR-121")
@@ -1297,17 +1526,21 @@ def test_phasec_item5_formula_against_measured_peak(build: Build) -> None:
     The formula is `estimate_required(base + 2 x (init + ips) + cache_peak)` with the distribution's
     data. The peak is the largest storage growth over the baseline during the create, counted inside
     `podman unshare`. The verdict is PASS when the peak is within the required figure. Arch is
-    recorded and not asserted (ADR-015 Open question 12).
+    recorded and skipped, not asserted (ADR-015 Open question 12).
     """
     verdict = "PASS" if build.peak <= build.required else "FAIL"
     print(
         f"T727_ITEM5 {build.distro} base={build.base_bytes} init={build.init_bytes} "
         f"ips={build.ips_bytes} cache={build.cache_bytes} raw={build.raw} "
         f"required={build.required} peak={build.peak} samples={build.samples} "
-        f"watch_errors={build.watch_errors[:1]} verdict={verdict}"
+        f"elapsed_s={build.elapsed_s} watch_errors={build.watch_errors[:1]} verdict={verdict}"
     )
+    assert_sampled(f"{build.distro} item 5", build.samples, build.elapsed_s, build.watch_errors)
     if build.distro == "arch":
-        return
+        pytest.skip(
+            f"arch is recorded, not asserted (ADR-015 Open question 12): peak {build.peak} "
+            f"required {build.required} verdict {verdict}"
+        )
     assert build.peak <= build.required, (
         f"{build.distro}: measured peak {build.peak} is over the formula {build.required}"
     )
@@ -1387,13 +1620,18 @@ def test_phasec_reuse_and_pinned_terms_debian(
         home = int(status.get("realm_home_bytes") or 0)
         base = build.base_bytes
         required = estimate_required(base + home)
-        with StorageWatch(paths) as watch:
+        began = time.monotonic()
+        # The pinned rebuild is the shortest build, so its watch samples every second.
+        with StorageWatch(paths, interval=1.0) as watch:
             rebuilt = run_ginn(launcher, "rebuild", pin, timeout=CREATE_TIMEOUT)
+        elapsed = time.monotonic() - began
         assert rebuilt.rc == 0, rebuilt.error_text()
         print(
             f"T727_PINNED debian base={base} home={home} required={required} peak={watch.peak()} "
-            f"codes={rebuilt.codes()} verdict={'PASS' if watch.peak() <= required else 'FAIL'}"
+            f"samples={len(watch.sizes)} elapsed_s={elapsed:.1f} codes={rebuilt.codes()} "
+            f"verdict={'PASS' if watch.peak() <= required else 'FAIL'}"
         )
+        assert_sampled("pinned rebuild", len(watch.sizes), elapsed, watch.errors)
         assert watch.peak() <= required, (watch.peak(), required)
     finally:
         run_ginn(launcher, "stop", pin)
@@ -1434,25 +1672,26 @@ def test_phasec_item10_arch_clean_empties_the_cache(
 
 @pytest.mark.fr("FR-048")
 def test_phasec_item14_host_proxy_absent_and_change_commas(
-    launcher: Path, paths: OwnedPaths, monkeypatch: pytest.MonkeyPatch
+    launcher: Path, paths: OwnedPaths
 ) -> None:
     """Item 14: the derived image's Env does not hold a host proxy variable that is set in the
     run's environment (ADR-015 Decisions 2b and 2g), and the commas of a `--change` value are
     probed.
 
     A holder creates the base first, with no proxy in the environment. Then the proxy variables are
-    set to a dummy address for the one create that follows. Every create runs `podman pull` (the
-    digest check of ops/create.py), so NO_PROXY=* sends that pull direct: the dummy is set, and it
-    is never used. The comma probe commits a scratch image in ginn's storage with an ENV and a LABEL
-    value that hold a comma, and records what podman stores. Everything is removed afterwards.
+    set to a dummy address in the environment of the one create that follows (run_ginn_env). The
+    test process's own environment is never changed. Every create runs `podman pull` (the digest
+    check of ops/create.py), so NO_PROXY=* sends that pull direct: the dummy is set, and it is never
+    used. The comma probe commits a scratch image in ginn's storage with an ENV and a LABEL value
+    that hold a comma, and records what podman stores. Everything is removed afterwards.
     """
     hold = f"{PREFIX}debian-proxyhold"
     name = f"{PREFIX}debian-proxy"
     _CREATED.extend([hold, name])
     held = run_ginn(launcher, "create", "debian", "--name", hold, "--services", "off")
     assert held.rc == 0, held.error_text()
-    probe = "t727-change-probe"
-    probe_image = "localhost/t727-change-probe:1"
+    probe = PROBE
+    probe_image = PROBE_IMAGE
     try:
         base_id = realm_image(paths, hold)
         created_probe = product_run(paths, ["create", "--name", probe, base_id, "true"])
@@ -1479,22 +1718,17 @@ def test_phasec_item14_host_proxy_absent_and_change_commas(
         else:
             probe_env, probe_labels = [], {"commit_error": committed.stderr.strip()[-200:]}
         print(f"T727_ITEM14_PROBE env={probe_env} labels={probe_labels}")
-        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-            monkeypatch.setenv(key, DUMMY_PROXY)
-        for key in ("NO_PROXY", "no_proxy"):
-            monkeypatch.setenv(key, "*")
-        created = run_ginn(
-            launcher, "create", "debian", "--name", name, "--services", "on", timeout=CREATE_TIMEOUT
+        created = run_ginn_env(
+            launcher,
+            PROXY_ENV,
+            "create",
+            "debian",
+            "--name",
+            name,
+            "--services",
+            "on",
+            timeout=CREATE_TIMEOUT,
         )
-        for key in (
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "NO_PROXY",
-            "no_proxy",
-        ):
-            monkeypatch.delenv(key)
         assert created.rc == 0, created.error_text()
         derived_env = image_env(paths, realm_image(paths, name))
         cid = realm_cid(paths, name)
@@ -1535,6 +1769,7 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
         init_b = definition.services_estimated_installed_bytes
         ips_b = definition.integration_estimated_installed_bytes
         cache_b = definition.package_cache_peak_bytes
+        began = time.monotonic()
         with StorageWatch(paths) as watch:
             created = run_ginn(
                 launcher,
@@ -1546,6 +1781,7 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
                 "on",
                 timeout=CREATE_TIMEOUT,
             )
+        elapsed = time.monotonic() - began
         assert created.rc == 0, created.error_text()
         required = storage_required_bytes(0, init_b, ips_b, cache_b)
         raw = 2 * (init_b + ips_b) + cache_b
@@ -1553,8 +1789,10 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
         verdict = "PASS" if peak <= required else "FAIL"
         print(
             f"T727_ITEM5_COMMIT debian base_present=True raw={raw} required={required} "
-            f"peak={peak} samples={len(watch.sizes)} errors={watch.errors[:1]} verdict={verdict}"
+            f"peak={peak} samples={len(watch.sizes)} elapsed_s={elapsed:.1f} "
+            f"errors={watch.errors[:1]} verdict={verdict}"
         )
+        assert_sampled("commit only", len(watch.sizes), elapsed, watch.errors)
         assert peak <= required, f"commit-only peak {peak} is over the formula {required}"
     finally:
         run_ginn(launcher, "stop", name)
@@ -1716,9 +1954,11 @@ def test_phased_delete_order_and_shared_base_guard(launcher: Path, paths: OwnedP
     Two services-on debian realms A and B share one base. B is rebuilt to generation 2, as in the
     T7.30 observation. A is deleted first: its own derived image goes, and the base stays, since
     B's derived image is built on it. B is deleted next: its derived image goes, and then the base.
-    The image IDs, digests, parents and labels are recorded before the deletes, and the order of the
-    delete's steps comes from its progress lines. A note that says a derived image is kept is read
-    as what it names: the guard keeps the base, which is the image that `delete` removes last.
+    The image IDs, digests, parents and labels are recorded before the deletes. The image presence
+    checks after each delete are the evidence of the order and of the guard. For delete A only, the
+    order of its progress lines is also checked (a progress-step-order check, not an order of
+    removals). A note that says a derived image is kept is read as what it names: the guard keeps
+    the base, which is the image that `delete` removes last.
     """
     a = f"{PREFIX}debian-a"
     b = f"{PREFIX}debian-b"
@@ -1775,11 +2015,13 @@ def test_phased_delete_order_and_shared_base_guard(launcher: Path, paths: OwnedP
         assert not after_a["a_derived"], "A's own derived image is kept after its delete"
         assert after_a["b_derived"], "B's derived image went with A's delete"
         assert after_a["base"], "the base went while B's derived image is built on it"
-        init_at = next(i for i, step in enumerate(steps_a) if "init-image-removed" in step)
-        base_at = next(
+        # A progress-step-order check, for delete A only. The image presence checks above are the
+        # evidence that the derived image went and the base stayed.
+        init_step_at = next(i for i, step in enumerate(steps_a) if "init-image-removed" in step)
+        base_step_at = next(
             i for i, step in enumerate(steps_a) if "image-removed" in step and "init" not in step
         )
-        assert init_at < base_at, steps_a
+        assert init_step_at < base_step_at, f"progress steps out of order: {steps_a}"
         delete_b, steps_b = ginn_progress(launcher, "delete", b, "--purge-home", "--yes")
         body_b = json.dumps(delete_b.body, sort_keys=True)[:1500]
         print(f"T727_DELETE_B rc={delete_b.rc} steps={steps_b} body={body_b}")
