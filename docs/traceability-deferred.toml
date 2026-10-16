@@ -339,7 +339,7 @@ reason = "the create was timed once on a Void host with debian, zero packages an
 [[deferred]]
 id = "NFR-008"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+reason = "not covered yet: no test carries the marker, and no realm total is measured. S-10 measured one addition (the Arch locale archive, 3,064,432 bytes), and S-11 measured the init-set deltas per distribution (ADR-015 Decision 11). The per-distribution check is ADR-015 host gates T7.27 items 5 and 13. tools/measure/ does not cover NFR-008 yet (T10.4)"
 
 [[deferred]]
 id = "NFR-009"
@@ -399,12 +399,12 @@ reason = "domain, loader and store accept a new distribution definition with no 
 [[deferred]]
 id = "NFR-062"
 milestone = "M10"
-reason = "not covered yet; the Must-FR suite must pass on the glibc and musl CI matrix, an M10 release gate"
+reason = "not covered yet as a proof: no test carries the marker. The CI job test in .github/workflows/ci.yaml runs the unit suite on the Void glibc and musl containers, which is the unit leg of the matrix. The requirement is the full Must-FR suite, and the host-only tests need GINN_INTEGRATION=1 on a Void host. No musl host has run them (S-03 has no result file), so the musl run closes at the M10 gate run (T10.6)"
 
 [[deferred]]
 id = "NFR-063"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+reason = "not covered by a test: no test carries the marker. The CI job provenance in .github/workflows/ci.yaml runs tools/provenance-scan.sh on each push to void and each pull request, against the pinned references (docs/provenance.md). The SRS asks for the scan before each release. tools/release.sh does not run it, so the release check is the CI run of that commit. The release-time proof is owned by M10 (docs/roadmap.md)"
 
 [[deferred]]
 id = "NFR-SEC-001"
@@ -421,7 +421,7 @@ reason = "tests/unit/test_security_caps.py parses docs/capabilities.md and compa
 [[deferred]]
 id = "NFR-SEC-003"
 milestone = "M10"
-reason = "not covered yet; the M10 package job scans the built .xbps for setuid or setgid files (the source scan is AS-003)"
+reason = "not covered yet: tests/unit/test_packaging.py covers AS-003 (the xbps template and the source tree) and says NFR-SEC-003 is not proven there. The CI job package in .github/workflows/ci.yaml builds the x86_64 glibc .xbps and uploads it, but nothing scans it for setuid or setgid files. The file-mode scan of the built package is M10 work"
 
 [[deferred]]
 id = "NFR-SEC-004"
