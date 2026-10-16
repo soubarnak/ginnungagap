@@ -173,6 +173,8 @@ class ContainerInfo:
             finished_at=_timestamp(state.get("FinishedAt")),
             labels=_labels(config, "Labels"),
             size_rw=_optional_int(obj, "SizeRw"),
+            # The top-level `Image` is the image ID; `ImageName` is the name (ADR-015 Decision 9).
+            image_id=_bare_image_id(_text(obj, "Image")),
         )
 
     @classmethod

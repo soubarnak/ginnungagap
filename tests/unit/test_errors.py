@@ -374,3 +374,19 @@ def test_the_provision_leftover_notice_names_the_realm_the_leftover_and_the_clea
         "the next provisioning of this realm removes it, and 'ginn delete lab' removes every "
         "derived image of the realm"
     )
+
+
+@pytest.mark.fr("FR-083")
+def test_the_rebuild_pending_notice_names_the_init_set_download_and_the_disk_use() -> None:
+    notice = warn("GINN-W-REBUILD-PENDING", realm="lab", change="the services mode changed")
+    assert notice.code == "GINN-W-REBUILD-PENDING"
+    assert notice.message == (
+        "realm 'lab': the next start rebuilds it into a new container, because the services mode "
+        "changed"
+    )
+    assert notice.remedy == (
+        "its packages and Realm Home are kept, and a rebuild that does not reuse the derived image "
+        "pulls the pinned image and replays the packages without a prompt (CL-19); a start that "
+        "must provision downloads the init set and uses disk for its derived image, and runs under "
+        "this notice; run 'ginn rebuild lab' to do it now"
+    )

@@ -96,6 +96,17 @@ def test_container_inspect_fixture_parses_created_state() -> None:
     assert container.finished_at == ""
     assert container.labels == {}
     assert container.size_rw is None
+    assert container.image_id == "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8"
+
+
+@pytest.mark.fr("DR-040")
+def test_container_inspect_reads_the_image_id_from_its_top_level_image_field() -> None:
+    (raw,) = _load("container-inspect-alpine.json")
+    image_id = "b" * 64
+    assert ContainerInfo.from_inspect({**raw, "Image": "sha256:" + image_id}).image_id == image_id
+    assert ContainerInfo.from_inspect({**raw, "Image": "alpine:3"}).image_id == ""
+    assert ContainerInfo.from_inspect({**raw, "Image": 7}).image_id == ""
+    assert ContainerInfo.from_inspect({k: v for k, v in raw.items() if k != "Image"}).image_id == ""
 
 
 @pytest.mark.fr("IR-020")

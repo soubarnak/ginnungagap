@@ -470,22 +470,59 @@ def pending_rebuild_notice(record: RealmRecord, reason: str) -> GinnWarning | No
     return warn("GINN-W-REBUILD-PENDING", realm=record.name.value, change=reason)
 
 
+def _options_stale(record: RealmRecord) -> bool:
+    """True when a create-time option, or a GPU or fonts grant, differs from the container's.
+
+    The options are compared the way `created_options` names them (security/caps.py `option_keys`).
+    """
+    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
+    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
+    return wanted != record.created_options or not record.create_grants_match(toggles)
+
+
 def stale_container(record: RealmRecord) -> bool:
     """True when the record asks for a create-time state that its container was not made with.
 
     A create-time option (a device, a security option or a group, ADR-006), a GPU or fonts grant and
     the services mode are fixed at `podman create`. A tier, permission or services change that
     needs them is recorded in the settings at once, and it is applied by a rebuild at the next
-    start (FR-066, FR-083). This is the test for that rebuild. The options are compared the way
-    `created_options` names them (security/caps.py `option_keys`).
+    start (FR-066, FR-083). This is the test for that rebuild.
     """
-    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
-    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
-    return (
-        wanted != record.created_options
-        or not record.create_grants_match(toggles)
-        or record.settings.services != record.services_at_create
-    )
+    return _options_stale(record) or record.settings.services != record.services_at_create
+
+
+def stale_services_only(record: RealmRecord) -> bool:
+    """True when `stale_container` is true only through the services mode (ADR-015 Decision 7).
+
+    Such a change keeps the tier, the permissions and the create-time options. A realm with a
+    derived image is then rebuilt from that image (`reuse`), and it is not provisioned again.
+    """
+    return record.settings.services != record.services_at_create and not _options_stale(record)
+
+
+def check_derived_image(podman: Podman, name: RealmName, cid: str, expected: str | None) -> None:
+    """Refuse to start a container that was not made from the derived image its record names.
+
+    `expected` is the record's `init_image_id`, or the `building_init_image_id` of a rebuild that
+    starts its container. None means that the realm has no derived image, so nothing is checked
+    (ADR-015 Decision 9). Podman fixes a container's image at create, so the container's `image_id`
+    is the image it runs from, and it must be the recorded ID. A mismatch is GINN-E-IMAGE-DERIVED,
+    and the container is left stopped. Nothing is written here.
+    """
+    if expected is None:
+        return
+    actual = podman.inspect(cid).image_id
+    if actual != expected:
+        err = make(
+            "GINN-E-IMAGE-DERIVED",
+            realm=name.value,
+            detail=f"the container runs image {actual or 'none'}, not the recorded {expected}",
+        )
+        err.remedy = (
+            f"run 'ginn rebuild {name.value}', which provisions the realm's derived image again "
+            "from its current pin"
+        )
+        raise err
 
 
 def _rebuild_stale(
@@ -526,7 +563,13 @@ def _rebuild_stale(
     rebuild_hooks = RebuildHooks() if hooks.rebuild is None else hooks.rebuild
     try:
         return rebuild_for_start(
-            env, podman, record.name, session=user, hooks=rebuild_hooks, warnings=warnings
+            env,
+            podman,
+            record.name,
+            session=user,
+            hooks=rebuild_hooks,
+            warnings=warnings,
+            services_only=stale_services_only(record),
         )
     except GinnError as err:
         if err.code == "GINN-E-INTERRUPTED":
@@ -763,6 +806,11 @@ def start_realm(
         generation = current.generation
         current = _rebuild_stale(env, podman, current, user, hooks, notices)
         rebuilt = current.generation != generation
+    if current.container_id is not None:
+        # Before the sv call, and before any journal entry, so a container that is not the recorded
+        # derived image is refused with nothing written. A services-on start would otherwise
+        # show the mismatch as a supervisor restart loop (ADR-015 Decision 9).
+        check_derived_image(podman, name, current.container_id, current.init_image_id)
     if current.services_at_create and not supervised:
         refuse_before_supervisor(
             env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
@@ -1241,6 +1289,8 @@ def _start(
     cid = record.container_id
     if cid is None:
         raise _internal("the realm has no container to start", realm=name.value)
+    # Before any write: a container that is not the recorded derived image is refused (Decision 9).
+    check_derived_image(podman, name, cid, record.init_image_id)
     record = _resolve_gpg(record, hooks)
     grants = _plan_grants(env, record, user, hooks)
     # Written before the container starts: the identities of the last start are cleared, so a

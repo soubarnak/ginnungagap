@@ -117,6 +117,8 @@ def _error(code: str, ref: str) -> GinnError:
 
 _FAKE_INIT: Final = b"systemd\n"
 """The stand-in for systemd's binary at `/sbin/init`, which the fake image carries by default."""
+_ZERO_TIME: Final = "0001-01-01T00:00:00Z"
+"""The time that podman prints for a container that has not started or finished."""
 
 
 def _path_not_found() -> GinnError:
@@ -356,24 +358,46 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         del self.containers[container_id]
 
-    def _info_for(self, container: _Container) -> ContainerInfo:
-        return ContainerInfo(
-            image_id=container.image_id,
-            id=container.id,
-            name=container.name,
-            image=container.image,
-            state=container.state,
-            pid=container.pid,
-            exit_code=container.exit_code,
-            started_at="",
-            finished_at="",
-            labels=dict(container.labels),
-        )
+    def _inspect_json(self, container: _Container) -> dict[str, object]:
+        """The object that `podman container inspect` prints for `container`, in the fields ginn
+        reads. The top-level `Image` is the image ID, and it is "" when the fake holds no image for
+        the reference the container was created from, as podman never prints that for a container.
+        `ContainerInfo.from_inspect` parses it, so the image ID is read as it is from podman."""
+        return {
+            "Id": container.id,
+            "Name": container.name,
+            "Image": container.image_id,
+            "ImageName": container.image,
+            "State": {
+                "Status": container.state.value,
+                "Pid": container.pid,
+                "ExitCode": container.exit_code,
+                "StartedAt": _ZERO_TIME,
+                "FinishedAt": _ZERO_TIME,
+            },
+            "Config": {"Labels": dict(container.labels)},
+        }
+
+    def _ps_json(self, container: _Container) -> dict[str, object]:
+        """The row that `podman ps --all --format json` prints for `container`, in the fields ginn
+        reads. `ContainerInfo.from_ps` parses it, which reads the image ID from `ImageID`."""
+        return {
+            "Id": container.id,
+            "Names": [container.name],
+            "Image": container.image,
+            "ImageID": container.image_id,
+            "State": container.state.value,
+            "Pid": container.pid,
+            "ExitCode": container.exit_code,
+            "StartedAt": 0,
+            "ExitedAt": 0,
+            "Labels": dict(container.labels),
+        }
 
     def inspect(self, container_id: str) -> ContainerInfo:
         self._record("inspect", container_id)
         self._take_op_failure("inspect")
-        return self._info_for(self._container(container_id))
+        return ContainerInfo.from_inspect(self._inspect_json(self._container(container_id)))
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
         self._record("ps", tuple(sorted((label_filter or {}).items())))
@@ -381,7 +405,7 @@ class FakePodman:
         matches: list[ContainerInfo] = []
         for container in self.containers.values():
             if all(container.labels.get(k) == v for k, v in wanted.items()):
-                matches.append(self._info_for(container))
+                matches.append(ContainerInfo.from_ps(self._ps_json(container)))
         return matches
 
     def commit(self, container_id: str, image_name: str, *, changes: Sequence[str] = ()) -> str:

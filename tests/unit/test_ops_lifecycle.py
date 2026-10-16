@@ -26,7 +26,7 @@ import pytest
 
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
-from ginn.errors import GinnError, make
+from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops import lifecycle
 from ginn.ops import rebuild as rebuild_module
@@ -34,16 +34,19 @@ from ginn.ops._mutating import OpEnv, mutating
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
+    check_derived_image,
     list_realms,
     realm_status,
     render_status_text,
+    stale_container,
+    stale_services_only,
     start_realm,
     stop_realm,
 )
 from ginn.ops.lifecycle import _tree_usage as tree_usage
 from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.podman.adapter import CreateSpec, ExecTarget
-from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.podman.models import ContainerInfo, ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
 from ginn.runtime.idle import IdleHooks, log_path, record_path
 from ginn.runtime.realm_security import SecurityHooks
@@ -236,6 +239,7 @@ def _record(
     kvm_at_create: bool = False,
     gpu_at_create: bool = True,
     fonts_at_create: bool = True,
+    init_image_id: str | None = None,
 ) -> RealmRecord:
     settings = RealmSettings(
         name=RealmName(name),
@@ -262,6 +266,7 @@ def _record(
         kvm_at_create=kvm_at_create,
         gpu_at_create=gpu_at_create,
         fonts_at_create=fonts_at_create,
+        init_image_id=init_image_id,
     )
 
 
@@ -1041,6 +1046,240 @@ def test_a_services_off_realm_running_with_no_container_is_settled_as_a_crash_fi
     assert audited_ops(env) == ["crash", "stop", "start"]
     (crash,) = audit_of(env, "crash")
     assert crash.outcome == "ok"
+
+
+@pytest.mark.fr("FR-066")
+def test_a_services_only_change_is_the_one_the_stale_test_names() -> None:
+    """Only the services clause differs, so the rebuild may reuse the derived image (ADR-015
+    Decision 7). A change of an option as well is not services-only, and neither is one of only an
+    option."""
+    unchanged = _record("lab", RealmState.STOPPED, None)
+    services = replace(
+        _record("lab", RealmState.STOPPED, None, services=True), services_at_create=False
+    )
+    both = replace(services, created_options=["device=/dev/fuse"])
+    option = _record("lab", RealmState.STOPPED, None, created_options=["device=/dev/fuse"])
+
+    assert not stale_container(unchanged)
+    assert stale_container(services) and stale_services_only(services)
+    assert stale_container(both) and not stale_services_only(both)
+    assert stale_container(option) and not stale_services_only(option)
+
+
+@pytest.mark.fr("FR-066")
+@pytest.mark.parametrize(
+    ("services_changed", "options_changed", "services_only"),
+    [(True, False, True), (True, True, False), (False, True, False)],
+    ids=["services-only", "services-and-options", "options-only"],
+)
+def test_a_stale_start_tells_the_rebuild_whether_only_the_services_mode_changed(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+    services_changed: bool,
+    options_changed: bool,
+    services_only: bool,
+) -> None:
+    """The start's rebuild gets `services_only` only for a services-only change (FR-066, FR-083)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        created_options=["device=/dev/fuse"] if options_changed else [],
+    )
+    if services_changed:
+        record = stored(env, "lab")
+        RealmStore(env.paths, env.clock).save(
+            replace(
+                record,
+                settings=replace(record.settings, services=True),
+                services_at_create=False,
+            )
+        )
+    store = RealmStore(env.paths)
+    seen: list[dict[str, Any]] = []
+
+    def rebuild(env_: Any, podman: Any, name: RealmName, **kwargs: Any) -> RealmRecord:
+        seen.append(kwargs)
+        fresh = replace(store.load(name), created_options=[], kvm_at_create=False)
+        store.save(fresh)
+        return fresh
+
+    monkeypatch.setattr(rebuild_module, "rebuild_for_start", rebuild)
+
+    start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert [kwargs["services_only"] for kwargs in seen] == [services_only]
+
+
+@pytest.mark.fr("FR-066")
+def test_a_leftover_that_a_start_rebuild_leaves_reaches_the_warnings_of_the_start(
+    env: OpEnv,
+    fake: LifecyclePodman,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rebuild appends its GINN-W-PROVISION-LEFTOVER notes to the list that the start passes
+    it, and the start hands that list to its caller, as the other start warnings are (ADR-015
+    Decision 13)."""
+    make_realm(
+        env,
+        fake,
+        "lab",
+        RealmState.STOPPED,
+        running=False,
+        created_options=["device=/dev/fuse"],
+    )
+    store = RealmStore(env.paths)
+
+    def rebuild(env_: Any, podman: Any, name: RealmName, **kwargs: Any) -> RealmRecord:
+        kwargs["warnings"].append(
+            warn("GINN-W-PROVISION-LEFTOVER", realm=name.value, detail="kept 0123456789ab")
+        )
+        fresh = replace(store.load(name), created_options=[], kvm_at_create=False)
+        store.save(fresh)
+        return fresh
+
+    monkeypatch.setattr(rebuild_module, "rebuild_for_start", rebuild)
+    warnings: list[GinnWarning] = []
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks, warnings=warnings)
+
+    assert record.state is RealmState.RUNNING
+    leftovers = [w for w in warnings if w.code == "GINN-W-PROVISION-LEFTOVER"]
+    assert len(leftovers) == 1
+    assert leftovers[0].message.endswith("kept 0123456789ab")
+
+
+DERIVED_ID = "d" * 64
+"""The image ID of the derived image that a test holds under the realm's prefix."""
+
+
+def _hold_derived_image(fake: LifecyclePodman, image_id: str = DERIVED_ID) -> None:
+    """Hold a derived image of realm `lab` in the fake, under its prefix (ADR-015 Decision 10)."""
+    fake.images["localhost/ginn-init-lab:g1"] = ImageInfo(
+        id=image_id,
+        digest="sha256:" + "cd" * 32,
+        repo_digests=(),
+        size=1,
+        created="2026-10-13T09:00:00Z",
+    )
+
+
+def _container_from(fake: LifecyclePodman, image_id: str | None) -> str:
+    """A container of realm `lab` made from `image_id`, or from the pinned digest when None."""
+    labels = {LABEL_REALM: "lab", LABEL_DISTRO: "debian", LABEL_GENERATION: "1"}
+    spec = CreateSpec(
+        name="ginn-lab-g1",
+        image_digest_ref=DIGEST,
+        image_id=image_id,
+        network="host",
+        labels=labels,
+    )
+    return fake.create(spec)
+
+
+@pytest.mark.fr("DR-040")
+def test_a_start_runs_a_container_made_from_the_recorded_derived_image(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    _hold_derived_image(fake)
+    cid = _container_from(fake, DERIVED_ID)
+    (env.paths.homes / "lab").mkdir(parents=True, exist_ok=True)
+    RealmStore(env.paths, env.clock).save(
+        _record("lab", RealmState.STOPPED, cid, init_image_id=DERIVED_ID)
+    )
+    fake.calls.clear()
+
+    record = start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert record.state is RealmState.RUNNING
+    assert "start" in [call.op for call in fake.calls]
+
+
+@pytest.mark.fr("DR-040")
+def test_a_start_refuses_a_container_that_is_not_the_recorded_derived_image_before_it_starts(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks
+) -> None:
+    """The container was made from the pinned image, so its image is not the recorded ID. The start
+    is refused with GINN-E-IMAGE-DERIVED before any write or start, and the realm stays stopped."""
+    _hold_derived_image(fake)
+    cid = _container_from(fake, None)
+    (env.paths.homes / "lab").mkdir(parents=True, exist_ok=True)
+    RealmStore(env.paths, env.clock).save(
+        _record("lab", RealmState.STOPPED, cid, init_image_id=DERIVED_ID)
+    )
+    before = record_bytes(env, "lab")
+    fake.calls.clear()
+
+    with pytest.raises(GinnError) as raised:
+        start_realm(env, fake, RealmName("lab"), session=user, hooks=hooks)
+
+    assert raised.value.code == "GINN-E-IMAGE-DERIVED"
+    assert raised.value.remedy == (
+        "run 'ginn rebuild lab', which provisions the realm's derived image again from its "
+        "current pin"
+    )
+    assert "start" not in [call.op for call in fake.calls]
+    assert record_bytes(env, "lab") == before
+
+
+@pytest.mark.fr("DR-040")
+def test_the_image_check_names_the_building_image_only_when_one_is_given(
+    fake: LifecyclePodman,
+) -> None:
+    """A rebuild's supervised start checks its container against `building_init_image_id`. With no
+    derived image there is nothing to check, and no inspect runs."""
+    _hold_derived_image(fake)
+    cid = _container_from(fake, DERIVED_ID)
+    name = RealmName("lab")
+    fake.calls.clear()
+
+    check_derived_image(fake, name, cid, None)
+    assert [call.op for call in fake.calls] == []
+
+    check_derived_image(fake, name, cid, DERIVED_ID)
+    with pytest.raises(GinnError) as raised:
+        check_derived_image(fake, name, cid, "e" * 64)
+    assert raised.value.code == "GINN-E-IMAGE-DERIVED"
+    assert "not the recorded" in raised.value.message
+
+
+@pytest.mark.fr("DR-040")
+@pytest.mark.fr("FR-081")
+def test_a_services_on_start_refuses_a_foreign_derived_container_before_sv_up(
+    env: OpEnv, fake: LifecyclePodman, user: HostUser, hooks: LifecycleHooks, clock: FakeClock
+) -> None:
+    """The services-on container is not the recorded derived image. The start is refused with
+    GINN-E-IMAGE-DERIVED before any `sv` call, so runsv never starts the realm and cannot restart
+    it in a loop (ADR-015 Decision 9). Nothing is written."""
+    _hold_derived_image(fake)
+    _supervised_realm(env, fake, "lab", state=RealmState.STOPPED, running=False)
+    store = RealmStore(env.paths, env.clock)
+    store.save(replace(store.load(RealmName("lab")), init_image_id=DERIVED_ID))
+    runit = RunitFake(service_dir(env.paths, RealmName("lab")), clock)
+    before = record_bytes(env, "lab")
+    fake.calls.clear()
+
+    with pytest.raises(GinnError) as raised:
+        start_realm(
+            env,
+            fake,
+            RealmName("lab"),
+            session=user,
+            hooks=_services_hooks(hooks, runit, clock),
+        )
+
+    assert raised.value.code == "GINN-E-IMAGE-DERIVED"
+    assert runit.argvs == [], "no sv call runs before the refusal"
+    assert "start" not in [call.op for call in fake.calls]
+    assert record_bytes(env, "lab") == before
+    assert env.journal.pending() == []
 
 
 @pytest.mark.fr("FR-063")

@@ -797,6 +797,8 @@ def test_inspect_parses_the_container_fixture(shim: Path, tmp_path: Path) -> Non
     container = make_cli(tmp_path).inspect(CONTAINER)
     assert container.name == "t211-alpine"
     assert container.image == "docker.io/library/alpine:3"
+    # The top-level `Image` of the fixture is the bare image ID (ADR-015 Decision 9).
+    assert container.image_id == "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8"
 
 
 @pytest.mark.fr("FR-011")

@@ -810,9 +810,11 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=0,
         summary="realm '{realm}': the next start rebuilds it into a new container, because "
         "{change}",
-        remedy="its packages and Realm Home are kept, and the rebuild pulls the pinned image and "
-        "replays the packages without a prompt (CL-19); run 'ginn rebuild {realm}' to do it now",
-        source="FR-066, FR-083, CL-19 (ginn-defined; not an SRS code)",
+        remedy="its packages and Realm Home are kept, and a rebuild that does not reuse the "
+        "derived image pulls the pinned image and replays the packages without a prompt "
+        "(CL-19); a start that must provision downloads the init set and uses disk for "
+        "its derived image, and runs under this notice; run 'ginn rebuild {realm}' to do it now",
+        source="FR-066, FR-083, CL-19, ADR-015 Decision 7 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-IDLE-STOP",

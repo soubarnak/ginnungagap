@@ -507,6 +507,29 @@ def _stage_leftovers(fake: Any, name: RealmName, generation: int) -> None:
     )
 
 
+def _run_from_derived(fake: Any, store: RealmStore, name: RealmName, init: str) -> None:
+    """Record `init` as the realm's derived image, and make its container from that image.
+
+    A realm with an init image always runs from it (ADR-015 Decisions 7 and 9), so the container
+    that `_seed` or the rebuild fixture made from the pinned base is made again from `init`, with
+    the same name and labels, and the record names the new container.
+    """
+    record = store.load(name)
+    assert record.container_id is not None
+    seeded = fake.inspect(record.container_id)
+    fake.rm(record.container_id, force=True)
+    cid = fake.create(
+        CreateSpec(
+            name=seeded.name,
+            image_digest_ref=DIGEST,
+            image_id=init,
+            network="host",
+            labels=seeded.labels,
+        )
+    )
+    store.save(replace(record, container_id=cid, init_image_id=init))
+
+
 def _seed_init_leftovers(world: World, name: RealmName) -> None:
     """A stored stopped realm that records its init image, with the leftovers of an interrupted
     stage of its next generation in podman. The delete must sweep the leftovers and the image it
@@ -515,8 +538,7 @@ def _seed_init_leftovers(world: World, name: RealmName) -> None:
         world.fake.pull(DIGEST)  # the pinned base, which the delete removes last (FR-019 AC-1)
     init = _derived_image(world.fake, derived_image_name(name, 1))
     _stage_leftovers(world.fake, name, 2)
-    store = RealmStore(world.paths)
-    store.save(replace(store.load(name), init_image_id=init))
+    _run_from_derived(world.fake, RealmStore(world.paths), name, init)
     world.fake.calls.clear()
 
 
@@ -561,7 +583,7 @@ def _rebuild_provisioned(tmp: Path, mp: pytest.MonkeyPatch) -> Bed:
     bed = _rebuild(tmp, mp, running=False)
     store = _store(bed)
     init = _derived_image(bed.fake, derived_image_name(REBUILD_NAME, 1))
-    store.save(replace(store.load(REBUILD_NAME), init_image_id=init))
+    _run_from_derived(bed.fake, store, REBUILD_NAME, init)
     bed.fake.calls.clear()
     bed.done = lambda: [
         *_generation_is(bed, 2),
