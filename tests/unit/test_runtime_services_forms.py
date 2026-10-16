@@ -21,6 +21,7 @@ from ginn.runtime.spec import (
     JOURNALD_DROPIN_TARGET,
     SERVICES_MASKED_UNITS,
     SERVICES_MITIGATIONS,
+    SERVICES_USERDBD_UNITS,
     UNIT_DIR,
     create_argv,
     create_spec,
@@ -82,8 +83,21 @@ def test_with_the_mitigations_on_each_masked_unit_gets_a_read_only_dev_null_bind
     values = _mount_values(create_argv(spec))
     for unit in SERVICES_MASKED_UNITS:
         assert f"type=bind,source=/dev/null,target={UNIT_DIR}/{unit},ro" in values
-    assert len([v for v in values if "source=/dev/null" in v]) == 11
+    assert len([v for v in values if "source=/dev/null" in v]) == 13
     assert UNIT_DIR == "/etc/systemd/system"
+
+
+def test_the_userdbd_service_and_its_socket_get_the_same_dev_null_bind() -> None:
+    """ADR-007 D9 (T7.32): the userdb service and socket are masked like the other units."""
+    spec = replace(
+        make_spec(services=True),
+        services_mitigations=True,
+        journald_dropin=DROPIN_SOURCE,
+    )
+    values = _mount_values(create_argv(spec))
+    assert SERVICES_USERDBD_UNITS == ("systemd-userdbd.service", "systemd-userdbd.socket")
+    for unit in SERVICES_USERDBD_UNITS:
+        assert f"type=bind,source=/dev/null,target={UNIT_DIR}/{unit},ro" in values
 
 
 def test_the_mitigation_mounts_follow_the_realms_own_mounts() -> None:
@@ -132,15 +146,20 @@ def test_the_pidfile_is_optional_on_the_adapter() -> None:
     assert "--conmon-pidfile" not in argv
 
 
-def test_the_masks_in_the_argv_match_the_list_the_s05_spike_used() -> None:
-    """The argv masks the S-05 base ten, then logind from the S-05 logind file (CL-28)."""
+def test_the_masks_in_the_argv_are_the_s05_lists_then_the_userdbd_pair() -> None:
+    """The argv masks the S-05 base ten, then logind from the S-05 logind file (CL-28), then the
+    userdb pair (ADR-007 D9, T7.32). The pair is in no spike file, so it is the suffix."""
     spikes = Path(__file__).resolve().parents[2] / "spikes/s05"
 
     def listed(name: str) -> list[str]:
         lines = (spikes / name).read_text(encoding="utf-8").splitlines()
         return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
-    assert list(SERVICES_MASKED_UNITS) == [*listed("masks-base.txt"), *listed("masks-logind.txt")]
+    assert list(SERVICES_MASKED_UNITS) == [
+        *listed("masks-base.txt"),
+        *listed("masks-logind.txt"),
+        *SERVICES_USERDBD_UNITS,
+    ]
 
 
 @pytest.mark.fr("FR-080")

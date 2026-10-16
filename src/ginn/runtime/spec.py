@@ -131,9 +131,22 @@ tests pin it."""
 SERVICES_LOGIND_UNIT: Final = "systemd-logind.service"
 """The logind unit that ADR-007 mitigation b also masks (decided by the user, 2026-10-14, CL-28).
 The list is spikes/s05/masks-logind.txt (tests pin it)."""
-SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (*SERVICES_BASE_MASKED_UNITS, SERVICES_LOGIND_UNIT)
-"""The eleven units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over its
-unit path under /etc/systemd/system. The base ten, then logind (CL-28)."""
+SERVICES_USERDBD_UNITS: Final[tuple[str, ...]] = (
+    "systemd-userdbd.service",
+    "systemd-userdbd.socket",
+)
+"""The userdb service and its socket, which ADR-007 mitigation b also masks (decided by the user,
+2026-10-16, T7.32, ADR-007 D9). The realm user is in /etc/passwd, so userdbd is not needed. The
+socket is masked too, so socket activation cannot start the masked service, as for the udev
+sockets. No spikes/s05 file lists them: S-05 never measured userdbd."""
+SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
+    *SERVICES_BASE_MASKED_UNITS,
+    SERVICES_LOGIND_UNIT,
+    *SERVICES_USERDBD_UNITS,
+)
+"""The thirteen units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over
+its unit path under /etc/systemd/system. The base ten, then logind (CL-28), then the userdb pair
+(T7.32)."""
 UNIT_DIR: Final = "/etc/systemd/system"
 KALI: Final = "kali"
 HOST_NETWORK: Final = "host"

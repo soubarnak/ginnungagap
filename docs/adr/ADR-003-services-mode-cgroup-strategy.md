@@ -137,7 +137,7 @@ placement above, and it adds the supervision contract. `services/runit_user.py` 
 7. **ADR-007 forms.** Mitigations a and b are coded as create-time forms, behind
    `SERVICES_MITIGATIONS`, which is `False` until S-05s passes or CL-10 is decided. With the flag on,
    the argv binds the ginn-owned journald drop-in read-only at `/etc/systemd/journald.conf.d/ginn.conf`
-   and binds `/dev/null` read-only over each of the ten units in `spikes/s05/masks-base.txt`, and over `systemd-logind.service` (ADR-007 D8), under
+   and binds `/dev/null` read-only over each of the ten units in `spikes/s05/masks-base.txt`, and over `systemd-logind.service` (ADR-007 D8) and the userdb pair `systemd-userdbd.service` and `systemd-userdbd.socket` (ADR-007 D9, T7.32), under
    `/etc/systemd/system`. Mitigation d (`SYSTEMD_LOG_LEVEL=warning`) stays on by default. No file is
    written into the realm's `/etc` (CR-007).
 
