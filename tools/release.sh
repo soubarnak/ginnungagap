@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Release helper for the ginn Void package (T0.6, AS-003, NFR-SEC-003).
+# Release helper for the ginn Void package (T0.6, T10.6, AS-003, NFR-SEC-003).
+#
+# This script runs only in the CI build container (.github/workflows/ci.yaml, package job) or
+# by the maintainer. The test suite never runs it, and ginn never runs it at runtime: it calls
+# xbps-rindex, and FR-004 is a runtime rule for ginn.
 #
 #   check                      template version equal to the pyproject version, no tag yet, clean tree
 #   checksum URL_OR_FILE       write the sha256 of the release tarball into the template
-#   repo BINPKGS_DIR OUT_DIR   sign the ginn packages and build the signed repository in OUT_DIR,
-#                              one signed index per architecture found in BINPKGS_DIR. OUT_DIR
-#                              also gets the rendered traceability matrix (traceability.md)
-#   cut                        run check, create the annotated tag v<version>, print next steps
+#   repo BINPKGS_DIR OUT_DIR   build the ginn repository in OUT_DIR, one index per architecture found
+#                              in BINPKGS_DIR, with SHA256SUMS and the rendered traceability matrix
+#                              (traceability.md). Unsigned unless GINN_SIGNING_KEY names a private
+#                              key; with a key the packages and every index are signed
+#   cut                        run check, create the annotated tag v<version>, print next steps.
+#                              It never pushes
 #
 # The signing key is read from GINN_SIGNING_KEY. Keys are never committed; *.pem and
 # *.key are listed in .gitignore.
@@ -80,9 +86,16 @@ cmd_checksum() {
 cmd_repo() {
     local bins=${1:?usage: release.sh repo BINPKGS_DIR OUT_DIR}
     local out=${2:?usage: release.sh repo BINPKGS_DIR OUT_DIR}
-    local key=${GINN_SIGNING_KEY:?set GINN_SIGNING_KEY to the private key path}
-    local pkg count=0
-    [ -f "$key" ] || die "signing key not found: $key"
+    local key=${GINN_SIGNING_KEY:-}
+    local mode=unsigned pkg count=0
+    if [ -n "$key" ]; then
+        [ -f "$key" ] || die "signing key not found: $key"
+        mode=signed
+    fi
+    # The index must not mix with files from an earlier run, so OUT_DIR has to be empty.
+    if [ -d "$out" ] && [ -n "$(ls -A -- "$out")" ]; then
+        die "output directory $out is not empty; give a new or empty directory"
+    fi
     mkdir -p "$out"
     out=$(cd "$out" && pwd)
     for pkg in "$bins"/ginn*.xbps; do
@@ -99,10 +112,12 @@ cmd_repo() {
     # It is generated and not committed, so it is rendered here before it is copied.
     python3 -I "$here/tools/traceability.py" --write
     cp -- "$here/docs/traceability.md" "$out/traceability.md"
-    # Sign each package before indexing: the index records the file hash.
-    for pkg in "$out"/ginn*.xbps; do
-        xbps-rindex --sign-pkg --signedby "$signer" --privkey "$key" "$pkg"
-    done
+    if [ "$mode" = signed ]; then
+        # Sign each package before indexing: the index records the file hash.
+        for pkg in "$out"/ginn*.xbps; do
+            xbps-rindex --sign-pkg --signedby "$signer" --privkey "$key" "$pkg"
+        done
+    fi
     # xbps keeps one repodata index per architecture, selected by XBPS_TARGET_ARCH.
     # Index each package under its own architecture, then sign every index found.
     local archs=() arch
@@ -114,10 +129,18 @@ cmd_repo() {
             *) archs+=("$arch") ;;
         esac
     done
-    for arch in "${archs[@]}"; do
-        XBPS_TARGET_ARCH=$arch xbps-rindex --sign --signedby "$signer" --privkey "$key" "$out"
-    done
-    echo "signed repository: $out ($count package(s), architectures: ${archs[*]})"
+    if [ "$mode" = signed ]; then
+        for arch in "${archs[@]}"; do
+            XBPS_TARGET_ARCH=$arch xbps-rindex --sign --signedby "$signer" --privkey "$key" "$out"
+        done
+    else
+        # xbps refuses an unsigned remote repository, so users read this one from a local
+        # directory (docs/packaging.md, Install from the release).
+        echo "release.sh: GINN_SIGNING_KEY is not set; the repository is UNSIGNED" >&2
+    fi
+    # SHA256SUMS lets a download be checked without a signature.
+    (cd "$out" && sha256sum -- ginn*.xbps ./*-repodata > SHA256SUMS)
+    echo "$mode repository: $out ($count package(s), architectures: ${archs[*]})"
 }
 
 cmd_cut() {
@@ -129,9 +152,10 @@ cmd_cut() {
 Tag v$tv created locally. Next steps:
   1. git push origin v$tv
   2. release.sh checksum https://github.com/soubarnak/ginnungagap/archive/refs/tags/v$tv.tar.gz
-     then commit the template change on the main line.
-  3. tools/xbps-build.sh <void-packages-dir>   (set GINN_MUSL=1 to add the musl target)
-  4. GINN_SIGNING_KEY=<key.pem> tools/release.sh repo <void-packages-dir>/hostdir/binpkgs <out-dir>
+     then commit the template change on the void branch.
+  3. tools/xbps-build.sh <void-packages-dir>   (the musl target is not built for 1.0.0)
+  4. tools/release.sh repo <void-packages-dir>/hostdir/binpkgs <out-dir>
+     (unsigned; set GINN_SIGNING_KEY=<key.pem> to sign)
   5. Create GitHub release v$tv and upload every file in <out-dir>.
 EOF
 }

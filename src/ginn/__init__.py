@@ -5,7 +5,7 @@ from importlib import metadata
 
 __all__ = ["__version__"]
 
-_FALLBACK_VERSION = "0.1.0.dev0"
+_FALLBACK_VERSION = "1.0.0"
 
 
 def _read_version() -> str:

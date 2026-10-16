@@ -125,11 +125,6 @@ def test_template_version_is_1_0_0() -> None:
 
 
 @pytest.mark.fr("AS-003")
-@pytest.mark.xfail(
-    strict=True,
-    reason="pyproject.toml and src/ginn/__init__.py still say 0.1.0.dev0. Closing this needs "
-    "the release bump outside packaging/ (docs/packaging.md, release step 1).",
-)
 def test_template_version_matches_pyproject_without_dev_marker() -> None:
     expected = str(_pyproject()["project"]["version"]).removesuffix(".dev0")
     assert _template_fields()["version"] == expected
