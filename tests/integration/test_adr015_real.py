@@ -44,7 +44,6 @@ import pytest
 
 from ginn.distros import load as load_distro
 from ginn.ops.disk import estimate_required
-from ginn.ops.provision import storage_required_bytes
 from ginn.runtime.provision import LABEL_BASE_DIGEST, LABEL_INIT_SET, LABEL_PROVISION
 from ginn.runtime.spec import SERVICES_MASKED_UNITS, SERVICES_USERDBD_UNITS
 from ginn.services._exec_lock import exec_lock_dir
@@ -340,6 +339,68 @@ def run_ginn_env(
     objects = [json.loads(line) for line in lines if line.startswith("{")]
     body: dict[str, Any] = next((o for o in reversed(objects) if "progress" not in o), {})
     return Ran(done.returncode, body)
+
+
+def ginn_steps(
+    launcher: Path, *args: str, timeout: float = 900.0
+) -> tuple[Ran, list[dict[str, Any]]]:
+    """`ginn --json` as `ginn()` runs it, and the progress objects it printed, in the order printed.
+
+    A finished step of an operation prints `{"progress": {"step", "message"}}` on stderr (FR-107,
+    cli/output.py). The fields of a step are read from the objects returned here. `ginn()` and
+    `run_ginn_env` drop them. The environment is read at call time, so a `mock.patch.dict` around
+    the call reaches the command.
+    """
+    env = {**os.environ, "PATH": f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(launcher), "--json", *args],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+        cwd="/tmp",  # noqa: S108 - a working directory, not a temp file
+        timeout=timeout,
+        check=False,
+    )
+    lines = (done.stdout + "\n" + done.stderr).splitlines()
+    objects = [json.loads(line) for line in lines if line.startswith("{")]
+    body: dict[str, Any] = next((o for o in reversed(objects) if "progress" not in o), {})
+    steps = [o["progress"] for o in objects if isinstance(o.get("progress"), dict)]
+    return Ran(done.returncode, body), steps
+
+
+SPACE_STEP = "space-checked"
+"""The progress step where a create, a resume or a rebuild compares free space with its figure."""
+
+
+def space_checked(label: str, steps: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+    """The product's `required_bytes` and `free_bytes`, from the command's `space-checked` step.
+
+    The T7.35 contract: the object `{"progress": {"step": "space-checked", "required_bytes": N,
+    "free_bytes": M, ...}}` of `ginn --json` carries the figure the product compares with free
+    space, with the 1.10 margin applied. The gate reads that figure and does not re-derive it. A
+    path that checks nothing reports `required_bytes` 0 with a `reason`, and that fails here: there
+    is no figure to bound the measured peak by.
+    """
+    found = [step for step in steps if step.get("step") == SPACE_STEP]
+    assert len(found) == 1, (
+        f"{label}: {len(found)} `{SPACE_STEP}` progress steps, expected 1; steps: {list(steps)}"
+    )
+    step = found[0]
+    assert "required_bytes" in step and "free_bytes" in step, (
+        f"{label}: the `{SPACE_STEP}` step lacks required_bytes or free_bytes (T7.35 contract): "
+        f"{step}"
+    )
+    required, free = step["required_bytes"], step["free_bytes"]
+    # A step that checks nothing reports required_bytes 0 (or none) with free_bytes None and a
+    # reason, so the reason is read before the free figure is required to be an integer.
+    assert isinstance(required, int) and required > 0, (
+        f"{label}: required_bytes is {required!r}, reason {step.get('reason')!r}: this path "
+        "checked nothing, so the measured peak has no figure to be bounded by"
+    )
+    assert isinstance(free, int), f"{label}: free_bytes is {free!r} in the `{SPACE_STEP}` step"
+    print(f"T727_SPACE {label} {json.dumps(step, sort_keys=True)}")
+    return required, free
 
 
 def teardown_step(
@@ -1101,9 +1162,19 @@ def product_podman(paths: OwnedPaths, args: Sequence[str]) -> str:
     return done.stdout
 
 
-def du_bytes(paths: OwnedPaths, path: str | Path) -> int:
-    """The bytes under `path`, counted inside `podman unshare`, so keep-id layers can be read."""
-    done = product_run(paths, ["unshare", "du", "-sb", str(path)], timeout=900.0)
+DU_ALLOCATED = ("-sxB1",)
+"""The `du` flags of the storage peak: allocated bytes, on one filesystem (`-x`), so a running
+container's merged mount is not counted. T7.33 measured these flags (ADR-015 Decision 11)."""
+DU_APPARENT = ("-sbx",)
+"""The `du` flags of the apparent bytes, on one filesystem. Recorded, and not asserted."""
+
+
+def du_bytes(paths: OwnedPaths, path: str | Path, flags: Sequence[str] = DU_ALLOCATED) -> int:
+    """The bytes under `path`, counted inside `podman unshare`, so keep-id layers can be read.
+
+    The default is allocated bytes. `flags` takes `DU_APPARENT` for apparent bytes.
+    """
+    done = product_run(paths, ["unshare", "/usr/bin/du", *flags, "--", str(path)], timeout=900.0)
     fields = done.stdout.split()
     if not fields or not fields[0].isdigit():
         raise ValueError(
@@ -1278,14 +1349,28 @@ def assert_sampled(label: str, samples: int, elapsed_s: float, errors: Sequence[
     )
 
 
+def storage_sizes(paths: OwnedPaths) -> tuple[int, int]:
+    """The allocated and the apparent bytes of the podman root, each counted with `du -x`."""
+    return du_bytes(paths, paths.podman_root), du_bytes(paths, paths.podman_root, DU_APPARENT)
+
+
+APPARENT_EVERY = 5
+"""Apparent bytes are counted on every fifth allocated sample. Each count is a second `du` pass over
+the same tree, so counting them on every sample would halve the allocated sampling rate."""
+
+
 class StorageWatch:
     """Samples the podman storage size, the image tmpdir and the owned entries of /var/tmp every
     `interval` seconds of a build.
 
-    The size is counted inside `podman unshare` (du_bytes), so the keep-id layers are included. The
-    peak is the largest sample less the size before the build. A failed sample is recorded, not
-    fatal. `var_known` holds the /var/tmp names there were before the build. Each other entry that
-    this user owns and that a sample sees goes into `var_tmp_seen` (read only, nothing is removed).
+    The size is counted inside `podman unshare` with `du -x` (du_bytes), so the keep-id layers are
+    included and a running container's merged mount is not. Allocated bytes are the figure the peak
+    is taken from, and they are counted on every sample. The peak is the largest allocated sample
+    less the allocated size before the build (`peak`, asserted). Apparent bytes are counted on every
+    `APPARENT_EVERY`th allocated sample (`peak_apparent`) and not asserted. A failed sample is
+    recorded, not fatal, and it adds to neither list. `var_known` holds the /var/tmp names there
+    were before the build. Each other entry that this user owns and that a sample sees goes into
+    `var_tmp_seen` (read only, nothing is removed).
     """
 
     def __init__(
@@ -1297,7 +1382,9 @@ class StorageWatch:
         self.paths = paths
         self.interval = interval
         self.baseline = 0
+        self.apparent_baseline = 0
         self.sizes: list[int] = []
+        self.apparent_sizes: list[int] = []
         self.errors: list[str] = []
         self.image_tmp_seen: set[str] = set()
         self.var_known = var_known
@@ -1307,7 +1394,7 @@ class StorageWatch:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self) -> StorageWatch:
-        self.baseline = du_bytes(self.paths, self.paths.podman_root)
+        self.baseline, self.apparent_baseline = storage_sizes(self.paths)
         self._thread.start()
         return self
 
@@ -1317,10 +1404,14 @@ class StorageWatch:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            # The asserted figure is taken first. A failed apparent count must not drop it.
             try:
                 self.sizes.append(du_bytes(self.paths, self.paths.podman_root))
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 self.errors.append(f"{type(exc).__name__}: {exc}"[:200])
+            else:
+                if len(self.sizes) % APPARENT_EVERY == 0:
+                    self._sample_apparent()
             with contextlib.suppress(OSError):
                 self.image_tmp_seen.update(os.listdir(self.paths.image_tmp))
             with contextlib.suppress(OSError):
@@ -1334,9 +1425,20 @@ class StorageWatch:
                 )
             self._stop.wait(self.interval)
 
+    def _sample_apparent(self) -> None:
+        """One apparent count. A failure is recorded, and the allocated sample it follows stays."""
+        try:
+            self.apparent_sizes.append(du_bytes(self.paths, self.paths.podman_root, DU_APPARENT))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            self.errors.append(f"apparent: {type(exc).__name__}: {exc}"[:200])
+
     def peak(self) -> int:
-        """The largest storage growth over the baseline. Callers assert `assert_sampled` first."""
+        """The largest allocated growth over the baseline. Callers assert `assert_sampled` first."""
         return max(self.sizes, default=self.baseline) - self.baseline
+
+    def peak_apparent(self) -> int:
+        """The largest apparent growth over its baseline. Recorded, not asserted."""
+        return max(self.apparent_sizes, default=self.apparent_baseline) - self.apparent_baseline
 
 
 def realm_upper(paths: OwnedPaths, name: str) -> dict[str, Any]:
@@ -1351,26 +1453,40 @@ def realm_upper(paths: OwnedPaths, name: str) -> dict[str, Any]:
     return {
         "upper": upper,
         "size_rw": int(size_text) if size_text.isdigit() else None,
-        "upper_bytes": du_bytes(paths, upper) if upper else None,
+        # Apparent bytes, as before: SizeRw and writable_layer_bytes are apparent figures too.
+        "upper_bytes": du_bytes(paths, upper, DU_APPARENT) if upper else None,
     }
 
 
 @dataclass
+class Measure:
+    """One services-off create from no base, with its storage watch and its progress objects, from
+    which `space_checked` reads the product's own figure."""
+
+    name: str
+    elapsed_s: float
+    progress: list[dict[str, Any]]
+    peak: int
+    peak_apparent: int
+    samples: int
+    watch_errors: list[str]
+
+
+@dataclass
 class Build:
-    """One services-on create of a distribution, with its storage and its tmpdir measured."""
+    """One services-on create of a distribution, with its storage and its tmpdir measured, and the
+    services-off create from no base that ran before it (`off`, item 5). When that services-off
+    create failed, `off` is None and `off_failure` names the failure."""
 
     distro: str
     name: str
     rc: int
     elapsed_s: float
     base_bytes: int
-    init_bytes: int
-    ips_bytes: int
-    cache_bytes: int
-    required: int
-    raw: int
+    progress: list[dict[str, Any]]
     baseline: int
     peak: int
+    peak_apparent: int
     samples: int
     watch_errors: list[str]
     image_tmp: str
@@ -1381,6 +1497,8 @@ class Build:
     var_listings: int
     steps: list[str]
     disk: dict[str, Any]
+    off: Measure | None
+    off_failure: str | None
 
 
 @pytest.fixture(scope="module")
@@ -1393,16 +1511,65 @@ def gate_dir() -> Iterator[Path]:
         shutil.rmtree(base, ignore_errors=True)
 
 
+def services_off_leg(launcher: Path, paths: OwnedPaths, gate_dir: Path, distro: str) -> Measure:
+    """The services-off create of `distro` from no base, measured (item 5, services off).
+
+    `build` runs this before its services-on create, so that create also starts from no base. The
+    realm is deleted here, and a delete removes the pinned base when no realm uses it. `build`
+    checks after this returns, whether it succeeded or not, that the base is gone, because a base
+    that stays would make the services-on create measure a create over a base in storage. A failed
+    assertion here is raised to `build`, which records it. The progress objects are kept, and the
+    item 5 test reads the figure of this create's `space-checked` step (`space_checked`).
+    """
+    name = f"{PREFIX}{distro}-off"
+    _CREATED.append(name)
+    steps_file = gate_dir / f"{distro}-off-steps.txt"
+    began = time.monotonic()
+    try:
+        # Sampled every second: a services-off create can be as short as about 20 s (T7.33).
+        with (
+            StorageWatch(paths, interval=1.0) as watch,
+            mock.patch.dict(os.environ, {STEP_LOG_ENV: str(steps_file)}),
+        ):
+            created, progress = ginn_steps(
+                launcher,
+                "create",
+                distro,
+                "--name",
+                name,
+                "--services",
+                "off",
+                timeout=CREATE_TIMEOUT,
+            )
+        elapsed = time.monotonic() - began
+        assert created.rc == 0, created.error_text()
+        measured = Measure(
+            name=name,
+            elapsed_s=round(elapsed, 1),
+            progress=progress,
+            peak=watch.peak(),
+            peak_apparent=watch.peak_apparent(),
+            samples=len(watch.sizes),
+            watch_errors=watch.errors[:5],
+        )
+    finally:
+        run_ginn(launcher, "stop", name)
+        run_ginn(launcher, "delete", name, "--purge-home", "--yes")
+    return measured
+
+
 @pytest.fixture(scope="module", params=DISTROS)
 def build(
     request: pytest.FixtureRequest, launcher: Path, paths: OwnedPaths, gate_dir: Path
 ) -> Iterator[Build]:
-    """A services-on create of one distribution, from no base (a real pull and a real commit).
+    """A services-off, then a services-on create of one distribution, both from no base (a real
+    pull and a real commit each time).
 
-    The create runs under StorageWatch and the step log. /var/tmp is listed before and after it, and
-    during it by each sample. The realm is deleted at the module's end, with its Realm Home. When
-    the pinned base is already in ginn storage, the distribution is skipped: its items need a real
-    pull, and the skip names the realm that holds the base when one is known.
+    The services-off create runs first (`services_off_leg`), and it is deleted with its base. The
+    services-on create runs under StorageWatch and the step log. /var/tmp is listed before and after
+    it, and during it by each sample. The services-on realm is deleted at the module's end, with its
+    Realm Home. When the pinned base is already in ginn storage, the distribution is skipped: its
+    items need a real pull, and the skip names the realm that holds the base when one is known.
     """
     distro = str(request.param)
     base_id = pinned_base_id(paths, distro)
@@ -1411,6 +1578,19 @@ def build(
         pytest.skip(
             f"{distro}: the pinned base {base_id} is already in ginn storage, held by realm "
             f"{holder or 'unknown'}. Items 5, 9 and the item 8 shared-base guard need a real pull."
+        )
+    off: Measure | None = None
+    off_failure: str | None = None
+    try:
+        off = services_off_leg(launcher, paths, gate_dir, distro)
+    except Exception as exc:  # noqa: BLE001 - recorded on the Build, and item 5 (off) fails on it
+        off_failure = f"{type(exc).__name__}: {exc}"
+    left = pinned_base_id(paths, distro)
+    if left is not None:
+        cause = off_failure or "no failure was recorded"
+        pytest.skip(
+            f"{distro}: the services-off leg left the pinned base {left} in ginn storage "
+            f"({cause}), so the services-on create would not start from no base"
         )
     name = f"{PREFIX}{distro}-prov"
     _CREATED.append(name)
@@ -1422,7 +1602,7 @@ def build(
         StorageWatch(paths, var_known=frozenset(var_before)) as watch,
         mock.patch.dict(os.environ, {STEP_LOG_ENV: str(steps_file)}),
     ):
-        created = run_ginn(
+        created, progress = ginn_steps(
             launcher, "create", distro, "--name", name, "--services", "on", timeout=CREATE_TIMEOUT
         )
     elapsed = time.monotonic() - began
@@ -1432,10 +1612,6 @@ def build(
         disk = disk_use(launcher, paths, name)
         base = disk["base_bytes"]
         assert base is not None, "the pinned base is not found by its io.ginn.base-digest"
-        definition = load_distro(distro)
-        init_b = definition.services_estimated_installed_bytes
-        ips_b = definition.integration_estimated_installed_bytes
-        cache_b = definition.package_cache_peak_bytes
         changes = ginn_changes(var_before, var_after, watch.var_tmp_seen)
         others = sum(
             1
@@ -1449,13 +1625,10 @@ def build(
             rc=created.rc,
             elapsed_s=round(elapsed, 1),
             base_bytes=base,
-            init_bytes=init_b,
-            ips_bytes=ips_b,
-            cache_bytes=cache_b,
-            required=storage_required_bytes(base, init_b, ips_b, cache_b),
-            raw=base + 2 * (init_b + ips_b) + cache_b,
+            progress=progress,
             baseline=watch.baseline,
             peak=watch.peak(),
+            peak_apparent=watch.peak_apparent(),
             samples=len(watch.sizes),
             watch_errors=watch.errors[:5],
             image_tmp=str(paths.image_tmp),
@@ -1466,6 +1639,8 @@ def build(
             var_listings=watch.var_listings,
             steps=steps,
             disk=disk,
+            off=off,
+            off_failure=off_failure,
         )
     finally:
         run_ginn(launcher, "stop", name)
@@ -1521,28 +1696,56 @@ def test_phasec_item9_image_copy_stays_out_of_var_tmp(build: Build) -> None:
 
 @pytest.mark.fr("FR-121")
 def test_phasec_item5_formula_against_measured_peak(build: Build) -> None:
-    """Item 5: the FR-121 formula for the provision image source, against the measured storage peak.
+    """Item 5, services on: the product's FR-121 figure for this create, against the measured peak.
 
-    The formula is `estimate_required(base + 2 x (init + ips) + cache_peak)` with the distribution's
-    data. The peak is the largest storage growth over the baseline during the create, counted inside
-    `podman unshare`. The verdict is PASS when the peak is within the required figure. Arch is
-    recorded and skipped, not asserted (ADR-015 Open question 12).
+    The figure is `required_bytes` of the create's own `space-checked` step (T7.35 contract, read
+    by `space_checked`). The gate does not re-derive it. The peak is the largest allocated growth of
+    the podman root over its baseline during the create, counted inside `podman unshare` with
+    `du -x`. The verdict is PASS when the peak is within the figure. The apparent peak is printed
+    beside it and not asserted. Arch is asserted like the others: T7.33 bounds it (ADR-015
+    Decision 11).
     """
-    verdict = "PASS" if build.peak <= build.required else "FAIL"
+    required, free = space_checked(f"{build.distro} services-on create", build.progress)
+    verdict = "PASS" if build.peak <= required else "FAIL"
     print(
-        f"T727_ITEM5 {build.distro} base={build.base_bytes} init={build.init_bytes} "
-        f"ips={build.ips_bytes} cache={build.cache_bytes} raw={build.raw} "
-        f"required={build.required} peak={build.peak} samples={build.samples} "
+        f"T727_ITEM5 {build.distro} base={build.base_bytes} required={required} free={free} "
+        f"peak={build.peak} peak_apparent={build.peak_apparent} samples={build.samples} "
         f"elapsed_s={build.elapsed_s} watch_errors={build.watch_errors[:1]} verdict={verdict}"
     )
     assert_sampled(f"{build.distro} item 5", build.samples, build.elapsed_s, build.watch_errors)
-    if build.distro == "arch":
-        pytest.skip(
-            f"arch is recorded, not asserted (ADR-015 Open question 12): peak {build.peak} "
-            f"required {build.required} verdict {verdict}"
+    assert build.peak <= required, (
+        f"{build.distro}: measured allocated peak {build.peak} is over the product's "
+        f"required_bytes {required}"
+    )
+
+
+@pytest.mark.fr("FR-121")
+def test_phasec_item5_services_off_against_measured_peak(build: Build) -> None:
+    """Item 5, services off: a services-off create from no base, against its own `required_bytes`.
+
+    `build` runs `services_off_leg` before the services-on create, and that leg is measured the same
+    way: the allocated growth of the podman root with `du -x`, against the figure of its own
+    `space-checked` step. T7.35 extends the storage model to the services-off create.
+    """
+    if build.off is None:
+        pytest.fail(
+            f"{build.distro}: the services-off leg did not measure: {build.off_failure}",
+            pytrace=False,
         )
-    assert build.peak <= build.required, (
-        f"{build.distro}: measured peak {build.peak} is over the formula {build.required}"
+    off = build.off
+    required, free = space_checked(f"{build.distro} services-off create", off.progress)
+    verdict = "PASS" if off.peak <= required else "FAIL"
+    print(
+        f"T727_ITEM5_OFF {build.distro} name={off.name} required={required} free={free} "
+        f"peak={off.peak} peak_apparent={off.peak_apparent} samples={off.samples} "
+        f"elapsed_s={off.elapsed_s} watch_errors={off.watch_errors[:1]} verdict={verdict}"
+    )
+    assert_sampled(
+        f"{build.distro} item 5 services off", off.samples, off.elapsed_s, off.watch_errors
+    )
+    assert off.peak <= required, (
+        f"{build.distro}: services-off allocated peak {off.peak} is over the product's "
+        f"required_bytes {required}"
     )
 
 
@@ -1580,8 +1783,11 @@ def test_phasec_reuse_and_pinned_terms_debian(
     Reuse: services off then on, with the derived image kept. The lazy start is a reuse build (no
     provisioning). htop is installed in the services-off container, as S-11 measured the writable
     layer, and the writable layer is compared with the term of the distribution data. Pinned: a
-    services-off realm with no derived image, rebuilt, whose peak is compared with base plus the
-    realm's current disk use.
+    services-off realm with no derived image, rebuilt while its pinned base is in storage. The
+    figure is the rebuild's own `required_bytes` (its `space-checked` step, read by
+    `space_checked`), and the peak is the allocated growth of the rebuild. This covers a pin already
+    in storage only. A pin rotation pulls and copies the base again; the product models that (T7.35)
+    and this gate does not run it, because it needs a trust manifest edit on this host.
     """
     if build.distro != "debian":
         pytest.skip("reuse and pinned are measured on debian only (ADR-015 Decision 11)")
@@ -1616,23 +1822,25 @@ def test_phasec_reuse_and_pinned_terms_debian(
     created = run_ginn(launcher, "create", "debian", "--name", pin, "--services", "off")
     assert created.rc == 0, created.error_text()
     try:
-        status = run_ginn(launcher, "status", pin).body.get("disk") or {}
-        home = int(status.get("realm_home_bytes") or 0)
         base = build.base_bytes
-        required = estimate_required(base + home)
         began = time.monotonic()
         # The pinned rebuild is the shortest build, so its watch samples every second.
         with StorageWatch(paths, interval=1.0) as watch:
-            rebuilt = run_ginn(launcher, "rebuild", pin, timeout=CREATE_TIMEOUT)
+            rebuilt, rebuild_steps = ginn_steps(launcher, "rebuild", pin, timeout=CREATE_TIMEOUT)
         elapsed = time.monotonic() - began
         assert rebuilt.rc == 0, rebuilt.error_text()
+        required, free = space_checked("debian pinned rebuild", rebuild_steps)
         print(
-            f"T727_PINNED debian base={base} home={home} required={required} peak={watch.peak()} "
-            f"samples={len(watch.sizes)} elapsed_s={elapsed:.1f} codes={rebuilt.codes()} "
+            f"T727_PINNED debian base={base} required={required} free={free} peak={watch.peak()} "
+            f"peak_apparent={watch.peak_apparent()} samples={len(watch.sizes)} "
+            f"elapsed_s={elapsed:.1f} codes={rebuilt.codes()} "
             f"verdict={'PASS' if watch.peak() <= required else 'FAIL'}"
         )
         assert_sampled("pinned rebuild", len(watch.sizes), elapsed, watch.errors)
-        assert watch.peak() <= required, (watch.peak(), required)
+        assert watch.peak() <= required, (
+            f"pinned rebuild: allocated peak {watch.peak()} is over the product's required_bytes "
+            f"{required}"
+        )
     finally:
         run_ginn(launcher, "stop", pin)
         run_ginn(launcher, "delete", pin, "--purge-home", "--yes")
@@ -1753,9 +1961,12 @@ def test_phasec_item14_host_proxy_absent_and_change_commas(
 def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: OwnedPaths) -> None:
     """Item 5, the commit alone: a services-on create over a base that is already in storage.
 
-    ops/create.py leaves the base term out when the pinned image is present, so the figure is
-    `storage_required_bytes(0, init, ips, cache_peak)`. The growth of the create is measured with
-    no pull in it, which separates the commit from the pull that the provision test includes.
+    The base is held by a services-off realm, so this create transfers no base layer. The create
+    has its own `space-checked` step, which carries the product's figure for the base-in-storage
+    branch of Decision 11 (ops/_create_plan.py `storage_required` with `base_in_storage`). The gate
+    reads that figure (`space_checked`) and does not re-derive it. The growth of the create is
+    measured with no base transfer in it, which separates the commit from the pull that the
+    provision test includes.
     """
     hold = f"{PREFIX}debian-commit-hold"
     name = f"{PREFIX}debian-commit"
@@ -1765,13 +1976,9 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
     )
     assert held.rc == 0, held.error_text()
     try:
-        definition = load_distro("debian")
-        init_b = definition.services_estimated_installed_bytes
-        ips_b = definition.integration_estimated_installed_bytes
-        cache_b = definition.package_cache_peak_bytes
         began = time.monotonic()
         with StorageWatch(paths) as watch:
-            created = run_ginn(
+            created, steps = ginn_steps(
                 launcher,
                 "create",
                 "debian",
@@ -1783,17 +1990,18 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
             )
         elapsed = time.monotonic() - began
         assert created.rc == 0, created.error_text()
-        required = storage_required_bytes(0, init_b, ips_b, cache_b)
-        raw = 2 * (init_b + ips_b) + cache_b
+        required, free = space_checked("debian commit only", steps)
         peak = watch.peak()
         verdict = "PASS" if peak <= required else "FAIL"
         print(
-            f"T727_ITEM5_COMMIT debian base_present=True raw={raw} required={required} "
-            f"peak={peak} samples={len(watch.sizes)} elapsed_s={elapsed:.1f} "
-            f"errors={watch.errors[:1]} verdict={verdict}"
+            f"T727_ITEM5_COMMIT debian base_present=True required={required} free={free} "
+            f"peak={peak} peak_apparent={watch.peak_apparent()} samples={len(watch.sizes)} "
+            f"elapsed_s={elapsed:.1f} errors={watch.errors[:1]} verdict={verdict}"
         )
         assert_sampled("commit only", len(watch.sizes), elapsed, watch.errors)
-        assert peak <= required, f"commit-only peak {peak} is over the formula {required}"
+        assert peak <= required, (
+            f"commit-only allocated peak {peak} is over the product's required_bytes {required}"
+        )
     finally:
         run_ginn(launcher, "stop", name)
         run_ginn(launcher, "delete", name, "--purge-home", "--yes")
@@ -1923,27 +2131,11 @@ def ginn_progress(launcher: Path, *args: str, timeout: float = 900.0) -> tuple[R
     """`ginn --json` as the other helpers run it, and the progress lines it printed, in order.
 
     Each step of an operation prints one progress object (`on_step`, FR-107). The lines are read in
-    the order they were printed, so the step order of a delete can be asserted.
+    the order they were printed, so the step order of a delete can be asserted. `ginn_steps` reads
+    them; this returns each one as text.
     """
-    env = {**os.environ, "PATH": f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
-    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [str(launcher), "--json", *args],
-        capture_output=True,
-        text=True,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        cwd="/tmp",  # noqa: S108 - a working directory, not a temp file
-        timeout=timeout,
-        check=False,
-    )
-    objects = [
-        json.loads(line)
-        for line in (done.stdout + "\n" + done.stderr).splitlines()
-        if line.startswith("{")
-    ]
-    body = next((o for o in reversed(objects) if "progress" not in o), {})
-    steps = [str(o.get("message") or o.get("progress")) for o in objects if "progress" in o]
-    return Ran(done.returncode, body), steps
+    ran, steps = ginn_steps(launcher, *args, timeout=timeout)
+    return ran, [str(step) for step in steps]
 
 
 @pytest.mark.fr("FR-019")
