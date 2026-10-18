@@ -35,7 +35,11 @@ from ginn.ops.create import create_realm
 from ginn.ops.disk import estimate_required
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, realm_status, start_realm, stop_realm
 from ginn.ops.permissions import set_permissions, set_tier
-from ginn.ops.provision import storage_required_bytes, tmpdir_required_bytes
+from ginn.ops.provision import (
+    services_off_required_bytes,
+    storage_required_bytes,
+    tmpdir_required_bytes,
+)
 from ginn.ops.rebuild import RebuildHooks, RebuildResult, rebuild_for_start, rebuild_realm
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.service import ServiceHooks, set_autostart, set_services_mode, start_service
@@ -2833,6 +2837,140 @@ def test_a_provision_build_runs_the_new_root_from_the_derived_image_it_names(
     )
 
 
+NEW_DIGEST = "sha256:" + "9" * 64
+"""A pin that a rotation would name for debian (T7.35). The fake pull answers with its digest."""
+
+
+def _rotated(distro: str, digest: str) -> trust.TrustManifest:
+    """The packaged Trust Manifest with one distribution's pinned digest replaced."""
+    current = trust.load()
+    entries = tuple(replace(e, digest=digest) if e.key == distro else e for e in current.entries)
+    return replace(current, entries=entries)
+
+
+def _pinned_figure(*, base_pulled: bool, digest_entry: trust.TrustEntry | None = None) -> int:
+    """The services-off figure of a pinned build of debian (T7.35), by whether its pin is local."""
+    definition = load_distro("debian")
+    entry = digest_entry or trust.load().entry("debian")
+    return services_off_required_bytes(
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
+        definition.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=base_pulled,
+    )
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-121")
+def test_a_pinned_rebuild_after_a_pin_rotation_is_checked_for_its_pull_and_its_copy(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.35: a pinned build whose pin is not in storage pulls the new base and copies it again.
+    The check used to be the base estimate alone, which did not cover that. Free space one byte
+    short of the pulled figure refuses before the pull, and the old root stays. With the figure,
+    the rebuild pulls the rotated pin and swaps in generation 2."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    rotated = _rotated("debian", NEW_DIGEST)
+    needed = _pinned_figure(base_pulled=True, digest_entry=rotated.entry("debian"))
+    pulled = pulls(fake)
+    mark = len(fake.calls)
+
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(
+            env,
+            fake,
+            home,
+            tmp_path,
+            sleeps,
+            mountinfo,
+            services_only=False,
+            manifest=rotated,
+            statvfs=_statvfs(needed - 1),
+        )
+
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{needed} bytes"
+    assert fake.ops()[mark:] == ["image_exists"]
+    assert pulls(fake) == pulled
+    assert stored(env).generation == 1
+
+    record = stale_rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        services_only=False,
+        manifest=rotated,
+        statvfs=_statvfs(needed),
+    )
+    assert record.generation == 2
+    assert record.image_digest == NEW_DIGEST
+    assert pulls(fake) == pulled + 1
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-121")
+def test_a_pinned_rebuild_of_the_same_pin_checks_the_copy_without_the_download(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.35: a pin already in storage is local, so its figure leaves the download out and counts
+    the keep-id copy as absent, the worst case. The build still asks podman for the pin by digest,
+    which answers from storage and writes no layers. Its `space-checked` step reports the figure."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    needed = _pinned_figure(base_pulled=False)
+    pulled = pulls(fake)
+    mark = len(fake.calls)
+
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(
+            env,
+            fake,
+            home,
+            tmp_path,
+            sleeps,
+            mountinfo,
+            services_only=False,
+            statvfs=_statvfs(needed - 1),
+        )
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{needed} bytes"
+    assert fake.ops()[mark:] == ["image_exists"]
+    assert pulls(fake) == pulled
+
+    details: dict[str, dict[str, object]] = {}
+    record = stale_rebuild(
+        env,
+        fake,
+        home,
+        tmp_path,
+        sleeps,
+        mountinfo,
+        services_only=False,
+        statvfs=_statvfs(needed),
+        on_step_detail=lambda step, detail: details.setdefault(step, dict(detail)),
+    )
+    assert record.generation == 2
+    assert pulls(fake) == pulled + 1
+    assert details["space-checked"] == {
+        "required_bytes": needed,
+        "free_bytes": needed,
+        "reason": None,
+    }
+
+
 @pytest.mark.fr("FR-021")
 def test_a_pinned_build_creates_its_root_from_the_pin_and_provisions_nothing(
     env: OpEnv,
@@ -3207,6 +3345,35 @@ def test_a_provision_build_is_refused_before_its_pull_when_the_image_staging_dir
     assert caught.value.details["path"] == str(staging_dir)
     assert (pulls(fake), commits(fake)) == (pulled, committed)
     assert stored(env).generation == 1
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("field", ["base_layer_allocated_bytes", "stage_layer_allocated_bytes"])
+def test_a_pinned_build_refuses_missing_layer_sizes_before_its_image_read(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """ADR-015 Decision 11b: a services-off pinned build reads the storage figure's layers, so a
+    distribution without them is refused as GINN-E-DISTRO-DATA before the image read, which is the
+    build's first podman call. The services-off realm keeps its generation and its state."""
+    make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    shipped = load_distro("debian")
+    monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
+    mark = len(fake.calls)
+    with pytest.raises(GinnError) as caught:
+        stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, services_only=False)
+    assert caught.value.code == "GINN-E-DISTRO-DATA"
+    assert caught.value.details["field"] == field
+    assert fake.ops()[mark:] == []
+    assert stored(env).generation == 1
+    assert stored(env).state is RealmState.STOPPED
 
 
 @pytest.mark.fr("FR-121")

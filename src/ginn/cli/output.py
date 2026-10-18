@@ -16,7 +16,9 @@ Stream contract:
   `delete` carry them in the result under `notes`, which both always include. Verbose lines are
   `{"verbose": "..."}`.
   Each finished step of a long operation is `{"progress": {"step", "message"}}` (FR-107), and it
-  is written whether or not --verbose is on. Warnings that cannot ride in a result are
+  is written whether or not --verbose is on. The `space-checked` step adds `required_bytes`,
+  `free_bytes` and `reason` to that object (FR-121, T7.35). Readers take `step` and `message`.
+  Warnings that cannot ride in a result are
   `{"warning": {code, message, remedy}}`. On failure the error object
   `{"error": {code, message, remedy, exit_code, details, notes}}` is always the last line. `notes`
   is a list, empty when the failure collected none.
@@ -29,7 +31,7 @@ last. In text mode `warn()` writes to stderr at once.
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from ginn.errors import GinnError
 from ginn.errors import Warning as GinnWarning
@@ -121,15 +123,20 @@ class Output:
         else:
             sys.stderr.write(_line(text))
 
-    def progress(self, step: str, message: str) -> None:
+    def progress(self, step: str, message: str, detail: Mapping[str, object] | None = None) -> None:
         """Report one finished step of a long operation (FR-107).
 
         JSON mode writes `{"progress": {"step", "message"}}` to stderr at once, whether or not
-        verbose is on, because the Control Plane reads these lines. Text mode shows `message` as a
-        verbose line only, so a text run stays quiet by default.
+        verbose is on, because the Control Plane reads these lines. `detail` adds its keys to that
+        object, such as the figures of the `space-checked` step (FR-121). The Control Plane reads
+        `message` only, so a new key breaks no reader. Text mode shows `message` as a verbose line
+        only, so a text run stays quiet by default.
         """
         if self.json_mode:
-            payload = {"progress": {"step": step, "message": message}}
+            body: dict[str, object] = {"step": step, "message": message}
+            if detail:
+                body.update(detail)
+            payload = {"progress": body}
             sys.stderr.write(json.dumps(payload, sort_keys=True) + "\n")
         else:
             self.verbose_line(message)

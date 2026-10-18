@@ -30,15 +30,17 @@ so the create downloads it a second time, after the confirmation (CL-22). The ga
 a host with no baseline writes the baseline and one integrity audit entry, as any mutating
 operation's first call does (FR-006). That is the only ginn state an estimate can write.
 
-The space checks are FR-121's. The base image is checked before its pull, and the set is checked
-against its estimate times 1.10 before the result is returned, so a short disk is refused before
-anyone is asked to confirm.
+The space checks are FR-121's. The base image is checked before its pull, with the services-off
+storage figure of ops/provision.py (the pull, the keep-id copy and the stage, T7.35). The set is
+checked against its estimate times 1.10 before the result is returned, so a short disk is refused
+before anyone is asked to confirm. The result's `required_bytes` is the whole create's figure: the
+base's storage peak and the set, times 1.10 (`EverythingEstimate`).
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -51,16 +53,18 @@ from ginn.ops._create_plan import (
     CreateHooks,
     CreateRequest,
     SizeEstimate,
+    SpaceCheck,
     _Plan,
     _validate,
+    check_space,
     closure_names,
-    required_bytes,
     size_totals,
 )
 from ginn.ops._mutating import OpEnv
 from ginn.ops._rollback import Rollback
 from ginn.ops.disk import check_free_paths, estimate_required
 from ginn.ops.images import image_names, remove_estimate_containers, uses_image
+from ginn.ops.provision import storage_peak_for
 from ginn.ops.retry import network_retry_hook
 from ginn.packages.manager import run_step
 from ginn.podman.adapter import CreateSpec, ExecTarget, Podman, RetryHook
@@ -85,17 +89,31 @@ def _throwaway(realm: str) -> ExecTarget:
 class EverythingEstimate:
     """The size of the everything set of one distribution, as FR-014 AC-1 shows it before a yes.
 
-    `required_bytes` is the free space FR-121 asks for: the set's estimate times 1.10, rounded up.
-    The create that follows checks the same figure again, against the disk as it is then.
+    The create checks two figures, at two points. Before its pull it checks the storage figure of
+    its base (`base_required_bytes`, the services-off formula with the keep-id copy, T7.35). After
+    the refresh it checks the set (`everything_required_bytes`, the set's estimate times 1.10). The
+    set's bytes land on top of the base's, so the free space the whole create needs is the base's
+    peak and the set's estimate together, times 1.10 (`required_bytes`). With that much free, both
+    of the create's checks pass. A create with less may pass the first and be refused at the set.
     """
 
     distro: str
     everything: tuple[str, ...]
     size: SizeEstimate
+    base_peak_bytes: int
+    """The raw storage peak of the base, before the margin (`storage_peak_for`, FR-121)."""
+
+    @property
+    def base_required_bytes(self) -> int:
+        return estimate_required(self.base_peak_bytes)
+
+    @property
+    def everything_required_bytes(self) -> int:
+        return estimate_required(self.size.total_bytes)
 
     @property
     def required_bytes(self) -> int:
-        return estimate_required(self.size.total_bytes)
+        return estimate_required(self.base_peak_bytes + self.size.total_bytes)
 
 
 def measure_everything(
@@ -196,10 +214,19 @@ class _Estimate:
         """The name that error details carry for this estimate. It names no realm (FR-014)."""
         return f"estimate:{self._distro}"
 
-    def _step(self, name: str) -> None:
-        """Report one finished step to the hooks: one progress line in the CLI (FR-107)."""
+    def _step(self, name: str, detail: Mapping[str, object] | None = None) -> None:
+        """Report one finished step to the hooks: one progress line in the CLI (FR-107).
+
+        A step's `detail` reaches the hook before the step, as the create's does (FR-121).
+        """
+        if detail is not None and self._hooks.on_step_detail is not None:
+            self._hooks.on_step_detail(name, detail)
         if self._hooks.on_step is not None:
             self._hooks.on_step(name)
+
+    def _space_checked(self, check: SpaceCheck) -> None:
+        """Report `space-checked` with the figures of its check (FR-121)."""
+        self._step("space-checked", check.fields())
 
     def run(self) -> EverythingEstimate:
         """Measure, then undo. Every exit runs the undo, and a failed undo is never silent."""
@@ -231,12 +258,20 @@ class _Estimate:
 
     def _measure(self) -> EverythingEstimate:
         paths = self._env.paths
-        check_free_paths(
+        plan = self._plan
+        # The base is checked with its pull, as the create checks it before its own pull (T7.35).
+        base_peak = storage_peak_for(
+            plan.definition,
+            services=plan.spec.services,
+            download_bytes=plan.entry.compressed_size_bytes,
+            base_pulled=True,
+        )
+        check = check_space(
             [paths.podman_root, paths.homes],
-            required_bytes(self._plan.entry),
+            estimate_required(base_peak),
             statvfs=self._hooks.statvfs,
         )
-        self._step("space-checked")
+        self._space_checked(check)
         self._remove_containers()
         self._pull()
         self._step("pulled")
@@ -270,7 +305,10 @@ class _Estimate:
             statvfs=self._hooks.statvfs,
         )
         return EverythingEstimate(
-            distro=self._distro, everything=tuple(self._plan.everything), size=size
+            distro=self._distro,
+            everything=tuple(self._plan.everything),
+            size=size,
+            base_peak_bytes=base_peak,
         )
 
     def _pull(self) -> None:

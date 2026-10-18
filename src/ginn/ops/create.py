@@ -6,9 +6,11 @@
 journal step. `CreateHooks.on_step` runs after each step is recorded.
 
 - checked: the realm name is free. Neither a record nor a Realm Home exists (FR-010 AC-3).
-- space-checked: free space in the podman root and the Realm Home filesystems covers the base
-  estimate times 1.10, rounded up (FR-121, ops/disk.py). A services-on create needs the disk formula
-  of ADR-015 Decision 11 instead, which also covers its init set and its package cache.
+- space-checked: free space in the podman root and the Realm Home filesystems covers the storage
+  figure of ADR-015 Decision 11 times 1.10, rounded up (FR-121, ops/disk.py, ops/_create_plan.py
+  `storage_required`). The figure is the services mode's: a services-off create counts its pull,
+  its keep-id copy and its stage, as a services-on create does (T7.35). The step's progress line
+  carries `required_bytes`, `free_bytes` and `reason` (`SpaceCheck`, FR-107).
 - recorded: the record is saved as `creating` (DR-020), with the pinned reference and digest. It is
   saved before the pull, so an interrupted create leaves a record that recovery can find (FR-122).
   It also keeps the request that `create --resume` needs: `create_pending`, the `--with` packages
@@ -108,10 +110,13 @@ from ginn.ops._create_plan import (
     CreateHooks,
     CreateRequest,
     SizeEstimate,
+    SpaceCheck,
     _Plan,
     _validate,
+    check_space,
     human_bytes,
     required_bytes,
+    storage_required,
 )
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops._rollback import Rollback
@@ -125,8 +130,6 @@ from ginn.ops.provision import (
     check_init,
     provision_init,
     remove_derived,
-    require_storage_layers,
-    storage_required_bytes,
 )
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
@@ -217,29 +220,6 @@ def _drop_in_failure(cause: OSError | GinnError) -> GinnError:
 def _cleared_request() -> dict[str, Any]:
     """The fields that the save writing `stopped` clears, as the create is no longer pending."""
     return {"create_pending": False, "with_at_create": [], "everything_confirmed": False}
-
-
-def _storage_required(plan: _Plan, *, base_in_storage: bool) -> int:
-    """The podman storage that a create needs before its first effect (FR-121).
-
-    A services-off create needs the base estimate times 1.10, as it always did. A services-on create
-    needs the storage formula of ADR-015 Decision 11 (`storage_required_bytes`), with the measured
-    base and stage layers of the distribution data (T7.33). `base_in_storage` says that the pinned
-    image is already here, so no pull is counted and the base layer is not new bytes. The keep-id
-    copy of the base is still counted, as a worst case. A services-on create whose distribution
-    data has no measured layer is refused first (`require_storage_layers`).
-    """
-    if not plan.spec.services:
-        return required_bytes(plan.entry)
-    definition = plan.definition
-    require_storage_layers(definition)
-    return storage_required_bytes(
-        definition.base_layer_allocated_bytes,
-        definition.stage_layer_allocated_bytes,
-        definition.package_cache_peak_bytes,
-        download_bytes=plan.entry.compressed_size_bytes,
-        base_pulled=not base_in_storage,
-    )
 
 
 def _with_init_entries(
@@ -386,18 +366,38 @@ class _Create:
         self._step("checked")
 
     def _check_space(self) -> None:
-        """FR-121: the `_storage_required` figure must fit on each filesystem the create fills."""
+        """FR-121: the storage figure must fit on each filesystem the create fills.
+
+        The figure assumes the pull, so no podman call runs before the refusal (the figure of
+        ops/_create_plan.py `storage_required`). A create that finds its image local checks less
+        in a resume and in a pinned rebuild, which pass `base_in_storage` themselves.
+        """
         self._check_space_for(base_in_storage=False)
 
     def _check_space_for(self, *, base_in_storage: bool) -> None:
-        """`space-checked`: free space covers the requirement, which `base_in_storage` may lower."""
+        """`space-checked`: free space covers the requirement, which `base_in_storage` may lower.
+
+        The check and the figures it compared go to the step, so the progress line carries them
+        (FR-121, FR-107). A short filesystem raises GINN-E-DISK-SPACE before the step is recorded.
+        """
         paths = self._env.paths
-        check_free_paths(
+        check = check_space(
             [paths.podman_root, paths.homes],
-            _storage_required(self._plan, base_in_storage=base_in_storage),
+            storage_required(self._plan, base_in_storage=base_in_storage),
             statvfs=self._hooks.statvfs,
         )
-        self._step("space-checked")
+        self._space_checked(check)
+
+    def _space_checked(self, check: SpaceCheck, staging: SpaceCheck | None = None) -> None:
+        """Record `space-checked` with the figures of its check (FR-121).
+
+        `staging` is the image tmpdir check of a provision build (ADR-015 Decision 11), which the
+        progress line carries under its own key, so the storage figures keep their meaning.
+        """
+        detail: dict[str, object] = dict(check.fields())
+        if staging is not None:
+            detail["staging"] = staging.fields()
+        self._step("space-checked", detail)
 
     def _save_creating(self) -> None:
         plan = self._plan
@@ -885,8 +885,15 @@ class _Create:
 
     # Helpers.
 
-    def _step(self, name: str) -> None:
+    def _step(self, name: str, detail: Mapping[str, object] | None = None) -> None:
+        """Journal one step, then report it. A step's `detail` reaches the hook before the step.
+
+        The detail is progress only. The journal keeps the step name, so a free-space figure that
+        varies between runs never changes what recovery reads (FR-122).
+        """
         self._mutation.step(name)
+        if detail is not None and self._hooks.on_step_detail is not None:
+            self._hooks.on_step_detail(name, detail)
         if self._hooks.on_step is not None:
             self._hooks.on_step(name)
 

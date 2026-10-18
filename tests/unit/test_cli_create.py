@@ -25,8 +25,10 @@ from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
 from ginn.ops.create import CreateRequest, CreateResult, SizeEstimate
 from ginn.ops.disk import estimate_required
+from ginn.ops.provision import services_off_required_bytes, storage_peak_for
 from ginn.podman.models import ContainerState, ExecResult
 from ginn.store.records import RealmStore
+from ginn.trust import manifest as trust
 from tests.unit.realm_cli_support import World, record_of, seed_killed_estimate
 
 
@@ -435,7 +437,26 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["create", "debian", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    progress = [
+        json.loads(line)["progress"]
+        for line in captured.err.splitlines()
+        if line.startswith('{"progress"')
+    ]
+    [space] = [item for item in progress if item["step"] == "space-checked"]
+    entry = trust.load().entry("debian")
+    debian = load_distro("debian")
+    services_off = services_off_required_bytes(
+        debian.base_layer_allocated_bytes,
+        debian.stage_layer_allocated_bytes,
+        debian.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
+    )
+    assert space["required_bytes"] == services_off
+    assert space["free_bytes"] >= space["required_bytes"]
+    assert space["reason"] is None
+    payload = json.loads(captured.out)
     assert payload == {
         "name": "debian",
         "distro": "debian",
@@ -486,6 +507,17 @@ def _kali_answers(world: World) -> None:
     world.fake.exec_results[tuple(kali.argv(Verb.ESTIMATE, names))] = ExecResult(0, KALI_SHOW, "")
 
 
+def _kali_base_peak() -> int:
+    """The services-off storage peak of the kali base, pulled (T7.35), as the estimate checks it."""
+    entry = trust.load().entry("kali")
+    return storage_peak_for(
+        load_distro("kali"),
+        services=False,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
+    )
+
+
 @pytest.mark.fr("FR-014")
 @pytest.mark.fr("FR-121")
 def test_the_estimate_prints_the_sizes_as_json_and_leaves_no_realm_or_container(
@@ -500,7 +532,10 @@ def test_the_estimate_prints_the_sizes_as_json_and_leaves_no_realm_or_container(
         "packages": 3,
         "download_bytes": 6000,
         "installed_bytes": 6144,
-        "required_bytes": estimate_required(6000 + 6144),
+        "required_bytes": estimate_required(_kali_base_peak() + 6000 + 6144),
+        "base_required_bytes": estimate_required(_kali_base_peak()),
+        "everything_required_bytes": estimate_required(6000 + 6144),
+        "services": False,
     }
     assert world.fake.containers == {}
     assert world.fake.images == {}
@@ -516,7 +551,7 @@ def test_the_estimate_text_is_human_readable_and_needs_no_terminal(
     assert main(["create", "kali", "--everything", "--estimate"]) == 0
     out = capsys.readouterr().out
     assert "kali everything: 3 packages, download 5.9 KiB, installed 6.0 KiB" in out
-    assert "required free space: " in out and "(estimate x 1.10)" in out
+    assert "required free space: " in out and "(estimate x 1.10; services off; base " in out
     assert "estimate only: no realm was made, and nothing was installed" in out
 
 
@@ -563,6 +598,11 @@ def test_the_estimate_prints_one_progress_line_per_step_in_json_mode(
         "estimated",
     ]
     assert lines[1] == {"progress": {"message": "estimate: step pulled done", "step": "pulled"}}
+    # T7.35: the space check's line carries its figures; the other lines keep their three keys.
+    assert lines[0]["progress"]["required_bytes"] == estimate_required(_kali_base_peak())
+    assert isinstance(lines[0]["progress"]["free_bytes"], int)
+    assert lines[0]["progress"]["reason"] is None
+    assert set(lines[1]["progress"]) == {"step", "message"}
 
 
 @pytest.mark.fr("FR-006")

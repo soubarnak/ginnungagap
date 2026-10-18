@@ -123,10 +123,16 @@ from ginn.domain.permissions import Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_realm
-from ginn.ops._create_plan import CreateHooks, CreateRequest, _Plan, _validate
+from ginn.ops._create_plan import (
+    CreateHooks,
+    CreateRequest,
+    _Plan,
+    _validate,
+    check_space,
+)
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.create import ROLLBACK_STOP_TIMEOUT_S, STOP_TIMEOUT_S, _Create
-from ginn.ops.disk import StatVfs, check_free, check_free_paths, estimate_required
+from ginn.ops.disk import StatVfs, estimate_required
 from ginn.ops.lifecycle import (
     HostUser,
     LifecycleHooks,
@@ -230,6 +236,8 @@ class RebuildHooks:
     security: SecurityHooks = field(default_factory=SecurityHooks)
     program: str | None = None
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
+    on_step_detail: Callable[[str, Mapping[str, object]], None] | None = None
+    """The figures of a step before `on_step` reports it (`space-checked`, FR-121, FR-107)."""
 
 
 @dataclass(frozen=True)
@@ -269,6 +277,7 @@ def _create_hooks(hooks: RebuildHooks) -> CreateHooks:
         helper=hooks.helper,
         manifest=hooks.manifest,
         on_step=hooks.on_step,
+        on_step_detail=hooks.on_step_detail,
         seccomp_source=hooks.seccomp_source,
         extras=hooks.extras,
         security=hooks.security,
@@ -418,51 +427,62 @@ class _Rebuild(_Create):
         return self._swap()
 
     def _check_space(self) -> None:
-        """FR-121 for the image of this build (ADR-015 Decision 11).
+        """FR-121 for the image of this build (ADR-015 Decision 11, T7.35).
 
-        A pinned build keeps the create's check. A provision build needs the storage formula of its
-        stage, with the base counted, because this build pulls the pin. The image staging directory
-        must hold the init set and the Integration Package Set, and the stage checks it again before
-        its commit, so this is an earlier refusal. A reuse build pulls and provisions nothing, so it
-        needs the writable layer of the one container it creates, and nothing else (Decision 11).
+        A pinned build checks the create's storage figure (`_Create._check_space_for`). The pull is
+        left out only when the pinned image is already in storage, which the adapter's image-exists
+        read decides. A rotated pin is not local, so its build pulls the base and copies it again,
+        and the figure counts both. The same pin is local, and its figure counts the keep-id copy
+        as absent, the worst case the create uses too.
+
+        A provision build needs the storage formula of its stage, with the base counted, because
+        this build pulls the pin. The image staging directory must hold the init set and the
+        Integration Package Set, and the stage checks it again before its commit, so this is an
+        earlier refusal. A reuse build pulls and provisions nothing, so it needs the writable layer
+        of the one container it creates, and nothing else (Decision 11).
 
         The Decision 11 term for the current disk use of the realm is not added by any build. The
         FR-020 figure counts the Realm Home only (`container_bytes` is null), so the figure that
         would include gN's root and derived image is deferred (recorded in the docs).
         """
         if self._source is ImageSource.PINNED:
-            super()._check_space()
+            # The measured layers come first, so a missing size is refused before the image read.
+            require_storage_layers(self._plan.definition)
+            local = self._podman.image_exists(self._plan.spec.image)
+            self._check_space_for(base_in_storage=local)
             return
+        paths = self._env.paths
         if self._source is ImageSource.REUSE:
-            paths = self._env.paths
-            required = estimate_required(self._plan.definition.writable_layer_bytes)
-            check_free_paths(
-                [paths.podman_root, paths.homes], required, statvfs=self._hooks.statvfs
+            check = check_space(
+                [paths.podman_root, paths.homes],
+                estimate_required(self._plan.definition.writable_layer_bytes),
+                statvfs=self._hooks.statvfs,
             )
-        if self._source is ImageSource.PROVISION:
-            definition = self._plan.definition
-            # The formula is used for a services-off provision too (a realm with a derived image),
-            # so the measured layers are required here whatever the services mode.
-            require_storage_layers(definition)
-            init_bytes = definition.services_estimated_installed_bytes
-            ips_bytes = definition.integration_estimated_installed_bytes
-            paths = self._env.paths
-            required = storage_required_bytes(
+            self._space_checked(check)
+            return
+        definition = self._plan.definition
+        # The formula is used for a services-off provision too (a realm with a derived image),
+        # so the measured layers are required here whatever the services mode.
+        require_storage_layers(definition)
+        init_bytes = definition.services_estimated_installed_bytes
+        ips_bytes = definition.integration_estimated_installed_bytes
+        storage = check_space(
+            [paths.podman_root, paths.homes],
+            storage_required_bytes(
                 definition.base_layer_allocated_bytes,
                 definition.stage_layer_allocated_bytes,
                 definition.package_cache_peak_bytes,
                 download_bytes=self._plan.entry.compressed_size_bytes,
                 base_pulled=True,
-            )
-            check_free_paths(
-                [paths.podman_root, paths.homes], required, statvfs=self._hooks.statvfs
-            )
-            check_free(
-                paths.image_tmp,
-                tmpdir_required_bytes(init_bytes, ips_bytes),
-                statvfs=self._hooks.statvfs,
-            )
-        self._step("space-checked")
+            ),
+            statvfs=self._hooks.statvfs,
+        )
+        staging = check_space(
+            [paths.image_tmp],
+            tmpdir_required_bytes(init_bytes, ips_bytes),
+            statvfs=self._hooks.statvfs,
+        )
+        self._space_checked(storage, staging)
 
     def _provision_derived(self) -> None:
         """Build the derived image of gN+1 with the provisioning stage (ADR-015 Decision 2).

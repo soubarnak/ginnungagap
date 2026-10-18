@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import pwd
 import sys
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
@@ -174,15 +174,31 @@ _paths: OwnedPaths | None = None
 `lifecycle_hooks()` finds the ginn command of a rebuild without a `paths` argument."""
 
 
-def _step_reporter(output: Output | None, operation: str) -> Callable[[str], None] | None:
+class _StepReport:
+    """The progress lines of one operation: one per finished journal step (FR-107).
+
+    A step's detail, such as the figures of the `space-checked` step (FR-121), reaches `detail`
+    before the step is reported. The line of that step then carries the detail's keys.
+    """
+
+    def __init__(self, output: Output, operation: str) -> None:
+        self._output = output
+        self._operation = operation
+        self._details: dict[str, Mapping[str, object]] = {}
+
+    def detail(self, step: str, detail: Mapping[str, object]) -> None:
+        self._details[step] = dict(detail)
+
+    def __call__(self, step: str) -> None:
+        detail = self._details.pop(step, None)
+        self._output.progress(step, f"{self._operation}: step {step} done", detail)
+
+
+def _step_reporter(output: Output | None, operation: str) -> _StepReport | None:
     """The on_step hook of an operation: one progress line per finished journal step (FR-107)."""
     if output is None:
         return None
-
-    def report(step: str) -> None:
-        output.progress(step, f"{operation}: step {step} done")
-
-    return report
+    return _StepReport(output, operation)
 
 
 def create_hooks(
@@ -197,13 +213,15 @@ def create_hooks(
     `operation` names the operation in each line: an estimate passes "estimate" (FR-107).
     """
     s = seams()
+    report = _step_reporter(output or _output, operation)
     return CreateHooks(
         helper=s.helper,
         integrate=s.integrate,
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(paths),
-        on_step=_step_reporter(output or _output, operation),
+        on_step=report,
+        on_step_detail=None if report is None else report.detail,
     )
 
 
@@ -222,12 +240,14 @@ def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None)
     journal step gives one progress line (FR-107), to `output` or else the Output of `realms()`.
     """
     s = seams()
+    report = _step_reporter(output or _output, "rebuild")
     return RebuildHooks(
         helper=s.helper,
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(_paths if paths is None else paths),
-        on_step=_step_reporter(output or _output, "rebuild"),
+        on_step=report,
+        on_step_detail=None if report is None else report.detail,
         lifecycle=_base_lifecycle(s),
     )
 

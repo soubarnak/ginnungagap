@@ -38,7 +38,7 @@ class EverythingSizes:
     """The sizes of the Kali everything set, as `create --estimate` reports them (FR-014 AC-1).
 
     The Control Plane shows them in the confirmation before it runs the create. `required_bytes` is
-    the free space that FR-121 asks for: the estimate times 1.10.
+    the free space that FR-121 asks for: the base's storage peak plus the set, times 1.10.
     """
 
     packages: int
@@ -63,8 +63,8 @@ class EverythingSizes:
             f"The Kali everything set has {self.packages} packages: download "
             f"{format_bytes(self.download_bytes)}, installed {format_bytes(self.installed_bytes)}. "
             f"ginn needs {format_bytes(self.required_bytes)} free on the podman and Realm Home "
-            "filesystems, which is the estimate plus 10 percent, and checks it again before it "
-            "installs. Nothing of the set is installed until you confirm. Continue?"
+            "filesystems, which is the base's storage peak plus the set, times 1.10. It checks "
+            "again before it installs. Nothing of the set is installed until you confirm. Continue?"
         )
 
 

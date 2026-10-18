@@ -20,7 +20,7 @@ import errno
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -52,7 +52,7 @@ from ginn.ops.create import (
     required_bytes,
 )
 from ginn.ops.disk import estimate_required
-from ginn.ops.provision import storage_required_bytes
+from ginn.ops.provision import services_off_required_bytes, storage_required_bytes
 from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
@@ -153,6 +153,19 @@ class _Vfs:
 def _statvfs(available: int) -> Callable[[str], _Vfs]:
     """A statvfs seam that reports the same free space for every path."""
     return lambda _path: _Vfs(available)
+
+
+def _services_off_needed(*, base_pulled: bool) -> int:
+    """The storage figure of a services-off create of debian (T7.35), with or without the pull."""
+    entry = trust.load().entry("debian")
+    definition = load_distro("debian")
+    return services_off_required_bytes(
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
+        definition.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=base_pulled,
+    )
 
 
 def _helper_rows(argv: Sequence[str], root: str) -> str:
@@ -705,8 +718,8 @@ def test_a_services_on_create_needs_the_disk_formula_before_its_pull(
 ) -> None:
     """ADR-015 Decision 11: the free space covers the base estimate, but not the copies of the base,
     the stage layer and the package cache of a services-on create (T7.33). The create refuses before
-    its pull. A services-off create with the same free space goes on: it needs only the base
-    estimate."""
+    its pull. A services-off create needs its own figure (T7.35): the pull, the keep-id copy and the
+    stage's room, so the same free space refuses it too, and its own figure goes on."""
     entry = trust.load().entry("debian")
     definition = load_distro("debian")
     base_only = required_bytes(entry)
@@ -725,7 +738,16 @@ def test_a_services_on_create_needs_the_disk_formula_before_its_pull(
     assert caught.value.details["needed"] == f"{formula} bytes"
     assert "pull" not in ops_of(fake)
     assert_nothing_left(env, fake)
-    result = create_realm(env, fake, request(home), hooks=hooks)
+    off_needed = _services_off_needed(base_pulled=True)
+    assert base_only < off_needed < formula
+    short = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(off_needed - 1))
+    with pytest.raises(GinnError) as off:
+        create_realm(env, fake, request(home), hooks=short)
+    assert off.value.code == "GINN-E-DISK-SPACE"
+    assert off.value.details["needed"] == f"{off_needed} bytes"
+    assert_nothing_left(env, fake)
+    enough = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(off_needed))
+    result = create_realm(env, fake, request(home), hooks=enough)
     assert result.record.state is RealmState.STOPPED
 
 
@@ -745,7 +767,8 @@ def test_a_services_on_create_refuses_missing_layer_sizes_before_any_podman_call
     """NFR-060, ADR-015 Decision 11: the loader defaults the measured layer sizes to 0, so a
     fixture loads without them. A services-on create would estimate near zero from them, so it
     refuses before its first podman call with GINN-E-DISTRO-DATA, which names the file and the key.
-    A services-off create of the same distribution does not read them, and goes on."""
+    A services-off create refuses the same way (T7.35): its storage figure reads the same layers,
+    so a fixture without them is not a create of either mode."""
     shipped = load_distro("debian")
     monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
     hooks = hooks_for(tmp_path, sleeps, mountinfo)
@@ -756,8 +779,12 @@ def test_a_services_on_create_refuses_missing_layer_sizes_before_any_podman_call
     assert caught.value.details["field"] == field
     assert fake.calls == []
     assert_nothing_left(env, fake)
-    result = create_realm(env, fake, request(home), hooks=hooks)
-    assert result.record.state is RealmState.STOPPED
+    with pytest.raises(GinnError) as off:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert off.value.code == "GINN-E-DISTRO-DATA"
+    assert off.value.details["field"] == field
+    assert fake.calls == []
+    assert_nothing_left(env, fake)
 
 
 @pytest.mark.fr("DR-018")
@@ -1248,7 +1275,7 @@ def test_two_realms_of_one_distribution_have_separate_homes_and_containers(
 
 @pytest.mark.fr("FR-121")
 @pytest.mark.fr("AS-023")
-def test_free_space_below_the_estimate_refuses_before_any_download(
+def test_free_space_below_the_services_off_figure_refuses_before_any_podman_call(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -1256,22 +1283,25 @@ def test_free_space_below_the_estimate_refuses_before_any_download(
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    needed = required_bytes(trust.load().entry("debian"))
+    """T7.35: a services-off create needs the keep-id copy of its base, and the stage's room, not
+    only the base estimate. Free space one byte short of the figure refuses before any podman call,
+    and the refusal names the figure and the podman root."""
+    needed = _services_off_needed(base_pulled=True)
     hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1))
     with pytest.raises(GinnError) as caught:
         create_realm(env, fake, request(home), hooks=hooks)
     assert caught.value.code == "GINN-E-DISK-SPACE"
     assert caught.value.exit_code == 73
     assert caught.value.details["needed"] == f"{needed} bytes"
+    assert caught.value.details["available"] == f"{needed - 1} bytes"
     assert caught.value.details["path"] == str(env.paths.podman_root)
-    assert "pull" not in ops_of(fake)
-    assert "create" not in ops_of(fake)
+    assert fake.calls == []
     assert_nothing_left(env, fake)
     assert [e.error_code for e in create_entries(env)] == ["GINN-E-DISK-SPACE"]
 
 
 @pytest.mark.fr("FR-121")
-def test_free_space_equal_to_the_estimate_times_1_10_is_enough(
+def test_free_space_equal_to_the_services_off_figure_is_enough(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -1279,10 +1309,50 @@ def test_free_space_equal_to_the_estimate_times_1_10_is_enough(
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    needed = required_bytes(trust.load().entry("debian"))
+    needed = _services_off_needed(base_pulled=True)
     hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed))
     result = create_realm(env, fake, request(home), hooks=hooks)
     assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("FR-107")
+def test_the_space_checked_step_reports_the_figures_it_compared(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.35: the `space-checked` step carries `required_bytes` (the figure with the margin),
+    `free_bytes` (the smallest free space checked) and no `reason`, before the step is reported."""
+    needed = _services_off_needed(base_pulled=True)
+    details: dict[str, dict[str, object]] = {}
+    order: list[str] = []
+
+    def on_detail(step: str, detail: Mapping[str, object]) -> None:
+        details[step] = dict(detail)
+        order.append(f"detail:{step}")
+
+    def on_step(step: str) -> None:
+        order.append(f"step:{step}")
+
+    hooks = hooks_for(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        statvfs=_statvfs(needed + 7),
+        on_step=on_step,
+        on_step_detail=on_detail,
+    )
+    create_realm(env, fake, request(home), hooks=hooks)
+    assert details["space-checked"] == {
+        "required_bytes": needed,
+        "free_bytes": needed + 7,
+        "reason": None,
+    }
+    assert order.index("detail:space-checked") < order.index("step:space-checked")
 
 
 @pytest.mark.fr("FR-121")
@@ -1297,15 +1367,74 @@ def test_the_space_check_covers_the_podman_root_and_the_realm_home(
 ) -> None:
     """Both filesystems that the create fills are checked, each with the same requirement."""
     checked: list[tuple[list[Path], int]] = []
+    real = create_ops.check_space
 
-    def record(paths: Sequence[Path], required: int, **_: object) -> None:
+    def record(paths: Sequence[Path], required: int, *, statvfs: Any) -> Any:
         checked.append((list(paths), required))
+        return real(paths, required, statvfs=statvfs)
 
-    monkeypatch.setattr(create_ops, "check_free_paths", record)
+    monkeypatch.setattr(create_ops, "check_space", record)
     create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
     assert checked == [
-        ([env.paths.podman_root, env.paths.homes], required_bytes(trust.load().entry("debian")))
+        ([env.paths.podman_root, env.paths.homes], _services_off_needed(base_pulled=True))
     ]
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("FR-107")
+@pytest.mark.parametrize(
+    ("root_offset", "homes_offset", "refused"),
+    [
+        pytest.param(50, 7, False, id="homes-smaller-both-enough"),
+        pytest.param(7, 50, False, id="root-smaller-both-enough"),
+        pytest.param(50, -1, True, id="homes-short"),
+        pytest.param(-1, -9, True, id="both-short-homes-smaller"),
+    ],
+)
+def test_the_space_check_reads_each_filesystem_and_decides_by_the_smaller_free_space(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    root_offset: int,
+    homes_offset: int,
+    refused: bool,
+) -> None:
+    """The podman root and the Realm Home can be on two filesystems, so each is read on its own.
+    The step's `free_bytes` is the smaller of the two. When the smaller one is short, the refusal
+    names that path and its own free space, even when the other path is checked first."""
+    root, homes = env.paths.podman_root, env.paths.homes
+    root.mkdir(parents=True, exist_ok=True)
+    homes.mkdir(parents=True, exist_ok=True)
+    needed = _services_off_needed(base_pulled=True)
+    free = {str(root): needed + root_offset, str(homes): needed + homes_offset}
+    details: dict[str, dict[str, object]] = {}
+    hooks = hooks_for(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        statvfs=lambda path: _Vfs(free.get(path, AMPLE)),
+        on_step_detail=lambda step, detail: details.setdefault(step, dict(detail)),
+    )
+
+    if not refused:
+        create_realm(env, fake, request(home), hooks=hooks)
+        assert details["space-checked"] == {
+            "required_bytes": needed,
+            "free_bytes": min(free.values()),
+            "reason": None,
+        }
+        return
+
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{needed} bytes"
+    assert caught.value.details["available"] == f"{needed + homes_offset} bytes"
+    assert caught.value.details["path"] == str(homes)
+    assert fake.calls == []
 
 
 @pytest.mark.fr("FR-121")

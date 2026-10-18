@@ -22,11 +22,13 @@ A GinnError or a KeyboardInterrupt rolls back what this call made, newest first,
 does (FR-120, DR-018). A SIGKILL cannot roll back. `sweep_provisions` and `remove_derived` find what
 it leaves, and recovery and resume call them (FR-122, ADR-015 Decision 13).
 
-Disk (FR-121). `storage_required_bytes` and `tmpdir_required_bytes` are the formulas of ADR-015
-Decision 11, and `require_storage_layers` refuses a distribution whose measured layers are 0. The
-commit stages its image copy in `paths.image_tmp`, so that directory is checked
-with its own formula before the stage commit. The storage formula belongs to the caller's precheck,
-before the pull, because this stage runs after the base is already in storage.
+Disk (FR-121). `storage_required_bytes`, `services_off_required_bytes` and `tmpdir_required_bytes`
+are the formulas of ADR-015 Decision 11 (T7.35 adds the services-off one), `storage_peak_for`
+dispatches between the two by services mode, and `require_storage_layers` refuses a distribution
+whose measured layers are 0. The commit stages its image copy in `paths.image_tmp`, so that
+directory is checked with its own formula before the stage commit. The storage formula belongs to
+the caller's precheck, before the pull, because this stage runs after the base is already in
+storage.
 
 The caller holds the realm lock (FR-123) and the image lock of the distribution. This module takes
 neither, and it does not import ops/create.py.
@@ -227,10 +229,10 @@ def require_storage_layers(definition: DistroDef) -> None:
     """Refuse a distribution whose measured layer sizes are missing, before any podman call.
 
     The loader defaults `base_layer_allocated_bytes` and `stage_layer_allocated_bytes` to 0, so a
-    fixture loads without them (NFR-060). Shipped data sets both. A services-on create, and a
-    provision build, feed them to `storage_required_bytes`, where a 0 gives a near-zero estimate.
-    So the caller checks them first, and this raises GINN-E-DISTRO-DATA, which names the file and
-    the key (FR-121, ADR-015 Decision 11).
+    fixture loads without them (NFR-060). Shipped data sets both. Every create, every pinned or
+    provision build and every resume feeds them to a storage formula (`storage_peak_for`), where a
+    0 gives a near-zero estimate. So the caller checks them first, and this raises
+    GINN-E-DISTRO-DATA, which names the file and the key (FR-121, ADR-015 Decision 11).
     """
     layers = (
         ("base_layer_allocated_bytes", definition.base_layer_allocated_bytes),
@@ -246,7 +248,13 @@ def require_storage_layers(definition: DistroDef) -> None:
             )
 
 
-def storage_required_bytes(
+def _check_sizes(*values: int) -> None:
+    for value in values:
+        if value < 0:
+            raise ValueError(f"FR-121: a size estimate is not negative, got {value}")
+
+
+def storage_peak_bytes(
     base_bytes: int,
     stage_bytes: int,
     cache_peak_bytes: int,
@@ -254,7 +262,7 @@ def storage_required_bytes(
     download_bytes: int,
     base_pulled: bool,
 ) -> int:
-    """The podman storage that a services-on create needs (FR-121, ADR-015 Decision 11).
+    """The raw peak of the podman storage a services-on create needs (FR-121, ADR-015 Decision 11).
 
     The sizes are measured (T7.33, podman 5.8.8, allocated bytes on ext4): `base_bytes` is the base
     layer, `stage_bytes` the stage layer after the clean (the init set, the Integration Package Set,
@@ -270,11 +278,8 @@ def storage_required_bytes(
     stage) and the end state (the copies, the stage and the flattened copy, which is the largest
     term on every measured distribution). Without `base_pulled`, the copy is taken as absent, so
     the bound holds when no container has used the base yet. A cached copy makes the need smaller.
-    The result is the peak times the 1.10 margin, rounded up.
     """
-    for value in (base_bytes, stage_bytes, cache_peak_bytes, download_bytes):
-        if value < 0:
-            raise ValueError(f"FR-121: a size estimate is not negative, got {value}")
+    _check_sizes(base_bytes, stage_bytes, cache_peak_bytes, download_bytes)
     copies = 2 if base_pulled else 1
     peak = max(
         copies * base_bytes + stage_bytes + cache_peak_bytes,
@@ -282,7 +287,101 @@ def storage_required_bytes(
     )
     if base_pulled:
         peak = max(peak, download_bytes + base_bytes)
-    return estimate_required(peak)
+    return peak
+
+
+def storage_required_bytes(
+    base_bytes: int,
+    stage_bytes: int,
+    cache_peak_bytes: int,
+    *,
+    download_bytes: int,
+    base_pulled: bool,
+) -> int:
+    """The free space a services-on create needs: `storage_peak_bytes` times the 1.10 margin.
+
+    The result is rounded up (ops/disk.py). See `storage_peak_bytes` for the terms.
+    """
+    return estimate_required(
+        storage_peak_bytes(
+            base_bytes,
+            stage_bytes,
+            cache_peak_bytes,
+            download_bytes=download_bytes,
+            base_pulled=base_pulled,
+        )
+    )
+
+
+def services_off_peak_bytes(
+    base_bytes: int,
+    stage_bytes: int,
+    cache_peak_bytes: int,
+    *,
+    download_bytes: int,
+    base_pulled: bool,
+) -> int:
+    """The raw peak of the podman storage that a services-off create or pinned build needs (T7.35).
+
+    A services-off container has the same copies as a services-on one (T7.33): the pulled layer,
+    when `base_pulled`, and the keep-id copy of the base at the create. Its writes are the refresh
+    lists, the Integration Package Set and the locale steps, with the package cache kept, since no
+    clean runs. Those are the services-on provisioning writes (ADR-015 Decision 2c) without the
+    init set and without the clean. So the services-on provisioning point, `copies × base + stage +
+    cache`, bounds the services-off writable layer by containment. The services-off figure is that
+    point and the pull point (download and layer, when `base_pulled`). It has no flattened copy and
+    no second stage, because no derived image is made. On debian, one services-off create traced
+    on 2026-10-16 with the T7.33 tool, the writable layer peaked at 49.3 MB against the bound of
+    64.6 MB (stage plus cache). Only debian is measured, so the other distributions rest on the
+    containment argument (ADR-015 Decision 11b). `--with` packages are not in this figure, which
+    is the same gap the services-on create has. The everything set is the estimate's own term.
+    """
+    _check_sizes(base_bytes, stage_bytes, cache_peak_bytes, download_bytes)
+    copies = 2 if base_pulled else 1
+    peak = copies * base_bytes + stage_bytes + cache_peak_bytes
+    if base_pulled:
+        peak = max(peak, download_bytes + base_bytes)
+    return peak
+
+
+def services_off_required_bytes(
+    base_bytes: int,
+    stage_bytes: int,
+    cache_peak_bytes: int,
+    *,
+    download_bytes: int,
+    base_pulled: bool,
+) -> int:
+    """The free space a services-off create or pinned build needs: peak times the 1.10 margin."""
+    return estimate_required(
+        services_off_peak_bytes(
+            base_bytes,
+            stage_bytes,
+            cache_peak_bytes,
+            download_bytes=download_bytes,
+            base_pulled=base_pulled,
+        )
+    )
+
+
+def storage_peak_for(
+    definition: DistroDef, *, services: bool, download_bytes: int, base_pulled: bool
+) -> int:
+    """The raw storage peak of a create, resume or pinned build, by its services mode (FR-121).
+
+    The measured layers are checked first (`require_storage_layers`), so a distribution without
+    them is refused before any podman call. A services-on create takes `storage_peak_bytes`, and a
+    services-off one `services_off_peak_bytes`. A provision build calls `storage_peak_bytes`
+    directly, since it always runs the stage.
+    """
+    require_storage_layers(definition)
+    layers = (
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
+        definition.package_cache_peak_bytes,
+    )
+    peak = storage_peak_bytes if services else services_off_peak_bytes
+    return peak(*layers, download_bytes=download_bytes, base_pulled=base_pulled)
 
 
 def tmpdir_required_bytes(init_bytes: int, ips_bytes: int) -> int:
@@ -714,6 +813,10 @@ __all__ = [
     "provision_init",
     "remove_derived",
     "require_storage_layers",
+    "services_off_peak_bytes",
+    "services_off_required_bytes",
+    "storage_peak_bytes",
+    "storage_peak_for",
     "storage_required_bytes",
     "sweep_provisions",
     "tmpdir_required_bytes",

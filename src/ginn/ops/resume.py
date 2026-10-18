@@ -17,9 +17,10 @@ Order of a resume:
 2. Inside `mutating("create")`, under the realm lock (`_Resume._check_name`). The record is checked
    again. A Realm Home that is a link or a file is refused with GINN-E-INTERNAL.
 3. The create phases run, with the step names that create records:
-   - `space-checked`: the free-space check runs again. When the pinned image is already in storage,
-     nothing is downloaded, so a services-off create's base estimate is not checked (FR-121). A
-     services-on create checks the disk formula of ADR-015 Decision 11, without its base term then.
+   - `space-checked`: the free-space check runs again, with the storage figure of the resume's mode
+     (FR-121, ADR-015 Decision 11). When the pinned image is already in storage, the pull is left
+     out of the figure, but the realm container's keep-id copy still counts, for either mode
+     (T7.35). A missing image is downloaded, and the full figure applies.
    - `cleared` (`_Resume._clear`): a services-on realm is told `d` first, so runsv does not restart
      a container that is removed (ADR-003). Every container of the generation is stopped and removed
      by its labels, and the runit directory is removed, since the create writes it again. A
@@ -248,24 +249,19 @@ class _Resume(_Create):
             remove_image(self._podman, old)
 
     def _check_space(self) -> None:
-        """`space-checked`: a services-off resume with its image in storage checks nothing.
+        """`space-checked`: the storage figure of this resume, by its image's presence (FR-121).
 
-        A services-off resume whose pinned image is already in storage downloads nothing: its layers
-        are local, and the requirement is the base estimate alone (FR-121). The step is recorded as
-        create records it. A missing image is downloaded, and then the full check runs.
+        A resume whose pinned image is already in storage pulls nothing, so the pull is left out of
+        the figure (`base_in_storage`). The keep-id copy of the base still counts, and so does the
+        stage of a services-on resume, because the realm container is made again (ADR-015
+        Decision 11). A missing image is downloaded, and the full figure applies. A services-off
+        resume is checked too, since its container create may still be ahead (T7.35).
 
-        A services-on resume provisions again, so the stage's terms are always checked (ADR-015
-        Decision 11). Only the pull is left out when the image is in storage. The keep-id copy of
-        the base and the flattened copy of the derived image still count. A create has no reuse
-        branch, since it always provisions, so no reuse term applies here. The measured layers are
-        checked before the first podman call (`require_storage_layers`).
+        The measured layers are checked first (`require_storage_layers`), so a distribution without
+        them is refused as GINN-E-DISTRO-DATA before the image read, which is a podman call.
         """
-        if self._plan.spec.services:
-            require_storage_layers(self._plan.definition)
+        require_storage_layers(self._plan.definition)
         local = self._podman.image_exists(self._plan.spec.image)
-        if local and not self._plan.spec.services:
-            self._step("space-checked")
-            return
         self._check_space_for(base_in_storage=local)
 
     def _save_creating(self) -> None:

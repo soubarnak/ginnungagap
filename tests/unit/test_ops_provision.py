@@ -36,6 +36,10 @@ from ginn.ops.provision import (
     check_init,
     provision_init,
     remove_derived,
+    services_off_peak_bytes,
+    services_off_required_bytes,
+    storage_peak_bytes,
+    storage_peak_for,
     storage_required_bytes,
     sweep_provisions,
     tmpdir_required_bytes,
@@ -669,6 +673,152 @@ def test_the_formulas_refuse_a_negative_estimate() -> None:
         storage_required_bytes(0, 0, 0, download_bytes=-1, base_pulled=True)
     with pytest.raises(ValueError):
         tmpdir_required_bytes(0, -1)
+
+
+MEASURED_OFF_DEBIAN = {
+    "baseline": 401_408,
+    "after_pull": 88_322_048,
+    "after_create": 176_279_552,
+    "peak": 225_546_240,
+}
+"""T7.35: one services-off debian create, traced on 2026-10-16 with the T7.33 tool (`du -x`,
+allocated bytes of the podman root). `baseline` is the root before the pull, `after_pull` the root
+with the pulled layer, `after_create` the root with the keep-id copy, and `peak` the largest sample,
+which is the apt-get install of the Integration Package Set."""
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("distro", ["debian", "fedora", "kali", "arch"])
+def test_the_services_off_figure_is_the_pull_or_the_provisioning_point(distro: str) -> None:
+    """T7.35: a services-off create needs the download and the layer when it pulls, and the point
+    where its container has the copies, the cache and the stage: `copies x base + stage + cache`.
+    No flattened copy and no second stage, because no derived image is made. Each figure is
+    recomputed from the distribution's data and its trust entry."""
+    definition = load(distro)
+    base = definition.base_layer_allocated_bytes
+    stage = definition.stage_layer_allocated_bytes
+    cache = definition.package_cache_peak_bytes
+    download = trust.load().entry(distro).compressed_size_bytes
+    pulled = max(download + base, 2 * base + stage + cache)
+    peak = services_off_peak_bytes(base, stage, cache, download_bytes=download, base_pulled=True)
+    assert peak == pulled, distro
+    required = services_off_required_bytes(
+        base, stage, cache, download_bytes=download, base_pulled=True
+    )
+    assert required == estimate_required(pulled), distro
+    # The base is in storage: no pull, and the copy is counted as absent (the worst case).
+    present = base + stage + cache
+    no_pull = services_off_peak_bytes(
+        base, stage, cache, download_bytes=download, base_pulled=False
+    )
+    assert no_pull == present, distro
+
+
+@pytest.mark.fr("FR-121")
+def test_the_services_off_figures_for_debian_are_the_worked_numbers() -> None:
+    """Debian's worked numbers (ADR-015 Decision 11b): the pulled base is 2 x 87,920,640 plus the
+    stage 43,008,000 and the cache 21,576,652, which is 240,425,932, and the download point is
+    lower. With the 1.10 margin, rounded up, that is 264,468,526. Base in storage: 152,505,292, and
+    167,755,822 with the margin."""
+    definition = DEBIAN
+    base, stage = definition.base_layer_allocated_bytes, definition.stage_layer_allocated_bytes
+    cache = definition.package_cache_peak_bytes
+    download = trust.load().entry("debian").compressed_size_bytes
+    assert download == 29_843_347
+    assert (base, stage, cache) == (87_920_640, 43_008_000, 21_576_652)
+    peak = services_off_peak_bytes(base, stage, cache, download_bytes=download, base_pulled=True)
+    assert peak == 240_425_932
+    required = services_off_required_bytes(
+        base, stage, cache, download_bytes=download, base_pulled=True
+    )
+    assert required == 264_468_526
+    assert (
+        services_off_required_bytes(base, stage, cache, download_bytes=download, base_pulled=False)
+        == 167_755_822
+    )
+
+
+@pytest.mark.fr("FR-121")
+def test_the_services_off_bound_covers_the_debian_peak_it_was_measured_against() -> None:
+    """T7.35: on debian the measured writable layer (the peak growth less the pulled layer and the
+    keep-id copy) is inside the containment bound, stage plus cache. The bound and the 1.10 margin
+    both cover the measured peak growth."""
+    measured = MEASURED_OFF_DEBIAN
+    peak_growth = measured["peak"] - measured["baseline"]
+    pulled_layer = measured["after_pull"] - measured["baseline"]
+    keep_id_copy = measured["after_create"] - measured["after_pull"]
+    writable = peak_growth - pulled_layer - keep_id_copy
+    assert pulled_layer == DEBIAN.base_layer_allocated_bytes
+    assert writable == 49_266_688
+    assert writable <= DEBIAN.stage_layer_allocated_bytes + DEBIAN.package_cache_peak_bytes
+    download = trust.load().entry("debian").compressed_size_bytes
+    peak = services_off_peak_bytes(
+        DEBIAN.base_layer_allocated_bytes,
+        DEBIAN.stage_layer_allocated_bytes,
+        DEBIAN.package_cache_peak_bytes,
+        download_bytes=download,
+        base_pulled=True,
+    )
+    assert peak >= peak_growth
+    required = services_off_required_bytes(
+        DEBIAN.base_layer_allocated_bytes,
+        DEBIAN.stage_layer_allocated_bytes,
+        DEBIAN.package_cache_peak_bytes,
+        download_bytes=download,
+        base_pulled=True,
+    )
+    assert required * 100 >= peak_growth * 110
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize("distro", ["debian", "fedora", "kali", "arch"])
+@pytest.mark.parametrize("base_pulled", [True, False])
+def test_the_services_off_figure_is_never_above_the_services_on_figure(
+    distro: str, base_pulled: bool
+) -> None:
+    """The services-off formula drops the flattened copy and the second stage, so it never asks
+    for more than the services-on formula of the same distribution (T7.35)."""
+    definition = load(distro)
+    args = (
+        definition.base_layer_allocated_bytes,
+        definition.stage_layer_allocated_bytes,
+        definition.package_cache_peak_bytes,
+    )
+    download = trust.load().entry(distro).compressed_size_bytes
+    off = services_off_peak_bytes(*args, download_bytes=download, base_pulled=base_pulled)
+    on = storage_peak_bytes(*args, download_bytes=download, base_pulled=base_pulled)
+    assert off <= on, distro
+
+
+@pytest.mark.fr("FR-121")
+def test_the_storage_peak_for_takes_the_formula_of_its_services_mode() -> None:
+    download = trust.load().entry("debian").compressed_size_bytes
+    args = (
+        DEBIAN.base_layer_allocated_bytes,
+        DEBIAN.stage_layer_allocated_bytes,
+        DEBIAN.package_cache_peak_bytes,
+    )
+    for pulled in (True, False):
+        on = storage_peak_for(DEBIAN, services=True, download_bytes=download, base_pulled=pulled)
+        off = storage_peak_for(DEBIAN, services=False, download_bytes=download, base_pulled=pulled)
+        assert on == storage_peak_bytes(*args, download_bytes=download, base_pulled=pulled)
+        assert off == services_off_peak_bytes(*args, download_bytes=download, base_pulled=pulled)
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("NFR-060")
+@pytest.mark.parametrize("services", [True, False])
+def test_a_create_formula_refuses_a_distribution_without_its_measured_layers(
+    services: bool,
+) -> None:
+    """Both modes refuse a missing measured layer with GINN-E-DISTRO-DATA, before any podman call
+    (FR-121). A services-off create now depends on the same layers as a services-on one."""
+    unmeasured = replace(DEBIAN, base_layer_allocated_bytes=0)
+    with pytest.raises(GinnError) as caught:
+        storage_peak_for(unmeasured, services=services, download_bytes=0, base_pulled=True)
+    assert caught.value.code == "GINN-E-DISTRO-DATA"
+    assert caught.value.details["field"] == "base_layer_allocated_bytes"
 
 
 @pytest.mark.fr("FR-121")
