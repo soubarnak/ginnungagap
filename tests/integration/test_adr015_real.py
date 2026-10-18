@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import statistics
@@ -227,14 +228,90 @@ def package_installed(launcher: Path, name: str, distro: str, package: str) -> b
     return rc == 0
 
 
-def sweep(launcher: Path, paths: OwnedPaths) -> list[str]:
-    """Delete every realm whose name starts with PREFIX, with its Realm Home. Returns what is left.
+HOME_NAME = re.compile(r"t727-[a-z0-9-]+")
+"""The exact shape of a t727 realm name, and so of its Realm Home. Only such a name is removed."""
 
-    Empty cgroup leaves of this module are removed too (finding F9 of the T7.7 gate). The images and
-    containers of the module are checked by `leftovers` (ADR-015 Decision 13).
+
+def orphan_homes(paths: OwnedPaths, listed: Iterable[str]) -> list[Path]:
+    """The Realm Homes of t727 names that no realm in `listed` (`ginn list`) owns.
+
+    A delete without `--purge-home` drops the realm record and keeps the home (run 8 left
+    t727-fedora-off this way), and create refuses a name whose home exists (GINN-E-NAME-TAKEN,
+    ops/create.py). Only the top level of the homes directory is read. An entry counts when its name
+    is an exact t727 name, it is a real directory (not a link) and this user owns it.
     """
-    for realm in run_ginn(launcher, "list").body.get("realms", []):
-        name = str(realm.get("name", ""))
+    try:
+        entries = list(os.scandir(paths.homes))
+    except FileNotFoundError:
+        return []
+    known = set(listed)
+    found: list[Path] = []
+    for entry in entries:
+        if entry.name in known or not HOME_NAME.fullmatch(entry.name):
+            continue
+        try:
+            owner = entry.stat(follow_symlinks=False).st_uid
+        except FileNotFoundError:
+            continue  # removed since the listing: nothing to remove
+        if entry.is_dir(follow_symlinks=False) and owner == os.getuid():
+            found.append(Path(entry.path))
+    return found
+
+
+def mounted_under(path: Path) -> bool:
+    """True when a mount point is `path` or lies under it, read from this process's mount table."""
+    prefix = str(path)
+    for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+        # The mount point is the fifth field. The kernel escapes a space, tab, newline and backslash
+        # as a backslash and three octal digits.
+        mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), line.split()[4])
+        if mount == prefix or mount.startswith(prefix + "/"):
+            return True
+    return False
+
+
+def remove_orphan_home(home: Path) -> str | None:
+    """Remove one orphan Realm Home. Return None when it is gone, else the reason it stays.
+
+    Nothing is removed while a mount point lies under it: a bind mount would send the removal to the
+    files it shows. `shutil.rmtree` does not follow links.
+    """
+    if mounted_under(home):
+        return "a mount point lies under it"
+    try:
+        shutil.rmtree(home)
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"[:200]
+    print(f"T727_HOME_REMOVED {home.name}")
+    return None
+
+
+def listed_realms(launcher: Path) -> tuple[list[str] | None, str]:
+    """The realm names of `ginn list`, or None with the reason the listing cannot be trusted.
+
+    A failed call, or an output without a `realms` key, must not read as an empty list: an empty
+    list would make every t727 Realm Home an orphan, and the sweep would remove homes whose realms
+    still have records.
+    """
+    ran = run_ginn(launcher, "list")
+    if ran.rc == 0 and "realms" in ran.body:
+        return [str(realm.get("name", "")) for realm in ran.body["realms"]], ""
+    return None, (ran.error_text() if ran.rc != 0 else "its output has no realms key")
+
+
+def sweep(launcher: Path, paths: OwnedPaths) -> list[str]:
+    """Delete every realm whose name starts with PREFIX, with its Realm Home, and every orphan Realm
+    Home of a PREFIX name (`orphan_homes`). Returns what is left.
+
+    A `ginn list` that fails removes nothing: the sweep returns "ginn list failed: ..." in what is
+    left, so the pre-run and the teardown asserts fail. Empty cgroup leaves of this module are
+    removed too (finding F9 of the T7.7 gate). The images and containers of the module are checked
+    by `leftovers` (ADR-015 Decision 13).
+    """
+    listed, failure = listed_realms(launcher)
+    if listed is None:
+        return [f"ginn list failed: {failure}"]
+    for name in listed:
         if name.startswith(PREFIX):
             run_ginn(launcher, "delete", name, "--purge-home", "--yes")
     for leaf in CGROUP_ROOT.glob(f"{PREFIX}*"):
@@ -242,11 +319,15 @@ def sweep(launcher: Path, paths: OwnedPaths) -> list[str]:
         if leaf.is_dir() and not (leaf / "cgroup.procs").read_text(encoding="utf-8").split():
             with contextlib.suppress(OSError):
                 leaf.rmdir()
-    return [
-        str(r.get("name"))
-        for r in run_ginn(launcher, "list").body.get("realms", [])
-        if str(r.get("name", "")).startswith(PREFIX)
-    ]
+    listed, failure = listed_realms(launcher)
+    if listed is None:
+        return [f"ginn list failed: {failure}"]
+    left = [name for name in listed if name.startswith(PREFIX)]
+    for home in orphan_homes(paths, listed):
+        reason = remove_orphan_home(home)
+        if reason is not None:
+            left.append(f"Realm Home {home.name}: {reason}")
+    return left
 
 
 def leftovers(paths: OwnedPaths) -> dict[str, list[str]]:
@@ -445,10 +526,13 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
             encoding="utf-8",
         )
         _CREATED.clear()
-        # A realm or image of an earlier run would collide with this run's names, so none may
-        # remain. The sweep removes the realms, and heal_leftovers the crashed run's probe.
+        # A realm, image or Realm Home of an earlier run would collide with this run's names, so
+        # none may remain. The sweep removes the realms and their homes, and heal_leftovers the
+        # crashed run's probe.
         kept = sweep(script, paths)
-        assert kept == [], f"t727 realms from an earlier run could not be removed: {kept}"
+        assert kept == [], (
+            f"t727 realms or Realm Homes from an earlier run could not be removed: {kept}"
+        )
         heal_leftovers(paths)
         assert leftovers(paths) == {"images": [], "containers": []}, (
             "t727 leftovers before the gate"
@@ -483,7 +567,7 @@ def launcher(paths: OwnedPaths) -> Iterator[Path]:
                 exec_socket(paths).unlink()
         teardown_step(failed, "remove the gate directory", shutil.rmtree, base, ignore_errors=True)
         assert failed == [], f"t727 teardown steps failed: {failed}"
-        assert left == [], "t727 realms could not be removed after the gate"
+        assert left == [], f"t727 realms or Realm Homes could not be removed after the gate: {left}"
         assert remaining == {"images": [], "containers": []}, f"t727 leftovers: {remaining}"
 
 
@@ -1169,18 +1253,38 @@ DU_APPARENT = ("-sbx",)
 """The `du` flags of the apparent bytes, on one filesystem. Recorded, and not asserted."""
 
 
-def du_bytes(paths: OwnedPaths, path: str | Path, flags: Sequence[str] = DU_ALLOCATED) -> int:
-    """The bytes under `path`, counted inside `podman unshare`, so keep-id layers can be read.
+DU_RETRIES = 1
+"""How many times a failed `du` count is tried again. One retry covers the race of run 8: podman
+renaming or removing an entry while `du` walks the tree (`fts_read` ENOENT)."""
+DU_RETRY_S = 0.5
+"""The pause before a `du` count is tried again."""
 
-    The default is allocated bytes. `flags` takes `DU_APPARENT` for apparent bytes.
-    """
+
+def _du_once(paths: OwnedPaths, path: str | Path, flags: Sequence[str]) -> int:
     done = product_run(paths, ["unshare", "/usr/bin/du", *flags, "--", str(path)], timeout=900.0)
     fields = done.stdout.split()
-    if not fields or not fields[0].isdigit():
+    if done.returncode != 0 or not fields or not fields[0].isdigit():
         raise ValueError(
             f"du under podman unshare failed (rc {done.returncode}): {done.stderr.strip()[-200:]}"
         )
     return int(fields[0])
+
+
+def du_bytes(paths: OwnedPaths, path: str | Path, flags: Sequence[str] = DU_ALLOCATED) -> int:
+    """The bytes under `path`, counted inside `podman unshare`, so keep-id layers can be read.
+
+    The default is allocated bytes. `flags` takes `DU_APPARENT` for apparent bytes. A non-zero exit
+    is a failure even when du printed a total: a partial total is an under-count (an entry that
+    vanished during the walk), and a peak must not rest on one. A failed count is tried again
+    DU_RETRIES times, DU_RETRY_S apart, and the last failure is raised. The retry is here, so every
+    caller gets it: the storage watch and `realm_upper`, which reads a running realm.
+    """
+    for _ in range(DU_RETRIES):
+        try:
+            return _du_once(paths, path, flags)
+        except ValueError:
+            time.sleep(DU_RETRY_S)
+    return _du_once(paths, path, flags)
 
 
 def realm_cid(paths: OwnedPaths, name: str) -> str:
@@ -1334,24 +1438,42 @@ def image_copy_dir(paths: OwnedPaths) -> str:
 
 
 MIN_SAMPLES = 3
-"""The fewest successful storage samples a peak may rest on. The watch samples every 3 s, so a build
+"""The fewest counted storage samples a peak may rest on. The watch samples every second, so a build
 that yields fewer than three has no measured peak, and its zero must not pass (item 2)."""
+MAX_DROP_FRACTION = 0.10
+"""The largest share of storage samples a watch may drop after its retry (item 5). The services-on
+create runs its rm, rmi and rm within about 1.1 s, so a sample that lands on them can fail twice.
+The peak rests on the others, and the sample after the return (`final_ok`) is checked on its own."""
 
 
-def assert_sampled(label: str, samples: int, elapsed_s: float, errors: Sequence[str]) -> None:
-    """Fail when the watch took too few successful samples for its peak to mean anything (item 2).
+def assert_sampled(
+    label: str,
+    samples: int,
+    elapsed_s: float,
+    errors: Sequence[str],
+    dropped: int,
+    final_ok: bool,
+) -> None:
+    """Fail when the watch's peak cannot be trusted (items 2 and 5).
 
-    A zero peak from no samples is not a measurement, so it must not pass.
+    The peak rests on at least MIN_SAMPLES counted samples, and on the sample taken after the build
+    returned (`final_ok`), which holds the storage the build left. A missing final sample fails the
+    leg outright. Otherwise the watch may drop at most MAX_DROP_FRACTION of its attempts. A zero
+    peak from no samples is not a measurement, so it must not pass.
     """
+    attempts = samples + dropped
     assert samples >= MIN_SAMPLES, (
         f"{label}: {samples} storage samples in {elapsed_s:.1f} s, below {MIN_SAMPLES}; "
-        f"errors: {list(errors)[:2]}"
+        f"errors: {list(errors)[:3]}"
     )
-
-
-def storage_sizes(paths: OwnedPaths) -> tuple[int, int]:
-    """The allocated and the apparent bytes of the podman root, each counted with `du -x`."""
-    return du_bytes(paths, paths.podman_root), du_bytes(paths, paths.podman_root, DU_APPARENT)
+    assert final_ok, (
+        f"{label}: the storage sample after the build returned was not counted; "
+        f"errors: {list(errors)[:3]}"
+    )
+    assert dropped <= MAX_DROP_FRACTION * attempts, (
+        f"{label}: {dropped} of {attempts} storage samples dropped after a retry, over "
+        f"{MAX_DROP_FRACTION:.0%}; errors: {list(errors)[:3]}"
+    )
 
 
 APPARENT_EVERY = 5
@@ -1361,22 +1483,28 @@ the same tree, so counting them on every sample would halve the allocated sampli
 
 class StorageWatch:
     """Samples the podman storage size, the image tmpdir and the owned entries of /var/tmp every
-    `interval` seconds of a build.
+    `interval` seconds (one second) of a build, and at both of its ends.
+
+    The first sample is the baseline, taken in `__enter__` before the build. The last is taken in
+    `__exit__`, after the command has returned, so the storage the build leaves is counted. A timer
+    sample alone can miss the growth of a create's last seconds (run 8 of T7.27: debian services-on
+    at 3 s, 86 MB short of the end state that T7.35 measured).
 
     The size is counted inside `podman unshare` with `du -x` (du_bytes), so the keep-id layers are
     included and a running container's merged mount is not. Allocated bytes are the figure the peak
     is taken from, and they are counted on every sample. The peak is the largest allocated sample
     less the allocated size before the build (`peak`, asserted). Apparent bytes are counted on every
-    `APPARENT_EVERY`th allocated sample (`peak_apparent`) and not asserted. A failed sample is
-    recorded, not fatal, and it adds to neither list. `var_known` holds the /var/tmp names there
-    were before the build. Each other entry that this user owns and that a sample sees goes into
-    `var_tmp_seen` (read only, nothing is removed).
+    `APPARENT_EVERY`th allocated sample (`peak_apparent`) and not asserted. A count is retried once
+    inside du_bytes. A count that still fails is recorded in `errors` and counted in `dropped`, and
+    it adds to no list. `final_ok` says whether the sample after the return was
+    counted. `var_known` holds the /var/tmp names there were before the build. Each other entry that
+    this user owns and that a sample sees goes into `var_tmp_seen` (read only, nothing is removed).
     """
 
     def __init__(
         self,
         paths: OwnedPaths,
-        interval: float = 3.0,
+        interval: float = 1.0,
         var_known: frozenset[str] = frozenset(),
     ) -> None:
         self.paths = paths
@@ -1386,6 +1514,8 @@ class StorageWatch:
         self.sizes: list[int] = []
         self.apparent_sizes: list[int] = []
         self.errors: list[str] = []
+        self.dropped = 0
+        self.final_ok = False
         self.image_tmp_seen: set[str] = set()
         self.var_known = var_known
         self.var_tmp_seen: set[str] = set()
@@ -1394,43 +1524,65 @@ class StorageWatch:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self) -> StorageWatch:
-        self.baseline, self.apparent_baseline = storage_sizes(self.paths)
+        allocated = self._count(DU_ALLOCATED, "allocated")
+        apparent = self._count(DU_APPARENT, "apparent")
+        if allocated is None or apparent is None:
+            raise ValueError(f"the storage baseline could not be counted: {self.errors[-2:]}")
+        # The baseline is the first sample, so a build that ends at once still has one.
+        self.baseline, self.apparent_baseline = allocated, apparent
+        self.sizes.append(allocated)
+        self.apparent_sizes.append(apparent)
         self._thread.start()
         return self
 
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
         self._thread.join(timeout=300)
+        # The sample after the command returned: it holds the storage the build left.
+        self.final_ok = self._sample()
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            # The asserted figure is taken first. A failed apparent count must not drop it.
-            try:
-                self.sizes.append(du_bytes(self.paths, self.paths.podman_root))
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                self.errors.append(f"{type(exc).__name__}: {exc}"[:200])
-            else:
-                if len(self.sizes) % APPARENT_EVERY == 0:
-                    self._sample_apparent()
-            with contextlib.suppress(OSError):
-                self.image_tmp_seen.update(os.listdir(self.paths.image_tmp))
-            with contextlib.suppress(OSError):
-                listed = tmp_entries(VAR_TMP)
-                self.var_listings += 1
-                uid = os.getuid()
-                self.var_tmp_seen.update(
-                    name
-                    for name, value in listed.items()
-                    if value[0] == uid and name not in self.var_known
-                )
-            self._stop.wait(self.interval)
+        # Event.wait returns True once __exit__ has set the flag, so the thread ends with no sample
+        # of its own. __exit__ takes the last one, after the join.
+        while not self._stop.wait(self.interval):
+            self._sample()
 
-    def _sample_apparent(self) -> None:
-        """One apparent count. A failure is recorded, and the allocated sample it follows stays."""
+    def _count(self, flags: Sequence[str], name: str) -> int | None:
+        """One `du` count of the podman root, or None when it failed. `du_bytes` retries it once
+        (DU_RETRIES), so None means the count failed twice. The failure is recorded in `errors`.
+        """
         try:
-            self.apparent_sizes.append(du_bytes(self.paths, self.paths.podman_root, DU_APPARENT))
+            return du_bytes(self.paths, self.paths.podman_root, flags)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            self.errors.append(f"apparent: {type(exc).__name__}: {exc}"[:200])
+            self.errors.append(f"{name} dropped: {type(exc).__name__}: {exc}"[:200])
+            return None
+
+    def _sample(self) -> bool:
+        """One sample: the allocated count (the asserted figure, taken first), the apparent count on
+        every `APPARENT_EVERY`th allocated sample, and the listings. Return whether the allocated
+        count was counted.
+        """
+        size = self._count(DU_ALLOCATED, "allocated")
+        if size is None:
+            self.dropped += 1
+        else:
+            self.sizes.append(size)
+            if len(self.sizes) % APPARENT_EVERY == 0:
+                apparent = self._count(DU_APPARENT, "apparent")
+                if apparent is not None:
+                    self.apparent_sizes.append(apparent)
+        with contextlib.suppress(OSError):
+            self.image_tmp_seen.update(os.listdir(self.paths.image_tmp))
+        with contextlib.suppress(OSError):
+            listed = tmp_entries(VAR_TMP)
+            self.var_listings += 1
+            uid = os.getuid()
+            self.var_tmp_seen.update(
+                name
+                for name, value in listed.items()
+                if value[0] == uid and name not in self.var_known
+            )
+        return size is not None
 
     def peak(self) -> int:
         """The largest allocated growth over the baseline. Callers assert `assert_sampled` first."""
@@ -1469,6 +1621,8 @@ class Measure:
     peak: int
     peak_apparent: int
     samples: int
+    dropped: int
+    final_ok: bool
     watch_errors: list[str]
 
 
@@ -1488,6 +1642,8 @@ class Build:
     peak: int
     peak_apparent: int
     samples: int
+    dropped: int
+    final_ok: bool
     watch_errors: list[str]
     image_tmp: str
     image_tmp_seen: list[str]
@@ -1511,24 +1667,51 @@ def gate_dir() -> Iterator[Path]:
         shutil.rmtree(base, ignore_errors=True)
 
 
+def delete_failure(launcher: Path, name: str) -> str:
+    """Delete a t727 realm with its Realm Home, as `ginn --json delete --purge-home --yes`.
+
+    Return "" when the delete returned 0. Otherwise return its rc and the tail of its stderr (or of
+    its stdout when stderr is empty). A refused delete keeps the realm record and its pinned base,
+    so the caller must fail on it (run 8: GINN-E-HOST-UNACKED, with the leg reporting no failure).
+    """
+    env = {**os.environ, "PATH": f"{launcher.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [str(launcher), "--json", "delete", name, "--purge-home", "--yes"],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+        env=env,
+        cwd="/tmp",  # noqa: S108 - a working directory, not a temp file
+        timeout=900.0,
+        check=False,
+    )
+    if done.returncode == 0:
+        return ""
+    output = done.stderr.strip() or done.stdout.strip()
+    return f"delete of {name} failed (rc {done.returncode}): {output[-400:]}"
+
+
 def services_off_leg(launcher: Path, paths: OwnedPaths, gate_dir: Path, distro: str) -> Measure:
     """The services-off create of `distro` from no base, measured (item 5, services off).
 
     `build` runs this before its services-on create, so that create also starts from no base. The
-    realm is deleted here, and a delete removes the pinned base when no realm uses it. `build`
-    checks after this returns, whether it succeeded or not, that the base is gone, because a base
-    that stays would make the services-on create measure a create over a base in storage. A failed
-    assertion here is raised to `build`, which records it. The progress objects are kept, and the
-    item 5 test reads the figure of this create's `space-checked` step (`space_checked`).
+    realm is deleted here, and a delete removes the pinned base when no realm uses it. The delete's
+    rc is checked: a refused delete fails this leg, with its stderr, whether the create succeeded or
+    not (defect 2 of run 8). `build` then checks that the base is gone, because a base that stays
+    would make the services-on create measure a create over a base in storage. The progress objects
+    are kept, and the item 5 test reads the figure of this create's `space-checked` step
+    (`space_checked`).
     """
     name = f"{PREFIX}{distro}-off"
     _CREATED.append(name)
     steps_file = gate_dir / f"{distro}-off-steps.txt"
     began = time.monotonic()
+    measured: Measure | None = None
+    error: Exception | None = None
     try:
         # Sampled every second: a services-off create can be as short as about 20 s (T7.33).
         with (
-            StorageWatch(paths, interval=1.0) as watch,
+            StorageWatch(paths) as watch,
             mock.patch.dict(os.environ, {STEP_LOG_ENV: str(steps_file)}),
         ):
             created, progress = ginn_steps(
@@ -1550,11 +1733,21 @@ def services_off_leg(launcher: Path, paths: OwnedPaths, gate_dir: Path, distro: 
             peak=watch.peak(),
             peak_apparent=watch.peak_apparent(),
             samples=len(watch.sizes),
+            dropped=watch.dropped,
+            final_ok=watch.final_ok,
             watch_errors=watch.errors[:5],
         )
+    except Exception as exc:  # noqa: BLE001 - re-raised below, after the delete has been checked
+        error = exc
     finally:
         run_ginn(launcher, "stop", name)
-        run_ginn(launcher, "delete", name, "--purge-home", "--yes")
+        refused = delete_failure(launcher, name)
+    if refused:
+        detail = f" (after {type(error).__name__}: {error})" if error is not None else ""
+        raise AssertionError(f"{refused}{detail}")
+    if error is not None:
+        raise error
+    assert measured is not None
     return measured
 
 
@@ -1569,7 +1762,9 @@ def build(
     services-on create runs under StorageWatch and the step log. /var/tmp is listed before and after
     it, and during it by each sample. The services-on realm is deleted at the module's end, with its
     Realm Home. When the pinned base is already in ginn storage, the distribution is skipped: its
-    items need a real pull, and the skip names the realm that holds the base when one is known.
+    items need a real pull, and the skip names the realm that holds the base when one is known. When
+    the services-off leg itself leaves the base, the distribution fails: that base is the gate's own
+    leftover (a refused delete, for one), and a skip would hide it.
     """
     distro = str(request.param)
     base_id = pinned_base_id(paths, distro)
@@ -1587,10 +1782,12 @@ def build(
         off_failure = f"{type(exc).__name__}: {exc}"
     left = pinned_base_id(paths, distro)
     if left is not None:
-        cause = off_failure or "no failure was recorded"
-        pytest.skip(
+        # The base is the gate's own leftover, so this is a failure. A skip would hide it (run 8).
+        cause = off_failure or "the leg's create and delete both reported success"
+        pytest.fail(
             f"{distro}: the services-off leg left the pinned base {left} in ginn storage "
-            f"({cause}), so the services-on create would not start from no base"
+            f"({cause}), so the services-on create would not start from no base",
+            pytrace=False,
         )
     name = f"{PREFIX}{distro}-prov"
     _CREATED.append(name)
@@ -1630,6 +1827,8 @@ def build(
             peak=watch.peak(),
             peak_apparent=watch.peak_apparent(),
             samples=len(watch.sizes),
+            dropped=watch.dropped,
+            final_ok=watch.final_ok,
             watch_errors=watch.errors[:5],
             image_tmp=str(paths.image_tmp),
             image_tmp_seen=sorted(watch.image_tmp_seen),
@@ -1674,7 +1873,7 @@ def test_phasec_item9_image_copy_stays_out_of_var_tmp(build: Build) -> None:
     programs write to /var/tmp too. The test fails only on a new owned entry whose name carries a
     podman, buildah or ginn hint. Every other new owned entry is printed as a T727_VARTMP_OTHER line
     for a manual check, and it does not fail. The sampled listing finds an entry that appeared and
-    went again between the two listings, but not one that lived less than a sample interval (3 s).
+    went again between the two listings, but not one that lived less than a sample interval (1 s).
     Nothing is deleted there.
     """
     named = {name: change for name, change in build.var_changes.items() if change["named_for_ginn"]}
@@ -1708,11 +1907,20 @@ def test_phasec_item5_formula_against_measured_peak(build: Build) -> None:
     required, free = space_checked(f"{build.distro} services-on create", build.progress)
     verdict = "PASS" if build.peak <= required else "FAIL"
     print(
-        f"T727_ITEM5 {build.distro} base={build.base_bytes} required={required} free={free} "
-        f"peak={build.peak} peak_apparent={build.peak_apparent} samples={build.samples} "
-        f"elapsed_s={build.elapsed_s} watch_errors={build.watch_errors[:1]} verdict={verdict}"
+        f"T727_ITEM5 {build.distro} base={build.base_bytes} baseline={build.baseline} "
+        f"required={required} free={free} peak={build.peak} "
+        f"peak_apparent={build.peak_apparent} samples={build.samples} dropped={build.dropped} "
+        f"final_ok={build.final_ok} elapsed_s={build.elapsed_s} "
+        f"watch_errors={build.watch_errors[:2]} verdict={verdict}"
     )
-    assert_sampled(f"{build.distro} item 5", build.samples, build.elapsed_s, build.watch_errors)
+    assert_sampled(
+        f"{build.distro} item 5",
+        build.samples,
+        build.elapsed_s,
+        build.watch_errors,
+        build.dropped,
+        build.final_ok,
+    )
     assert build.peak <= required, (
         f"{build.distro}: measured allocated peak {build.peak} is over the product's "
         f"required_bytes {required}"
@@ -1738,10 +1946,16 @@ def test_phasec_item5_services_off_against_measured_peak(build: Build) -> None:
     print(
         f"T727_ITEM5_OFF {build.distro} name={off.name} required={required} free={free} "
         f"peak={off.peak} peak_apparent={off.peak_apparent} samples={off.samples} "
-        f"elapsed_s={off.elapsed_s} watch_errors={off.watch_errors[:1]} verdict={verdict}"
+        f"dropped={off.dropped} final_ok={off.final_ok} elapsed_s={off.elapsed_s} "
+        f"watch_errors={off.watch_errors[:2]} verdict={verdict}"
     )
     assert_sampled(
-        f"{build.distro} item 5 services off", off.samples, off.elapsed_s, off.watch_errors
+        f"{build.distro} item 5 services off",
+        off.samples,
+        off.elapsed_s,
+        off.watch_errors,
+        off.dropped,
+        off.final_ok,
     )
     assert off.peak <= required, (
         f"{build.distro}: services-off allocated peak {off.peak} is over the product's "
@@ -1825,7 +2039,7 @@ def test_phasec_reuse_and_pinned_terms_debian(
         base = build.base_bytes
         began = time.monotonic()
         # The pinned rebuild is the shortest build, so its watch samples every second.
-        with StorageWatch(paths, interval=1.0) as watch:
+        with StorageWatch(paths) as watch:
             rebuilt, rebuild_steps = ginn_steps(launcher, "rebuild", pin, timeout=CREATE_TIMEOUT)
         elapsed = time.monotonic() - began
         assert rebuilt.rc == 0, rebuilt.error_text()
@@ -1833,10 +2047,18 @@ def test_phasec_reuse_and_pinned_terms_debian(
         print(
             f"T727_PINNED debian base={base} required={required} free={free} peak={watch.peak()} "
             f"peak_apparent={watch.peak_apparent()} samples={len(watch.sizes)} "
+            f"dropped={watch.dropped} final_ok={watch.final_ok} "
             f"elapsed_s={elapsed:.1f} codes={rebuilt.codes()} "
             f"verdict={'PASS' if watch.peak() <= required else 'FAIL'}"
         )
-        assert_sampled("pinned rebuild", len(watch.sizes), elapsed, watch.errors)
+        assert_sampled(
+            "pinned rebuild",
+            len(watch.sizes),
+            elapsed,
+            watch.errors,
+            watch.dropped,
+            watch.final_ok,
+        )
         assert watch.peak() <= required, (
             f"pinned rebuild: allocated peak {watch.peak()} is over the product's required_bytes "
             f"{required}"
@@ -1996,9 +2218,17 @@ def test_phasec_item5_commit_only_with_base_present(launcher: Path, paths: Owned
         print(
             f"T727_ITEM5_COMMIT debian base_present=True required={required} free={free} "
             f"peak={peak} peak_apparent={watch.peak_apparent()} samples={len(watch.sizes)} "
-            f"elapsed_s={elapsed:.1f} errors={watch.errors[:1]} verdict={verdict}"
+            f"dropped={watch.dropped} final_ok={watch.final_ok} "
+            f"elapsed_s={elapsed:.1f} errors={watch.errors[:2]} verdict={verdict}"
         )
-        assert_sampled("commit only", len(watch.sizes), elapsed, watch.errors)
+        assert_sampled(
+            "commit only",
+            len(watch.sizes),
+            elapsed,
+            watch.errors,
+            watch.dropped,
+            watch.final_ok,
+        )
         assert peak <= required, (
             f"commit-only allocated peak {peak} is over the product's required_bytes {required}"
         )
