@@ -16,6 +16,7 @@ import pytest
 
 from ginn.distros import DistroDef, Verb, load
 from ginn.distros.loader import UpdateStatus, from_mapping
+from ginn.domain import InstallMethod, InstallSource, ManifestEntry
 from ginn.errors import GinnError
 from ginn.packages.aur import (
     BUILD_ROOT,
@@ -40,6 +41,7 @@ from ginn.packages.manager import (
     CheckResult,
     database_inconsistent,
     decisive_line,
+    explicit_manifest,
     explicit_packages,
     failure,
     network_failure,
@@ -413,6 +415,38 @@ def test_explicit_packages_raises_rather_than_return_an_empty_list() -> None:
     with pytest.raises(GinnError) as caught:
         explicit_packages(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.parametrize("keep_existing", [False, True])
+def test_explicit_manifest_keep_existing_decides_whether_an_entry_is_replaced(
+    keep_existing: bool,
+) -> None:
+    fake = FakePodman()
+    cid = _running(fake)
+    definition = _definition("arch")
+    _canned(fake, definition.argv(Verb.LIST_EXPLICIT), 0, "htop\nvim\n")
+    old = ManifestEntry(name="htop", source=InstallSource.AUR, method=InstallMethod.NATIVE)
+    result = explicit_manifest(
+        fake,
+        cid,
+        definition,
+        realm=REALM,
+        services=False,
+        manifest=[old],
+        names=["htop", "vim"],
+        installed_now=True,
+        keep_existing=keep_existing,
+    )
+    assert result is not None
+    entries = {entry.name: entry for entry in result}
+    assert entries["vim"].source is InstallSource.REPO
+    assert entries["vim"].method is InstallMethod.GINN
+    if keep_existing:
+        assert entries["htop"] == old
+    else:
+        assert entries["htop"].source is InstallSource.REPO
+        assert entries["htop"].method is InstallMethod.GINN
 
 
 @pytest.mark.fr("FR-041")

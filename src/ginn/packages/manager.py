@@ -356,6 +356,7 @@ def explicit_manifest(
     manifest: Sequence[ManifestEntry],
     names: Sequence[str],
     installed_now: bool,
+    keep_existing: bool = False,
 ) -> list[ManifestEntry] | None:
     """The Install Manifest that the realm's explicit-package list gives for `names`.
 
@@ -363,6 +364,10 @@ def explicit_manifest(
     the realm lists as explicit is recorded as `ginn`. After a remove, each name it no longer lists
     is dropped. None when the list cannot be read or is over the caps, and the caller keeps the
     manifest it had. A result equal to `manifest` means nothing changes.
+
+    `keep_existing` (recovery only) records after an install just the names that have no entry yet,
+    so an entry that exists keeps its source and method: recovery cannot tell that the install
+    reached that name.
     """
     try:
         explicit = explicit_packages(
@@ -375,7 +380,8 @@ def explicit_manifest(
     except Exception:  # noqa: BLE001 - the caller's own error is the one that counts
         return None
     if installed_now:
-        present = [raw for raw in names if raw in explicit]
+        have = {entry.name for entry in manifest} if keep_existing else set()
+        present = [raw for raw in names if raw in explicit and raw not in have]
         if not present:
             return list(manifest)
         return installed(manifest, present, source=InstallSource.REPO, method=InstallMethod.GINN)

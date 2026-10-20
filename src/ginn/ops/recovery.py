@@ -71,9 +71,16 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
   succeeds and before the manifest is saved, so an entry at that step gets the manifest written from
   its `packages` param, in the same record write (FR-040, FR-041, DR-007). An AUR install (param
   `aur`) writes its step `removed` after its build-only set is gone, and its entries are `aur`
-  (FR-043). An entry at any earlier step leaves the manifest as it was. The native change may
-  already have happened there, and no journal step says how far it got. The rebuild replays the
-  manifest as it stands, so this residual stays open.
+  (FR-043). An entry at an earlier step of a repository install or remove (`begin`,
+  `exec-acked`, `refreshed`, `checked`) may have changed packages without a step to say so. When
+  the container runs, the realm's explicit list is read (read-only) and the manifest follows it for
+  the journaled names. At `begin` only an install does this, and it adds just the names with no
+  entry; a remove at `begin` keeps the manifest, since a dry run may be all that ran. The manifest
+  is saved after the state move, in a second atomic save; the replay is idempotent.
+  A stopped container, an unreadable list or an
+  invalid journal list leaves the manifest as it was, and the reason says so. A failed install or
+  remove that finished its own journal entry is not seen here (ops/packages.py reconciles it in
+  place). The rebuild replays the manifest as it stands.
 - sync, export and unexport change only host files, never a realm record (FR-044, FR-047). They are
   recovered with no state write, whatever the record reads, so a deleting or broken realm is not
   blocked by a launcher. The next run of the same operation reconciles the host files.
@@ -188,6 +195,7 @@ OP_REMOVE: Final = "remove"
 STEP_INSTALLED: Final = "installed"
 """The journal step that an install writes after its package step (ops/packages.py)."""
 STEP_REMOVED: Final = "removed"
+"""The journal step that a remove writes after its package step (ops/packages.py)."""
 STEP_GIT: Final = "git"
 """The AUR build's journal step after its git install (ops/packages.py, packages/aur.py)."""
 STEP_DEPENDENCIES: Final = "dependencies"
@@ -195,19 +203,23 @@ STEP_DEPENDENCIES: Final = "dependencies"
 STEP_TOOLCHAIN: Final = "toolchain"
 """The AUR build's journal step after its toolchain is installed."""
 STEP_BUILT: Final = "built"
+"""The AUR build's journal step after its packages are installed, before the build-only removal."""
 STEP_UPGRADING: Final = "upgrading"
-_LISTED_STEPS: Final = frozenset({"exec-acked", "refreshed", "checked"})
+"""The AUR build's journal step before each package install (packages/aur.py)."""
+STEP_BEGIN: Final = "begin"
+"""The step that `journal.begin` writes. It is left by a kill before any exec (a remove's dry run
+included, so nothing changed), and by a kill between the start of a package exec and its
+`exec-acked` step (the change may have started). An install reconciles from the explicit list
+there. A remove keeps its manifest, as the list cannot tell the cases apart (ops/packages.py)."""
+_LISTED_STEPS: Final = frozenset({STEP_BEGIN, "exec-acked", "refreshed", "checked"})
 """Journal steps of a package verb after which its change may have started, though its own step
 is not recorded. Recovery reads the realm's explicit list for them (ADR-014, T7.10 review)."""
-"""The AUR build's journal step before each package install (packages/aur.py)."""
 _QUERY_TIMEOUT_S: Final = 300.0
 _REMOVE_TIMEOUT_S: Final = 300.0
-"""The AUR build's journal step after its packages are installed, before the build-only removal."""
 _AUR_STEPS: Final = frozenset(
     {STEP_GIT, STEP_DEPENDENCIES, STEP_TOOLCHAIN, STEP_UPGRADING, STEP_BUILT, STEP_REMOVED}
 )
 _ROOT_ENV: Final = {"LC_ALL": "C.UTF-8"}
-"""The journal step that a remove writes after its package step (ops/packages.py)."""
 OP_UNEXPORT: Final = "unexport"
 _HOST_ONLY_OPS: Final = frozenset({OP_SYNC, OP_EXPORT, OP_UNEXPORT})
 """Operations that write host files only, never a realm record (see the module docstring)."""
@@ -650,6 +662,9 @@ def _listed_manifest(
     if names is None:
         reason = "the journal entry names no valid package list, so the manifest is left as it is"
         return replace(decision, reason=f"{decision.reason}; {reason}")
+    if entry.step == STEP_BEGIN and entry.op == OP_REMOVE:
+        reason = "the removal may not have started, so the Install Manifest is left as it is"
+        return replace(decision, reason=f"{decision.reason}; {reason}")
     if record.container_id is None or _podman_state(podman, record) is not ContainerState.RUNNING:
         reason = "the container is not running, so the Install Manifest is left as it is"
         return replace(decision, reason=f"{decision.reason}; {reason}")
@@ -662,6 +677,7 @@ def _listed_manifest(
         manifest=record.manifest,
         names=names,
         installed_now=entry.op == OP_INSTALL,
+        keep_existing=True,
     )
     if manifest is None:
         reason = "the package list cannot be read, so the Install Manifest is left as it is"
