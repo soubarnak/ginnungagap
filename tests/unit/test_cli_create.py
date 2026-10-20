@@ -23,10 +23,12 @@ from ginn.distros import Verb
 from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
+from ginn.ops import _create_plan
 from ginn.ops.create import CreateRequest, CreateResult, SizeEstimate
 from ginn.ops.disk import estimate_required
 from ginn.ops.provision import services_off_required_bytes, storage_peak_for
 from ginn.podman.models import ContainerState, ExecResult
+from ginn.security.nvidia import NvidiaPlan, Status
 from ginn.store.records import RealmStore
 from ginn.trust import manifest as trust
 from tests.unit.realm_cli_support import World, record_of, seed_killed_estimate
@@ -397,6 +399,16 @@ def test_a_stage_note_is_printed_as_a_note_line_in_text_mode(
     """ADR-015 Decision 2h: a stage removal that fails after the commit is a note, and the create
     still finishes. Text mode prints it as a `note:` line, as it prints the locale and GPU notes."""
     monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+    # A READY plan keeps the host's GPU state (driver, musl) out of the printed notes.
+    ready = NvidiaPlan(
+        status=Status.READY,
+        reason="test host",
+        spec_path=str(world.paths.data / "cdi" / "nvidia.json"),
+        spec_text='{"cdiVersion": "0.6.0"}\n',
+        ld_path=str(world.paths.data / "ld" / "ginn-nvidia.conf"),
+        ld_text="/usr/lib/ginn-nvidia\n",
+    )
+    monkeypatch.setattr(_create_plan, "nvidia_plan", lambda paths, hooks: ready)
     world.fake.fail_ops["rm"] = "GINN-E-INTERNAL"
     assert main(["create", "debian", "--services", "on"]) == 0
     assert capsys.readouterr().out.splitlines() == [
