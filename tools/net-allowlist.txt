@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Network allow-list for tools/net-capture-check.py (NFR-SEC-010, AS-022).
+#
+# ginn sends no telemetry. A capture during a ginn workload may show connections only to image
+# registries, distribution repositories and the AUR. One entry per line, '#' starts a comment:
+#
+#   example.org       exact host name (the apex only)
+#   *.example.org     any host under example.org, at any depth (the apex is not matched)
+#   cidr 192.0.2.0/24 an address range. Loopback is always allowed and needs no entry.
+#
+# Names are matched against the DNS names the workload looked up (and the answers they got), so a
+# CDN address is allowed when it was reached through an allowed name. DNS traffic to the host's
+# resolver (port 53, 853) is not a destination of its own; the names it asks for are checked.
+#
+# Sources: the pinned images of src/ginn/trust/data/trust.toml (quay.io, docker.io,
+# registry.fedoraproject.org), the package managers of src/ginn/distros/data/*.toml (apt, pacman,
+# dnf), and AUR_URL of src/ginn/packages/aur.py (aur.archlinux.org).
+#
+# A mirror that a package manager picks at run time (Arch geo mirrors, Fedora metalink mirrors)
+# must be added here by hand when a capture shows it. Adding a host is a reviewed change.
+
+# Hosts below are the ones a first capture is expected to show. Entries marked "confirm" come from
+# the published behaviour of the service, not from a capture of ginn: confirm them with
+# tools/net-capture-check.py on a real run and correct them in a reviewed change.
+
+# Image registries
+quay.io
+cdn01.quay.io
+cdn02.quay.io
+cdn03.quay.io
+docker.io
+registry-1.docker.io
+auth.docker.io
+index.docker.io
+production.cloudflare.docker.com
+# confirm: Docker Hub serves blobs from a Cloudflare R2 host with a bucket-specific name.
+docker-images-prod.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com
+registry.fedoraproject.org
+cdn.registry.fedoraproject.org
+
+# Debian (confirm the CDN names)
+deb.debian.org
+security.debian.org
+cdn-fastly.deb.debian.org
+
+# Kali (confirm the mirror names)
+http.kali.org
+kali.download
+archive.kali.org
+
+# Fedora repositories (confirm the metalink mirror hosts by capture, then list them)
+mirrors.fedoraproject.org
+download.fedoraproject.org
+
+# Arch Linux and the AUR (aur.archlinux.org); geo mirrors resolve to a few names (confirm)
+archlinux.org
+aur.archlinux.org
+mirror.pkgbuild.com
+geo.mirror.pkgbuild.com
