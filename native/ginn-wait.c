@@ -8,8 +8,8 @@
  * 1 conmon exited without one, 2 usage, 3 pidfile or /proc error, or the pid is not conmon (not
  * running, or start time changed), 4 podman stop failed while conmon runs, 5 system call failed.
  * Start time (/proc/<pid>/stat field 22) is checked with the pidfile and after pidfd_open. Without
- * SYS_pidfd_open or on ENOSYS it polls every second. A pid reused before the pidfile is read is not
- * detected: remove a stale pidfile before podman starts.
+ * SYS_pidfd_open, with -DGINN_WAIT_NO_PIDFD (tests) or on ENOSYS it polls every second. A pid reused
+ * before the pidfile is read is not detected: remove a stale pidfile before podman starts.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -100,7 +100,7 @@ static pid_t read_pid(const char *path) {
 
 /* A CLOEXEC pidfd for pid. -1 with errno set on failure; ENOSYS selects the polling fallback. */
 static int pidfd_of(pid_t pid) {
-#ifdef SYS_pidfd_open
+#if defined(SYS_pidfd_open) && !defined(GINN_WAIT_NO_PIDFD) /* the define: test builds only */
 	long fd = syscall(SYS_pidfd_open, pid, 0);
 	if (fd >= 0) fcntl((int)fd, F_SETFD, FD_CLOEXEC);
 	return (int)fd;
