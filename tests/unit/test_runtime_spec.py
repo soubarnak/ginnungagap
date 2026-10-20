@@ -42,6 +42,7 @@ GID = 1000
 DIGEST = "quay.io/archlinux/archlinux@sha256:" + "ab" * 32
 
 FONTS = "/usr/share/fonts"
+FONTS_TARGET = "/usr/share/fonts/ginn-host"
 LOCALTIME = "/etc/localtime"
 GPU = "/dev/dri"
 STABLE_PATHS = (FONTS, LOCALTIME, GPU)
@@ -99,7 +100,7 @@ GOLDEN_ARCH = [
     "--mount",
     "type=bind,source=/home/alice/.local/share/ginn/homes/arch,target=/home/alice",
     "--mount",
-    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
+    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts/ginn-host,ro",
     "--mount",
     "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
     "--tmpfs",
@@ -148,7 +149,7 @@ GOLDEN_ARCH_SERVICES_ON = [
     "--mount",
     "type=bind,source=/home/alice/.local/share/ginn/homes/arch,target=/home/alice",
     "--mount",
-    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
+    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts/ginn-host,ro",
     "--mount",
     "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
     "--tmpfs",
@@ -297,7 +298,7 @@ def test_basic_services_off_golden_argv() -> None:
 def test_stable_binds_only_and_no_variable_grant_even_when_every_source_exists() -> None:
     spec = make_spec(present=(*STABLE_PATHS, *VARIABLE_PATHS))
     argv = create_argv(spec)
-    assert mount_targets(argv) == [str(HOME), FONTS, LOCALTIME]
+    assert mount_targets(argv) == [str(HOME), FONTS_TARGET, LOCALTIME]
     assert option_values(argv, "--tmpfs") == ["/run/user/1000:mode=0700,U"]
     assert option_values(argv, "--device") == [GPU]
     for path in VARIABLE_PATHS:
@@ -741,8 +742,8 @@ def test_a_custom_realm_with_the_gpu_toggle_on_gets_the_dri_device_and_off_gets_
 def test_a_custom_realm_with_the_fonts_timezone_toggle_off_has_no_fonts_or_localtime_bind() -> None:
     on = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES)))
     off = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES - {Toggle.FONTS_TIMEZONE})))
-    assert {FONTS, LOCALTIME} <= set(on)
-    assert not {FONTS, LOCALTIME} & set(off)
+    assert {FONTS_TARGET, LOCALTIME} <= set(on)
+    assert not {FONTS_TARGET, LOCALTIME} & set(off)
 
 
 @pytest.mark.fr("FR-061")

@@ -10,6 +10,7 @@ same on every run.
 from __future__ import annotations
 
 import errno
+import os
 import subprocess
 import time
 from collections.abc import Sequence
@@ -31,6 +32,7 @@ from ginn.export.sync import (
     sync_realm,
     unexport_all,
 )
+from ginn.export.watch import STAMP_NAME, read_sync_mark, sync_is_redundant
 from ginn.ops._mutating import OpEnv, mutating
 from ginn.podman.models import ExecResult
 from ginn.store.audit import AuditLog
@@ -767,3 +769,126 @@ def test_the_watcher_is_re_armed_even_when_the_sync_body_raises(
 
     assert caught.value.code == "GINN-E-INTERNAL"
     assert calls == ["x"]
+
+
+def _stamp(world: World) -> Path:
+    directory = world.paths.homes / "arch" / ".local" / "state" / "ginn-export"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / STAMP_NAME).write_bytes(b"")
+    return directory / STAMP_NAME
+
+
+def _mark(world: World) -> tuple[int, int] | None:
+    return read_sync_mark(world.paths, RealmName("arch"))
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("NFR-009")
+def test_a_finished_sync_records_the_stamp_it_saw(world: World) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    stamp = _stamp(world)
+    assert _mark(world) is None
+    _sync(world)
+    info = stamp.stat()
+    assert _mark(world) == (info.st_ino, info.st_ctime_ns)
+    assert sync_is_redundant(world.paths, RealmName("arch")) is True
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_inside_another_operations_lock_records_the_stamp_too(world: World) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    _stamp(world)
+    env = _env(world)
+    with mutating(env, "install", RealmName("arch")) as mutation:
+        sync_in_lock(
+            env, world.fake, RealmName("arch"), mutation=mutation, hooks=SyncHooks(PROGRAM)
+        )
+    assert _mark(world) is not None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_touch_during_the_listing_leaves_the_watchers_sync_to_run(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    stamp = _stamp(world)
+    real = export_sync._list_desktop
+
+    def touching(*args: object) -> object:
+        os.utime(stamp, ns=(1, 1))  # a native transaction ends while the realm is listed
+        return real(*args)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(export_sync, "_list_desktop", touching)
+    _sync(world)
+    assert sync_is_redundant(world.paths, RealmName("arch")) is False
+
+
+@pytest.mark.fr("FR-044")
+def test_a_realm_that_does_not_run_records_nothing(world: World) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+    _stamp(world)
+    _sync(world)
+    assert _mark(world) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_failed_listing_records_nothing(world: World) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()}, listing_status=1)
+    _stamp(world)
+    with pytest.raises(GinnError):
+        _sync(world)
+    assert _mark(world) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_body_that_raises_records_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    _stamp(world)
+
+    def boom(*_args: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(export_sync._Sync, "run", boom)
+    with pytest.raises(RuntimeError):
+        _sync(world)
+    assert _mark(world) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_with_a_failed_copy_records_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    _stamp(world)
+    monkeypatch.setattr(
+        export_sync._Sync, "_build", lambda self, app, size: export_sync._Fail("copy failed")
+    )
+    result = _sync(world)
+    assert [w.code for w in result.warnings] == ["GINN-W-EXPORT-SKIPPED"]
+    assert _mark(world) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_that_ends_in_an_export_sync_warning_records_nothing(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    _publish(world, {"firefox": _entry()})
+    _stamp(world)
+
+    def warns(self: object, listing: object) -> None:
+        self._result.warnings.append(  # type: ignore[attr-defined]
+            export_sync._not_synced("arch", OSError(errno.EIO, "io"))
+        )
+
+    monkeypatch.setattr(export_sync._Sync, "run", warns)
+    _sync(world)
+    assert _mark(world) is None

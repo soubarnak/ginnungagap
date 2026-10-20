@@ -67,6 +67,13 @@ SHELL_RC_FILES: Final = (".bashrc", ".zshrc")
 USER_MEDIA_ROOT: Final = "/run/media"
 MOUNT_ROOTS: Final = ("/media", "/mnt")
 FONTS: Final = "/usr/share/fonts"
+FONTS_TARGET: Final = "/usr/share/fonts/ginn-host"
+"""Where the host fonts appear in the realm (FR-061, AS-009).
+
+It is a subdirectory of the realm's own `/usr/share/fonts`, which fontconfig scans recursively on
+every distribution. Only this subdirectory is read-only, so a font package still installs into the
+writable `/usr/share/fonts`.
+"""
 LOCALTIME: Final = "/etc/localtime"
 GPU_DEVICE: Final = "/dev/dri"
 RUNTIME_PARENT: Final = "/run/user"
@@ -198,9 +205,11 @@ def create_binds(
     source = _realm_home_source(realm_home, owned_paths)
     mounts = [Mount("bind", str(source), str(host_home), ())]
     skipped: list[Skipped] = []
-    fixed_paths = (FONTS, LOCALTIME) if Toggle.FONTS_TIMEZONE in toggles else ()
-    for fixed in fixed_paths:
-        entry = _fixed_bind(fixed, home=host_home, owned_paths=owned_paths, env=env, exists=exists)
+    fixed_paths = ((FONTS, FONTS_TARGET), (LOCALTIME, LOCALTIME))
+    for fixed, target in fixed_paths if Toggle.FONTS_TIMEZONE in toggles else ():
+        entry = _fixed_bind(
+            fixed, target, home=host_home, owned_paths=owned_paths, env=env, exists=exists
+        )
         if isinstance(entry, Skipped):
             skipped.append(entry)
         else:
@@ -389,13 +398,14 @@ def _points(realm: str, *, is_dir: bool, parents: Sequence[str], home: Path) -> 
 
 def _fixed_bind(
     path: str,
+    target: str,
     *,
     home: Path,
     owned_paths: Sequence[Path],
     env: Mapping[str, str],
     exists: Exists,
 ) -> Mount | Skipped:
-    """A fixed system path, read-only, bound at the same path (AS-009).
+    """A fixed system path, read-only, bound at `target` (AS-009).
 
     The check runs on the resolved path, so a link into a forbidden place is refused. The bind
     source is the literal path. Podman resolves a link again at each start, so the source stays
@@ -409,7 +419,7 @@ def _fixed_bind(
     )
     if reason is not None:
         return Skipped("share", path, reason)
-    return Mount("bind", path, path, ("ro",))
+    return Mount("bind", path, target, ("ro",))
 
 
 def _folder(

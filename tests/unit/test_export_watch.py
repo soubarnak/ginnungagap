@@ -26,12 +26,17 @@ from ginn.export import watch
 from ginn.export.watch import (
     MARKER_NAME,
     STAMP_NAME,
+    SYNC_SKIP_STATUS,
     WatchHooks,
     arm,
     ensure_hooks,
     open_stamp_dir,
+    read_sync_mark,
     rearm,
     stamp_realm_path,
+    stamp_snapshot,
+    sync_is_redundant,
+    write_sync_mark,
 )
 from ginn.podman.adapter import ExecTarget
 from ginn.podman.models import ExecResult
@@ -524,6 +529,7 @@ def test_arm_starts_ginn_watch_on_the_stamp_directory_for_the_containers_init(
         "/usr/bin/ginn",
         "_sync",
         "lab",
+        "--from-watch",
     ]
     assert spawn.passed == [(spawn.passed[0][0], str(directory), directory.stat().st_ino)]
     assert log == paths.runtime / "watch" / "lab.log"
@@ -969,3 +975,63 @@ def test_more_than_three_rearms_in_a_minute_are_refused_with_a_warning(
     assert record is not None
     assert record.rearms == 1
     assert len(spawn.calls) == 5
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("NFR-009")
+def test_a_stamp_as_the_last_sync_saw_it_makes_the_watcher_run_redundant(paths: OwnedPaths) -> None:
+    _make_stamp_dir(paths)
+    snapshot = stamp_snapshot(paths, NAME)
+    assert snapshot is not None
+    write_sync_mark(paths, NAME, snapshot)
+    assert read_sync_mark(paths, NAME) == snapshot
+    assert sync_is_redundant(paths, NAME) is True
+    assert SYNC_SKIP_STATUS == 64
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("FR-045")
+def test_a_touched_or_replaced_stamp_still_runs_the_sync(paths: OwnedPaths) -> None:
+    directory = _make_stamp_dir(paths)
+    snapshot = stamp_snapshot(paths, NAME)
+    write_sync_mark(paths, NAME, snapshot)
+    stamp = directory / STAMP_NAME
+    os.utime(stamp, ns=(1, 1))  # even a backdated mtime moves the ctime
+    assert sync_is_redundant(paths, NAME) is False
+    write_sync_mark(paths, NAME, stamp_snapshot(paths, NAME))
+    assert sync_is_redundant(paths, NAME) is True
+    stamp.unlink()
+    stamp.write_bytes(b"")  # another inode
+    assert sync_is_redundant(paths, NAME) is False
+
+
+@pytest.mark.fr("FR-044")
+def test_no_record_no_stamp_or_a_link_for_a_stamp_runs_the_sync(
+    paths: OwnedPaths, tmp_path: Path
+) -> None:
+    directory = _make_stamp_dir(paths)
+    assert sync_is_redundant(paths, NAME) is False  # no record
+    write_sync_mark(paths, NAME, stamp_snapshot(paths, NAME))
+    assert sync_is_redundant(paths, NAME) is True
+    (directory / STAMP_NAME).unlink()
+    assert sync_is_redundant(paths, NAME) is False  # no stamp
+    (tmp_path / "target").write_bytes(b"")
+    (directory / STAMP_NAME).symlink_to(tmp_path / "target")
+    assert stamp_snapshot(paths, NAME) is None  # a link is not a stamp (CR-006)
+    assert sync_is_redundant(paths, NAME) is False
+    (paths.runtime / "watch" / "lab.sync").write_text("junk", encoding="ascii")
+    assert read_sync_mark(paths, NAME) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_that_saw_no_stamp_drops_the_old_mark(paths: OwnedPaths) -> None:
+    write_sync_mark(paths, NAME, (1, 2))
+    write_sync_mark(paths, NAME, None)
+    assert read_sync_mark(paths, NAME) is None
+
+
+@pytest.mark.fr("FR-044")
+def test_remove_drops_the_sync_mark(paths: OwnedPaths) -> None:
+    write_sync_mark(paths, NAME, (1, 2))
+    watch.remove(paths, NAME)
+    assert read_sync_mark(paths, NAME) is None

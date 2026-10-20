@@ -11,11 +11,15 @@ reading podman's storage. So the realm signals the host instead. Three parts:
   The hook never makes the directory (a `mkdir` by container root would give a subordinate-id
   owner); a missing directory just makes its `touch` fail, which no package manager treats as fatal.
 - `ginn-watch` runs on the host, on that directory, for as long as the realm's init lives
-  (`arm`). A touch of the stamp runs `ginn _sync <realm>` after a short quiet time. The stamp name
-  ends in `.desktop` because ginn-watch looks only at such names. Its content is never read. When
+  (`arm`). A touch of the stamp runs `ginn _sync <realm> --from-watch` after a short quiet time.
+  The stamp name ends in `.desktop` because ginn-watch looks only at such names. Its content is
+  never read. When
   the realm removes the directory, the watcher runs once more and exits (status 3). That last
   `ginn _sync` calls `rearm` inside its lock, which makes the directory again and starts a fresh
   watcher (at most 3 times a minute).
+- `--from-watch` makes `ginn _sync` exit at once, without the lock, with status 64
+  (`SYNC_SKIP_STATUS`) when the stamp is as the last finished sync saw it (`sync_is_redundant`):
+  `ginn install` and the like sync the menu themselves. ginn-watch does not retry status 64.
 - `ginn _sync` re-reads the realm through ginn itself (export/sync.py), so what the realm wrote into
   the stamp cannot steer anything.
 
@@ -82,6 +86,11 @@ _DIR: Final = "watch"
 _SAFE_PATH: Final = re.compile(r"/[A-Za-z0-9_./-]+")
 """A realm path the hook files may carry. No blank, quote, backslash, `%`, `$` or `{`."""
 _MARKER_LIMIT: Final = 256
+FROM_WATCH: Final = "--from-watch"
+"""The hidden flag of `ginn _sync` that marks a run of the watcher (see `sync_is_redundant`)."""
+SYNC_SKIP_STATUS: Final = 64
+"""The exit status of `ginn _sync --from-watch` that did nothing because the menu is current. No
+catalogue code exits 64, and ginn-watch neither retries it nor counts it as a rapid run."""
 _WRITE_HOOK: Final = 'mkdir -p -- "${1%/*}" && printf %s "$2" > "$1.tmp" && mv -f -- "$1.tmp" "$1"'
 """Run by `sh -c` as container root. $1 is the hook path and $2 its text (argv, never spliced). The
 text goes to `$1.tmp` and moves over the hook, so a package manager never reads half a file."""
@@ -414,6 +423,7 @@ def arm(
             command,
             "_sync",
             name.value,
+            FROM_WATCH,
         ]
         try:
             _dir(paths).mkdir(mode=OWNED_DIR_MODE, parents=True, exist_ok=True)
@@ -476,7 +486,72 @@ def rearm(paths: OwnedPaths, name: RealmName, *, hooks: WatchHooks) -> GinnWarni
     )
 
 
+def sync_mark_path(paths: OwnedPaths, name: RealmName) -> Path:
+    """When the realm's last sync began (`runtime/watch/<realm>.sync`)."""
+    return _dir(paths) / f"{name.value}.sync"
+
+
+def stamp_snapshot(paths: OwnedPaths, name: RealmName) -> tuple[int, int] | None:
+    """The stamp's (inode, ctime in ns), `lstat`ed below the safe walk, or None.
+
+    None when the stamp directory is not safe, or the stamp is missing or not a regular file.
+    The ctime is set by the kernel on every touch and cannot be set back with `utimensat`, so it
+    needs no trust in the wall clock or in the stamp's mtime.
+    """
+    with open_stamp_dir(paths, name) as directory:
+        if directory is None:
+            return None
+        try:
+            found = os.stat(STAMP_NAME, dir_fd=directory, follow_symlinks=False)
+        except OSError:
+            return None
+    return (found.st_ino, found.st_ctime_ns) if stat.S_ISREG(found.st_mode) else None
+
+
+def write_sync_mark(paths: OwnedPaths, name: RealmName, snapshot: tuple[int, int] | None) -> None:
+    """Record the stamp `snapshot` that a finished sync saw before it listed the realm.
+
+    `sync_in_lock` calls this under the realm lock, only after the sync ran through. The snapshot
+    was taken before the listing, so a transaction that touched the stamp during the sync leaves a
+    stamp that differs from it. With no snapshot (no stamp) the old mark is removed. Atomic write
+    below Owned Paths. Raises OSError; the caller treats that as best effort (a missing mark only
+    costs one redundant sync).
+    """
+    if snapshot is None:
+        sync_mark_path(paths, name).unlink(missing_ok=True)
+        return
+    _dir(paths).mkdir(mode=OWNED_DIR_MODE, parents=True, exist_ok=True)
+    write_bytes_atomic(sync_mark_path(paths, name), json.dumps(list(snapshot)).encode("ascii"))
+
+
+def read_sync_mark(paths: OwnedPaths, name: RealmName) -> tuple[int, int] | None:
+    """The stamp snapshot of the realm's last finished sync, or None when absent or unreadable."""
+    try:
+        data = json.loads(sync_mark_path(paths, name).read_text(encoding="ascii"))
+        if isinstance(data, list) and len(data) == 2 and all(type(n) is int for n in data):
+            return (data[0], data[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def sync_is_redundant(paths: OwnedPaths, name: RealmName) -> bool:
+    """True when the stamp is exactly as the last finished sync saw it (`ginn _sync --from-watch`).
+
+    `ginn install` runs the package manager inside the realm lock. Its hook touches the stamp, and
+    ginn syncs the menu itself before it returns. The watcher's sync would only find the lock busy
+    and then repeat that work right after, which can refuse the user's next command (FR-123). So
+    the watcher asks first, without a lock: the stamp's current (inode, ctime) must equal the
+    recorded snapshot exactly. Any touch, replacement or removal since that sync differs, and a
+    missing mark, stamp or stamp directory, or any error, gives False: the normal sync runs.
+    Nothing is written, so no audit entry is due (FR-124 audits mutations).
+    """
+    mark = read_sync_mark(paths, name)
+    return mark is not None and mark == stamp_snapshot(paths, name)
+
+
 def remove(paths: OwnedPaths, name: RealmName) -> None:
     """Remove the realm's watcher record and log (on delete). Absent files are a no-op."""
+    sync_mark_path(paths, name).unlink(missing_ok=True)
     record_path(paths, name).unlink(missing_ok=True)
     log_path(paths, name).unlink(missing_ok=True)

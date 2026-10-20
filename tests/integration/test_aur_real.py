@@ -84,8 +84,15 @@ def required_by(world: World, name: str, packages: set[str]) -> dict[str, list[s
 
 def base_devel_members(world: World, name: str) -> set[str]:
     ran = in_realm(world, name, "pacman -Sgq base-devel")
-    assert ran.rc == 0, ran.err[-400:]
-    members = set(ran.out.split())
+    if ran.rc != 0:
+        # Arch turned base-devel from a group into a meta-package: read its name and dependencies.
+        ran = in_realm(world, name, "pacman -Si base-devel")
+        assert ran.rc == 0, ran.err[-400:]
+        deps = [ln.split(":", 1)[1] for ln in ran.out.splitlines() if ln.startswith("Depends On")]
+        names = {w.split(">")[0].split("<")[0].split("=")[0] for w in " ".join(deps).split()}
+        members = (names - {"None"}) | {"base-devel"}
+    else:
+        members = set(ran.out.split())
     assert members, "pacman lists no base-devel members: the sync databases are missing"
     return members
 
