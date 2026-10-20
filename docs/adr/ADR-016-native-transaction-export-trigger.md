@@ -85,7 +85,7 @@ Negative, and what the code must not do:
 
 Follow-up and host-only items (nothing below was run):
 
-- F14 host gate in `tests/integration/test_export_real.py`: `pacman -S`, `apt install` and `dnf install` inside a started realm, with the 5 s timing (NFR-009), and the removal case (FR-045). The F-WATCH expected failures there are renamed F14 and unmarked after a pass.
+- F14 host gate in `tests/integration/test_export_real.py`: `pacman -S`, `apt install` and `dnf install` inside a started realm, with the 5 s timing (NFR-009), and the removal case (FR-045). The expected failures there were once named F-WATCH; they are named F14 and the marker is removed after a pass.
 - Per image: that the hook file is read (pacman `HookDir`, apt `apt.conf.d`, dnf5 actions plugin enabled by default, `libdnf5-plugin-actions` installable, read by the first dnf5 run after the user installs it, and that dnf5's actions plugin runs the plain `touch <stamp>` command as written, with no shell and no quote handling, and does not fail the transaction when the touch fails), that `touch` as container root can write the realm user's stamp under keep-id (`CAP_DAC_OVERRIDE`), and that `ginn-watch` sees the close.
 - Boot-time autostart: the supervised start's environment (PATH, HOME) when it spawns `ginn-watch`, and that the watcher outlives `sv down` only until the init exits.
 - Memory: `ginn-watch` RSS per running realm (NFR-002, NFR-003, ADR-007).

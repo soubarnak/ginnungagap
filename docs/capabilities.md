@@ -171,6 +171,18 @@ Not added: NET_ADMIN. S-09 C shows that NET_ADMIN lets the stock nmap run, but t
 
 Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the Kali realm (S-09 Finding 2). This is a candidate fix and was not tested. It removes a capability rather than adding one, so it is not in the enumerated set. It conflicts with pulling the official image by digest unless a build step is added (CR-007). Decision for T10.1.
 
+## Package-manager hook files in a realm (ADR-016, CL-35)
+
+These are not podman options. They are files that ginn writes into a realm's `/etc`, as container root, once per container (`ensure_hooks`, `export/watch.py`), so that the host menu follows the realm's own package manager (FR-044, FR-045, NFR-009). Each file makes the package manager run `/usr/bin/touch <stamp>` after a package transaction (the apt form goes through apt's shell, see the table). The stamp is `<Realm Home>/.local/state/ginn-export/transaction.desktop`. The host watches it and runs `ginn _sync <realm>`. A hook never makes the stamp directory (the installer does make the hook's own `/etc` parent with `mkdir -p`). A failed hook never fails the transaction (unverified for dnf5, CL-35). Source: the `[export_hook]` table of `src/ginn/distros/data/<distro>.toml`. Not run on a host yet (F14 host gate).
+
+| Distribution | File inside the realm | What it does |
+|---|---|---|
+| arch | `/etc/pacman.d/hooks/ginn-export.hook` | A pacman hook, `When = PostTransaction`, on `usr/share/applications/*.desktop` for Install, Upgrade and Remove. |
+| debian, kali | `/etc/apt/apt.conf.d/99ginn-export` | `DPkg::Post-Invoke { "/usr/bin/touch <stamp> 2>/dev/null || true"; };`, run through apt's shell after every dpkg run that apt makes. A bare `dpkg -i` does not run it. |
+| fedora | `/etc/dnf/libdnf5-plugins/actions.d/ginn-export.actions` | One dnf5 actions line, `post_transaction::::/usr/bin/touch <stamp>`. It does nothing unless the realm has `libdnf5-plugin-actions`, which is not in the Integration Package Set. The user installs it with `ginn install fedora libdnf5-plugin-actions`. |
+
+Beside the hook, ginn writes a marker `hooks-for` (the container id) in the same stamp directory, as the realm user. CR-007 reading: see CL-35.
+
 ## Not in this document
 
 - FR-085 (Docker in a realm) is deferred. Its options will be added here when it is decided (CL-2).

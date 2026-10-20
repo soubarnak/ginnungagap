@@ -21,8 +21,8 @@ at a chosen journal step (STEP_SEAM) and look at what the next ginn command does
 What this file proves, and what it leaves out:
 - FR-044 AC-1 and AC-2, FR-045 AC-1: `ginn install` and `ginn remove` leave the host menu right when
   they return. The native path (`ginn exec --root -- apt-get ...`) is a separate item. It is a
-  strict xfail (F-WATCH) while no trigger runs `ginn _sync` after a native transaction (no watcher
-  is wired in src/ginn; native/ginn-watch.c is not started by any command).
+  strict xfail (F14) until the ADR-016 hook and watcher are shown to run `ginn _sync` after a native
+  transaction on a host. The code exists and is unit-tested on fakes; this gate has not run.
 - NFR-009: 20 timed `ginn _sync` runs, interpreter start included, each on a removed host entry.
   The 5 s bound is read at the sync, since a package transaction itself is not timed by ginn.
 - Launch prefix (no FR marker): the host entry runs `<ginn> exec <realm> -- <argv>`, and that
@@ -410,12 +410,13 @@ XFAIL_WATCH = pytest.mark.xfail(
     strict=True,
     raises=KnownGapF14,
     reason=(
-        "F14: no trigger syncs the menu after native package transactions (FR-044/045); "
-        "fix in ADR-016"
+        "F14: the ADR-016 trigger is not shown on a host (FR-044/045); "
+        "the F14 gate removes this marker"
     ),
 )
-"""The native-transaction items fail until a later task wires a watcher to `_sync`. strict: an
-unexpected pass makes the run fail, so the marker is removed when the product fix lands."""
+"""The native-transaction items are expected to fail until the ADR-016 trigger is shown on a host
+(F14 gate). strict: once the gate passes, this marker makes the run fail, and the gate procedure
+removes the marker."""
 
 
 def native_entries(world: World, name: str) -> list[Path]:
