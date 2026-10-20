@@ -14,6 +14,7 @@ from ginn.cli import _context
 from ginn.cli.commands import CommandSpec, Context
 from ginn.domain import RealmName
 from ginn.export.sync import SyncHooks, SyncResult, sync_realm
+from ginn.export.watch import WatchHooks
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:
@@ -34,7 +35,8 @@ def _run(args: argparse.Namespace, ctx: Context) -> int:
     name = RealmName(str(args.realm))
     realms = _context.realms(ctx.output)
     _context.settle_interrupted(realms, ctx.output)
-    hooks = SyncHooks(program=_context.ginn_program(realms.paths))
+    program = _context.ginn_program(realms.paths)
+    hooks = SyncHooks(program=program, watch=WatchHooks(program=program))
     result = sync_realm(realms.env, realms.podman, name, hooks=hooks)
     _context.finish(realms, ctx.output)
     for notice in result.warnings:

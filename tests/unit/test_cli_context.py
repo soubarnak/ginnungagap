@@ -326,9 +326,31 @@ def test_a_bare_lifecycle_hooks_call_looks_up_the_ginn_command_for_the_paths_of_
 
     hooks = _context.lifecycle_hooks()
 
-    assert seen == [paths]
+    assert seen and all(found == paths for found in seen)  # start, rebuild, rebuild's restart
     assert hooks.rebuild is not None
     assert hooks.rebuild.program == "/usr/bin/ginn"
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-044")
+def test_a_start_and_the_restart_of_a_rebuild_both_carry_the_export_watchers_ginn_command(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The restart of a rebuilt running realm uses `RebuildHooks.lifecycle`, which has no rebuild
+    of its own. Its watcher needs the absolute ginn command all the same (ADR-016)."""
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+
+    hooks = _context.lifecycle_hooks(world.paths)
+    rebuild = _context.rebuild_hooks(world.paths)
+
+    assert hooks.watch.program == "/usr/bin/ginn"
+    assert rebuild.lifecycle.watch.program == "/usr/bin/ginn"
+    assert rebuild.lifecycle.rebuild is None
+
+
+@pytest.mark.fr("FR-044")
+def test_the_host_user_carries_the_gid_for_the_hook_exec() -> None:
+    assert _context.host_user().gid == os.getgid()
 
 
 SWEEPING_COMMANDS = [

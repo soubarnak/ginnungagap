@@ -33,7 +33,8 @@ from ginn.domain import (
 from ginn.domain.permissions import Permissions, Toggle, effective_toggles, initial_permissions
 from ginn.errors import make
 from ginn.ops._mutating import OpEnv
-from ginn.ops.disk import StatVfs, estimate_required
+from ginn.ops.disk import StatVfs, estimate_required, free_bytes
+from ginn.ops.provision import storage_peak_for
 from ginn.ops.security_ops import nvidia_plan
 from ginn.packages.manager import refused
 from ginn.runtime.attach import MOUNTINFO
@@ -100,6 +101,51 @@ def estimate_bytes(entry: TrustEntry) -> int:
 def required_bytes(entry: TrustEntry) -> int:
     """The free space FR-121 requires: the base estimate times 1.10, rounded up (ops/disk.py)."""
     return estimate_required(estimate_bytes(entry))
+
+
+@dataclass(frozen=True)
+class SpaceCheck:
+    """What one FR-121 check compared, for the `space-checked` progress line (FR-107, FR-121).
+
+    `required_bytes` is the value the check compared with free space, with the 1.10 margin applied.
+    `free_bytes` is the smallest free space among the paths the check covers. A check that ran has
+    no `reason`. No check in the code produces the other shape today: a check either runs and
+    reports its figures, or raises GINN-E-DISK-SPACE. The shape is kept for the gate contract,
+    where a step that checks nothing would report `required_bytes` 0, `free_bytes` None and a
+    `reason` that says so.
+    """
+
+    required_bytes: int
+    free_bytes: int | None
+    reason: str | None = None
+
+    def fields(self) -> dict[str, object]:
+        """The keys that the progress line carries, as `required_bytes`, `free_bytes`, `reason`."""
+        return {
+            "required_bytes": self.required_bytes,
+            "free_bytes": self.free_bytes,
+            "reason": self.reason,
+        }
+
+
+def check_space(paths: Sequence[Path], required: int, *, statvfs: StatVfs) -> SpaceCheck:
+    """Check that each path's filesystem holds `required` bytes, as ops/disk.py `check_free_paths`.
+
+    Each path is read once, so the figure reported is the one that was compared. The podman root
+    and the Realm Home can sit on different filesystems. The path with the least free space is the
+    one that decides: when any path is short, it is that path that GINN-E-DISK-SPACE names, with
+    the `needed`, `available` and `path` details (FR-121), and the step's `free_bytes` is the same
+    figure. A tie goes to the first path. A refusal is the threshold evidence of the gate, so the
+    details name the figures exactly.
+    """
+    free = [(path, free_bytes(path, statvfs=statvfs)) for path in paths]
+    path, smallest = min(free, key=lambda item: item[1])
+    if smallest < required:
+        needed, avail = f"{required} bytes", f"{smallest} bytes"
+        err = make("GINN-E-DISK-SPACE", needed=needed, available=avail)
+        err.details["path"] = str(path)
+        raise err
+    return SpaceCheck(required_bytes=required, free_bytes=smallest)
 
 
 def closure_names(
@@ -224,6 +270,9 @@ class CreateHooks:
     """The absolute ginn command that a services-on realm's run and finish scripts execute."""
     confirm: Callable[[str], bool] | None = None
     """Answers the Kali everything prompt (FR-014). None declines, as delete does without one."""
+    on_step_detail: Callable[[str, Mapping[str, object]], None] | None = None
+    """Receives the figures of a step before `on_step` reports it: `space-checked` gets the FR-121
+    check (`SpaceCheck.fields`). The CLI merges them into that step's progress line (FR-107)."""
 
 
 @dataclass(frozen=True)
@@ -253,6 +302,24 @@ class _Plan:
     gpu: NvidiaPlan
     toggles: frozenset[Toggle]
     gpu_cdi: bool
+
+
+def storage_required(plan: _Plan, *, base_in_storage: bool) -> int:
+    """The free space of a create's podman storage check, by its services mode (FR-121, T7.35).
+
+    It is the storage formula for the plan's mode (ops/provision.py `storage_peak_for`), with the
+    base's download and layers, times the 1.10 margin. The create, resume, pinned rebuild and
+    estimate all call this, so their figures for one request agree. `base_in_storage` says that
+    the pinned image is already here, so no pull is counted. A create that checks before its pull
+    passes False, which is the worst case.
+    """
+    peak = storage_peak_for(
+        plan.definition,
+        services=plan.spec.services,
+        download_bytes=plan.entry.compressed_size_bytes,
+        base_pulled=not base_in_storage,
+    )
+    return estimate_required(peak)
 
 
 def _refuse_missing_devices(exists: Exists) -> None:

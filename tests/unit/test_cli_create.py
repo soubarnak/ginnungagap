@@ -23,10 +23,14 @@ from ginn.distros import Verb
 from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState, Tier
 from ginn.errors import warn
+from ginn.ops import _create_plan
 from ginn.ops.create import CreateRequest, CreateResult, SizeEstimate
 from ginn.ops.disk import estimate_required
+from ginn.ops.provision import services_off_required_bytes, storage_peak_for
 from ginn.podman.models import ContainerState, ExecResult
+from ginn.security.nvidia import NvidiaPlan, Status
 from ginn.store.records import RealmStore
+from ginn.trust import manifest as trust
 from tests.unit.realm_cli_support import World, record_of, seed_killed_estimate
 
 
@@ -371,7 +375,57 @@ def test_services_on_is_accepted_and_leaves_the_realm_stopped_with_the_pending_n
     assert record.state is RealmState.STOPPED
     assert record.settings.services is True
     assert [c.state for c in world.fake.containers.values()] == [ContainerState.CREATED]
-    assert "start" not in world.fake.ops()
+    # Only the provisioning container is started, and it is gone (ADR-015 Decision 2). The realm
+    # container, which the record names, is never started (ADR-003).
+    started = [call.args[0] for call in world.fake.calls if call.op == "start"]
+    assert record.container_id not in started
+    assert started
+    assert payload["notes"] == []
+
+
+@pytest.mark.fr("FR-010")
+def test_a_services_off_create_lists_no_notes_in_its_json(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--json", "create", "debian"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["notes"] == []
+
+
+@pytest.mark.fr("FR-080")
+def test_a_stage_note_is_printed_as_a_note_line_in_text_mode(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-015 Decision 2h: a stage removal that fails after the commit is a note, and the create
+    still finishes. Text mode prints it as a `note:` line, as it prints the locale and GPU notes."""
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+    # A READY plan keeps the host's GPU state (driver, musl) out of the printed notes.
+    ready = NvidiaPlan(
+        status=Status.READY,
+        reason="test host",
+        spec_path=str(world.paths.data / "cdi" / "nvidia.json"),
+        spec_text='{"cdiVersion": "0.6.0"}\n',
+        ld_path=str(world.paths.data / "ld" / "ginn-nvidia.conf"),
+        ld_text="/usr/lib/ginn-nvidia\n",
+    )
+    monkeypatch.setattr(_create_plan, "nvidia_plan", lambda paths, hooks: ready)
+    world.fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+    assert main(["create", "debian", "--services", "on"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "realm debian created: state stopped",
+        "note: reset-removed failed with GINN-E-INTERNAL",
+    ]
+
+
+@pytest.mark.fr("FR-080")
+def test_a_stage_note_is_listed_under_notes_in_the_json(
+    world: World, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_context, "ginn_program", lambda paths=None: "/usr/bin/ginn")
+    world.fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+    assert main(["--json", "create", "debian", "--services", "on"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["notes"] == ["reset-removed failed with GINN-E-INTERNAL"]
 
 
 @pytest.mark.fr("FR-010")
@@ -395,7 +449,26 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["create", "debian", "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    progress = [
+        json.loads(line)["progress"]
+        for line in captured.err.splitlines()
+        if line.startswith('{"progress"')
+    ]
+    [space] = [item for item in progress if item["step"] == "space-checked"]
+    entry = trust.load().entry("debian")
+    debian = load_distro("debian")
+    services_off = services_off_required_bytes(
+        debian.base_layer_allocated_bytes,
+        debian.stage_layer_allocated_bytes,
+        debian.package_cache_peak_bytes,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
+    )
+    assert space["required_bytes"] == services_off
+    assert space["free_bytes"] >= space["required_bytes"]
+    assert space["reason"] is None
+    payload = json.loads(captured.out)
     assert payload == {
         "name": "debian",
         "distro": "debian",
@@ -407,6 +480,7 @@ def test_a_real_create_on_the_fake_leaves_a_stopped_basic_realm(
         "resumed": False,
         "locale_note": payload["locale_note"],
         "gpu_note": payload["gpu_note"],
+        "notes": [],
         "everything": None,
     }
     record = RealmStore(world.paths).load(RealmName("debian"))
@@ -445,6 +519,17 @@ def _kali_answers(world: World) -> None:
     world.fake.exec_results[tuple(kali.argv(Verb.ESTIMATE, names))] = ExecResult(0, KALI_SHOW, "")
 
 
+def _kali_base_peak() -> int:
+    """The services-off storage peak of the kali base, pulled (T7.35), as the estimate checks it."""
+    entry = trust.load().entry("kali")
+    return storage_peak_for(
+        load_distro("kali"),
+        services=False,
+        download_bytes=entry.compressed_size_bytes,
+        base_pulled=True,
+    )
+
+
 @pytest.mark.fr("FR-014")
 @pytest.mark.fr("FR-121")
 def test_the_estimate_prints_the_sizes_as_json_and_leaves_no_realm_or_container(
@@ -459,7 +544,10 @@ def test_the_estimate_prints_the_sizes_as_json_and_leaves_no_realm_or_container(
         "packages": 3,
         "download_bytes": 6000,
         "installed_bytes": 6144,
-        "required_bytes": estimate_required(6000 + 6144),
+        "required_bytes": estimate_required(_kali_base_peak() + 6000 + 6144),
+        "base_required_bytes": estimate_required(_kali_base_peak()),
+        "everything_required_bytes": estimate_required(6000 + 6144),
+        "services": False,
     }
     assert world.fake.containers == {}
     assert world.fake.images == {}
@@ -475,7 +563,7 @@ def test_the_estimate_text_is_human_readable_and_needs_no_terminal(
     assert main(["create", "kali", "--everything", "--estimate"]) == 0
     out = capsys.readouterr().out
     assert "kali everything: 3 packages, download 5.9 KiB, installed 6.0 KiB" in out
-    assert "required free space: " in out and "(estimate x 1.10)" in out
+    assert "required free space: " in out and "(estimate x 1.10; services off; base " in out
     assert "estimate only: no realm was made, and nothing was installed" in out
 
 
@@ -522,6 +610,11 @@ def test_the_estimate_prints_one_progress_line_per_step_in_json_mode(
         "estimated",
     ]
     assert lines[1] == {"progress": {"message": "estimate: step pulled done", "step": "pulled"}}
+    # T7.35: the space check's line carries its figures; the other lines keep their three keys.
+    assert lines[0]["progress"]["required_bytes"] == estimate_required(_kali_base_peak())
+    assert isinstance(lines[0]["progress"]["free_bytes"], int)
+    assert lines[0]["progress"]["reason"] is None
+    assert set(lines[1]["progress"]) == {"step", "message"}
 
 
 @pytest.mark.fr("FR-006")

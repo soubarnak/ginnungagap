@@ -40,9 +40,9 @@ template="$void/srcpkgs/ginn/template"
 if [ "${GINN_LOCAL_SOURCE:-0}" = 1 ]; then
     tmp=$(mktemp -d)
     trap 'rm -rf -- "$tmp"' EXIT
-    archive="v$version.tar.gz"
-    # The prefix matches the directory name of a GitHub tag archive.
-    git -C "$here" archive --format=tar.gz --prefix="ginnungagap-$version/" \
+    archive="ginn-v$version.tar.gz"
+    # The name and prefix match a GitHub archive of the tag ginn-v$version.
+    git -C "$here" archive --format=tar.gz --prefix="ginnungagap-ginn-v$version/" \
         -o "$tmp/$archive" HEAD
     sum=$(sha256sum "$tmp/$archive" | cut -d' ' -f1)
     sed -i "s/^checksum=.*/checksum=$sum/" "$template"
@@ -53,7 +53,7 @@ if [ "${GINN_LOCAL_SOURCE:-0}" = 1 ]; then
 fi
 
 if grep -q '^checksum=@CHECKSUM@$' "$template"; then
-    echo "checksum is still @CHECKSUM@; run tools/release.sh checksum or set GINN_LOCAL_SOURCE=1" >&2
+    echo "checksum is still @CHECKSUM@; run tools/release.sh checksum URL_OR_FILE or set GINN_LOCAL_SOURCE=1" >&2
     exit 2
 fi
 

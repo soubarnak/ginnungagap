@@ -3,9 +3,10 @@
 
 Every test runs on FakePodman, through the `world` fixture of tests/unit/realm_cli_support.py. No
 package manager runs. Covered: the argv and the root user under the locale, the refresh rule of
-ADR-011, the refusals before any side effect (names, --aur, Kali, the realm state, a held lock),
-the failure codes, the FR-120 retry, the remove dry run that refuses a dependent removal, and the
-manifest and audit entries of each operation.
+ADR-011, the refusals before any side effect (names, --aur, the realm state, a held lock), the
+failure codes, the FR-120 retry, the remove dry run that refuses a dependent removal, the manifest
+and audit entries of each operation, and the Kali install and remove, which run the Debian steps
+(kali.toml, ADR-011).
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ GID = 1000
 
 DEB = "deb"
 ARCH = "arch"
+KALI = "kali"
 EXIT_SIGNATURE = 65
 
 
@@ -83,6 +85,10 @@ def _ginn(name: str) -> ManifestEntry:
 
 def _native(name: str) -> ManifestEntry:
     return ManifestEntry(name=name, source=InstallSource.REPO, method=InstallMethod.NATIVE)
+
+
+def _init(name: str) -> ManifestEntry:
+    return ManifestEntry(name=name, source=InstallSource.REPO, method=InstallMethod.GINN, init=True)
 
 
 @pytest.mark.fr("FR-040")
@@ -289,20 +295,33 @@ def test_a_failed_aur_build_restores_the_realm_and_leaves_the_manifest_alone(wor
 
 
 @pytest.mark.fr("FR-040")
-def test_kali_is_refused_until_its_milestone_as_enter_refuses_it(world: World) -> None:
-    make_realm(world, "kali", RealmState.RUNNING, running=True, distro="kali")
-    with pytest.raises(GinnError) as caught:
-        install_packages(
-            _env(world),
-            world.fake,
-            RealmName("kali"),
-            ["htop"],
-            aur=False,
-            session=_session(world),
-            hooks=_hooks(world),
-        )
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert world.fake.calls == []
+@pytest.mark.fr("FR-042")
+@pytest.mark.fr("DR-007")
+@pytest.mark.fr("FR-124")
+def test_kali_install_refreshes_then_installs_as_root_like_debian(world: World) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    env = _env(world)
+    record = install_packages(
+        env,
+        world.fake,
+        RealmName(KALI),
+        ["htop"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+    )
+    # Kali lists `install` in refresh_before, as Debian does (kali.toml, ADR-011).
+    assert _execs(world) == [
+        _argv("kali", Verb.REFRESH),
+        _argv("kali", Verb.INSTALL, "htop"),
+        DESKTOP_LIST,
+    ]
+    for call in world.fake.exec_calls:
+        assert call.user == "0:0"
+    assert record.manifest == [_ginn("htop")]
+    (entry,) = _audit(env, "install")
+    assert entry.outcome == "ok"
+    assert entry.params["packages"] == ["htop"]
 
 
 @pytest.mark.fr("FR-040")
@@ -465,6 +484,31 @@ def test_remove_runs_the_dry_run_then_removes_and_drops_the_entry(world: World) 
         DESKTOP_LIST,
     ]
     assert _manifest(world, DEB) == []
+    (entry,) = _audit(env, "remove")
+    assert entry.outcome == "ok"
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.fr("DR-007")
+def test_kali_remove_runs_the_dry_run_then_removes_like_debian(world: World) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    store = RealmStore(world.paths)
+    record = stored(world, KALI)
+    store.save(_with_manifest(record, [_ginn("htop")]))
+    world.fake.exec_results[_argv("kali", Verb.REMOVE_CHECK, "htop")] = ExecResult(
+        0, "Remv htop [3.3]\n", ""
+    )
+    env = _env(world)
+    remove_packages(
+        env, world.fake, RealmName(KALI), ["htop"], session=_session(world), hooks=_hooks(world)
+    )
+    # Kali defines remove-check, the dry run that ADR-011 requires before remove.
+    assert _execs(world) == [
+        _argv("kali", Verb.REMOVE_CHECK, "htop"),
+        _argv("kali", Verb.REMOVE, "htop"),
+        DESKTOP_LIST,
+    ]
+    assert _manifest(world, KALI) == []
     (entry,) = _audit(env, "remove")
     assert entry.outcome == "ok"
 
@@ -1052,3 +1096,255 @@ def test_a_failed_install_does_not_sync_the_menu(
         )
     assert calls == []
     assert DESKTOP_LIST not in _execs(world)
+
+
+# ---- T7.26 init entries (ADR-015 Decision 14): an install is a no-op, a remove is refused --------
+
+
+@pytest.mark.fr("FR-040")
+def test_installing_an_init_entry_is_a_manifest_no_op_with_a_note(world: World) -> None:
+    make_realm(world, DEB, RealmState.RUNNING, running=True, distro="debian")
+    RealmStore(world.paths).save(_with_manifest(stored(world, DEB), [_init("systemd")]))
+    env = _env(world)
+    notes: list[str] = []
+    record = install_packages(
+        env,
+        world.fake,
+        RealmName(DEB),
+        ["systemd"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+        notes=notes,
+    )
+    # No podman call at all: no refresh, no install, no menu sync, and no mutating operation.
+    assert world.fake.calls == []
+    assert _audit(env, "install") == []
+    assert record.manifest == [_init("systemd")]
+    assert _manifest(world, DEB) == [_init("systemd")]
+    (note,) = notes
+    assert "'systemd' is an init package of realm 'deb'" in note
+    assert "changed nothing" in note
+
+
+@pytest.mark.fr("FR-040")
+def test_an_init_entry_in_an_install_is_skipped_and_the_other_names_install(world: World) -> None:
+    make_realm(world, DEB, RealmState.RUNNING, running=True, distro="debian")
+    RealmStore(world.paths).save(_with_manifest(stored(world, DEB), [_init("systemd")]))
+    env = _env(world)
+    notes: list[str] = []
+    install_packages(
+        env,
+        world.fake,
+        RealmName(DEB),
+        ["systemd", "htop"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+        notes=notes,
+    )
+    # The package manager is asked for htop only, and never for the init entry.
+    assert _execs(world) == [
+        _argv("debian", Verb.REFRESH),
+        _argv("debian", Verb.INSTALL, "htop"),
+        DESKTOP_LIST,
+    ]
+    assert _manifest(world, DEB) == [_ginn("htop"), _init("systemd")]
+    (entry,) = _audit(env, "install")
+    assert entry.params["packages"] == ["htop"]
+    assert len(notes) == 1
+    assert "'systemd'" in notes[0]
+
+
+@pytest.mark.fr("FR-040")
+def test_an_install_of_init_entries_only_starts_nothing_in_a_stopped_realm(world: World) -> None:
+    make_realm(world, DEB, RealmState.STOPPED, running=False, distro="debian")
+    RealmStore(world.paths).save(_with_manifest(stored(world, DEB), [_init("systemd")]))
+    notes: list[str] = []
+    record = install_packages(
+        _env(world),
+        world.fake,
+        RealmName(DEB),
+        ["systemd"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+        notes=notes,
+    )
+    assert world.fake.calls == []
+    assert record.state is RealmState.STOPPED
+    assert len(notes) == 1
+
+
+@pytest.mark.fr("DR-020")
+@pytest.mark.fr("FR-040")
+def test_an_init_only_install_in_a_state_that_forbids_a_change_is_still_refused(
+    world: World,
+) -> None:
+    make_realm(world, ARCH, RealmState.CREATING, running=False, distro="arch")
+    RealmStore(world.paths).save(_with_manifest(stored(world, ARCH), [_init("systemd")]))
+    notes: list[str] = []
+    with pytest.raises(GinnError) as caught:
+        install_packages(
+            _env(world),
+            world.fake,
+            RealmName(ARCH),
+            ["systemd"],
+            aur=False,
+            session=_session(world),
+            hooks=_hooks(world),
+            notes=notes,
+        )
+    assert caught.value.code == "GINN-E-REALM-STATE"
+    assert world.fake.calls == []
+    assert notes == []
+
+
+@pytest.mark.fr("FR-041")
+@pytest.mark.parametrize("packages", [["systemd"], ["htop", "systemd"]])
+@pytest.mark.parametrize(
+    ("state", "running"), [(RealmState.RUNNING, True), (RealmState.STOPPED, False)]
+)
+def test_removing_an_init_entry_is_refused_as_a_whole_before_any_package_manager_call(
+    world: World, packages: list[str], state: RealmState, running: bool
+) -> None:
+    make_realm(world, DEB, state, running=running, distro="debian")
+    manifest = [_ginn("htop"), _init("systemd")]
+    RealmStore(world.paths).save(_with_manifest(stored(world, DEB), manifest))
+    env = _env(world)
+    with pytest.raises(GinnError) as caught:
+        remove_packages(
+            env,
+            world.fake,
+            RealmName(DEB),
+            packages,
+            session=_session(world),
+            hooks=_hooks(world),
+        )
+    assert caught.value.code == "GINN-E-PKG-PROTECTED"
+    assert caught.value.exit_code == 4
+    assert caught.value.details["name"] == "systemd"
+    assert caught.value.details["realm"] == DEB
+    # Nothing ran: no start of a stopped realm, no dry run, no remove, no audit entry.
+    assert world.fake.calls == []
+    assert _audit(env, "remove") == []
+    assert _manifest(world, DEB) == manifest
+
+
+@pytest.mark.fr("FR-041")
+def test_an_init_entry_that_a_start_makes_is_refused_again_under_the_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(world, ARCH, RealmState.STOPPED, running=False, distro="arch")
+    RealmStore(world.paths).save(
+        _with_manifest(stored(world, ARCH), [_ginn("htop"), _ginn("systemd")])
+    )
+
+    def rebuilding_start(env: OpEnv, podman: Any, name: RealmName, **_: Any) -> RealmRecord:
+        # A rebuild in the start makes systemd an init entry, so the init set changes after the
+        # early check of remove_packages (ADR-015 Decision 6). The body must refuse under the lock.
+        store = RealmStore(env.paths)
+        current = store.load(name)
+        assert current.container_id is not None
+        world.fake.start(current.container_id)
+        updated = replace(
+            current,
+            state=RealmState.RUNNING,
+            manifest=[_ginn("htop"), _init("systemd")],
+        )
+        store.save(updated)
+        return updated
+
+    monkeypatch.setattr(packages_module, "start_realm", rebuilding_start)
+    env = _env(world)
+    with pytest.raises(GinnError) as caught:
+        remove_packages(
+            env,
+            world.fake,
+            RealmName(ARCH),
+            ["systemd"],
+            session=_session(world),
+            hooks=_hooks(world),
+        )
+    assert caught.value.code == "GINN-E-PKG-PROTECTED"
+    # No package manager step ran, and the init entry is still there.
+    assert _execs(world) == []
+    assert _manifest(world, ARCH) == [_ginn("htop"), _init("systemd")]
+    (entry,) = _audit(env, "remove")
+    assert entry.error_code == "GINN-E-PKG-PROTECTED"
+
+
+@pytest.mark.fr("FR-041")
+def test_a_refused_removal_lists_every_init_name_it_refuses(world: World) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    RealmStore(world.paths).save(
+        _with_manifest(stored(world, ARCH), [_init("systemd"), _init("dbus")])
+    )
+    with pytest.raises(GinnError) as caught:
+        remove_packages(
+            _env(world),
+            world.fake,
+            RealmName(ARCH),
+            ["systemd", "dbus"],
+            session=_session(world),
+            hooks=_hooks(world),
+        )
+    assert caught.value.code == "GINN-E-PKG-PROTECTED"
+    assert caught.value.details["name"] == "systemd, dbus"
+    assert world.fake.calls == []
+
+
+@pytest.mark.fr("FR-040")
+def test_the_init_notes_survive_a_failed_install_of_the_other_names(world: World) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    RealmStore(world.paths).save(_with_manifest(stored(world, ARCH), [_init("systemd")]))
+    world.fake.exec_results[_argv("arch", Verb.INSTALL, "htop")] = ExecResult(
+        1, "", "error: target not found: htop"
+    )
+    notes: list[str] = []
+    with pytest.raises(GinnError):
+        install_packages(
+            _env(world),
+            world.fake,
+            RealmName(ARCH),
+            ["systemd", "htop"],
+            aur=False,
+            session=_session(world),
+            hooks=_hooks(world),
+            notes=notes,
+        )
+    (note,) = notes
+    assert "'systemd' is an init package of realm 'arch'" in note
+
+
+@pytest.mark.fr("FR-040")
+def test_sent_lists_the_names_the_manager_was_asked_for_and_nothing_for_an_init_only_call(
+    world: World,
+) -> None:
+    make_realm(world, ARCH, RealmState.RUNNING, running=True, distro="arch")
+    RealmStore(world.paths).save(_with_manifest(stored(world, ARCH), [_init("systemd")]))
+    env = _env(world)
+    sent: list[str] = []
+    install_packages(
+        env,
+        world.fake,
+        RealmName(ARCH),
+        ["systemd", "htop", "htop"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+        sent=sent,
+    )
+    assert sent == ["htop"]
+    init_only: list[str] = []
+    install_packages(
+        env,
+        world.fake,
+        RealmName(ARCH),
+        ["systemd"],
+        aur=False,
+        session=_session(world),
+        hooks=_hooks(world),
+        sent=init_only,
+    )
+    assert init_only == []

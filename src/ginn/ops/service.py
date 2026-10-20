@@ -37,7 +37,13 @@ from ginn.domain import RealmName, RealmState, can_transition
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import Mutation, OpEnv, mutating
-from ginn.ops.lifecycle import HostUser, LifecycleHooks, pending_rebuild_notice, start_realm
+from ginn.ops.lifecycle import (
+    HostUser,
+    LifecycleHooks,
+    check_derived_image,
+    pending_rebuild_notice,
+    start_realm,
+)
 from ginn.ops.recovery import OP_REBUILD
 from ginn.ops.security_ops import leave_agent, reconcile_proxy
 from ginn.podman.adapter import Podman
@@ -171,6 +177,8 @@ def _start_building(
         raise _internal("no rebuild journal entry names the building container", realm=name.value)
     if not journal.is_live():
         raise _internal("the rebuild that builds the container is not running", realm=name.value)
+    # The building container runs the derived image that the rebuild recorded (ADR-015 Decision 9).
+    check_derived_image(podman, name, cid, record.building_init_image_id)
     pidfile = conmon_pidfile(env.paths, name)
     _fresh_pidfile(env.paths, name)
     podman.start(cid)
@@ -427,7 +435,12 @@ def _services_body(
     )
     store.save(saved)
     mutation.step("saved")
-    notice = pending_rebuild_notice(saved, "the services mode changed")
+    change = "the services mode changed"
+    if not on and saved.init_image_id is not None:
+        # The derived image and its init entries stay: the services-off container runs from it, with
+        # systemd installed and not run (ADR-015 Decision 7, FR-082).
+        change = "the services mode changed to off; the init set is kept"
+    notice = pending_rebuild_notice(saved, change)
     if notice is not None:
         mutation.warnings.append(notice)
     return saved

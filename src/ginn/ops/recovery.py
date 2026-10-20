@@ -47,12 +47,14 @@ the original op_id is never written twice:
 Revert rules, by the operation the journal names. They follow DR-020, the ADRs, FR-122 and FR-120:
 
 - create: `creating` becomes `broken`, with no error code. A container that podman runs is stopped
-  first, as `_broken_verdict` describes. Partial artifacts stay, for `ginn create --resume` or
-  `ginn delete` (FR-122). The record keeps the request of the create (`create_pending`), so the
-  resume can finish it (ops/resume.py). A record already `stopped` is a complete create, because
-  `stopped` is the last record write of a create, so it is recovered without a change. A record
-  already `broken` is settled as broken, with no state write, and a container that runs is stopped
-  too.
+  first, as `_broken_verdict` describes. The provisioning containers go first, then the derived and
+  stage images outside the keep set, which are the record's `init_image_id` and
+  `building_init_image_id`, each removed by ID (ADR-015 Decision 13). Other partial artifacts stay,
+  for `ginn create --resume` or `ginn delete` (FR-122). The record keeps the request of the create
+  (`create_pending`), so the resume can finish it (ops/resume.py). A record already `stopped` is a
+  complete create, because `stopped` is the last record write of a create, so it is recovered
+  without a change. A record already `broken` is settled as broken, with no state write, and a
+  container that runs is stopped too.
 - start: a record that already reads `running` is a completed start, because the record is saved
   running only after the attach. So is a journal step of `running`. Both are matched to podman. Any
   other step means the start did not finish: a container that podman runs is stopped, and the
@@ -69,17 +71,28 @@ Revert rules, by the operation the journal names. They follow DR-020, the ADRs, 
   succeeds and before the manifest is saved, so an entry at that step gets the manifest written from
   its `packages` param, in the same record write (FR-040, FR-041, DR-007). An AUR install (param
   `aur`) writes its step `removed` after its build-only set is gone, and its entries are `aur`
-  (FR-043). An entry at any earlier step leaves the manifest as it was. The native change may
-  already have happened there, and no journal step says how far it got. The rebuild replays the
-  manifest as it stands, so this residual stays open.
+  (FR-043). An entry at an earlier step of a repository install or remove (`begin`,
+  `exec-acked`, `refreshed`, `checked`) may have changed packages without a step to say so. When
+  the container runs, the realm's explicit list is read (read-only) and the manifest follows it for
+  the journaled names. At `begin` only an install does this, and it adds just the names with no
+  entry; a remove at `begin` keeps the manifest, since a dry run may be all that ran. The manifest
+  is saved after the state move, in a second atomic save; the replay is idempotent.
+  A stopped container, an unreadable list or an
+  invalid journal list leaves the manifest as it was, and the reason says so. A failed install or
+  remove that finished its own journal entry is not seen here (ops/packages.py reconciles it in
+  place). The rebuild replays the manifest as it stands.
 - sync, export and unexport change only host files, never a realm record (FR-044, FR-047). They are
   recovered with no state write, whatever the record reads, so a deleting or broken realm is not
   blocked by a launcher. The next run of the same operation reconciles the host files.
 - rebuild (ops/rebuild.py, DR-034). Until the atomic swap the record names the old generation gN,
   and a `rebuilding` record returns to its previous state (DR-020). The new container gN+1 is an
   orphan then, so it is stopped and removed by its generation label. A services-on orphan runs under
-  its runit service, so runsv is told to stop it first (ADR-003). After the swap the record names
-  gN+1, so the settled state comes from podman, and gN is removed by its label, best effort.
+  its runit service, so runsv is told to stop it first (ADR-003). Its provisioning leftovers and the
+  derived images outside the keep set go with it, by ID; the move that returns the record to its
+  previous state clears `building_init_image_id`, so only `init_image_id` is kept then (ADR-015
+  Decision 13). After the swap the record names gN+1, so the settled state comes from podman, and
+  gN is removed by its label, best effort, and then the derived images outside the keep set go by
+  ID, with the containers before the images.
   Other records are matched to podman, as above.
 - update: `updating` becomes `broken` (DR-020, FR-120), with a running container stopped first as
   for create. A record already `broken` is settled as broken, with no state write, and a container
@@ -120,7 +133,7 @@ No other command runs it, so an app launch or a runit restart makes no podman ca
 
 import contextlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -139,6 +152,7 @@ from ginn.domain import (
 from ginn.errors import GinnError, make
 from ginn.ops._mutating import OpEnv, is_finished
 from ginn.ops.images import remove_estimate_containers, remove_image
+from ginn.ops.provision import remove_derived
 from ginn.ops.security_ops import leave_agent
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import (
@@ -181,6 +195,7 @@ OP_REMOVE: Final = "remove"
 STEP_INSTALLED: Final = "installed"
 """The journal step that an install writes after its package step (ops/packages.py)."""
 STEP_REMOVED: Final = "removed"
+"""The journal step that a remove writes after its package step (ops/packages.py)."""
 STEP_GIT: Final = "git"
 """The AUR build's journal step after its git install (ops/packages.py, packages/aur.py)."""
 STEP_DEPENDENCIES: Final = "dependencies"
@@ -188,19 +203,23 @@ STEP_DEPENDENCIES: Final = "dependencies"
 STEP_TOOLCHAIN: Final = "toolchain"
 """The AUR build's journal step after its toolchain is installed."""
 STEP_BUILT: Final = "built"
+"""The AUR build's journal step after its packages are installed, before the build-only removal."""
 STEP_UPGRADING: Final = "upgrading"
-_LISTED_STEPS: Final = frozenset({"exec-acked", "refreshed", "checked"})
+"""The AUR build's journal step before each package install (packages/aur.py)."""
+STEP_BEGIN: Final = "begin"
+"""The step that `journal.begin` writes. It is left by a kill before any exec (a remove's dry run
+included, so nothing changed), and by a kill between the start of a package exec and its
+`exec-acked` step (the change may have started). An install reconciles from the explicit list
+there. A remove keeps its manifest, as the list cannot tell the cases apart (ops/packages.py)."""
+_LISTED_STEPS: Final = frozenset({STEP_BEGIN, "exec-acked", "refreshed", "checked"})
 """Journal steps of a package verb after which its change may have started, though its own step
 is not recorded. Recovery reads the realm's explicit list for them (ADR-014, T7.10 review)."""
-"""The AUR build's journal step before each package install (packages/aur.py)."""
 _QUERY_TIMEOUT_S: Final = 300.0
 _REMOVE_TIMEOUT_S: Final = 300.0
-"""The AUR build's journal step after its packages are installed, before the build-only removal."""
 _AUR_STEPS: Final = frozenset(
     {STEP_GIT, STEP_DEPENDENCIES, STEP_TOOLCHAIN, STEP_UPGRADING, STEP_BUILT, STEP_REMOVED}
 )
 _ROOT_ENV: Final = {"LC_ALL": "C.UTF-8"}
-"""The journal step that a remove writes after its package step (ops/packages.py)."""
 OP_UNEXPORT: Final = "unexport"
 _HOST_ONLY_OPS: Final = frozenset({OP_SYNC, OP_EXPORT, OP_UNEXPORT})
 """Operations that write host files only, never a realm record (see the module docstring)."""
@@ -643,6 +662,9 @@ def _listed_manifest(
     if names is None:
         reason = "the journal entry names no valid package list, so the manifest is left as it is"
         return replace(decision, reason=f"{decision.reason}; {reason}")
+    if entry.step == STEP_BEGIN and entry.op == OP_REMOVE:
+        reason = "the removal may not have started, so the Install Manifest is left as it is"
+        return replace(decision, reason=f"{decision.reason}; {reason}")
     if record.container_id is None or _podman_state(podman, record) is not ContainerState.RUNNING:
         reason = "the container is not running, so the Install Manifest is left as it is"
         return replace(decision, reason=f"{decision.reason}; {reason}")
@@ -655,6 +677,7 @@ def _listed_manifest(
         manifest=record.manifest,
         names=names,
         installed_now=entry.op == OP_INSTALL,
+        keep_existing=True,
     )
     if manifest is None:
         reason = "the package list cannot be read, so the Install Manifest is left as it is"
@@ -953,9 +976,13 @@ def _decide_create(paths: OwnedPaths, podman: Podman, record: RealmRecord) -> _D
         reason = "the record already reads stopped, the last record write of a create"
         return _Decision(OUTCOME_RECOVERED, None, reason)
     if record.state in (RealmState.CREATING, RealmState.BROKEN):
-        reason = (
-            "interrupted create: marked broken; partial artifacts are left for "
-            "'ginn create --resume' or 'ginn delete' (FR-122)"
+        # The provisioning leftovers go before the realm is marked broken (ADR-015 Decision 13). A
+        # realm container that uses a derived image keeps it, with a note, and the verdict stops it.
+        removal = remove_derived(podman, record.name, _recorded_images(record))
+        reason = _with_notes(
+            "interrupted create: marked broken; its provisioning leftovers are swept, and other "
+            "partial artifacts are left for 'ginn create --resume' or 'ginn delete' (FR-122)",
+            removal.notes,
         )
         return _broken_verdict(paths, podman, record, reason)
     return _impossible(record, OP_CREATE)
@@ -1034,12 +1061,20 @@ def _decide_rebuild(
             f"interrupted rebuild: returned to {previous.value}; the old root stays intact until "
             "the atomic swap (DR-034)"
         )
-        return _move(record, previous, OUTCOME_RECOVERED, reason)
+        decision = _move(record, previous, OUTCOME_RECOVERED, reason)
+        if decision.outcome == OUTCOME_BLOCKED:
+            return decision
+        # The move clears building_init_image_id, so the image the rebuild was making is outside the
+        # keep set, and only the image that the record still names is kept (ADR-015 Decision 13).
+        removal = remove_derived(podman, record.name, (record.init_image_id,))
+        return replace(decision, reason=_with_notes(decision.reason, removal.notes))
     if record.state in _BY_PODMAN_FROM:
         swapped = entry.params.get("new_generation") == record.generation
+        notes: list[str] = []
         if swapped:
             with contextlib.suppress(GinnError):
                 remove_below(podman, record.name, record.generation, keep=record.container_id)
+            notes.extend(_sweep_after_swap(podman, record))
             if not record.services_at_create:
                 # The swap made the realm services-off, and the crash came before the rebuild
                 # removed the directory of gN (ADR-003). The container's mode is what counts here.
@@ -1048,8 +1083,34 @@ def _decide_rebuild(
                     remove_service(paths, record.name)
                 except OSError as exc:
                     return _runit_blocked(exc)
-        return _decide_by_podman(podman, record, OP_REBUILD)
+        decision = _decide_by_podman(podman, record, OP_REBUILD)
+        return replace(decision, reason=_with_notes(decision.reason, notes))
     return _impossible(record, OP_REBUILD)
+
+
+def _recorded_images(record: RealmRecord) -> tuple[str | None, ...]:
+    """The derived image IDs that a recovery keeps: `init_image_id` and `building_init_image_id`
+    (ADR-015 Decision 13). A None is no image. Every other derived image of the realm is removed."""
+    return (record.init_image_id, record.building_init_image_id)
+
+
+def _sweep_after_swap(podman: Podman, record: RealmRecord) -> list[str]:
+    """The derived images of the realm that are outside the keep set, after the swap (Decision 13).
+
+    The containers below gN go first, in `remove_below`. This is best effort, as that removal is:
+    a failure is a note, and the next sweep or delete takes what is left.
+    """
+    try:
+        return list(remove_derived(podman, record.name, _recorded_images(record)).notes)
+    except GinnError as err:
+        return [f"derived images not swept ({err.code})"]
+
+
+def _with_notes(reason: str, notes: Iterable[str]) -> str:
+    """The reason with the notes of a sweep appended, separated by `; `. A reason with no notes is
+    returned as it is."""
+    found = list(notes)
+    return reason if not found else f"{reason}; {'; '.join(found)}"
 
 
 def _runit_blocked(exc: OSError) -> _Decision:
@@ -1070,6 +1131,10 @@ def remove_below(podman: Podman, name: RealmName, generation: int, *, keep: str 
     generation label (runtime/spec.py). `keep` is never removed. A container without a generation
     label is not one of the realm's roots, so it is left. Return the count removed. A rebuild uses
     this after the swap, so a generation whose removal failed earlier is swept too (DR-034).
+
+    The derived images are not removed here. Containers keep this generation selection, and images
+    are never compared by generation. A caller removes the derived images outside the keep set by
+    ID, with `remove_derived`, after this call (ADR-015 Decision 13).
     """
     targets = []
     for info in podman.ps({LABEL_REALM: name.value}):

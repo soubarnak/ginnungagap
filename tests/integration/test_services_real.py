@@ -52,6 +52,7 @@ import pytest
 
 from ginn.domain import RealmName
 from ginn.podman.cli import PodmanCli
+from ginn.runtime.spec import SERVICES_MASKED_UNITS
 from ginn.services._exec_lock import (
     exec_lock_busy,
     exec_lock_dir,
@@ -544,7 +545,8 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     """FR-080 (ADR-003 argv) and NFR-003 (ADR-007 a+b+d): the create argv of a services-on realm.
 
     Read from the container that the real create made: the crun services flags, the mitigations as
-    read-only binds (the journald drop-in and eleven /dev/null unit masks), and no `--init`. It
+    read-only binds (the journald drop-in and the /dev/null unit masks of SERVICES_MASKED_UNITS),
+    and no `--init`. It
     needs
     no start, so it does not depend on the blocked supervised start. It runs on arch, because
     debian's image has no /sbin/init and its create is refused (F1, GINN-E-NO-INIT).
@@ -561,10 +563,15 @@ def test_fr080_create_time_forms_on_host(launcher: Path, paths: OwnedPaths) -> N
     assert argv[argv.index("--stop-signal") + 1] == "SIGRTMIN+3"
     assert argv[argv.index("--stop-timeout") + 1] == "30"
     assert "SYSTEMD_LOG_LEVEL=warning" in argv
-    assert argv[-1] == "/sbin/init"
+    assert argv[-3:-1] == ["--entrypoint", '["/sbin/init"]']
+    # ADR-015 Decision 4: a services-on container runs from its derived image, by its bare ID.
+    assert "@sha256:" not in argv[-1]
+    assert len(argv[-1]) == 64
     binds = [argv[i + 1] for i, word in enumerate(argv) if word == "--mount"]
     assert any(b.endswith("target=/etc/systemd/journald.conf.d/ginn.conf,ro") for b in binds)
-    assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == 11
+    assert len([b for b in binds if "source=/dev/null" in b and b.endswith(",ro")]) == len(
+        SERVICES_MASKED_UNITS
+    )
     fmt = "{{range .Mounts}}{{.Destination}} rw={{.RW}}\n{{end}}"
     assert "/etc/systemd/journald.conf.d/ginn.conf rw=false" in podman(
         paths, ["inspect", "--format", fmt, cid]

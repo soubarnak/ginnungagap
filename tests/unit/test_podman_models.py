@@ -55,6 +55,34 @@ def test_image_inspect_fixture_parses_digest_and_size() -> None:
 
 
 @pytest.mark.fr("IR-020")
+def test_image_labels_come_from_the_config() -> None:
+    raw = {"Id": ALPINE_ID, "Config": {"Labels": {"io.ginn.base-digest": ALPINE_MANIFEST}}}
+    assert ImageInfo.from_inspect(raw).labels == {"io.ginn.base-digest": ALPINE_MANIFEST}
+
+
+@pytest.mark.fr("IR-020")
+def test_image_labels_fall_back_to_the_top_level_key_and_keep_only_text() -> None:
+    top = ImageInfo.from_inspect({"Labels": {"io.ginn.provision": ""}, "Config": {"Labels": None}})
+    assert top.labels == {"io.ginn.provision": ""}
+    mixed = ImageInfo.from_inspect({"Config": {"Labels": {"a": 1, "b": "ok"}}})
+    assert mixed.labels == {"b": "ok"}
+    assert ImageInfo.from_inspect({}).labels == {}
+
+
+@pytest.mark.fr("CR-007")
+def test_image_user_and_env_come_from_the_config() -> None:
+    raw = {"Config": {"User": "1000:1000", "Env": ["PATH=/usr/bin", "HOME=/root"]}}
+    image = ImageInfo.from_inspect(raw)
+    assert image.user == "1000:1000"
+    assert image.env == ("PATH=/usr/bin", "HOME=/root")
+    # A config that names no user, or holds a wrongly typed Env, reads as none (IR-020).
+    bare = ImageInfo.from_inspect({"Config": {"User": None, "Env": "PATH=/usr/bin"}})
+    assert bare.user == ""
+    assert bare.env == ()
+    assert ImageInfo.from_inspect({}).user == ""
+
+
+@pytest.mark.fr("IR-020")
 def test_container_inspect_fixture_parses_created_state() -> None:
     (raw,) = _load("container-inspect-alpine.json")
     container = ContainerInfo.from_inspect(raw)
@@ -68,6 +96,17 @@ def test_container_inspect_fixture_parses_created_state() -> None:
     assert container.finished_at == ""
     assert container.labels == {}
     assert container.size_rw is None
+    assert container.image_id == "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8"
+
+
+@pytest.mark.fr("DR-040")
+def test_container_inspect_reads_the_image_id_from_its_top_level_image_field() -> None:
+    (raw,) = _load("container-inspect-alpine.json")
+    image_id = "b" * 64
+    assert ContainerInfo.from_inspect({**raw, "Image": "sha256:" + image_id}).image_id == image_id
+    assert ContainerInfo.from_inspect({**raw, "Image": "alpine:3"}).image_id == ""
+    assert ContainerInfo.from_inspect({**raw, "Image": 7}).image_id == ""
+    assert ContainerInfo.from_inspect({k: v for k, v in raw.items() if k != "Image"}).image_id == ""
 
 
 @pytest.mark.fr("IR-020")
@@ -106,6 +145,17 @@ def test_missing_keys_give_empty_values_not_errors() -> None:
     assert minimal.name == ""
     assert minimal.labels == {}
     assert minimal.size_rw is None
+
+
+@pytest.mark.fr("IR-020")
+@pytest.mark.fr("FR-122")
+def test_ps_row_carries_the_bare_image_id() -> None:
+    row = {"Id": "a" * 64, "Names": ["n"], "Image": "x", "ImageID": "sha256:" + "b" * 64}
+    assert ContainerInfo.from_ps(row).image_id == "b" * 64
+    assert ContainerInfo.from_ps({"ImageID": "b" * 64}).image_id == "b" * 64
+    assert ContainerInfo.from_ps({"ImageID": "short"}).image_id == ""
+    assert ContainerInfo.from_ps({"ImageID": 7}).image_id == ""
+    assert ContainerInfo.from_ps({}).image_id == ""
 
 
 @pytest.mark.fr("IR-020")

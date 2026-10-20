@@ -41,6 +41,41 @@ check_updates_exit_for_updates = 100
 # not broken. Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015: the init set of a services-on realm, which the provisioning stage installs. S-11 installed
+# and booted this set with zero failed units on the pinned image (spikes/results/S-11.md).
+services_packages = ["systemd", "dbus-broker"]
+# ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
+services_estimated_installed_bytes = 24586672
+# ADR-015 Decision 11: the installed bytes of the Integration Package Set (the ips_delta of the disk
+# formula, FR-121), measured in S-11. The set is glibc-langpack-en.
+integration_estimated_installed_bytes = 6000393
+# ADR-015 Decision 11: the package cache during the installs, before the clean (the cache_peak of
+# the disk formula, FR-121). S-11 measured the dnf cache before clean.
+package_cache_peak_bytes = 109206482
+# ADR-015 Decision 11: the writable layer of one services-off container from the derived image,
+# after an htop install (S-11, the reuse term of the disk check, FR-121).
+writable_layer_bytes = 117756852
+# ADR-015 Decision 11 (T7.33): the allocated bytes of the pinned base layer (the pulled layer)
+# and of the stage layer (the provisioning commit), measured on podman 5.8.8 on ext4 with 4 KiB
+# blocks on 2026-10-16. One run. Tied to the pin in trust.toml: a pin rotation (ADR-005) re-measures
+# both.
+base_layer_allocated_bytes = 151834624
+stage_layer_allocated_bytes = 35848192
+
+[export_hook]
+# ADR-016, CL-35 (FR-044, FR-045, NFR-009): a dnf5 actions line that runs after every transaction,
+# whoever runs dnf5. It touches the stamp file in the Realm Home,
+# which the host watches. The file is inert unless the realm has libdnf5-plugin-actions. That
+# package is NOT in the Integration Package Set (FR-013, CR-007 limit it), so a native `dnf
+# install` is exported only after the user installs the plugin (`ginn install fedora
+# libdnf5-plugin-actions`). Not verified on a host: that the plugin is installable on
+# fedora-minimal:44, that it is enabled by default, that it reads an actions.d file added before
+# or after its install without a restart, the line's format (dnf5 actions(8):
+# callback:filter:direction:options:command), whether dnf5 runs the command as an argv with no
+# shell (the line holds no quote on purpose) and whether a failed touch fails the transaction.
+path = "/etc/dnf/libdnf5-plugins/actions.d/ginn-export.actions"
+text = """post_transaction::::/usr/bin/touch {stamp}
+"""
 
 [integration]
 packages = ["glibc-langpack-{lang}"]
@@ -82,3 +117,6 @@ estimate = [
     "--queryformat", '%{{name}} %{{downloadsize}} %{{installsize}}\n',
     "{packages}",
 ]
+# ADR-015 Decision 3 (orchestrator decision Q5): dnf clean all empties the cached packages and
+# metadata. It names no package and no placeholder.
+clean = [["dnf", "clean", "all"]]

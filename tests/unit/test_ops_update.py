@@ -43,6 +43,7 @@ from tests.unit.realm_cli_support import World, make_realm, stored
 ARCH = "arch"
 DEB = "deb"
 FEDORA = "fedora"
+KALI = "kali"
 TMP = "/tmp/ginn-check-test"  # noqa: S108 - a path inside the realm, as in packages/manager.py
 DEBIAN_NETWORK = "E: Failed to fetch http://deb.debian.org/x: Temporary failure resolving 'deb'"
 DEBIAN_SIGNATURE = "W: GPG error: NO_PUBKEY 0123456789ABCDEF"
@@ -315,14 +316,25 @@ def test_a_realm_that_is_not_stopped_running_or_failed_is_refused_before_any_pod
 
 
 @pytest.mark.fr("FR-023")
-def test_a_kali_realm_is_refused_as_not_supported_yet(world: World) -> None:
-    make_realm(world, "kali", RealmState.RUNNING, running=True, distro="kali")
-    with pytest.raises(GinnError) as caught:
-        update_realm(
-            _env(world), world.fake, RealmName("kali"), session=_session(world), hooks=_hooks(world)
-        )
-    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
-    assert _execs(world) == []
+@pytest.mark.fr("FR-124")
+def test_kali_update_runs_refresh_then_dist_upgrade_like_debian(world: World) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    env = _env(world)
+    record = update_realm(
+        env, world.fake, RealmName(KALI), session=_session(world), hooks=_hooks(world)
+    )
+    # Kali lists `upgrade` in refresh_before, as Debian does (kali.toml, ADR-011).
+    assert _execs(world) == [
+        _argv("kali", Verb.REFRESH),
+        _argv("kali", Verb.UPGRADE),
+        DESKTOP_LIST,
+    ]
+    for call in world.fake.exec_calls:
+        assert call.user == "0:0"
+    assert record.state is RealmState.RUNNING
+    (entry,) = _audit(env, "update")
+    assert entry.outcome == "ok"
+    assert entry.params["distro"] == "kali"
 
 
 @pytest.mark.fr("FR-023")
@@ -426,6 +438,18 @@ def test_debian_check_refreshes_the_lists_then_counts_the_marked_lines(world: Wo
     row = _check(world, DEB)
     assert row.result == CheckResult(UpdateStatus.UPDATES, 2)
     assert _execs(world) == [_argv("debian", Verb.REFRESH), ("apt", "list", "--upgradable")]
+
+
+@pytest.mark.fr("FR-024")
+def test_kali_check_refreshes_the_lists_then_counts_the_marked_lines_like_debian(
+    world: World,
+) -> None:
+    make_realm(world, KALI, RealmState.RUNNING, running=True, distro="kali")
+    listing = "Listing...\nnmap/kali-rolling 7.95 amd64 [upgradable from: 7.94]\n"
+    world.fake.exec_results[("apt", "list", "--upgradable")] = ExecResult(0, listing, "")
+    row = _check(world, KALI)
+    assert row.result == CheckResult(UpdateStatus.UPDATES, 1)
+    assert _execs(world) == [_argv("kali", Verb.REFRESH), ("apt", "list", "--upgradable")]
 
 
 @pytest.mark.fr("FR-024")

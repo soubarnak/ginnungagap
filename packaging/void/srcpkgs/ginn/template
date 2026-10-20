@@ -14,15 +14,19 @@ hostmakedepends="python3-setuptools python3-wheel gcc make"
 # containers-common ships /usr/share/containers/seccomp.json. ginn generates its seccomp profile
 # from that file and fails closed without it (ADR-006).
 depends="python3 podman crun conmon netavark aardvark-dns passt catatonit fuse-overlayfs shadow xdg-dbus-proxy runit util-linux containers-common"
-checkdepends="python3-pytest python3-hypothesis"
+checkdepends="python3-pytest python3-hypothesis python3-yaml"
 short_desc="Per-distribution realms on rootless Podman for Void Linux"
 maintainer="Bongbetic <soubarna@live.in>"
 license="Apache-2.0"
 homepage="https://github.com/soubarnak/ginnungagap"
-distfiles="${homepage}/archive/refs/tags/v${version}.tar.gz"
-# checksum is a placeholder until the release tag exists. tools/release.sh checksum <tarball-url>
-# rewrites this line with the sha256 of the v<version> tag archive (docs/packaging.md, step 4).
-# Do not write a value by hand. The line must stay exactly as it is: the scripts match it.
+# Releases are tagged ginn-v<version> (docs/packaging.md). GitHub unpacks that tag archive into
+# ginnungagap-ginn-v<version>, which is not the default wrksrc (pkgname-version).
+distfiles="${homepage}/archive/refs/tags/ginn-v${version}.tar.gz"
+wrksrc="ginnungagap-ginn-v${version}"
+# checksum is a placeholder until the release tag exists. After a release, the release workflow
+# runs tools/release.sh bump (tools/release.sh checksum), which rewrites this line with the sha256 of the ginn-v<version> tag
+# archive and commits it to the void branch (docs/packaging.md). Do not write a value by hand.
+# The line must stay in the form checksum=<value>: the scripts match it.
 checksum=@CHECKSUM@
 
 post_install() {

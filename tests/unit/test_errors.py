@@ -74,6 +74,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-RECOVERED": 0,
     "GINN-W-RECOVERY-UNSETTLED": 0,
     "GINN-W-MANIFEST-UNRECORDED": 0,
+    "GINN-W-MANIFEST-UNVERIFIED": 0,
     "GINN-W-BUILD-RESIDUAL": 0,
     "GINN-E-HOST-DEVICE": 1,
     "GINN-E-SECCOMP-SOURCE": 1,
@@ -86,6 +87,9 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-E-SERVICE-CONTROL": 1,
     "GINN-E-SERVICE-MISSING": 1,
     "GINN-E-NO-INIT": 1,
+    "GINN-E-IMAGE-DERIVED": 65,
+    "GINN-E-PKG-PROTECTED": 4,
+    "GINN-E-REALM-BOOT": 1,
     "GINN-E-RELAY-UNAVAILABLE": 1,
     "GINN-E-RELAY-REJECTED": 1,
     "GINN-E-RELAY-TIMEOUT": 1,
@@ -103,6 +107,7 @@ EXPECTED_EXIT: dict[str, int] = {
     "GINN-W-CGROUP-LEFT": 0,
     "GINN-W-REBUILD-DEFERRED": 0,
     "GINN-W-REBUILD-PENDING": 0,
+    "GINN-W-PROVISION-LEFTOVER": 0,
     "GINN-W-RELAY-ORPHAN": 0,
     "GINN-W-ORPHAN-UNKNOWN": 0,
     "GINN-W-ORPHAN-UNSETTLED": 0,
@@ -211,6 +216,19 @@ def test_warn_renders_message_and_remedy() -> None:
         "host files changed since baseline: /etc/hosts",
         "review the listed paths; the likely cause is xbps or a system file edit made while ginn "
         "was running (R-004); then run 'ginn integrity --ack'",
+    )
+
+
+@pytest.mark.fr("FR-080")
+def test_the_services_pending_notice_names_the_derived_image_and_the_first_start() -> None:
+    notice = warn("GINN-W-SERVICES-PENDING", realm="lab")
+    assert notice.message == (
+        "realm 'lab' is created stopped with services on: its init set and Integration Package Set "
+        "are in its derived image, and nothing is started in it"
+    )
+    assert notice.remedy == (
+        "a services-on realm starts through its runit entry ('ginn start'); its packages go in "
+        "after that first supervised start, with 'ginn install'"
     )
 
 
@@ -339,3 +357,37 @@ def test_the_recovered_remedy_names_both_recovery_commands() -> None:
     assert "an interrupted create is resumed with 'ginn create --resume {realm}'" in remedy
     assert "'ginn delete {realm}'" in remedy
     assert "M8" not in remedy
+
+
+@pytest.mark.fr("FR-122")
+def test_the_provision_leftover_notice_names_the_realm_the_leftover_and_the_cleanup() -> None:
+    notice = warn(
+        "GINN-W-PROVISION-LEFTOVER",
+        realm="lab",
+        detail="kept 0123456789ab: it is recorded on the realm",
+    )
+    assert notice.code == "GINN-W-PROVISION-LEFTOVER"
+    assert notice.message == (
+        "realm 'lab': a provisioning or derived-image leftover was not removed: "
+        "kept 0123456789ab: it is recorded on the realm"
+    )
+    assert notice.remedy == (
+        "the next provisioning of this realm removes it, and 'ginn delete lab' removes every "
+        "derived image of the realm"
+    )
+
+
+@pytest.mark.fr("FR-083")
+def test_the_rebuild_pending_notice_names_the_init_set_download_and_the_disk_use() -> None:
+    notice = warn("GINN-W-REBUILD-PENDING", realm="lab", change="the services mode changed")
+    assert notice.code == "GINN-W-REBUILD-PENDING"
+    assert notice.message == (
+        "realm 'lab': the next start rebuilds it into a new container, because the services mode "
+        "changed"
+    )
+    assert notice.remedy == (
+        "its packages and Realm Home are kept, and a rebuild that does not reuse the derived image "
+        "pulls the pinned image and replays the packages without a prompt (CL-19); a start that "
+        "must provision downloads the init set and uses disk for its derived image, and runs under "
+        "this notice; run 'ginn rebuild lab' to do it now"
+    )

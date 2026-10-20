@@ -34,6 +34,7 @@ from ginn.ops.security_ops import agent_state_path, proxy_state_path, read_agent
 from ginn.ops.service import set_services_mode
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerInfo, ContainerState
+from ginn.runtime.provision import LABEL_BASE_DIGEST, LABEL_PROVISION
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_ESTIMATE, LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
 from ginn.services import supervisor
@@ -972,6 +973,7 @@ def test_the_journal_steps_are_the_listed_ones_in_order(env: OpEnv, fake: FakePo
         "container-removed",
         "service-removed",
         "exports-removed",
+        "init-image-removed",
         "image-removed",
         "home",
         "record-removed",
@@ -1073,6 +1075,148 @@ def test_a_shared_image_is_kept_while_another_realm_uses_it(env: OpEnv, fake: Fa
     delete_realm(env, fake, RealmName("other"))
 
     assert DIGEST not in fake.images
+
+
+BASE_SHA = DIGEST.partition("@")[2]
+"""The pinned base's manifest digest, which a derived image labels as its base (ADR-015 D13)."""
+
+
+def _provisioning_leftovers(fake: FakePodman, realm: str, generation: int) -> tuple[str, ...]:
+    """The leftovers of one interrupted stage, as ADR-015 Decisions 2f and 2h leave them: the
+    provisioning container, the stage image committed from it, the reset container created from the
+    stage, and the derived image committed from the reset. Return those four IDs, in that order."""
+    labels = {LABEL_PROVISION: f"{realm}:{generation}"}
+    provision = fake.create(
+        CreateSpec(
+            name=f"ginn_provision_{realm}_g{generation}",
+            image_digest_ref=DIGEST,
+            network="host",
+            labels=labels,
+        )
+    )
+    stage = fake.commit(
+        provision,
+        f"localhost/ginn-init-{realm}:g{generation}-stage",
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={BASE_SHA}"],
+    )
+    reset = fake.create(
+        CreateSpec(
+            name=f"ginn_provision_{realm}_g{generation}_reset",
+            image_digest_ref=DIGEST,
+            image_id=stage,
+            network="host",
+            labels=labels,
+        )
+    )
+    derived = fake.commit(
+        reset,
+        f"localhost/ginn-init-{realm}:g{generation}",
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={BASE_SHA}"],
+    )
+    return provision, reset, stage, derived
+
+
+@pytest.mark.fr("FR-019")
+def test_provisioning_leftovers_go_then_the_derived_images_by_id_then_the_pinned_base(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """FR-019 AC-1 (ADR-015 Decision 13). The reset and provisioning containers are removed first,
+    then the stage and derived images by their IDs, and the pinned base last. No provisioning
+    container remains. The order is the delete's own: the removal does not depend on podman refusing
+    an rmi of a base that has a child, which S-11 showed podman does not do."""
+    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
+    provision, reset, stage, derived = _provisioning_leftovers(fake, "lab", 1)
+    fake.calls.clear()
+    seen: list[str] = []
+
+    result = delete_realm(env, fake, RealmName("lab"), hooks=DeleteHooks(on_step=seen.append))
+
+    first_image = fake.ops().index("rmi")
+    removed_before_images = [c.args[0] for c in fake.calls[:first_image] if c.op == "rm"]
+    assert {provision, reset} <= set(removed_before_images)
+    removed_images = [c.args[0] for c in fake.calls if c.op == "rmi"]
+    assert sorted(removed_images[:2]) == sorted([stage, derived])
+    assert removed_images[2:] == [DIGEST]
+    assert not [c for c in fake.containers.values() if LABEL_PROVISION in c.labels]
+    assert DIGEST not in fake.images
+    assert stage not in {image.id for image in fake.images.values()}
+    assert derived not in {image.id for image in fake.images.values()}
+    assert seen.index("init-image-removed") < seen.index("image-removed")
+    assert result.image == "removed"
+    assert result.notes == ()
+
+
+@pytest.mark.fr("FR-019")
+def test_a_base_stays_while_another_realms_derived_image_is_built_on_it(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """Open question 13. Two realms built from one base: the delete of one keeps the base, because
+    the other realm's derived image carries the base's digest as its base-digest label. Deleting the
+    other realm then removes the base."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    make_realm(env, fake, "other", RealmState.STOPPED, container=False)
+    _provisioning_leftovers(fake, "lab", 1)
+    other_provision, other_reset, _stage, other_derived = _provisioning_leftovers(fake, "other", 1)
+    for leftover in (other_provision, other_reset):
+        fake.rm(leftover, force=True)
+
+    result = delete_realm(env, fake, RealmName("lab"))
+
+    assert result.image == "kept"
+    assert DIGEST in fake.images
+    assert other_derived in {image.id for image in fake.images.values()}
+    assert any("localhost/ginn-init-other:g1" in note for note in result.notes)
+
+    result = delete_realm(env, fake, RealmName("other"))
+
+    assert result.image == "removed"
+    assert DIGEST not in fake.images
+
+
+@pytest.mark.fr("FR-019")
+def test_a_derived_image_whose_rmi_fails_keeps_the_base_and_the_delete_goes_on(
+    env: OpEnv, fake: FakePodman, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    _provision, _reset, _stage, derived = _provisioning_leftovers(fake, "lab", 1)
+    real_rmi = fake.rmi
+
+    def refuse_the_derived(ref: str) -> None:
+        if ref == derived:
+            raise make("GINN-E-INTERNAL")
+        real_rmi(ref)
+
+    monkeypatch.setattr(fake, "rmi", refuse_the_derived)
+
+    result = delete_realm(env, fake, RealmName("lab"))
+
+    assert not realm_exists(env, "lab")
+    assert derived in {image.id for image in fake.images.values()}
+    assert DIGEST in fake.images
+    assert result.image == "kept"
+    assert any(f"kept {derived[:12]}: rmi failed" in note for note in result.notes)
+
+
+@pytest.mark.fr("FR-019")
+def test_a_listing_failure_at_the_init_image_step_stops_the_delete_and_the_next_one_finishes(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    """A listing error is not a note (ADR-015 Decision 13): the delete stops at init-image-removed,
+    the record stays deleting, and the next delete runs the sweep and removes the base."""
+    make_realm(env, fake, "lab", RealmState.STOPPED)
+    _provisioning_leftovers(fake, "lab", 1)
+    fake.fail_ops = {"images_by_name": "GINN-E-INTERNAL"}
+
+    with pytest.raises(GinnError) as caught:
+        delete_realm(env, fake, RealmName("lab"))
+
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert stored(env, "lab").state is RealmState.DELETING
+    assert audit_of(env, "delete")[-1].error_code == "GINN-E-INTERNAL"
+
+    delete_realm(env, fake, RealmName("lab"))
+
+    assert_gone(env, fake, "lab")
 
 
 @pytest.mark.fr("FR-019")
@@ -1516,6 +1660,25 @@ def test_a_delete_removes_the_realms_idle_watcher_record_and_log(
     directory.mkdir(mode=0o700, exist_ok=True)
     (directory / "lab.json").write_text("{}", encoding="utf-8")
     (directory / "lab.log").write_text("ginn-idle: x\n", encoding="utf-8")
+    (directory / "other.json").write_text("{}", encoding="utf-8")
+
+    delete_realm(env, fake, RealmName("lab"))
+
+    assert not (directory / "lab.json").exists()
+    assert not (directory / "lab.log").exists()
+    assert (directory / "other.json").exists(), "another realm's watcher is not touched"
+
+
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-044")
+def test_a_delete_removes_the_realms_export_watcher_record_and_log(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    directory = env.paths.runtime / "watch"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    (directory / "lab.json").write_text("{}", encoding="utf-8")
+    (directory / "lab.log").write_text("ginn-watch: x\n", encoding="utf-8")
     (directory / "other.json").write_text("{}", encoding="utf-8")
 
     delete_realm(env, fake, RealmName("lab"))

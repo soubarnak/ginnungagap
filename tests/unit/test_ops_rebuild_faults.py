@@ -31,6 +31,18 @@ from ginn.ops import rebuild as rebuild_ops
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import LifecycleHooks, start_realm
 from ginn.ops.permissions import set_tier
+from ginn.ops.provision import (
+    STEP_IMAGE_COMMITTED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_PROVISION_CREATED,
+    STEP_PROVISION_REMOVED,
+    STEP_RESET_CREATED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_COMMITTED,
+    STEP_STAGE_REMOVED,
+)
+from ginn.ops.rebuild import rebuild_for_start
 from ginn.ops.recovery import OUTCOME_RECOVERED, recover
 from ginn.ops.service import set_services_mode
 from ginn.podman.models import ContainerState
@@ -102,11 +114,19 @@ class SimulatedCrash(Exception):
     """Stands for a SIGKILL inside a rebuild step. It is not a GinnError, so the journal stays."""
 
 
-def _inject(step: str, kind: str) -> Any:
-    """A hook that faults at `step`, once, in the way `kind` names."""
+def _inject(step: str, kind: str, occurrence: int = 1) -> Any:
+    """A hook that faults at the `occurrence`-th call named `step`, once, in the way `kind` names.
+
+    The default is the first call. A step that runs more than once in a build, such as `exec-acked`
+    (the refresh's ack and then each replay install's), is faulted at a later call by its number.
+    """
+    seen: list[str] = []
 
     def hook(name: str) -> None:
         if name != step:
+            return
+        seen.append(name)
+        if len(seen) != occurrence:
             return
         if kind == "error":
             raise make("GINN-E-INTERNAL")
@@ -278,13 +298,27 @@ def test_a_crash_before_the_swap_removes_the_orphan_new_root(
 # start rebuilds lazily. The state checked is the full one: the root fields, the grants, the runit
 # directory and its `down` file, and every entry of the Realm Home.
 
-TRANSITIONS: tuple[str, ...] = ("to-on", "to-off")
-"""A rebuild that turns services on, and one that turns them off. The keep cases are CASES."""
+TRANSITIONS: tuple[str, ...] = ("to-on", "to-off", "reuse")
+"""A rebuild that turns services on, one that turns them off, and a reuse build: the services-off
+change of a realm that holds its derived image (ADR-015 Decision 7). The keep cases are CASES."""
+PROVISION_STEPS: tuple[str, ...] = (
+    STEP_PROVISION_CREATED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_STAGE_COMMITTED,
+    STEP_RESET_CREATED,
+    STEP_IMAGE_COMMITTED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_REMOVED,
+    STEP_PROVISION_REMOVED,
+)
+"""The journal steps of the provisioning stage of a services-on build (ADR-015 Decision 13)."""
 TRANSITION_STEPS: dict[str, tuple[str, ...]] = {
     "to-on": (
         "rebuilding",
         "space-checked",
         "pulled",
+        *PROVISION_STEPS,
         "created",
         "service",
         "started",
@@ -297,20 +331,35 @@ TRANSITION_STEPS: dict[str, tuple[str, ...]] = {
         "swapping",
     ),
     "to-off": STEPS,
+    "reuse": tuple("image-checked" if step == "pulled" else step for step in STEPS),
 }
-"""The journal steps of each transition. `service` is written only when services turn on."""
+"""The journal steps of each transition. `service` is written only when services turn on. A reuse
+build pulls nothing, so its `image-checked` step stands where `pulled` does (ADR-015 Decision 9)."""
+REUSE_PREVIOUS: tuple[str, ...] = ("stopped",)
+"""A reuse build starts from a stopped realm: `rebuild_for_start` refuses a running one."""
 TRANSITION_CASES: tuple[tuple[str, str, str, str], ...] = tuple(
     (transition, step, kind, previous)
     for transition in TRANSITIONS
     for step in TRANSITION_STEPS[transition]
     for kind in KINDS
-    for previous in PREVIOUS
+    for previous in (REUSE_PREVIOUS if transition == "reuse" else PREVIOUS)
+)
+EXEC_ACK_OCCURRENCES: tuple[int, ...] = (1, 2)
+"""The `exec-acked` calls of a build that replays one package. The refresh's ack is the first, and
+the replay install's is the second (ADR-011, FR-122). A fault at the first lands before any package
+is installed, and one at the second lands while the replay runs."""
+EXEC_ACK_CASES: tuple[tuple[str, int, str, str], ...] = tuple(
+    (transition, occurrence, kind, previous)
+    for transition in ("to-on", "reuse")
+    for occurrence in EXEC_ACK_OCCURRENCES
+    for kind in KINDS
+    for previous in (REUSE_PREVIOUS if transition == "reuse" else PREVIOUS)
 )
 SAVE_POINTS: tuple[str, ...] = ("building", "swap")
 """The two record saves of a rebuild: the one that records the building container, and the swap."""
 SAVE_CASES: tuple[tuple[str, str, str, str], ...] = tuple(
     (transition, point, kind, previous)
-    for transition in TRANSITIONS
+    for transition in ("to-on", "to-off")
     for point in SAVE_POINTS
     for kind in KINDS
     for previous in PREVIOUS
@@ -356,6 +405,14 @@ def _transition_realm(
     services-on.
     """
     runit = _runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    if transition == "reuse":
+        assert not running, "a reuse build starts from a stopped realm"
+        make_realm(env, fake, home, tmp_path, sleeps, mountinfo)
+        set_services_mode(env, NAME, on=True)
+        # The provision build that makes the derived image the reuse build will run from.
+        base.stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+        set_services_mode(env, NAME, on=False)
+        return stored(env), _supervised_lifecycle(tmp_path, mountinfo, runit)
     if transition == "to-on":
         make_realm(env, fake, home, tmp_path, sleeps, mountinfo, running=running)
     else:
@@ -421,19 +478,26 @@ def _check_settled(
         assert stored(env).state is RealmState.STOPPED
         # Recovery does not restart the old root, so only the directory itself is compared.
         assert _runit_state(env)[0] is runit_before[0], "the runit directory is the old one's"
-        assert not any(c.labels.get(LABEL_GENERATION) == "2" for c in fake.containers.values())
+        new = str(before.generation + 1)
+        assert not any(c.labels.get(LABEL_GENERATION) == new for c in fake.containers.values())
     else:
         assert env.journal.pending() == []
-        assert [e.outcome for e in env.audit.read() if e.op == "rebuild"] == ["error"]
+        # The newest rebuild entry is the one under test: a reuse setup has its own provision entry.
+        outcomes = [e.outcome for e in env.audit.read() if e.op == "rebuild"]
+        assert outcomes[-1] == "error"
         record = stored(env)
         assert root_fields(record) == root_fields(before)
         assert record.building_container_id is None and record.building_generation is None
-        assert generation_of(fake, 2) == []
+        assert generation_of(fake, before.generation + 1) == []
         assert _runit_state(env) == runit_before
         assert _home_tree(env) == home_before
         running = previous == "running"
         assert record.state is (RealmState.RUNNING if running else RealmState.STOPPED)
     assert _home_tree(env) == home_before
+    # The derived image the record names is the only one left: a failed or killed build leaves no
+    # extra image, and a realm that never had one has none (ADR-015 Decisions 7 and 13).
+    expected = {before.init_image_id} if before.init_image_id is not None else set()
+    assert base.derived_ids(fake) == expected
     if stored(env).state is not RealmState.RUNNING:
         started = start_realm(
             env,
@@ -445,7 +509,7 @@ def _check_settled(
         )
         assert started.state is RealmState.RUNNING
     record = stored(env)
-    assert record.generation == 1, "the old root is the one that runs"
+    assert record.generation == before.generation, "the old root is the one that runs"
     assert fake.containers[record.container_id].state is ContainerState.RUNNING
 
 
@@ -474,16 +538,104 @@ def test_a_fault_at_every_step_of_a_services_mode_change_leaves_the_old_root_usa
     runit_before = _runit_state(env)
     home_before = _home_tree(env)
     with pytest.raises(_expected(kind)):
-        rebuild(
-            env,
-            fake,
-            home,
-            tmp_path,
-            sleeps,
-            mountinfo,
-            on_step=_inject(step, kind),
-            lifecycle=lifecycle,
-        )
+        if transition == "reuse":
+            rebuild_for_start(
+                env,
+                fake,
+                NAME,
+                session=session(home),
+                gid=base.GID,
+                hooks=base.rebuild_hooks(
+                    tmp_path,
+                    sleeps,
+                    mountinfo,
+                    on_step=_inject(step, kind),
+                    lifecycle=lifecycle,
+                ),
+                services_only=True,
+            )
+        else:
+            rebuild(
+                env,
+                fake,
+                home,
+                tmp_path,
+                sleeps,
+                mountinfo,
+                on_step=_inject(step, kind),
+                lifecycle=lifecycle,
+            )
+    _check_settled(
+        env,
+        fake,
+        home,
+        tmp_path,
+        mountinfo,
+        lifecycle,
+        before=before,
+        kind=kind,
+        previous=previous,
+        runit_before=runit_before,
+        home_before=home_before,
+    )
+
+
+@pytest.mark.fr("NFR-031")
+@pytest.mark.fr("FR-122")
+@pytest.mark.parametrize(
+    ("transition", "occurrence", "kind", "previous"),
+    EXEC_ACK_CASES,
+    ids=[f"{t}-exec-ack-{n}-{k}-{p}" for t, n, k, p in EXEC_ACK_CASES],
+)
+def test_a_fault_at_each_exec_ack_of_a_services_mode_change_leaves_the_old_root_usable(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    transition: str,
+    occurrence: int,
+    kind: str,
+    previous: str,
+) -> None:
+    """The refresh's ack, which is the first `exec-acked`, and the replay install's, which is the
+    second. A build that turns services on, or reuses the derived image, runs both (ADR-011). A
+    fault at either leaves the same state and the same recovery as a fault at any other step."""
+    before, lifecycle = _transition_realm(
+        env, fake, home, tmp_path, sleeps, mountinfo, transition, running=previous == "running"
+    )
+    runit_before = _runit_state(env)
+    home_before = _home_tree(env)
+    hook = _inject("exec-acked", kind, occurrence)
+    with pytest.raises(_expected(kind)):
+        if transition == "reuse":
+            rebuild_for_start(
+                env,
+                fake,
+                NAME,
+                session=session(home),
+                gid=base.GID,
+                hooks=base.rebuild_hooks(
+                    tmp_path,
+                    sleeps,
+                    mountinfo,
+                    on_step=hook,
+                    lifecycle=lifecycle,
+                ),
+                services_only=True,
+            )
+        else:
+            rebuild(
+                env,
+                fake,
+                home,
+                tmp_path,
+                sleeps,
+                mountinfo,
+                on_step=hook,
+                lifecycle=lifecycle,
+            )
     _check_settled(
         env,
         fake,
@@ -715,7 +867,7 @@ def test_a_services_on_rebuild_replays_three_hundred_packages_in_relay_sized_cal
                 captured=True,
             )
         )
-    assert [e.name for e in result.record.manifest] == list(RELAY_NAMES)
+    assert [e.name for e in base.user_entries(result.record)] == list(RELAY_NAMES)
     assert result.replay_missing == ()
 
 
@@ -758,3 +910,44 @@ def test_a_failed_rebuild_syncs_the_relay_once_its_record_is_back_at_stopped(
         rebuild(env, fake, home, tmp_path, sleeps, mountinfo, on_step=_inject("swapping", "error"))
     assert seen == [RealmState.REBUILDING.value, RealmState.STOPPED.value]
     assert any("GINN-W-RELAY-SYNC" in note for note in caught.value.__notes__)
+
+
+@pytest.mark.fr("FR-083")
+def test_services_on_then_off_then_on_again_reuses_the_derived_image_each_time(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Turning services on provisions the derived image. Turning them off, and on again, reuses it:
+    each change is a rebuild with no pull and no commit, the init set stays in the record, and the
+    one derived image left is the one every root was created from (ADR-015 Decision 7)."""
+    runit = base._runit(env, tmp_path, mountinfo, home, fake, sleeps)
+    before = make_realm(env, fake, home, tmp_path, sleeps, mountinfo, packages=("curl",))
+    set_services_mode(env, NAME, on=True)
+    on = base.stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert on.generation == 2
+    assert on.services_at_create is True
+    assert on.init_image_id is not None
+    pulled, committed = base.pulls(fake), base.commits(fake)
+    set_services_mode(env, NAME, on=False)
+    off = base.stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert off.generation == 3
+    assert off.services_at_create is False
+    set_services_mode(env, NAME, on=True)
+    again = base.stale_rebuild(env, fake, home, tmp_path, sleeps, mountinfo, runit=runit)
+    assert again.generation == 4
+    assert again.services_at_create is True
+    assert again.state is RealmState.STOPPED
+    for record in (off, again):
+        assert record.init_image_id == on.init_image_id
+        assert record.image_digest == before.image_digest
+        assert fake.created_specs[-1].image_id == on.init_image_id
+    assert (base.pulls(fake), base.commits(fake)) == (pulled, committed)
+    assert base.derived_ids(fake) == {on.init_image_id}
+    assert [e.name for e in base.user_entries(again)] == ["curl"]
+    assert base.last_rebuild_params(env)["image_source"] == "reuse"
+    booted = [c for c in fake.exec_calls if c.container_id == again.container_id]
+    assert any(tuple(c.argv) == base.BOOT_STATE_ARGV for c in booted), "the third boot is checked"

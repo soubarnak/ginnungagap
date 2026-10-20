@@ -697,3 +697,73 @@ def test_an_os_error_before_the_listing_is_a_warning_and_writes_nothing(
     assert [w.code for w in result.warnings] == ["GINN-W-EXPORT-SYNC"]
     assert "Permission denied" in result.warnings[0].message
     assert not _host(world, "firefox").exists()
+
+
+@pytest.mark.fr("FR-044")
+def test_the_sync_command_keeps_the_export_watcher_armed_inside_the_realm_lock(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rearm` writes the watcher record, so it runs under the realm lock (ADR-016)."""
+    from ginn.errors import warn
+    from ginn.export.watch import WatchHooks
+
+    calls: list[str] = []
+
+    def fake_rearm(paths: object, name: RealmName, *, hooks: WatchHooks) -> object:
+        # The lock is held: a second mutating operation on the realm is refused.
+        with pytest.raises(GinnError) as caught:
+            with mutating(_env(world), "probe", name):
+                pass
+        assert caught.value.code == "GINN-E-REALM-BUSY"
+        calls.append(name.value)
+        return warn("GINN-W-EXPORT-SYNC", realm=name.value, reason="rearm said so")
+
+    monkeypatch.setattr(export_sync, "rearm", fake_rearm)
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    watch_hooks = WatchHooks(program=PROGRAM)
+
+    result = sync_realm(
+        _env(world), world.fake, RealmName("arch"), hooks=SyncHooks(PROGRAM, watch_hooks)
+    )
+
+    assert calls == ["arch"]
+    assert "rearm said so" in [w.message for w in result.warnings][-1]
+
+
+@pytest.mark.fr("FR-044")
+def test_a_sync_without_watch_hooks_calls_no_rearm(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        export_sync, "rearm", lambda *a, **k: pytest.fail("rearm must not run without hooks")
+    )
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+    sync_realm(_env(world), world.fake, RealmName("arch"), hooks=SyncHooks(PROGRAM))
+    sync_realm(_env(world), world.fake, RealmName("arch"))
+
+
+@pytest.mark.fr("FR-044")
+def test_the_watcher_is_re_armed_even_when_the_sync_body_raises(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ginn.export.watch import WatchHooks
+
+    calls: list[str] = []
+    monkeypatch.setattr(export_sync, "rearm", lambda paths, name, *, hooks: calls.append("x"))
+
+    def boom(*args: object, **kwargs: object) -> SyncResult:
+        raise make("GINN-E-INTERNAL")
+
+    monkeypatch.setattr(export_sync, "sync_in_lock", boom)
+    make_realm(world, "arch", RealmState.RUNNING, running=True)
+
+    with pytest.raises(GinnError) as caught:
+        sync_realm(
+            _env(world),
+            world.fake,
+            RealmName("arch"),
+            hooks=SyncHooks(PROGRAM, WatchHooks(program=PROGRAM)),
+        )
+
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert calls == ["x"]

@@ -10,7 +10,8 @@ The CLI JSON contract is in src/ginn/cli/output.py. In JSON mode:
 - stdout holds one JSON object, the result. It is empty on failure, except for `doctor`, which
   prints its report before it fails.
 - stderr holds JSON lines. `{"progress": {"step", "message"}}` lines come after each finished step
-  of a long operation. The CLI writes them without any flag, and the runner passes their message
+  of a long operation. The `space-checked` step also carries `required_bytes`, `free_bytes` and
+  `reason` (FR-121). The CLI writes them without any flag, and the runner passes their message
   to `on_progress`. `{"warning": {...}}` lines come before a failure. The last line is
   `{"error": {...}}` on failure, and it carries the GINN-E-* code, the remedy and exit_code.
 
@@ -95,7 +96,9 @@ def _progress_text(line: str) -> str | None:
     """The text of a progress line on stderr, or None for any other line.
 
     `{"progress": {"step", "message"}}` is written by the CLI after each finished step of a long
-    operation (FR-107). The Control Plane never passes --verbose, so no verbose line is read here.
+    operation (FR-107). The `space-checked` step adds `required_bytes`, `free_bytes` and `reason`
+    to that object (FR-121). This reader takes `message` only. The Control Plane never passes
+    --verbose, so no verbose line is read here.
     """
     obj = _json_object(line)
     if obj is None:
@@ -326,6 +329,8 @@ class DiskUse:
     realm_home_bytes: int
     realm_home_partial: bool
     container_bytes: int | None
+    image_bytes: int | None = None
+    base_image_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -489,7 +494,13 @@ def _disk(value: object) -> DiskUse | None:
     if not isinstance(home, int) or not isinstance(partial, bool):
         raise CliProtocolError("disk lacks realm_home_bytes or realm_home_partial")
     container = _opt_int(value, "container_bytes")
-    return DiskUse(realm_home_bytes=home, realm_home_partial=partial, container_bytes=container)
+    return DiskUse(
+        realm_home_bytes=home,
+        realm_home_partial=partial,
+        container_bytes=container,
+        image_bytes=_opt_int(value, "image_bytes"),
+        base_image_bytes=_opt_int(value, "base_image_bytes"),
+    )
 
 
 def realm_view(obj: Mapping[str, object]) -> RealmView:

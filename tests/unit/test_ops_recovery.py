@@ -57,8 +57,9 @@ from ginn.ops.recovery import (
 from ginn.ops.security_ops import agent_state_path, read_agent_record
 from ginn.packages.aur import query_argv
 from ginn.packages.manager import MAX_OUTPUT_CHARS
-from ginn.podman.adapter import ExecTarget
+from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.runtime.provision import LABEL_BASE_DIGEST, LABEL_PROVISION
 from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM
 from ginn.security import agent
 from ginn.security._proc import Proc
@@ -72,6 +73,7 @@ from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore, write_json_atomic
 from ginn.store.scratch import SCRATCH_PREFIX
 from tests.fakes.clock import FakeClock
+from tests.fakes.fake_podman import FakePodman
 
 DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
 
@@ -147,7 +149,10 @@ class _Podman:
         self.execs.append((container_id, tuple(argv), user))
         return ExecResult(self.exec_exit, self.listing, "")
 
-    def inspect(self, container_id: str) -> ContainerInfo:
+    def image_by_digest(self, digest: str) -> Any:
+        return None
+
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
         if self.inspect_fails or self.container is None:
             raise make("GINN-E-INTERNAL")
         return _info(container_id, self.container)
@@ -156,6 +161,10 @@ class _Podman:
         if self.ps_fails:
             raise make("GINN-E-INTERNAL")
         return [] if self.container is None else [_info(CID, self.container)]
+
+    def images_by_name(self, prefix: str) -> dict[str, Any]:
+        """No derived image is held, so the sweep after a rebuild finds nothing to remove."""
+        return {}
 
     def stop(self, container_id: str, timeout_s: int) -> None:
         self.stops.append(container_id)
@@ -2017,7 +2026,10 @@ class _Generations:
             if all(labels.get(key) == value for key, value in wanted.items())
         ]
 
-    def inspect(self, container_id: str) -> ContainerInfo:
+    def image_by_digest(self, digest: str) -> Any:
+        return None
+
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
         if container_id not in self.labels:
             raise make("GINN-E-INTERNAL")
         return _info(container_id, self.states[container_id])
@@ -2031,6 +2043,10 @@ class _Generations:
         self.removed.append(container_id)
         del self.labels[container_id]
         del self.states[container_id]
+
+    def images_by_name(self, prefix: str) -> dict[str, Any]:
+        """No derived image is held, so the sweep after a rebuild finds nothing to remove."""
+        return {}
 
 
 def _labelled(realm: str, generation: int) -> dict[str, str]:
@@ -2378,3 +2394,275 @@ def test_an_interrupted_install_with_its_container_stopped_leaves_the_manifest_a
     assert (
         "the container is not running, so the Install Manifest is left as it is" in outcome.reason
     )
+
+
+ARCH_REF = "docker.io/library/archlinux@sha256:" + "ab" * 32
+"""The pinned base of the arch realm in the fake (FR-011). Its manifest digest is ARCH_SHA."""
+ARCH_SHA = "sha256:" + "ab" * 32
+
+
+def _leftover_image(fake: FakePodman, name: str, base: str | None) -> str:
+    """A derived image named `name`, committed from a probe container of the base and labelled as
+    the stage labels it (ADR-015 Decision 13). The probe is removed, so the image has no user.
+    Return the image ID."""
+    changes = [] if base is None else [f"LABEL {LABEL_BASE_DIGEST}={base}"]
+    probe_name = f"ginn-probe-{len(fake.images)}"
+    probe = fake.create(CreateSpec(name=probe_name, image_digest_ref=ARCH_REF, network="host"))
+    image = fake.commit(probe, name, changes=changes)
+    fake.rm(probe, force=True)
+    return image
+
+
+def _provisioning(fake: FakePodman, realm: str, generation: int) -> tuple[str, str, str, str]:
+    """The leftovers of one interrupted stage, as ADR-015 Decisions 2f and 2h leave them: the
+    provisioning container, the stage image committed from it, the reset container created from the
+    stage, and the derived image committed from the reset. Return those four IDs, in that order."""
+    labels = {LABEL_PROVISION: f"{realm}:{generation}"}
+    provision = fake.create(
+        CreateSpec(
+            name=f"ginn_provision_{realm}_g{generation}",
+            image_digest_ref=ARCH_REF,
+            network="host",
+            labels=labels,
+        )
+    )
+    stage = fake.commit(
+        provision,
+        f"localhost/ginn-init-{realm}:g{generation}-stage",
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={ARCH_SHA}"],
+    )
+    reset = fake.create(
+        CreateSpec(
+            name=f"ginn_provision_{realm}_g{generation}_reset",
+            image_digest_ref=ARCH_REF,
+            image_id=stage,
+            network="host",
+            labels=labels,
+        )
+    )
+    derived = fake.commit(
+        reset,
+        f"localhost/ginn-init-{realm}:g{generation}",
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={ARCH_SHA}"],
+    )
+    return provision, reset, stage, derived
+
+
+def _realm_root(fake: FakePodman, generation: int, image_id: str) -> str:
+    """A realm root of `generation`, created from the derived image `image_id` (ADR-015 D7)."""
+    return fake.create(
+        CreateSpec(
+            name=f"ginn-arch-g{generation}",
+            image_digest_ref=ARCH_REF,
+            image_id=image_id,
+            network="host",
+            labels={LABEL_REALM: "arch", LABEL_GENERATION: str(generation)},
+        )
+    )
+
+
+def _image_ids(fake: FakePodman) -> set[str]:
+    return {image.id for image in fake.images.values()}
+
+
+@pytest.mark.fr("FR-122")
+def test_an_interrupted_create_removes_its_provisioning_leftovers_by_id_and_is_marked_broken(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman()
+    _save(paths, _record(state=RealmState.CREATING, container_id=None))
+    other_provision, other_reset, other_stage, other_derived = _provisioning(fake, "other", 1)
+    provision, reset, stage, derived = _provisioning(fake, "arch", 1)
+    _write_journal(paths, _dead(op="create", step="image-committed", params={"generation": 1}))
+    fake.calls.clear()
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_BROKEN
+    assert _state(paths) is RealmState.BROKEN
+    assert provision not in fake.containers and reset not in fake.containers
+    assert stage not in _image_ids(fake) and derived not in _image_ids(fake)
+    removed = [c.args[0] for c in fake.calls if c.op == "rmi"]
+    assert sorted(removed) == sorted([stage, derived])  # by ID, never by name
+    assert other_provision in fake.containers and other_reset in fake.containers
+    assert {other_stage, other_derived} <= _image_ids(fake)
+
+
+@pytest.mark.fr("FR-122")
+def test_a_create_sweep_never_removes_the_image_its_record_keeps(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman()
+    kept = _leftover_image(fake, "localhost/ginn-init-arch:g1", ARCH_SHA)
+    leftover = _leftover_image(fake, "localhost/ginn-init-arch:g2", ARCH_SHA)
+    _save(paths, replace(_record(state=RealmState.BROKEN, container_id=None), init_image_id=kept))
+    _write_journal(paths, _dead(op="create", step="pulled"))
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_BROKEN
+    assert kept in _image_ids(fake)
+    assert leftover not in _image_ids(fake)
+
+
+@pytest.mark.fr("FR-122")
+def test_an_interrupted_rebuild_keeps_the_image_its_record_names_and_removes_its_building_image(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman()
+    current = _leftover_image(fake, "localhost/ginn-init-arch:g1", ARCH_SHA)
+    root = _realm_root(fake, 1, current)
+    provision, reset, stage, building = _provisioning(fake, "arch", 2)
+    orphan = _realm_root(fake, 2, building)
+    record = replace(
+        _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED, container_id=root),
+        init_image_id=current,
+        building_init_image_id=building,
+    )
+    _save(paths, record)
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="started", params={"generation": 1, "new_generation": 2}),
+    )
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "DR-034" in outcome.reason
+    assert orphan not in fake.containers and provision not in fake.containers
+    assert reset not in fake.containers
+    assert stage not in _image_ids(fake) and building not in _image_ids(fake)
+    assert current in _image_ids(fake)
+    assert root in fake.containers
+    stored = RealmStore(paths).load(RealmName("arch"))
+    assert stored.state is RealmState.STOPPED
+    assert stored.init_image_id == current
+    assert stored.building_init_image_id is None
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("DR-034")
+def test_a_rebuild_killed_during_its_provisioning_sweeps_the_leftovers_and_keeps_the_recorded_image(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    """A kill between the provisioning containers and the commit: the stage image and the reset
+    container are leftovers, no building image is recorded, and no orphan root exists yet."""
+    fake = FakePodman()
+    current = _leftover_image(fake, "localhost/ginn-init-arch:g1", ARCH_SHA)
+    root = _realm_root(fake, 1, current)
+    labels = {LABEL_PROVISION: "arch:2"}
+    provision = fake.create(
+        CreateSpec(
+            name="ginn_provision_arch_g2",
+            image_digest_ref=ARCH_REF,
+            network="host",
+            labels=labels,
+        )
+    )
+    stage = fake.commit(
+        provision,
+        "localhost/ginn-init-arch:g2-stage",
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={ARCH_SHA}"],
+    )
+    reset = fake.create(
+        CreateSpec(
+            name="ginn_provision_arch_g2_reset",
+            image_digest_ref=ARCH_REF,
+            image_id=stage,
+            network="host",
+            labels=labels,
+        )
+    )
+    record = replace(
+        _record(state=RealmState.REBUILDING, previous_state=RealmState.STOPPED, container_id=root),
+        init_image_id=current,
+    )
+    _save(paths, record)
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="started", params={"generation": 1, "new_generation": 2}),
+    )
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert provision not in fake.containers and reset not in fake.containers
+    assert stage not in _image_ids(fake)
+    assert current in _image_ids(fake)
+    assert root in fake.containers
+    stored = RealmStore(paths).load(RealmName("arch"))
+    assert stored.state is RealmState.STOPPED
+    assert stored.init_image_id == current
+    assert stored.building_init_image_id is None
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("DR-034")
+def test_a_swapped_rebuild_removes_the_old_derived_image_by_id_after_its_containers(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman()
+    old = _leftover_image(fake, "localhost/ginn-init-arch:g1", ARCH_SHA)
+    new = _leftover_image(fake, "localhost/ginn-init-arch:g2", ARCH_SHA)
+    old_root = _realm_root(fake, 1, old)
+    root = _realm_root(fake, 2, new)
+    record = replace(_record(state=RealmState.STOPPED, container_id=root), generation=2)
+    _save(paths, replace(record, init_image_id=new))
+    _write_journal(
+        paths,
+        _dead(op="rebuild", step="swapping", params={"generation": 1, "new_generation": 2}),
+    )
+    fake.calls.clear()
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert old_root not in fake.containers
+    assert old not in _image_ids(fake)
+    assert new in _image_ids(fake)
+    assert root in fake.containers
+    removed_rm = [i for i, c in enumerate(fake.calls) if c.op == "rm" and c.args[0] == old_root]
+    removed_rmi = [i for i, c in enumerate(fake.calls) if c.op == "rmi" and c.args[0] == old]
+    assert removed_rm and removed_rmi and removed_rm[0] < removed_rmi[0]
+    assert _state(paths) is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-122")
+def test_a_create_whose_leftovers_cannot_be_listed_is_blocked_and_its_journal_kept(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman(fail_ops={"images_by_name": "GINN-E-INTERNAL"})
+    _save(paths, _record(state=RealmState.CREATING, container_id=None))
+    journal = _write_journal(paths, _dead(op="create", step="pulled"))
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_BLOCKED
+    assert "GINN-E-INTERNAL" in outcome.reason
+    assert _state(paths) is RealmState.CREATING
+    assert journal.exists()
+
+
+@pytest.mark.fr("FR-122")
+def test_a_swapped_rebuild_whose_image_sweep_fails_is_settled_with_the_failure_named(
+    paths: OwnedPaths, env: OpEnv
+) -> None:
+    fake = FakePodman(fail_ops={"images_by_name": "GINN-E-INTERNAL"})
+    old = _leftover_image(fake, "localhost/ginn-init-arch:g1", ARCH_SHA)
+    new = _leftover_image(fake, "localhost/ginn-init-arch:g2", ARCH_SHA)
+    _realm_root(fake, 1, old)
+    root = _realm_root(fake, 2, new)
+    record = replace(_record(state=RealmState.STOPPED, container_id=root), generation=2)
+    _save(paths, replace(record, init_image_id=new))
+    journal = _write_journal(
+        paths,
+        _dead(op="rebuild", step="swapping", params={"generation": 1, "new_generation": 2}),
+    )
+
+    outcome = _only(recover(env, fake))
+
+    assert outcome.outcome == OUTCOME_RECOVERED
+    assert "derived images not swept (GINN-E-INTERNAL)" in outcome.reason
+    assert old in _image_ids(fake)
+    assert new in _image_ids(fake)  # the keep set holds even when the sweep cannot run
+    assert not journal.exists()

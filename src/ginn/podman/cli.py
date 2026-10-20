@@ -63,6 +63,7 @@ from ginn.runtime import exec_relay
 from ginn.store.paths import OwnedPaths, check_runtime_dir
 
 _IN_USE_PATTERNS: Final = (re.compile(r"image is in use by a container", re.IGNORECASE),)
+_IMAGE_GONE_PATTERNS: Final = (re.compile(r"image not known|no such image", re.IGNORECASE),)
 _PATH_NOT_FOUND_PATTERNS: Final = (re.compile(r"could not be found on container", re.IGNORECASE),)
 """podman's wording when a `cp` path is absent in the container (F3): `"<path>" could not be found
 on container <name>: no such file or directory`."""
@@ -72,6 +73,9 @@ _DIGEST_PATTERNS: Final = (
     re.compile(r"image not known", re.IGNORECASE),
 )
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_IMAGE_ID_TEXT: Final = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
+_DIFF_KINDS: Final = frozenset({"A", "C", "D"})
+_CONTROL_CHARS: Final = frozenset("\0\n\r")
 _CDI_PATTERNS: Final = (re.compile(r"unresolvable CDI devices", re.IGNORECASE),)
 _NETWORK_EXIT: Final = 125
 STDERR_TAIL_BYTES: Final = 65536
@@ -330,6 +334,27 @@ def _first(op: str, obj: object) -> Mapping[str, object]:
     if not items:
         raise _internal(f"{op}: empty result")
     return items[0]
+
+
+def _image_id_output(op: str, stdout: str) -> str:
+    """Return the image ID that podman printed, as 64 lowercase hex digits.
+
+    The ID is the last line of the output, because commit may print progress before it. A
+    `sha256:` prefix on that line is dropped, so every ID ginn holds has the bare form.
+    """
+    lines = stdout.strip().splitlines()
+    match = _IMAGE_ID_TEXT.fullmatch(lines[-1].strip()) if lines else None
+    if match is None:
+        raise _internal(f"{op}: podman printed no image id")
+    return match.group(1)
+
+
+def _check_change(change: str) -> str:
+    """A `--change` is one argv word, which a line break or NUL would split (NFR-SEC-005)."""
+    require_arg(change, "commit change")
+    if _CONTROL_CHARS & set(change):
+        raise ValueError(f"NFR-SEC-005: a commit change holds a control character: {change!r}")
+    return change
 
 
 class PodmanCli:
@@ -631,6 +656,41 @@ class PodmanCli:
         self._expect("image inspect", result)
         return ImageInfo.from_inspect(_first("image inspect", self._json("image inspect", result)))
 
+    def image_id(self, ref: str) -> str:
+        result = self._run(["image", "inspect", "--format", "{{.Id}}", require_arg(ref, "image")])
+        self._expect("image inspect", result)
+        return _image_id_output("image inspect", result.stdout)
+
+    def image_by_digest(self, digest: str) -> ImageInfo | None:
+        require_arg(digest, "digest")
+        result = self._run(["images", "--digests", "--format", "{{.ID}} {{.Digest}}"])
+        self._expect("images", result)
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == digest:
+                return self.image_inspect(parts[0])
+        return None
+
+    def images_by_name(self, prefix: str) -> dict[str, ImageInfo]:
+        if not prefix:
+            raise ValueError("images_by_name needs a name prefix: an empty one matches every image")
+        # The listing gives names only. Each match is then inspected, for its labels. A name with
+        # no tag is skipped: podman prints it as `<none>`, and it names no image to inspect. A name
+        # that another delete removed after the listing is skipped too: podman no longer knows it.
+        result = self._run(["images", "--format", "{{.Repository}}:{{.Tag}}"])
+        self._expect("images", result)
+        found: dict[str, ImageInfo] = {}
+        for line in result.stdout.splitlines():
+            name = line.strip()
+            if not name.startswith(prefix) or name.endswith(":<none>"):
+                continue
+            try:
+                found[name] = self.image_inspect(name)
+            except GinnError as err:
+                if not _matches(_IMAGE_GONE_PATTERNS, str(err.details.get("stderr", ""))):
+                    raise
+        return found
+
     def rmi(self, ref: str) -> None:
         result = self._run(["rmi", require_arg(ref, "image")])
         self._expect("rmi", result)
@@ -657,8 +717,9 @@ class PodmanCli:
         args = ["rm", *(["--force"] if force else []), require_arg(container_id, "container")]
         self._expect("rm", self._run(args))
 
-    def inspect(self, container_id: str) -> ContainerInfo:
-        args = ["container", "inspect", "--format", "json", require_arg(container_id, "container")]
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
+        args = ["container", "inspect", *(["--size"] if size else [])]
+        args += ["--format", "json", require_arg(container_id, "container")]
         result = self._run(args)
         self._expect("container inspect", result)
         obj = _first("container inspect", self._json("container inspect", result))
@@ -672,6 +733,29 @@ class PodmanCli:
         self._expect("ps", result)
         items = _objects("ps", self._json("ps", result))
         return [ContainerInfo.from_ps(item) for item in items]
+
+    def commit(self, container_id: str, image_name: str, *, changes: Sequence[str] = ()) -> str:
+        # Each change is its own argv word after its own --change, so none is read as an option.
+        args = ["commit", "--pause=false"]
+        for change in changes:
+            args += ["--change", _check_change(change)]
+        args += [require_arg(container_id, "container"), require_arg(image_name, "image")]
+        result = self._run(args)
+        self._expect("commit", result)
+        return _image_id_output("commit", result.stdout)
+
+    def diff(self, container_id: str) -> list[tuple[str, str]]:
+        result = self._run(["diff", require_arg(container_id, "container")])
+        self._expect("diff", result)
+        rows: list[tuple[str, str]] = []
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            kind, _, path = line.partition(" ")
+            if kind not in _DIFF_KINDS or not path:
+                raise _internal(f"diff: unexpected row {line!r}")
+            rows.append((kind, path))
+        return rows
 
     def exec(
         self,

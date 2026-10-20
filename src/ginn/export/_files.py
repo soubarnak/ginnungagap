@@ -24,7 +24,14 @@ def write_file_atomic(path: Path, data: bytes, mode: int) -> None:
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     renamed = False
     try:
-        with os.fdopen(fd, "wb") as sink:
+        try:
+            sink = os.fdopen(fd, "wb")
+        except BaseException:
+            # A file object owns the descriptor only once fdopen returns, so a failure here
+            # leaves it open unless it is closed now. The staged file is removed below.
+            os.close(fd)
+            raise
+        with sink:
             sink.write(data)
             sink.flush()
             os.fchmod(sink.fileno(), mode)

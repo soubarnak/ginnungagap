@@ -57,6 +57,14 @@ GINN-E-REALM-STATE (exit 4). An unknown name raises GINN-E-NO-SUCH-REALM before 
 A container that podman does not list is not running. A podman error while listing or inspecting a
 container is not read as "not running": it propagates, and nothing is written.
 
+Native package changes (FR-044, FR-045, ADR-016). Each start that reaches `running` installs the
+realm's package-manager hook once per container and starts `ginn-watch` on the Realm Home's stamp
+directory (`_arm_export_watch`, export/watch.py). A touch of the stamp, which the hook makes after
+every transaction, runs `ginn _sync <realm>` on the host. The watcher ends with the container's
+init, so a stop needs no code. Every failure is a GINN-W-EXPORT-SYNC warning and the start stands.
+Services-on realms take the same path: the supervised start (`ginn _service-run`) arms it. A running
+realm that is already started gets the hooks at its next start.
+
 Idempotence. Start of a realm that podman runs already returns the record and writes nothing. It
 keeps `restart_required` as stored, so the caller can report a pending restart (FR-066; M6 sets
 the flag). Stop of a stopped record asks podman: when the container runs, `podman stop` runs and
@@ -95,9 +103,14 @@ AC-1), `unavailable` with its error code when runit does not answer, and None fo
   answer, or when podman reports its own "unknown" state: ginn cannot compare that one.
 - disk: `realm_home_bytes` is the allocated size of the Realm Home (FR-020), and
   `realm_home_partial` is true when the walk stopped early. The walk does not cross a file system
-  boundary, and it does not follow links. `container_bytes` is null: the CLI adapter never asks
-  podman for a size (no `--size`), so the container layer size is a gap. The walk is
-  `LifecycleHooks.tree_usage`, which T8.2 may replace.
+  boundary, and it does not follow links. The walk is `LifecycleHooks.tree_usage`, which T8.2 may
+  replace. `container_bytes`, `image_bytes` and `base_image_bytes` are the storage figures of
+  NFR-008: the container's writable layer (`SizeRw`), the realm's derived image, and the pinned
+  base that the derived image's `io.ginn.base-digest` label names (ADR-015 Decision 10). They are
+  filled only when `realm_status` is called with `sizes=True` (`ginn status REALM`), because podman
+  walks the container layer for `--size`. `list` leaves them null, and so does `status` without
+  `--sizes`. Each is null when podman cannot
+  tell it; a failed podman call never raises.
 - exported_apps: null until export/ exists (M5).
 - error: null for a readable record. A corrupt or unreadable record keeps its name, and `error`
   holds the catalogue code and the reason; every other value is null.
@@ -109,6 +122,7 @@ The grants of a start follow the record's tier and Custom permissions (FR-061..0
 """
 
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -116,12 +130,15 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState, transition
 from ginn.domain.permissions import effective_toggles
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_realm
 from ginn.export.sync import _scan_host as _host_entries
+from ginn.export.watch import WatchHooks, ensure_hooks, unsynced
+from ginn.export.watch import arm as arm_export_watch
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.security_ops import (
     leave_agent,
@@ -132,6 +149,7 @@ from ginn.ops.security_ops import (
 )
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.runtime._enter_plan import exec_user
 from ginn.runtime.attach import (
     MOUNTINFO,
     AttachResult,
@@ -144,6 +162,7 @@ from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.idle import IdleHooks, idle_stopped
 from ginn.runtime.idle import arm as arm_idle_watcher
 from ginn.runtime.mounts import AttachPlan, Exists, attach_plan, runtime_dir
+from ginn.runtime.provision import LABEL_BASE_DIGEST
 from ginn.runtime.realm_security import (
     SecurityHooks,
     agent_enabled,
@@ -292,6 +311,9 @@ class HostUser:
     uid: int
     host_home: Path
     host_env: Mapping[str, str] = field(default_factory=dict)
+    gid: int | None = None
+    """The primary group, for an exec `--user uid:gid` (keep-id keeps the host ids). None means the
+    uid alone, which a caller that does not exec in the realm leaves unset."""
 
 
 @dataclass(frozen=True)
@@ -323,6 +345,9 @@ class LifecycleHooks:
     idle: IdleHooks = field(default_factory=IdleHooks)
     """The idle watcher of a services-off realm: the helper, its grace and how it is started
     (FR-018, runtime/idle.py)."""
+    watch: WatchHooks = field(default_factory=WatchHooks)
+    """The native-transaction watcher: ginn-watch, the ginn command it runs, and how it is started
+    (FR-044, FR-045, export/watch.py)."""
     rebuild: "RebuildHooks | None" = None
     """The seams of the rebuild that a start runs when its record needs a new container (FR-066).
     None is the rebuild's own defaults."""
@@ -330,17 +355,21 @@ class LifecycleHooks:
 
 @dataclass(frozen=True)
 class DiskUsage:
-    """The disk use of one realm. `container_bytes` is None until podman reports a size."""
+    """The disk use of one realm. The podman figures are None until podman reports them."""
 
     realm_home_bytes: int
     realm_home_partial: bool
     container_bytes: int | None
+    image_bytes: int | None = None
+    base_image_bytes: int | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
             "realm_home_bytes": self.realm_home_bytes,
             "realm_home_partial": self.realm_home_partial,
             "container_bytes": self.container_bytes,
+            "image_bytes": self.image_bytes,
+            "base_image_bytes": self.base_image_bytes,
         }
 
 
@@ -415,6 +444,13 @@ def render_status_text(status: RealmStatus) -> str:
     if status.disk is not None:
         partial = " (partial)" if status.disk.realm_home_partial else ""
         lines.append(f"disk: realm home {status.disk.realm_home_bytes} bytes{partial}")
+        for label, value in (
+            ("container", status.disk.container_bytes),
+            ("image", status.disk.image_bytes),
+            ("base image", status.disk.base_image_bytes),
+        ):
+            if value is not None:
+                lines.append(f"disk: {label} {value} bytes")
     lines.extend(status.share_skipped or [])
     if status.restart_required:
         lines.append("restart required")
@@ -470,22 +506,59 @@ def pending_rebuild_notice(record: RealmRecord, reason: str) -> GinnWarning | No
     return warn("GINN-W-REBUILD-PENDING", realm=record.name.value, change=reason)
 
 
+def _options_stale(record: RealmRecord) -> bool:
+    """True when a create-time option, or a GPU or fonts grant, differs from the container's.
+
+    The options are compared the way `created_options` names them (security/caps.py `option_keys`).
+    """
+    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
+    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
+    return wanted != record.created_options or not record.create_grants_match(toggles)
+
+
 def stale_container(record: RealmRecord) -> bool:
     """True when the record asks for a create-time state that its container was not made with.
 
     A create-time option (a device, a security option or a group, ADR-006), a GPU or fonts grant and
     the services mode are fixed at `podman create`. A tier, permission or services change that
     needs them is recorded in the settings at once, and it is applied by a rebuild at the next
-    start (FR-066, FR-083). This is the test for that rebuild. The options are compared the way
-    `created_options` names them (security/caps.py `option_keys`).
+    start (FR-066, FR-083). This is the test for that rebuild.
     """
-    toggles = effective_toggles(record.settings.tier, record.permissions.toggles)
-    wanted = option_keys(toggles, kvm_present=record.kvm_at_create)
-    return (
-        wanted != record.created_options
-        or not record.create_grants_match(toggles)
-        or record.settings.services != record.services_at_create
-    )
+    return _options_stale(record) or record.settings.services != record.services_at_create
+
+
+def stale_services_only(record: RealmRecord) -> bool:
+    """True when `stale_container` is true only through the services mode (ADR-015 Decision 7).
+
+    Such a change keeps the tier, the permissions and the create-time options. A realm with a
+    derived image is then rebuilt from that image (`reuse`), and it is not provisioned again.
+    """
+    return record.settings.services != record.services_at_create and not _options_stale(record)
+
+
+def check_derived_image(podman: Podman, name: RealmName, cid: str, expected: str | None) -> None:
+    """Refuse to start a container that was not made from the derived image its record names.
+
+    `expected` is the record's `init_image_id`, or the `building_init_image_id` of a rebuild that
+    starts its container. None means that the realm has no derived image, so nothing is checked
+    (ADR-015 Decision 9). Podman fixes a container's image at create, so the container's `image_id`
+    is the image it runs from, and it must be the recorded ID. A mismatch is GINN-E-IMAGE-DERIVED,
+    and the container is left stopped. Nothing is written here.
+    """
+    if expected is None:
+        return
+    actual = podman.inspect(cid).image_id
+    if actual != expected:
+        err = make(
+            "GINN-E-IMAGE-DERIVED",
+            realm=name.value,
+            detail=f"the container runs image {actual or 'none'}, not the recorded {expected}",
+        )
+        err.remedy = (
+            f"run 'ginn rebuild {name.value}', which provisions the realm's derived image again "
+            "from its current pin"
+        )
+        raise err
 
 
 def _rebuild_stale(
@@ -526,7 +599,13 @@ def _rebuild_stale(
     rebuild_hooks = RebuildHooks() if hooks.rebuild is None else hooks.rebuild
     try:
         return rebuild_for_start(
-            env, podman, record.name, session=user, hooks=rebuild_hooks, warnings=warnings
+            env,
+            podman,
+            record.name,
+            session=user,
+            hooks=rebuild_hooks,
+            warnings=warnings,
+            services_only=stale_services_only(record),
         )
     except GinnError as err:
         if err.code == "GINN-E-INTERRUPTED":
@@ -763,6 +842,11 @@ def start_realm(
         generation = current.generation
         current = _rebuild_stale(env, podman, current, user, hooks, notices)
         rebuilt = current.generation != generation
+    if current.container_id is not None:
+        # Before the sv call, and before any journal entry, so a container that is not the recorded
+        # derived image is refused with nothing written. A services-on start would otherwise
+        # show the mismatch as a supervisor restart loop (ADR-015 Decision 9).
+        check_derived_image(podman, name, current.container_id, current.init_image_id)
     if current.services_at_create and not supervised:
         refuse_before_supervisor(
             env, name, _SUPERVISED_START_FROM, "start", shown_text="stopped or failed"
@@ -783,6 +867,7 @@ def start_realm(
         record = _start(env, podman, name, user, hooks, mutation)
         if not record.services_at_create:
             _arm_idle(env, podman, record, hooks, mutation)
+        _arm_export_watch(env, podman, record, user, hooks, mutation)
     if record.services_at_create:
         # The supervised start has recorded running; its attach ran in the leaf (direct route).
         _sync_relay_noted(env, podman, notices)
@@ -1037,6 +1122,53 @@ def _arm_idle(
         mutation.warnings.append(notice)
 
 
+def _arm_export_watch(
+    env: OpEnv,
+    podman: Podman,
+    record: RealmRecord,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    mutation: Mutation,
+) -> None:
+    """Install the realm's package-manager hook and start its watcher (FR-044, FR-045, ADR-016).
+
+    The hook is written once per container (export/watch.py `ensure_hooks`), and the watcher ends
+    with the container's init. Like the idle arm, an adapter without `global_argv` (a test fake)
+    arms nothing. A failed step is a GINN-W-EXPORT-SYNC warning, and it never fails the start. A
+    watcher is not started when the hook could not be installed, because nothing would touch the
+    stamp. The arm runs under the realm lock, which the start holds, so the record has one writer.
+    """
+    if not hooks.watch.enabled or not callable(getattr(podman, "global_argv", None)):
+        return
+    if record.container_id is None:
+        return
+    cid = record.container_id
+    name = record.settings.name
+    try:
+        distro = load_distro(record.settings.distro.value)
+        notice = ensure_hooks(
+            podman,
+            env.paths,
+            name,
+            distro,
+            container_id=cid,
+            host_home=str(user.host_home),
+            user=exec_user(user.uid, user.uid if user.gid is None else user.gid, root=False),
+            services=bool(record.services_at_create),
+        )
+        if notice is None and distro.export_hook is not None:
+            notice = arm_export_watch(
+                env.paths,
+                name,
+                init_pid=podman.inspect(cid).pid,
+                hooks=hooks.watch,
+            )
+    except GinnError as err:
+        notice = unsynced(name, _detail(err))
+    if notice is not None:
+        mutation.warnings.append(notice)
+
+
 def _follow_autostart(env: OpEnv, name: RealmName) -> None:
     """Make the realm's `down` file match its autostart flag, under the realm lock (DR-012).
 
@@ -1241,6 +1373,8 @@ def _start(
     cid = record.container_id
     if cid is None:
         raise _internal("the realm has no container to start", realm=name.value)
+    # Before any write: a container that is not the recorded derived image is refused (Decision 9).
+    check_derived_image(podman, name, cid, record.init_image_id)
     record = _resolve_gpg(record, hooks)
     grants = _plan_grants(env, record, user, hooks)
     # Written before the container starts: the identities of the last start are cleared, so a
@@ -1514,17 +1648,54 @@ def _mismatch(state: RealmState, container_state: str | None) -> bool | None:
     return podman_runs != expected_running
 
 
+_DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _positive(value: int | None) -> int | None:
+    """`value`, or None when podman reports no size or zero (an unknown size is not zero bytes)."""
+    return value if value is not None and value > 0 else None
+
+
+def _storage(podman: Podman, record: RealmRecord) -> tuple[int | None, int | None, int | None]:
+    """The container layer, derived image and pinned base sizes, as NFR-008 counts them.
+
+    The container is inspected with `--size` (its `SizeRw`). Its image ID gives the derived image,
+    and the derived image's `io.ginn.base-digest` label gives the base. Any figure that podman
+    cannot give is None, and a failed podman call never raises.
+    """
+    cid = record.container_id
+    if cid is None:
+        return None, None, None
+    try:
+        info = podman.inspect(cid, size=True)
+    except GinnError:
+        return None, None, None
+    image_bytes = base_bytes = None
+    try:
+        if info.image_id:
+            derived = podman.image_inspect(info.image_id)
+            image_bytes = _positive(derived.size)
+            digest = derived.labels.get(LABEL_BASE_DIGEST, "")
+            base = podman.image_by_digest(digest) if _DIGEST.fullmatch(digest) else None
+            base_bytes = None if base is None else _positive(base.size)
+    except (GinnError, ValueError):
+        pass
+    return _positive(info.size_rw), image_bytes, base_bytes
+
+
 def _disk(
-    env: OpEnv, record: RealmRecord, info: ContainerInfo | None, hooks: LifecycleHooks
+    env: OpEnv, record: RealmRecord, hooks: LifecycleHooks, storage: Podman | None
 ) -> DiskUsage:
-    """The Realm Home's allocated bytes and the container's size, when podman reports one."""
+    """The Realm Home's allocated bytes and, when `storage` is given, podman's figures (NFR-008)."""
     home = env.paths.homes / record.name.value
     if os.path.lexists(home):
         home_bytes, partial = hooks.tree_usage(home)
     else:
         home_bytes, partial = 0, False
-    container_bytes = None if info is None else info.size_rw
-    return DiskUsage(home_bytes, partial, container_bytes)
+    container_bytes, image_bytes, base_bytes = (
+        (None, None, None) if storage is None else _storage(storage, record)
+    )
+    return DiskUsage(home_bytes, partial, container_bytes, image_bytes, base_bytes)
 
 
 def _exported_apps(env: OpEnv, name: RealmName) -> int | None:
@@ -1558,9 +1729,12 @@ def _describe(
     hooks: LifecycleHooks,
     *,
     disk: bool,
+    storage: Podman | None = None,
 ) -> RealmStatus:
     """The status of one readable record. Nothing is written (FR-020)."""
-    container_state, info = _container_state(record, probed)
+    container_state, _ = _container_state(record, probed)
+    if container_state in (_UNAVAILABLE, _ABSENT):
+        storage = None  # no container to size: podman cannot answer, or lists none
     idle = _idle_stopped_status(env, record, container_state)
     return RealmStatus(
         name=record.name.value,
@@ -1579,7 +1753,7 @@ def _describe(
         updated_at=utc_iso(record.updated_at),
         restart_required=record.restart_required or stale_container(record),
         share_skipped=list(record.share_skipped),
-        disk=_disk(env, record, info, hooks) if disk else None,
+        disk=_disk(env, record, hooks, storage) if disk else None,
         exported_apps=_exported_apps(env, record.name),
     )
 
@@ -1617,8 +1791,12 @@ def realm_status(
     *,
     hooks: LifecycleHooks | None = None,
     disk: bool = True,
+    sizes: bool = False,
 ) -> RealmStatus:
     """The status of realm `name`. Read-only: no lock, no journal, no audit (FR-020).
+
+    `sizes` adds podman's storage figures to `disk` (NFR-008). It costs a `--size` inspect, so only
+    `ginn status REALM --sizes` sets it.
 
     A missing realm raises GINN-E-NO-SUCH-REALM. A corrupt or unreadable record raises
     GINN-E-INTERNAL; `list_realms` reports it as an entry instead.
@@ -1626,7 +1804,7 @@ def realm_status(
     hooks = LifecycleHooks() if hooks is None else hooks
     record = _load(RealmStore(env.paths, env.clock), name)
     probed = _probe(podman, {LABEL_REALM: name.value}) if _probed(record) else None
-    return _describe(env, record, probed, hooks, disk=disk)
+    return _describe(env, record, probed, hooks, disk=disk, storage=podman if sizes else None)
 
 
 def list_realms(

@@ -48,6 +48,49 @@ refresh_before = []
 # Not verified until M4: pacman(8) documents no exit statuses for -D.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015 (orchestrator decision Q2): the init set is empty, because the Arch image already ships
+# systemd (S-11). Arch still provisions, for the Integration Package Set and the commit.
+services_packages = []
+services_estimated_installed_bytes = 0
+# ADR-015 Decision 11: the Integration Package Set is already in the image, so its installed bytes
+# are 0 (S-11).
+integration_estimated_installed_bytes = 0
+# ADR-015 Decision 11 (T7.33): the bytes that the clean removes from the provisioning layer, the
+# pacman package cache (apparent bytes, podman 5.8.8, 2026-10-16). S-11 measured 2,606,348. The
+# refresh (a full upgrade, ADR-015 Open question 12) leaves about 31 MB more in the stage layer: the
+# sync databases and any upgraded files, which the trace does not separate.
+package_cache_peak_bytes = 5560284
+# ADR-015 Decision 11: the writable layer of one services-off container from the derived image,
+# after an htop install (S-11, the reuse term of the disk check, FR-121).
+writable_layer_bytes = 676834
+# ADR-015 Decision 11 (T7.33): the allocated bytes of the pinned base layer (the pulled layer)
+# and of the stage layer (the provisioning commit), measured on podman 5.8.8 on ext4 with 4 KiB
+# blocks on 2026-10-16. One run. The stage is not 0 with an empty init set: the refresh's
+# sync databases stay in it, so a pin that upgrades more packages needs a larger value. A pin
+# rotation (ADR-005) re-measures both.
+base_layer_allocated_bytes = 434233344
+stage_layer_allocated_bytes = 35004416
+
+[export_hook]
+# ADR-016 (FR-044, FR-045, NFR-009): a pacman hook that runs after any transaction which adds,
+# changes or removes a .desktop file under /usr/share/applications, whoever runs pacman. It touches
+# the stamp file in the Realm Home, which the host watches.  The hook never makes the directory: the host
+# does (a root-made one would be owned by a subordinate id). If it is gone, touch fails and pacman
+# only warns. A failed hook is a warning in pacman and
+# never fails the transaction. Not verified on a host: that pacman runs the hook in the pinned image.
+path = "/etc/pacman.d/hooks/ginn-export.hook"
+text = """[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Path
+Target = usr/share/applications/*.desktop
+
+[Action]
+Description = Telling the ginn host that the application menu changed
+When = PostTransaction
+Exec = /usr/bin/touch {stamp}
+"""
 
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
@@ -104,3 +147,10 @@ list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 resolve = ["pacman", "--sync", "--print", "--print-format", "%n", "{packages}"]
 # --info is -Si: repository info, including Download Size and Installed Size. Changes nothing.
 estimate = ["pacman", "--sync", "--info", "{packages}"]
+# ADR-015 Decision 3: empties the package cache and keeps the directory. The sync databases in
+# /var/lib/pacman/sync stay, because install needs them (ADR-011). find is bounded to the cache
+# directory, inside the provisioning container, so it is not a search of the host. The argv is not
+# pacman --sync --clean --clean --noconfirm, because --noconfirm answers that prompt with N and the
+# cache stays (S-11). Untested: this argv has not run on a host, and whether find is in the arch base
+# image is open (ADR-015 Open question 11).
+clean = [["find", "/var/cache/pacman/pkg", "-mindepth", "1", "-delete"]]

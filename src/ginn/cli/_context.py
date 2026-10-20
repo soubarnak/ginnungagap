@@ -25,13 +25,14 @@ from __future__ import annotations
 import os
 import pwd
 import sys
-from collections.abc import Callable
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
 from ginn.cli.output import Output
 from ginn.errors import GinnError, make, warn
+from ginn.export.watch import WatchHooks
 from ginn.integrity.fingerprint import HOST_ROOT
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks
@@ -153,7 +154,7 @@ def account_name() -> str:
 
 def host_user() -> HostUser:
     """The host user: uid, home, and the environment that the session allowlist reads (FR-048)."""
-    return HostUser(uid=os.getuid(), host_home=Path.home(), host_env=os.environ)
+    return HostUser(uid=os.getuid(), host_home=Path.home(), host_env=os.environ, gid=os.getgid())
 
 
 def podman(paths: OwnedPaths, output: Output) -> PodmanCli:
@@ -174,15 +175,31 @@ _paths: OwnedPaths | None = None
 `lifecycle_hooks()` finds the ginn command of a rebuild without a `paths` argument."""
 
 
-def _step_reporter(output: Output | None, operation: str) -> Callable[[str], None] | None:
+class _StepReport:
+    """The progress lines of one operation: one per finished journal step (FR-107).
+
+    A step's detail, such as the figures of the `space-checked` step (FR-121), reaches `detail`
+    before the step is reported. The line of that step then carries the detail's keys.
+    """
+
+    def __init__(self, output: Output, operation: str) -> None:
+        self._output = output
+        self._operation = operation
+        self._details: dict[str, Mapping[str, object]] = {}
+
+    def detail(self, step: str, detail: Mapping[str, object]) -> None:
+        self._details[step] = dict(detail)
+
+    def __call__(self, step: str) -> None:
+        detail = self._details.pop(step, None)
+        self._output.progress(step, f"{self._operation}: step {step} done", detail)
+
+
+def _step_reporter(output: Output | None, operation: str) -> _StepReport | None:
     """The on_step hook of an operation: one progress line per finished journal step (FR-107)."""
     if output is None:
         return None
-
-    def report(step: str) -> None:
-        output.progress(step, f"{operation}: step {step} done")
-
-    return report
+    return _StepReport(output, operation)
 
 
 def create_hooks(
@@ -197,19 +214,30 @@ def create_hooks(
     `operation` names the operation in each line: an estimate passes "estimate" (FR-107).
     """
     s = seams()
+    report = _step_reporter(output or _output, operation)
     return CreateHooks(
         helper=s.helper,
         integrate=s.integrate,
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(paths),
-        on_step=_step_reporter(output or _output, operation),
+        on_step=report,
+        on_step_detail=None if report is None else report.detail,
     )
 
 
-def _base_lifecycle(s: Seams) -> LifecycleHooks:
-    """The lifecycle seams of the host seams, without a rebuild. A rebuild gets the same ones."""
-    return LifecycleHooks(helper=s.helper, exists=s.exists, mountinfo=s.mountinfo)
+def _base_lifecycle(s: Seams, paths: OwnedPaths | None) -> LifecycleHooks:
+    """The lifecycle seams of the host seams, without a rebuild. A rebuild gets the same ones.
+
+    The export watcher runs the absolute ginn command (`ginn_program`), so a rebuilt realm that
+    restarts gets its watcher as a start does (ADR-016).
+    """
+    return LifecycleHooks(
+        helper=s.helper,
+        exists=s.exists,
+        mountinfo=s.mountinfo,
+        watch=WatchHooks(program=ginn_program(paths)),
+    )
 
 
 def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None) -> RebuildHooks:
@@ -222,13 +250,15 @@ def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None)
     journal step gives one progress line (FR-107), to `output` or else the Output of `realms()`.
     """
     s = seams()
+    report = _step_reporter(output or _output, "rebuild")
     return RebuildHooks(
         helper=s.helper,
         exists=s.exists,
         mountinfo=s.mountinfo,
         program=ginn_program(_paths if paths is None else paths),
-        on_step=_step_reporter(output or _output, "rebuild"),
-        lifecycle=_base_lifecycle(s),
+        on_step=report,
+        on_step_detail=None if report is None else report.detail,
+        lifecycle=_base_lifecycle(s, _paths if paths is None else paths),
     )
 
 
@@ -238,7 +268,9 @@ def lifecycle_hooks(paths: OwnedPaths | None = None) -> LifecycleHooks:
     `paths` is the lookup of the ginn command for the rebuild (`rebuild_hooks`), and None takes the
     paths that `realms()` was given. The rebuild reads the same helper and probes as the start.
     """
-    return replace(_base_lifecycle(seams()), rebuild=rebuild_hooks(paths))
+    return replace(
+        _base_lifecycle(seams(), _paths if paths is None else paths), rebuild=rebuild_hooks(paths)
+    )
 
 
 def service_hooks() -> ServiceHooks:

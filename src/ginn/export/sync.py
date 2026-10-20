@@ -70,6 +70,7 @@ from ginn.export.desktop import (
     render_export,
 )
 from ginn.export.icons import IconError, IconIndex, copy_icon, resolve_icon
+from ginn.export.watch import WatchHooks, rearm
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
@@ -106,9 +107,14 @@ _STATE_VERSION: Final = 1
 
 @dataclass(frozen=True)
 class SyncHooks:
-    """The seams of sync. `program` is the ginn command that an exported launcher runs."""
+    """The seams of sync. `program` is the ginn command that an exported launcher runs.
+
+    `watch` is the export watcher's seams (ADR-016). `sync_realm`, the `ginn _sync` command, keeps
+    the watcher on the realm's stamp directory with it (`rearm`); None leaves the watcher alone.
+    """
 
     program: str = "ginn"
+    watch: WatchHooks | None = None
 
 
 @dataclass
@@ -168,7 +174,16 @@ def sync_realm(
 ) -> SyncResult:
     """Sync the host menu with realm `name` under the realm lock (mutating operation `sync`)."""
     with mutating(env, "sync", name) as mutation:
-        result = sync_in_lock(env, podman, name, mutation=mutation, hooks=hooks)
+        try:
+            result = sync_in_lock(env, podman, name, mutation=mutation, hooks=hooks)
+        finally:
+            # Also when the body raises: the watcher that ran this sync is about to exit (ADR-016).
+            # Under the lock, so two syncs never re-arm at once. rearm raises nothing, so an
+            # exception of the body is the one the caller sees.
+            if hooks is not None and hooks.watch is not None:
+                notice = rearm(env.paths, name, hooks=hooks.watch)
+                if notice is not None:
+                    mutation.warnings.append(notice)
     result.warnings.extend(mutation.warnings)
     return result
 

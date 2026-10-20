@@ -218,11 +218,16 @@ def _refuse_estimate(args: argparse.Namespace, distro: str) -> None:
 
 def _estimate_text(result: EverythingEstimate) -> str:
     size = result.size
+    parts = (
+        f"base {human_bytes(result.base_required_bytes)}, then the set "
+        f"{human_bytes(result.everything_required_bytes)}"
+    )
     return "\n".join(
         [
             f"{result.distro} everything: {size.packages} packages, download "
             f"{human_bytes(size.download_bytes)}, installed {human_bytes(size.installed_bytes)}",
-            f"required free space: {human_bytes(result.required_bytes)} (estimate x 1.10)",
+            f"required free space: {human_bytes(result.required_bytes)} (estimate x 1.10; "
+            f"services off; {parts})",
             "estimate only: no realm was made, and nothing was installed",
         ]
     )
@@ -236,6 +241,7 @@ def _text(result: CreateResult) -> str:
         lines.append(f"note: {result.locale_note}")
     if result.gpu_note is not None:
         lines.append(f"note: {result.gpu_note}")
+    lines.extend(f"note: {note}" for note in result.notes)
     if result.estimate is not None:
         estimate = result.estimate
         lines.append(
@@ -312,6 +318,9 @@ def _report_estimate(result: EverythingEstimate, ctx: Context) -> int:
         "download_bytes": size.download_bytes,
         "installed_bytes": size.installed_bytes,
         "required_bytes": result.required_bytes,
+        "base_required_bytes": result.base_required_bytes,
+        "everything_required_bytes": result.everything_required_bytes,
+        "services": False,
     }
     ctx.output.emit(payload, render=lambda: _estimate_text(result))
     return 0
@@ -364,6 +373,7 @@ def _report(result: CreateResult, realms: _context.Realms, ctx: Context) -> int:
         "resumed": result.resumed,
         "locale_note": result.locale_note,
         "gpu_note": result.gpu_note,
+        "notes": list(result.notes),
         "everything": None
         if estimate is None
         else {

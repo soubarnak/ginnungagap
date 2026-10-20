@@ -77,12 +77,33 @@ from ginn.ops.delete import delete_realm
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm, stop_realm
 from ginn.ops.packages import PackageHooks, install_packages, remove_packages
 from ginn.ops.permissions import set_permissions, set_tier
+from ginn.ops.provision import (
+    STEP_IMAGE_COMMITTED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_PROVISION_CREATED,
+    STEP_PROVISION_REMOVED,
+    STEP_RESET_CREATED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_COMMITTED,
+    STEP_STAGE_REMOVED,
+)
 from ginn.ops.recovery import OUTCOME_BROKEN, OUTCOME_FINISHED, OUTCOME_RECOVERED, recover
 from ginn.ops.resume import resume_create
 from ginn.ops.service import set_services_mode
 from ginn.ops.update import update_realm
 from ginn.podman.adapter import CreateSpec
 from ginn.podman.models import ContainerState, ExecResult
+from ginn.runtime.provision import (
+    LABEL_BASE_DIGEST,
+    LABEL_PROVISION,
+    derived_image_name,
+    derived_image_prefix,
+    provision_name,
+    provision_name_prefix,
+    reset_name,
+    stage_image_name,
+)
 from ginn.runtime.spec import LABEL_DISTRO, LABEL_GENERATION, LABEL_REALM
 from ginn.security import nvidia
 from ginn.security.caps import NESTED_DEVICES
@@ -435,6 +456,175 @@ def _generation_is(bed: Bed, generation: int) -> list[str]:
     return [f"the generation reads {record.generation}, expected {generation}"]
 
 
+BASE_SHA: Final = DIGEST.partition("@")[2]
+"""The pinned base's manifest digest. A derived image of the fake labels it as its base."""
+_FAULT_VARIANTS: Final = ("stopped", "running")
+"""The rebuild variants whose REBUILD_STEPS points test_ops_rebuild_faults already runs."""
+
+
+def _derived_image(fake: Any, name: str) -> str:
+    """A derived image named `name`, committed from a probe container of the pinned base, labelled
+    as the stage labels it (ADR-015 Decision 13). The probe is removed, so the image has no user."""
+    probe = fake.create(
+        CreateSpec(name=f"ginn-probe-{len(fake.images)}", image_digest_ref=DIGEST, network="host")
+    )
+    image = fake.commit(probe, name, changes=[f"LABEL {LABEL_BASE_DIGEST}={BASE_SHA}"])
+    fake.rm(probe, force=True)
+    return image
+
+
+def _stage_leftovers(fake: Any, name: RealmName, generation: int) -> None:
+    """The leftovers of an interrupted stage of `generation`, as ADR-015 Decisions 2f and 2h leave
+    them: the provisioning container, the stage image committed from it, the reset container created
+    from the stage, and the derived image committed from the reset."""
+    labels = {LABEL_PROVISION: f"{name.value}:{generation}"}
+    provision = fake.create(
+        CreateSpec(
+            name=provision_name(name, generation),
+            image_digest_ref=DIGEST,
+            network="host",
+            labels=labels,
+        )
+    )
+    stage = fake.commit(
+        provision,
+        stage_image_name(name, generation),
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={BASE_SHA}"],
+    )
+    reset = fake.create(
+        CreateSpec(
+            name=reset_name(name, generation),
+            image_digest_ref=DIGEST,
+            image_id=stage,
+            network="host",
+            labels=labels,
+        )
+    )
+    fake.commit(
+        reset,
+        derived_image_name(name, generation),
+        changes=[f"LABEL {LABEL_BASE_DIGEST}={BASE_SHA}"],
+    )
+
+
+def _run_from_derived(fake: Any, store: RealmStore, name: RealmName, init: str) -> None:
+    """Record `init` as the realm's derived image, and make its container from that image.
+
+    A realm with an init image always runs from it (ADR-015 Decisions 7 and 9), so the container
+    that `_seed` or the rebuild fixture made from the pinned base is made again from `init`, with
+    the same name and labels, and the record names the new container.
+    """
+    record = store.load(name)
+    assert record.container_id is not None
+    seeded = fake.inspect(record.container_id)
+    fake.rm(record.container_id, force=True)
+    cid = fake.create(
+        CreateSpec(
+            name=seeded.name,
+            image_digest_ref=DIGEST,
+            image_id=init,
+            network="host",
+            labels=seeded.labels,
+        )
+    )
+    store.save(replace(record, container_id=cid, init_image_id=init))
+
+
+def _seed_init_leftovers(world: World, name: RealmName) -> None:
+    """A stored stopped realm that records its init image, with the leftovers of an interrupted
+    stage of its next generation in podman. The delete must sweep the leftovers and the image it
+    does not keep (ADR-015 Decision 13)."""
+    if DIGEST not in world.fake.images:
+        world.fake.pull(DIGEST)  # the pinned base, which the delete removes last (FR-019 AC-1)
+    init = _derived_image(world.fake, derived_image_name(name, 1))
+    _stage_leftovers(world.fake, name, 2)
+    _run_from_derived(world.fake, RealmStore(world.paths), name, init)
+    world.fake.calls.clear()
+
+
+def _leftovers(bed: Bed, record: RealmRecord | None, *, in_use_ok: bool) -> list[str]:
+    """No provisioning container of the realm stays, and every derived image of the realm is the one
+    that the record names: `init_image_id`, or none when there is no record (ADR-015 Decisions 10
+    and 13, FR-122).
+
+    `in_use_ok` allows a derived image that a container still uses. A broken create keeps the
+    container it made from its derived image, and podman does not remove an image in use, so
+    recovery leaves that image and its note says so. A finished resume or delete allows none.
+    """
+    fake, name = bed.fake, bed.name
+    problems: list[str] = []
+    prefix = provision_name_prefix(name)
+    left = sorted(c.name for c in fake.ps() if c.name.startswith(prefix))
+    if left:
+        problems.append(f"a provisioning container is left: {left}")
+    expected = None if record is None else record.init_image_id
+    held = {c.image_id for c in fake.ps()} if in_use_ok else set()
+    derived = {info.id for info in fake.images_by_name(derived_image_prefix(name)).values()}
+    stray = sorted(image for image in derived if image != expected and image not in held)
+    if stray:
+        problems.append(
+            f"a derived image of the realm is left that its record does not name: {stray}"
+        )
+    return problems
+
+
+def _gone_swept(bed: Bed) -> list[str]:
+    """`_gone`, and the delete has also swept the realm's provisioning leftovers and derived images
+    and the pinned base, which no other realm uses (FR-019 AC-1, ADR-015 Decision 13)."""
+    problems = [*_gone(bed), *_leftovers(bed, None, in_use_ok=False)]
+    if DIGEST in bed.fake.images:
+        problems.append("the pinned base is left after the delete")
+    return problems
+
+
+def _rebuild_provisioned(tmp: Path, mp: pytest.MonkeyPatch) -> Bed:
+    """A stopped debian realm that records a derived image, so `ginn rebuild` is a `provision` build
+    (ADR-015 Decision 7). The rebuild provisions a new image and retires the recorded one."""
+    bed = _rebuild(tmp, mp, running=False)
+    store = _store(bed)
+    init = _derived_image(bed.fake, derived_image_name(REBUILD_NAME, 1))
+    _run_from_derived(bed.fake, store, REBUILD_NAME, init)
+    bed.fake.calls.clear()
+    bed.done = lambda: [
+        *_generation_is(bed, 2),
+        *_leftovers(bed, store.load(REBUILD_NAME), in_use_ok=False),
+    ]
+    return bed
+
+
+def _killed_services_create(tmp: Path, mp: pytest.MonkeyPatch) -> Bed:
+    """A services-on create killed after its derived image is committed, with its journal entry dead
+    and no recovery run yet. Recovery is the operation under test (FR-122)."""
+    world = _world(tmp, mp)
+    fake = ScriptedPodman(root=str(tmp))
+    bed = _bed(world, CREATE_NAME, fake)
+    bed.marker = None
+    bed.services = True
+    hooks = hooks_for(tmp, [], world.tmp / "mountinfo", program=GINN_PROGRAM)
+    request = create_request(world.home, services=True)
+    with probing(LabelProbe("after journal step image-committed"), fake):
+        with pytest.raises(SimulatedCrash):
+            create_realm(bed.env, fake, request, hooks=hooks)
+    _orphan(bed)
+    fake.calls.clear()
+    bed.run = lambda: recover(bed.env, fake)
+    bed.resume = lambda: resume_create(
+        bed.env,
+        fake,
+        CREATE_NAME,
+        uid=request.uid,
+        gid=request.gid,
+        host_home=request.host_home,
+        host_env=request.host_env,
+        hooks=hooks,
+    )
+    bed.done = lambda: [
+        *_state_is(bed, RealmState.BROKEN),
+        *_leftovers(bed, _store(bed).load(CREATE_NAME), in_use_ok=False),
+    ]
+    return bed
+
+
 def _variants() -> dict[str, tuple[Variant, ...]]:
     """The starting states of each operation type. Each state is a separate sweep."""
     deletes = {"stopped": (RealmState.STOPPED, False), "running": (RealmState.RUNNING, True)}
@@ -713,6 +903,21 @@ def _variants() -> dict[str, tuple[Variant, ...]]:
             ),
         ),
     )
+    variants["delete"] += (
+        Variant(
+            "delete",
+            "init-leftovers",
+            _realm(
+                lambda bed: delete_realm(bed.env, bed.fake, bed.name),
+                state=RealmState.STOPPED,
+                prepare=lambda world: _seed_init_leftovers(world, NAME),
+                done=_gone_swept,
+            ),
+        ),
+    )
+    variants["rebuild"] += (
+        Variant("rebuild", "provision", lambda tmp, mp: _rebuild_provisioned(tmp, mp)),
+    )
     return variants
 
 
@@ -759,6 +964,19 @@ def _agree(record: Any, containers: list[Any]) -> list[str]:
     return []
 
 
+def _started_a_realm(fake: Any) -> bool:
+    """True when podman started a services-on realm's own container (ADR-003).
+
+    A services-on create also starts its provisioning container, which carries no realm label, and
+    that start is allowed (ADR-015 Decision 2). A fake that records the realm starts at the call
+    answers from them, since a removed container leaves no label to read afterwards. Any other fake
+    answers with every start.
+    """
+    if hasattr(fake, "realm_starts"):
+        return bool(fake.realm_starts)
+    return "start" in fake.ops()
+
+
 def _verify(
     op: str,
     bed: Bed,
@@ -770,7 +988,7 @@ def _verify(
     env, fake, name = bed.env, bed.fake, bed.name
     if env.journal.pending():
         problems.append("a journal entry is still pending after recovery")
-    if bed.services and "start" in fake.ops():
+    if bed.services and _started_a_realm(fake):
         problems.append("a services-on realm was started by podman start (ADR-003)")
     if journal_existed and len(outcomes) != 1:
         problems.append(f"recovery reported {len(outcomes)} outcomes for one entry")
@@ -782,6 +1000,10 @@ def _verify(
     state = None if record is None else record.state
     if state not in _allowed(op, killed):
         problems.append(f"after recovery the record reads {state}, from {killed} at the kill")
+    if op != "delete" or record is None:
+        # A killed delete keeps its record `deleting` and leaves the sweep to the next delete
+        # (FR-122), so its leftovers are checked after that delete, in _follow_up.
+        problems.extend(_leftovers(bed, record, in_use_ok=True))
     containers = fake.ps({LABEL_REALM: name.value})
     if record is None:
         if containers:
@@ -842,6 +1064,8 @@ def _follow_up(bed: Bed) -> list[str]:
     try:
         if store.exists(name) and store.load(name).create_pending:
             problems.extend(_second_resume(bed))
+            resumed = store.load(name) if store.exists(name) else None
+            problems.extend(_leftovers(bed, resumed, in_use_ok=False))
         if store.exists(name):
             record = store.load(name)
             state = record.state
@@ -859,6 +1083,9 @@ def _follow_up(bed: Bed) -> list[str]:
             delete_realm(env, fake, name)
         if store.exists(name):
             problems.append("the record is still there after delete")
+        problems.extend(_leftovers(bed, None, in_use_ok=False))
+        if DIGEST in fake.images:
+            problems.append("the pinned base is left after delete")
         if fake.ps({LABEL_REALM: name.value}):
             problems.append("a container of the realm is left after delete")
         if service_dir(env.paths, name).exists():
@@ -957,7 +1184,11 @@ def _sweep(op: str, root: Path) -> tuple[int, list[str]]:
     for number, variant in enumerate(VARIANTS[op]):
         labels = _dry_run(variant, root / f"dry-{number}")
         for k, label in enumerate(labels):
-            if op == "rebuild" and label in {f"after journal step {x}" for x in REBUILD_STEPS}:
+            if (
+                op == "rebuild"
+                and variant.label in _FAULT_VARIANTS
+                and label in {f"after journal step {x}" for x in REBUILD_STEPS}
+            ):
                 continue  # counted from the fault matrix (REBUILD_FAULT_POINTS)
             points += 1
             for problem in _kill_and_check(variant, root / f"{number}-{k}", k, label):
@@ -1049,3 +1280,150 @@ def test_a_real_sigkill_leaves_no_broken_container_running(
 ) -> None:
     problems = _real_point_problems(op, variant_label, point, tmp_path)
     assert not problems, f"SIGKILL at {point!r}: {problems}"
+
+
+PROVISION_STEPS: Final = (
+    STEP_PROVISION_CREATED,
+    STEP_INIT_INSTALLED,
+    STEP_IPS_INSTALLED,
+    STEP_STAGE_COMMITTED,
+    STEP_RESET_CREATED,
+    STEP_IMAGE_COMMITTED,
+    STEP_RESET_REMOVED,
+    STEP_STAGE_REMOVED,
+    STEP_PROVISION_REMOVED,
+)
+"""The journal steps of the provisioning stage of a services-on create (ADR-015 Decision 13)."""
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-080")
+def test_the_services_on_create_has_a_kill_point_at_each_provisioning_step(tmp_path: Path) -> None:
+    """Each provisioning step is a journal write of the create, so a kill before and after it is a
+    point of the sweep (NFR-030). The points come from a dry run of the services-on create."""
+    (variant,) = [v for v in VARIANTS["create"] if v.label == "services-on"]
+    labels = _dry_run(variant, tmp_path / "dry")
+    for step in PROVISION_STEPS:
+        assert f"before journal step {step}" in labels, step
+        assert f"after journal step {step}" in labels, step
+    assert labels.index(f"after journal step {STEP_PROVISION_CREATED}") < labels.index(
+        f"after journal step {STEP_STAGE_COMMITTED}"
+    )
+
+
+def _variant(op: str, label: str) -> Variant:
+    return next(v for v in VARIANTS[op] if v.label == label)
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-019")
+def test_a_delete_killed_after_the_provisioning_sweep_is_finished_by_the_next_delete(
+    tmp_path: Path,
+) -> None:
+    """The kill lands after the last provisioning container is removed and before the first derived
+    image is removed (ADR-015 Decision 13). The record stays deleting, and the next delete sweeps
+    the images and the base."""
+    variant = _variant("delete", "init-leftovers")
+    labels = _dry_run(variant, tmp_path / "dry")
+    k = labels.index("before podman rmi") - 1
+    assert labels[k] == "after podman rm", labels[k]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-019")
+def test_a_delete_killed_between_its_init_image_step_and_its_image_step_is_finished_by_a_rerun(
+    tmp_path: Path,
+) -> None:
+    """The kill lands after the derived images are gone and before the pinned base is removed, so
+    the base is still there. The re-run removes it, and nothing else is left (FR-019 AC-1)."""
+    variant = _variant("delete", "init-leftovers")
+    labels = _dry_run(variant, tmp_path / "dry")
+    k = labels.index("after journal step init-image-removed")
+    assert labels[k + 1] == "before podman rmi", labels[k + 1]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-122")
+def test_a_services_on_create_killed_after_its_image_is_committed_loses_the_image_on_recovery(
+    tmp_path: Path,
+) -> None:
+    """The derived image exists, and the record does not name it yet, so recovery removes it by ID
+    (ADR-015 Decisions 12 and 13). The redo is the resume's, checked after it."""
+    variant = _variant("create", "services-on")
+    labels = _dry_run(variant, tmp_path / "dry")
+    k = labels.index("after journal step image-committed")
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-122")
+def test_a_services_on_create_killed_after_its_realm_container_is_on_the_derived_image_is_redone(
+    tmp_path: Path,
+) -> None:
+    """The kill lands after the realm container is created from the derived image, and before the
+    create records its image. Recovery keeps the image that this container uses, and the resume
+    clears the container and the image and redoes the provisioning (ADR-015 Decision 12)."""
+    variant = _variant("create", "services-on")
+    labels = _dry_run(variant, tmp_path / "dry")
+    after_stage = labels.index("after journal step provision-removed")
+    k = labels.index("after podman create", after_stage)
+    assert labels[k - 1] == "before podman create", labels[k - 1]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-021")
+def test_a_provision_rebuild_killed_after_it_records_its_building_image_is_settled(
+    tmp_path: Path,
+) -> None:
+    """The kill lands after `_mark_building` wrote `building_init_image_id`, before the swap. The
+    record returns to its previous state, the building image and its stage go, and the recorded
+    image stays (ADR-015 Decisions 8 and 13)."""
+    variant = _variant("rebuild", "provision")
+    labels = _dry_run(variant, tmp_path / "dry")
+    created = labels.index("after journal step created")
+    started = labels.index("before journal step started")
+    (k,) = [i for i in range(created, started) if labels[i] == "after record save"]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("DR-034")
+@pytest.mark.fr("FR-021")
+def test_a_provision_rebuild_killed_after_retire_before_its_image_removal_is_settled(
+    tmp_path: Path,
+) -> None:
+    """The kill lands after `_retire` removed gN and before `_retire_images` removes the derived
+    image that the swap no longer keeps (ADR-015 Decision 13)."""
+    variant = _variant("rebuild", "provision")
+    labels = _dry_run(variant, tmp_path / "dry")
+    k = labels.index("before podman rmi", labels.index("after journal step swapping")) - 1
+    assert labels[k] == "after podman rm", labels[k]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"killed at {labels[k]!r}: {problems}"
+
+
+@pytest.mark.fr("NFR-030")
+@pytest.mark.fr("FR-122")
+def test_recovery_killed_inside_its_provisioning_sweep_is_settled_when_it_runs_again(
+    tmp_path: Path,
+) -> None:
+    """Recovery of a services-on create killed after its image is committed. The kill lands on the
+    first podman removal of recovery, which is the sweep of the provisioning containers (ADR-015
+    Decision 13). The next recovery finds the same journal entry and settles it."""
+    variant = Variant("create", "services-on-image-committed", _killed_services_create)
+    labels = _dry_run(variant, tmp_path / "dry")
+    k = next(i for i, label in enumerate(labels) if label.startswith("before podman"))
+    assert labels[k] == "before podman rm", labels[k]
+    problems = _kill_and_check(variant, tmp_path / "kill", k, labels[k])
+    assert not problems, f"recovery killed at {labels[k]!r}: {problems}"

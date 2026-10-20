@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ginn"
-version = "0.1.0.dev0"
+version = "1.0.0"
 description = "Ginnungagap (ginn) is a Void Linux tool that creates isolated per-distribution Realms on rootless Podman and runs their applications as native desktop and terminal applications, without modifying the host."
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["PyGObject>=3.50"]
-dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy"]
+dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy", "pyyaml"]
 
 [project.scripts]
 ginn = "ginn.__main__:main"

@@ -29,13 +29,20 @@ from ginn.store.paths import OwnedPaths
 
 def _configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("realm", metavar="REALM", help="realm to show")
+    parser.add_argument(
+        "--sizes",
+        action="store_true",
+        help="also report the container, image and base image sizes from podman (NFR-008); slow",
+    )
 
 
 def _run(args: argparse.Namespace, ctx: Context) -> int:
     name = RealmName(str(args.realm))
     realms = _context.realms(ctx.output)
     _context.settle_interrupted(realms, ctx.output, read_only=True)
-    status = realm_status(realms.env, realms.podman, name, hooks=_context.lifecycle_hooks())
+    status = realm_status(
+        realms.env, realms.podman, name, hooks=_context.lifecycle_hooks(), sizes=bool(args.sizes)
+    )
     _context.finish(realms, ctx.output)
     _orphan_notices(realms.env.paths, name, ctx.output)
     ctx.output.emit(status.to_json(), render=lambda: status_text(status))

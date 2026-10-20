@@ -140,13 +140,13 @@ reason = "the AUR build is unit-tested on FakePodman and a dependency-graph fake
 id = "FR-044"
 milestone = "M5"
 partial = true
-reason = "the Desktop Entry allowlist, the icon checks, the bounded listings and the sync diff and apply are unit-tested on fakes (T5.4, T5.5, T5.6); the trigger, ginn-watch, is unit-tested on a temporary directory (T5.9): a .desktop create or delete runs the command after a debounced batch, and other names do not. Not proven on a host: the entry appears in a real menu, its launch from there, and the 5 s export (gate 3). Starting and stopping the watcher is M7. Known limit: realm my with app arch-firefox and realm my-arch with app firefox both name ginn-my-arch-firefox.desktop, which FR-044 AC-1 pins; the second realm is refused with a warning, never overwritten. A package transaction runs the menu sync under the same lock (T5.3, ops/packages.py): a successful install or remove syncs once, under the lock, with the absolute ginn path; a sync that lists nothing or cannot save its state is the GINN-W-EXPORT-SYNC warning, an entry whose host write fails is skipped with GINN-W-EXPORT-SKIPPED, and the change stands either way, while a journal write error still fails it; a realm that does not run is skipped silently (tests/unit/test_ops_packages.py, test_cli_packages.py, test_export_sync.py). The listing uses GNU find -printf: gate 3 must check every image (all four distributions) for GNU findutils"
+reason = "the Desktop Entry allowlist, the icon checks, the bounded listings and the sync diff and apply are unit-tested on fakes (T5.4, T5.5, T5.6); the helper ginn-watch is unit-tested on a temporary directory (T5.9): a .desktop create or delete runs the command after a debounced batch, and other names do not. ADR-016 (Proposed, finding F14) wires it: a hook file in the realm (pacman hook, apt 99ginn-export, dnf5 actions line) touches a stamp in the Realm Home, and a host ginn-watch started with the realm runs ginn _sync. The hook files, the arm and the sync are unit-tested on fakes. Not proven on a host: the entry appears in a real menu, its launch from there, each package manager running its hook in the pinned image, and the 5 s export (gate 3, the F14 host gate in tests/integration/test_export_real.py, not run). Fedora needs the user to install libdnf5-plugin-actions (CL-35), so a native dnf install is not exported by default there. Known limit: realm my with app arch-firefox and realm my-arch with app firefox both name ginn-my-arch-firefox.desktop, which FR-044 AC-1 pins; the second realm is refused with a warning, never overwritten. A package transaction runs the menu sync under the same lock (T5.3, ops/packages.py): a successful install or remove syncs once, under the lock, with the absolute ginn path; a sync that lists nothing or cannot save its state is the GINN-W-EXPORT-SYNC warning, an entry whose host write fails is skipped with GINN-W-EXPORT-SKIPPED, and the change stands either way, while a journal write error still fails it; a realm that does not run is skipped silently (tests/unit/test_ops_packages.py, test_cli_packages.py, test_export_sync.py). The listing uses GNU find -printf: gate 3 must check every image (all four distributions) for GNU findutils"
 
 [[deferred]]
 id = "FR-045"
 milestone = "M5"
 partial = true
-reason = "the removal of an entry and its icon copy on the next sync is unit-tested on fakes (T5.6), and a removed desktop file runs the sync trigger (ginn-watch, T5.9, unit-tested on a temporary directory); the removal inside a real realm and the 5 s unexport on a host (gate 3) are not, so this entry waits on the M5 host gate"
+reason = "the removal of an entry and its icon copy on the next sync is unit-tested on fakes (T5.6), and a removed desktop file runs the sync trigger (ginn-watch and the ADR-016 hook files, unit-tested on fakes and a temporary directory); the removal by a native package manager inside a real realm and the 5 s unexport on a host (gate 3, the F14 host gate, not run) are not proven, and on Fedora the native path needs libdnf5-plugin-actions (CL-35), so this entry waits on the M5 host gate"
 
 [[deferred]]
 id = "FR-046"
@@ -311,7 +311,7 @@ reason = "unit tests run for tools/measure; the RSS budget for the helpers needs
 id = "NFR-003"
 milestone = "M7"
 partial = true
-reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). That run predates F6 (machine-id copy and logind mask, CL-28, ADR-007 D8), which is unit-tested and whose host re-gate is pending. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). debian and fedora are refused at create with GINN-E-NO-INIT (F1, F3). The musl leg is not run."
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). Host figures (VmRSS median, 40 MiB budget, services on). Phase B (2026-10-16, code 5622ffc, 10 runs): debian 30.23, fedora 48.68 (FAIL), kali 27.64, arch 31.76 MiB. Run 6 (2026-10-16, code 76fb921, after T7.30 to T7.32, 10 runs on fedora): fedora 24.07 MiB PASS. Run 6 regression (3 runs each): debian 28.07, kali 27.79, arch 31.71 MiB, all PASS. The T7.7 figure of 87.11 MiB for arch (2026-10-14, before F6) is superseded. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). Tables: spikes/results/T7.27-adr015-real.md. The musl leg is not run."
 
 [[deferred]]
 id = "NFR-004"
@@ -328,7 +328,8 @@ reason = "the start time of a stopped realm was measured on a Void host with deb
 [[deferred]]
 id = "NFR-006"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+partial = true
+reason = "the measure script tools/measure/nfr-006-compute-gpu.py (T10.4) is unit-tested with fakes in tests/unit/test_tools_measure.py. No 7-Zip or glmark2 run happened on a host, so the 3% target has no measurement (NOT RUN)"
 
 [[deferred]]
 id = "NFR-007"
@@ -339,13 +340,14 @@ reason = "the create was timed once on a Void host with debian, zero packages an
 [[deferred]]
 id = "NFR-008"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+partial = true
+reason = "partly covered: T7.27 phase B (spikes/results/T7.27-adr015-real.md) measured a new services-on realm on all four distributions after create and at steady state, and each passes the target of official image size plus 200 MiB on podman's accounting (test_nfr008_disk_use_of_a_new_realm_per_distribution). Still open: arch fails an upper bound that counts the base twice, and debian's derived size is smaller than its base, so how a shared base counts is not settled. tools/measure/nfr-008-disk-accounting.py now exists (T10.4, 03a7415; it reads ginn status --sizes) and is unit-tested on fakes, but it has not run on a host. S-10 and S-11 measured the earlier deltas (ADR-015 Decision 11)."
 
 [[deferred]]
 id = "NFR-009"
 milestone = "M5"
 partial = true
-reason = "the sync costs a fixed number of podman calls, counted on 200 entries with a fixed per-call cost (T5.6); the trigger batches a burst into one run and bounds the wait for a steady stream to its max latency (ginn-watch, T5.9); the 5 s bound on installed applications, 20 runs, is host-only and waits for gate 3. That gate must check every image for GNU findutils (find -printf), since the listing needs it"
+reason = "the sync costs a fixed number of podman calls, counted on 200 entries with a fixed per-call cost (T5.6); the trigger batches a burst into one run (quiet 500 ms) and bounds the wait for a steady stream to its max latency of 1500 ms (ginn-watch, T5.9, ADR-016), unit-tested; the 5 s bound on installed applications, 20 runs, is host-only and waits for gate 3. That gate must check every image for GNU findutils (find -printf), since the listing needs it"
 
 
 [[deferred]]
@@ -399,12 +401,12 @@ reason = "domain, loader and store accept a new distribution definition with no 
 [[deferred]]
 id = "NFR-062"
 milestone = "M10"
-reason = "not covered yet; the Must-FR suite must pass on the glibc and musl CI matrix, an M10 release gate"
+reason = "not covered yet as a proof: no test carries the marker. The CI job test in .github/workflows/ci.yaml runs the unit suite on the Void glibc and musl containers, which is the unit leg of the matrix. The requirement is the full Must-FR suite, and the host-only tests need GINN_INTEGRATION=1 on a Void host. No musl host has run them (S-03 has no result file), so the musl run closes at the M10 gate run (T10.6)"
 
 [[deferred]]
 id = "NFR-063"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+reason = "not covered by a test: no test carries the marker. The CI job provenance in .github/workflows/ci.yaml runs tools/provenance-scan.sh on each push to void and each pull request, against the pinned references (docs/provenance.md). The SRS asks for the scan before each release. tools/release.sh does not run it, so the release check is the CI run of that commit. The release-time proof is owned by M10 (docs/roadmap.md)"
 
 [[deferred]]
 id = "NFR-SEC-001"
@@ -421,7 +423,7 @@ reason = "tests/unit/test_security_caps.py parses docs/capabilities.md and compa
 [[deferred]]
 id = "NFR-SEC-003"
 milestone = "M10"
-reason = "not covered yet; the M10 package job scans the built .xbps for setuid or setgid files (the source scan is AS-003)"
+reason = "the signed tag-driven release workflow (.github/workflows/release.yml, tools/release.sh, T10.6) and tests/unit/test_packaging.py and tests/unit/test_release_workflow.py cover AS-003 (the xbps template, the source tree and the workflow file). NFR-SEC-003 itself is not proven there: nothing scans the built .xbps for setuid or setgid files, and no release has run. The file-mode scan of the built package is M10 work"
 
 [[deferred]]
 id = "NFR-SEC-004"
@@ -450,7 +452,8 @@ reason = "the framing tests show that the agent channel forwards only list and s
 [[deferred]]
 id = "NFR-SEC-008"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+partial = true
+reason = "the host test tests/integration/test_two_user_real.py (T10.5) is written and needs GINN_INTEGRATION=1, a Custom realm and a second host user. It has not run, so the attempt to change the Audit Log from inside a Custom realm is unproven"
 
 [[deferred]]
 id = "NFR-SEC-009"
@@ -461,4 +464,5 @@ reason = "Control Plane to backend same-user channel is the GUI backend (T9.1); 
 [[deferred]]
 id = "NFR-SEC-010"
 milestone = "M10"
-reason = "not covered yet; the roadmap assigns its test to M10"
+partial = true
+reason = "the capture checker tools/net-capture-check.py and its allow-list are unit-tested (tests/unit/test_tools_net_capture.py), and the host gate tests/integration/test_network_allowlist_real.py (T10.5) is written. The gate has not run, so no capture of the full test suite exists"
