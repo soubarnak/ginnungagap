@@ -684,6 +684,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-042 AC-1, DR-007 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-W-MANIFEST-UNVERIFIED",
+        exit_code=0,
+        summary="the Install Manifest of realm '{realm}' could not be checked against the "
+        "installed packages after a failed {op}: {reason}",
+        remedy="run the same install or remove again to reconcile it",
+        source="FR-040, FR-041 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-BIN-NAME-INVALID",
         exit_code=2,
         summary="binary name '{binary}' is not valid",

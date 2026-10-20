@@ -365,9 +365,9 @@ def explicit_manifest(
     is dropped. None when the list cannot be read or is over the caps, and the caller keeps the
     manifest it had. A result equal to `manifest` means nothing changes.
 
-    `keep_existing` (recovery only) records after an install just the names that have no entry yet,
-    so an entry that exists keeps its source and method: recovery cannot tell that the install
-    reached that name.
+    `keep_existing` (recovery and the reconcile after a failed install or remove) records after an
+    install just the names that have no entry yet, so an entry that exists keeps its source and
+    method: neither can tell that the install reached that name.
     """
     try:
         explicit = explicit_packages(

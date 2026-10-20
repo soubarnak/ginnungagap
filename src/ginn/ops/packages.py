@@ -257,14 +257,19 @@ def _reconcile_failed(
     *,
     installed_now: bool,
     clock: float,
+    mutation: Mutation,
+    failure: GinnError,
 ) -> None:
     """After a failed install or remove, make the manifest match what the realm now lists.
 
     A failed transaction can leave some of the requested packages changed (FR-040, FR-041). The
-    explicit-package list tells which. After an install, each requested name the realm lists as
-    explicit is recorded as `ginn`. After a remove, each requested name it no longer lists is
-    dropped. A list that cannot be read, or is over the caps, changes nothing, and the caller
-    re-raises the operation's own error either way.
+    explicit-package list tells which, but a failed transaction is as uncertain per name as an
+    interrupted one, so an entry that exists keeps its source and method (`keep_existing`, as in
+    recovery): an `aur` or `native` entry is never rewritten to `repo`. After an install, each
+    requested name the realm lists as explicit and has no entry is recorded as `ginn`. After a
+    remove, each requested name it no longer lists is dropped. A list that cannot be read, or is
+    over the caps, changes nothing and is the warning GINN-W-MANIFEST-UNVERIFIED, which rides on
+    `failure` as a note because the caller re-raises the operation's own error either way.
     """
     manifest = explicit_manifest(
         podman,
@@ -275,8 +280,19 @@ def _reconcile_failed(
         manifest=current.manifest,
         names=names,
         installed_now=installed_now,
+        keep_existing=True,
     )
-    if manifest is None or manifest == current.manifest:
+    if manifest is None:
+        warning = warn(
+            "GINN-W-MANIFEST-UNVERIFIED",
+            realm=name.value,
+            op=OP_INSTALL if installed_now else OP_REMOVE,
+            reason="the realm's explicit-package list could not be read, or is over the limits",
+        )
+        mutation.warnings.append(warning)
+        failure.add_note(f"{warning.code}: {warning.message}. {warning.remedy}")
+        return
+    if manifest == current.manifest:
         return
     store.save(replace(current, manifest=manifest, updated_at=utc_from_epoch(clock)))
 
@@ -399,7 +415,7 @@ def _install_body(
                 target=target,
                 on_ack=_acked(mutation),
             )
-    except GinnError:
+    except GinnError as failure:
         _reconcile_failed(
             store,
             podman,
@@ -410,6 +426,8 @@ def _install_body(
             names,
             installed_now=True,
             clock=env.clock(),
+            mutation=mutation,
+            failure=failure,
         )
         raise
     mutation.step("installed")
@@ -496,7 +514,7 @@ def _remove_body(
             remove_batch,
             still_present=still_present if len(batches) > 1 else None,
         )
-    except GinnError:
+    except GinnError as failure:
         _reconcile_failed(
             store,
             podman,
@@ -507,6 +525,8 @@ def _remove_body(
             names,
             installed_now=False,
             clock=env.clock(),
+            mutation=mutation,
+            failure=failure,
         )
         raise
     mutation.step("removed")

@@ -288,3 +288,38 @@ def test_remove_of_an_init_entry_exits_four_with_protected_and_runs_no_call(
     assert error["code"] == "GINN-E-PKG-PROTECTED"
     assert error["exit_code"] == 4
     assert world.fake.calls == []
+
+
+def _unreadable_list_install(world: World) -> None:
+    make_realm(world, "deb", RealmState.RUNNING, running=True, distro="debian")
+    world.fake.exec_results[tuple(load("debian").argv(Verb.INSTALL, ["gimp"]))] = ExecResult(
+        100, "", "E: Unable to locate package gimp"
+    )
+    world.fake.exec_results[tuple(load("debian").argv(Verb.LIST_EXPLICIT))] = ExecResult(
+        1, "", "E: could not read the database"
+    )
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-122")
+def test_a_failed_install_with_an_unreadable_list_prints_the_unverified_note(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _unreadable_list_install(world)
+    assert main(["install", "deb", "gimp"]) != 0
+    err_lines = capsys.readouterr().err.splitlines()
+    assert any(line.startswith("  note: GINN-W-MANIFEST-UNVERIFIED") for line in err_lines)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-122")
+def test_a_failed_install_with_an_unreadable_list_carries_the_unverified_note_in_json(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _unreadable_list_install(world)
+    assert main(["--json", "install", "deb", "gimp"]) != 0
+    error = _error(capsys.readouterr().err)
+    assert error["code"] == "GINN-E-PKG-MANAGER"
+    notes = error["notes"]
+    assert isinstance(notes, list)
+    assert any(str(n).startswith("GINN-W-MANIFEST-UNVERIFIED") for n in notes)
