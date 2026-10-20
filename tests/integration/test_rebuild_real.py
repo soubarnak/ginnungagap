@@ -71,7 +71,7 @@ from tests.integration.test_aur_real import AUR_PACKAGE
 from tests.integration.test_export_real import (
     CANCEL_ENV,
     CREATE_TIMEOUT,
-    DESKTOP_APP,
+    DESKTOP_ID,
     DESKTOP_PKG,
     KILL_ENV,
     PREFIX,
@@ -162,6 +162,18 @@ def timed_list(target: Target) -> tuple[Any, float]:
     return listed, time.monotonic() - began
 
 
+def run_ginn_when_idle(target: Target, *args: str, wait_s: float = 60.0) -> Any:
+    """`run_ginn`, retried while a watcher-started `ginn _sync` holds the realm (GINN-E-REALM-BUSY).
+
+    The install hook touches the stamp, and the host watcher then syncs the realm for a moment."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        ran = run_ginn(target, *args)
+        if ran.rc != 75 or time.monotonic() > deadline:
+            return ran
+        time.sleep(1.0)
+
+
 def ensure_running(world: World, name: str) -> None:
     ran = run_ginn(world, "start", name)
     assert ran.rc == 0, ran.error_text()
@@ -179,12 +191,12 @@ def test_rebuild_keeps_home_manifest_and_settings(world: World, rb: str) -> None
     gen = before["generation"]
     notes = world.host.realm_home(rb) / "notes.txt"
     digest = sha(notes)
-    entry = entry_path(world, rb, DESKTOP_APP)
+    entry = entry_path(world, rb, DESKTOP_ID)
     htop_entry = entry_path(world, rb, REPO_PKG)
     entry.unlink(missing_ok=True)
     had_htop = htop_entry.exists()
     htop_entry.unlink(missing_ok=True)
-    ran = run_ginn(world, "rebuild", rb)
+    ran = run_ginn_when_idle(world, "rebuild", rb)
     assert ran.rc == 0, ran.error_text()
     body = ran.body
     assert body["generation"] == gen + 1, body

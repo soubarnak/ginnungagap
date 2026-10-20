@@ -20,9 +20,10 @@ at a chosen journal step (STEP_SEAM) and look at what the next ginn command does
 
 What this file proves, and what it leaves out:
 - FR-044 AC-1 and AC-2, FR-045 AC-1: `ginn install` and `ginn remove` leave the host menu right when
-  they return. The native path (`ginn exec --root -- apt-get ...`) is a separate item. It is a
-  strict xfail (F14) until the ADR-016 hook and watcher are shown to run `ginn _sync` after a native
-  transaction on a host. The code exists and is unit-tested on fakes; this gate has not run.
+  they return. The native path (`ginn exec --root -- apt-get ...`) is a separate item. It is
+  proven on a Debian realm (F14 gate, 2026-10-20): the apt hook and the host watcher run
+  `ginn _sync`
+  after a native transaction. The pacman and dnf5 hooks are not covered by this file.
 - NFR-009: 20 timed `ginn _sync` runs, interpreter start included, each on a removed host entry.
   The 5 s bound is read at the sync, since a package transaction itself is not timed by ginn.
 - Launch prefix (no FR marker): the host entry runs `<ginn> exec <realm> -- <argv>`, and that
@@ -64,7 +65,7 @@ SYNC_RUNS = 20
 EXPORT_REALM = f"{PREFIX}exp"
 EXPORT_REALM_2 = f"{PREFIX}exp2"
 DESKTOP_PKG = "xterm"
-DESKTOP_APP = "xterm"
+DESKTOP_ID = "debian-xterm"  # the desktop file id of the Debian xterm package
 NATIVE_PKG = "rxvt-unicode"
 BIN_PKG = "ripgrep"
 BIN_NAME = "rg"
@@ -243,6 +244,12 @@ def write_launcher(directory: Path, host: Host) -> Path:
         "from ginn.__main__ import main\n"
         "from ginn.cli import _context\n"
         "from ginn.runtime import attach\n"
+        "import ginn.export.watch as _watch\n"
+        "_watch_init = _watch.WatchHooks.__init__\n"
+        "def _watch_hooks(self, *a, **k):\n"
+        f"    k.setdefault('helper', {native + '/ginn-watch'!r})\n"
+        "    _watch_init(self, *a, **k)\n"
+        "_watch.WatchHooks.__init__ = _watch_hooks\n"
         f"HIDDEN = frozenset({hidden_mount_roots()!r})\n"
         "_real_identity = attach.read_identity\n"
         "def _identity(host, **kw):\n"
@@ -349,7 +356,7 @@ def test_install_exports_entry_and_launch_prefix(world: World, exp_realm: str) -
     docstring, so no FR-046 marker is claimed)."""
     ran = run_ginn(world, "install", exp_realm, DESKTOP_PKG)
     assert ran.rc == 0, ran.error_text()
-    entry = entry_path(world, exp_realm, DESKTOP_APP)
+    entry = entry_path(world, exp_realm, DESKTOP_ID)
     assert entry.is_file(), (
         f"no host entry {entry}; menu: {sorted(p.name for p in world.apps_dir.glob('*'))}"
     )
@@ -385,8 +392,8 @@ def test_sync_latency_over_20_runs(world: World, exp_realm: str) -> None:
 
     Each run times the whole process, interpreter start included. Every run is written to the
     gate's results file (GINN_T49_RESULTS) as MEASURED."""
-    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_APP)
-    entry = entry_path(world, exp_realm, DESKTOP_APP)
+    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_ID)
+    entry = entry_path(world, exp_realm, DESKTOP_ID)
     timings: list[float] = []
     facts: dict[str, Any] = {"runs": SYNC_RUNS, "bound_s": ENTRY_WAIT_S}
     with gate_item(world.host.results, "nfr009-sync-20", facts):
@@ -402,23 +409,6 @@ def test_sync_latency_over_20_runs(world: World, exp_realm: str) -> None:
         assert max(timings) <= ENTRY_WAIT_S, f"sync took {max(timings):.2f} s: {timings}"
 
 
-class KnownGapF14(AssertionError):
-    """Raised only at the menu-entry assertion of the native items (the known gap F14)."""
-
-
-XFAIL_WATCH = pytest.mark.xfail(
-    strict=True,
-    raises=KnownGapF14,
-    reason=(
-        "F14: the ADR-016 trigger is not shown on a host (FR-044/045); "
-        "the F14 gate removes this marker"
-    ),
-)
-"""The native-transaction items are expected to fail until the ADR-016 trigger is shown on a host
-(F14 gate). strict: once the gate passes, this marker makes the run fail, and the gate procedure
-removes the marker."""
-
-
 def native_entries(world: World, name: str) -> list[Path]:
     """The host entries rxvt-unicode would get, named from the package's own desktop files.
 
@@ -432,14 +422,13 @@ def native_entries(world: World, name: str) -> list[Path]:
     return [entry_path(world, name, stem) for stem in stems]
 
 
-@XFAIL_WATCH
 @pytest.mark.fr("FR-044")
 @pytest.mark.fr("NFR-009")
 def test_native_install_reaches_the_menu_within_5s(world: World, exp_realm: str) -> None:
     """FR-044 AC-1, native path: `apt-get install` inside the realm, then the entry within 5 s.
 
     Nothing here runs `ginn _sync`. If no ginn trigger runs after a native transaction, this fails
-    with the entry missing, the known finding (strict xfail, see the module docstring)."""
+    with the entry missing (the F14 finding, now closed on a Debian realm)."""
     ran = in_realm(
         world,
         exp_realm,
@@ -453,14 +442,13 @@ def test_native_install_reaches_the_menu_within_5s(world: World, exp_realm: str)
     began = time.monotonic()
     seen = wait_for(lambda: any(e.is_file() for e in expected), ENTRY_WAIT_S)
     if seen is None:
-        raise KnownGapF14(
+        pytest.fail(
             f"no host entry within {ENTRY_WAIT_S:.0f} s of the native install "
             f"({time.monotonic() - began:.1f} s waited); menu: "
             f"{sorted(p.name for p in world.apps_dir.glob('*'))}"
         )
 
 
-@XFAIL_WATCH
 @pytest.mark.fr("FR-045")
 @pytest.mark.fr("NFR-009")
 def test_native_removal_unexports_within_5s(world: World, exp_realm: str) -> None:
@@ -492,14 +480,14 @@ def test_native_removal_unexports_within_5s(world: World, exp_realm: str) -> Non
         ENTRY_WAIT_S,
     )
     if gone is None:
-        raise KnownGapF14(f"entry or icon still present {ENTRY_WAIT_S:.0f} s after the removal")
+        pytest.fail(f"entry or icon still present {ENTRY_WAIT_S:.0f} s after the removal")
 
 
 @pytest.mark.fr("FR-045")
 def test_remove_unexports_entry_and_icon(world: World, exp_realm: str) -> None:
     """FR-045 AC-1 through `ginn remove`: the entry and its copied icon are gone when it returns."""
-    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_APP)
-    entry = entry_path(world, exp_realm, DESKTOP_APP)
+    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_ID)
+    entry = entry_path(world, exp_realm, DESKTOP_ID)
     icon = read_entry(entry).get("Icon", "")
     ran = run_ginn(world, "remove", exp_realm, DESKTOP_PKG)
     assert ran.rc == 0, ran.error_text()
@@ -511,12 +499,12 @@ def test_remove_unexports_entry_and_icon(world: World, exp_realm: str) -> None:
 @pytest.mark.fr("FR-044")
 def test_same_app_in_two_realms_gives_two_entries(world: World, exp_realm: str) -> None:
     """FR-044 AC-2: the same application from two realms is two distinct menu entries."""
-    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_APP)
+    ensure_installed(world, exp_realm, DESKTOP_PKG, DESKTOP_ID)
     with realm(world, "debian", EXPORT_REALM_2) as second:
         ran = run_ginn(world, "install", second, DESKTOP_PKG)
         assert ran.rc == 0, ran.error_text()
-        first_entry = entry_path(world, exp_realm, DESKTOP_APP)
-        second_entry = entry_path(world, second, DESKTOP_APP)
+        first_entry = entry_path(world, exp_realm, DESKTOP_ID)
+        second_entry = entry_path(world, second, DESKTOP_ID)
         assert first_entry.is_file() and second_entry.is_file()
         names = {read_entry(first_entry)["Name"], read_entry(second_entry)["Name"]}
         assert len(names) == 2, names
