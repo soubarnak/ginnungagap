@@ -3678,6 +3678,7 @@ def test_a_services_off_start_installs_the_hook_and_starts_ginn_watch(
             "/usr/bin/ginn",
             "_sync",
             "lab",
+            "--from-watch",
         ]
     ]
     assert [notice.code for notice in notices] == []
@@ -3722,7 +3723,7 @@ def test_the_supervised_start_of_a_services_on_realm_arms_the_same_way(
     assert record.state is RealmState.RUNNING
     assert len(watch_fake.hook_execs) == 2
     assert len(spawns.calls) == 1
-    assert spawns.calls[0][-2:] == ["_sync", "lab"]
+    assert spawns.calls[0][-3:] == ["_sync", "lab", "--from-watch"]
 
 
 @pytest.mark.fr("FR-044")
@@ -3829,7 +3830,7 @@ def test_the_restart_of_a_rebuild_arms_its_watcher_from_its_own_hooks(
     )
 
     assert len(spawns.calls) == 1
-    assert spawns.calls[0][-3:] == ["/usr/bin/ginn", "_sync", "lab"]
+    assert spawns.calls[0][-4:] == ["/usr/bin/ginn", "_sync", "lab", "--from-watch"]
     assert [n.code for n in notices] == []
 
 

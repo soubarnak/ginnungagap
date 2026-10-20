@@ -313,6 +313,26 @@ def test_the_status_of_the_command_is_reported(helper: Path, tmp_path: Path) -> 
 
 
 @pytest.mark.fr("FR-044")
+@pytest.mark.fr("FR-123")
+def test_a_run_that_exits_64_is_not_retried_and_not_counted_as_rapid(
+    helper: Path, tmp_path: Path
+) -> None:
+    """Status 64 is `ginn _sync --from-watch` finding the menu current (ADR-016)."""
+    watched = _watched(tmp_path)
+    script, log = _stub(tmp_path, status=64)
+    proc = _start(helper, watched, [str(script)], quiet=50, maximum=100)
+    lines = _Lines(proc.stdout.fileno())  # type: ignore[union-attr]
+    lines.until("watching ")
+    stamp = watched / "a.desktop"
+    for turn in range(14):  # more than FREE_RUNS runs in a row, 100 ms apart at most
+        stamp.write_text(str(turn), encoding="utf-8")
+        assert lines.until("event ").endswith(" 64")
+    assert lines.next(0.6) is None  # no retry after the last run
+    assert log.read_text(encoding="utf-8").count("\n") == 14  # one run each, no retry
+    _stop(proc)
+
+
+@pytest.mark.fr("FR-044")
 def test_a_command_that_cannot_run_reports_127(helper: Path, tmp_path: Path) -> None:
     watched = _watched(tmp_path)
     proc = _start(helper, watched, ["/nonexistent/ginn-no-such-command"], once=True)

@@ -70,7 +70,7 @@ from ginn.export.desktop import (
     render_export,
 )
 from ginn.export.icons import IconError, IconIndex, copy_icon, resolve_icon
-from ginn.export.watch import WatchHooks, rearm
+from ginn.export.watch import WatchHooks, rearm, stamp_snapshot, write_sync_mark
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
@@ -203,6 +203,8 @@ def sync_in_lock(
     that called the sync stands. A journal write is not a host write, and its OS error propagates.
     """
     hooks = SyncHooks() if hooks is None else hooks
+    # The stamp as it is before the listing: a touch during the sync changes it (ADR-016).
+    snapshot = stamp_snapshot(env.paths, name)
     record = _load_record(env, name)
     result = SyncResult(name.value)
     if record.state is not RealmState.RUNNING or not _runs(podman, record, name):
@@ -219,6 +221,12 @@ def sync_in_lock(
         return result
     mutation.step("listed")
     sync.run(listing)
+    if not sync.failed and not any(n.code == "GINN-W-EXPORT-SYNC" for n in result.warnings):
+        try:
+            # Only a sync that ran through. Best effort: no mark means one more watcher sync.
+            write_sync_mark(env.paths, name, snapshot)
+        except OSError:
+            pass
     _audit_counts(
         mutation,
         added=len(result.added),
@@ -422,6 +430,8 @@ class _Sync:
         self._hosts = _scan_host(paths, realm)
         self._seen = _load_state(paths, realm)
         self._loaded = dict(self._seen)
+        self.failed = False
+        """True once an entry could not be copied out; the next sync must retry it (ADR-016)."""
 
     def run(self, listing: Mapping[str, tuple[int, str]]) -> None:
         for app in sorted(listing):
@@ -467,6 +477,7 @@ class _Sync:
             return
         built = self._build(app, size)
         if isinstance(built, _Fail):
+            self.failed = True
             self._warn_skipped(app, built.reason)
             return
         if isinstance(built, _Skip):

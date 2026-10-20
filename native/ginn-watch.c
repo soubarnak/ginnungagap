@@ -12,8 +12,8 @@
  * watcher ends with the realm's init (ADR-016). After FREE_RUNS successful runs in a row less than
  * RAPID_MS apart (a failed run or retry never counts), runs are spaced further (<max-ms> doubling
  * up to RAPID_MS), so a realm cannot keep ginn busy. A <dir> /proc/self/fd/<n> is an inherited
- * O_PATH descriptor, closed once watched. A removed <dir> gets a run (retried like any) and exit
- * 3. Exit: 0 ok, 1 failure, 2 usage, 3 directory gone.
+ * O_PATH descriptor, closed once watched. A removed <dir> gets a run and exit 3. A run exiting
+ * SKIP (64: nothing to do) is not retried or counted rapid. Exit: 0 ok, 1 failure, 2 usage, 3 gone.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -39,6 +39,7 @@
 #define MAX_PID 4194304L
 #define RAPID_MS 60000L
 #define FREE_RUNS 10
+#define SKIP 64
 
 struct state {
 	long count; /* changes seen so far that matter: .desktop names and queue overflows */
@@ -189,7 +190,7 @@ int main(int argc, char **argv) {
 				floor = rapid > FREE_RUNS ? ran + (max << (rapid - FREE_RUNS)) : 0;
 				if (floor > ran + RAPID_MS) floor = ran + RAPID_MS;
 			}
-			if (status != 0 && !once && tries++ < RETRIES) { /* due again max ms from now */
+			if (status != 0 && status != SKIP && !once && tries++ < RETRIES) { /* due again max ms from now */
 				pending = 1, first = t, last = t + max - quiet;
 			} else if (tries = 0, st.gone) {
 				return fprintf(stderr, "ginn-watch: %s is gone\n", dir), 3;
