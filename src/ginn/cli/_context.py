@@ -32,6 +32,7 @@ from typing import Final
 
 from ginn.cli.output import Output
 from ginn.errors import GinnError, make, warn
+from ginn.export.watch import WatchHooks
 from ginn.integrity.fingerprint import HOST_ROOT
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks
@@ -153,7 +154,7 @@ def account_name() -> str:
 
 def host_user() -> HostUser:
     """The host user: uid, home, and the environment that the session allowlist reads (FR-048)."""
-    return HostUser(uid=os.getuid(), host_home=Path.home(), host_env=os.environ)
+    return HostUser(uid=os.getuid(), host_home=Path.home(), host_env=os.environ, gid=os.getgid())
 
 
 def podman(paths: OwnedPaths, output: Output) -> PodmanCli:
@@ -225,9 +226,18 @@ def create_hooks(
     )
 
 
-def _base_lifecycle(s: Seams) -> LifecycleHooks:
-    """The lifecycle seams of the host seams, without a rebuild. A rebuild gets the same ones."""
-    return LifecycleHooks(helper=s.helper, exists=s.exists, mountinfo=s.mountinfo)
+def _base_lifecycle(s: Seams, paths: OwnedPaths | None) -> LifecycleHooks:
+    """The lifecycle seams of the host seams, without a rebuild. A rebuild gets the same ones.
+
+    The export watcher runs the absolute ginn command (`ginn_program`), so a rebuilt realm that
+    restarts gets its watcher as a start does (ADR-016).
+    """
+    return LifecycleHooks(
+        helper=s.helper,
+        exists=s.exists,
+        mountinfo=s.mountinfo,
+        watch=WatchHooks(program=ginn_program(paths)),
+    )
 
 
 def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None) -> RebuildHooks:
@@ -248,7 +258,7 @@ def rebuild_hooks(paths: OwnedPaths | None = None, output: Output | None = None)
         program=ginn_program(_paths if paths is None else paths),
         on_step=report,
         on_step_detail=None if report is None else report.detail,
-        lifecycle=_base_lifecycle(s),
+        lifecycle=_base_lifecycle(s, _paths if paths is None else paths),
     )
 
 
@@ -258,7 +268,9 @@ def lifecycle_hooks(paths: OwnedPaths | None = None) -> LifecycleHooks:
     `paths` is the lookup of the ginn command for the rebuild (`rebuild_hooks`), and None takes the
     paths that `realms()` was given. The rebuild reads the same helper and probes as the start.
     """
-    return replace(_base_lifecycle(seams()), rebuild=rebuild_hooks(paths))
+    return replace(
+        _base_lifecycle(seams(), _paths if paths is None else paths), rebuild=rebuild_hooks(paths)
+    )
 
 
 def service_hooks() -> ServiceHooks:

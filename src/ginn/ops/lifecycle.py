@@ -57,6 +57,14 @@ GINN-E-REALM-STATE (exit 4). An unknown name raises GINN-E-NO-SUCH-REALM before 
 A container that podman does not list is not running. A podman error while listing or inspecting a
 container is not read as "not running": it propagates, and nothing is written.
 
+Native package changes (FR-044, FR-045, ADR-016). Each start that reaches `running` installs the
+realm's package-manager hook once per container and starts `ginn-watch` on the Realm Home's stamp
+directory (`_arm_export_watch`, export/watch.py). A touch of the stamp, which the hook makes after
+every transaction, runs `ginn _sync <realm>` on the host. The watcher ends with the container's
+init, so a stop needs no code. Every failure is a GINN-W-EXPORT-SYNC warning and the start stands.
+Services-on realms take the same path: the supervised start (`ginn _service-run`) arms it. A running
+realm that is already started gets the hooks at its next start.
+
 Idempotence. Start of a realm that podman runs already returns the record and writes nothing. It
 keeps `restart_required` as stored, so the caller can report a pending restart (FR-066; M6 sets
 the flag). Stop of a stopped record asks podman: when the container runs, `podman stop` runs and
@@ -116,12 +124,15 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState, transition
 from ginn.domain.permissions import effective_toggles
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
 from ginn.export.sync import SyncHooks, sync_realm
 from ginn.export.sync import _scan_host as _host_entries
+from ginn.export.watch import WatchHooks, ensure_hooks, unsynced
+from ginn.export.watch import arm as arm_export_watch
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops.security_ops import (
     leave_agent,
@@ -132,6 +143,7 @@ from ginn.ops.security_ops import (
 )
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerInfo, ContainerState, ExecResult
+from ginn.runtime._enter_plan import exec_user
 from ginn.runtime.attach import (
     MOUNTINFO,
     AttachResult,
@@ -292,6 +304,9 @@ class HostUser:
     uid: int
     host_home: Path
     host_env: Mapping[str, str] = field(default_factory=dict)
+    gid: int | None = None
+    """The primary group, for an exec `--user uid:gid` (keep-id keeps the host ids). None means the
+    uid alone, which a caller that does not exec in the realm leaves unset."""
 
 
 @dataclass(frozen=True)
@@ -323,6 +338,9 @@ class LifecycleHooks:
     idle: IdleHooks = field(default_factory=IdleHooks)
     """The idle watcher of a services-off realm: the helper, its grace and how it is started
     (FR-018, runtime/idle.py)."""
+    watch: WatchHooks = field(default_factory=WatchHooks)
+    """The native-transaction watcher: ginn-watch, the ginn command it runs, and how it is started
+    (FR-044, FR-045, export/watch.py)."""
     rebuild: "RebuildHooks | None" = None
     """The seams of the rebuild that a start runs when its record needs a new container (FR-066).
     None is the rebuild's own defaults."""
@@ -831,6 +849,7 @@ def start_realm(
         record = _start(env, podman, name, user, hooks, mutation)
         if not record.services_at_create:
             _arm_idle(env, podman, record, hooks, mutation)
+        _arm_export_watch(env, podman, record, user, hooks, mutation)
     if record.services_at_create:
         # The supervised start has recorded running; its attach ran in the leaf (direct route).
         _sync_relay_noted(env, podman, notices)
@@ -1081,6 +1100,53 @@ def _arm_idle(
         podman_argv=list(global_argv()),
         hooks=hooks.idle,
     )
+    if notice is not None:
+        mutation.warnings.append(notice)
+
+
+def _arm_export_watch(
+    env: OpEnv,
+    podman: Podman,
+    record: RealmRecord,
+    user: HostUser,
+    hooks: LifecycleHooks,
+    mutation: Mutation,
+) -> None:
+    """Install the realm's package-manager hook and start its watcher (FR-044, FR-045, ADR-016).
+
+    The hook is written once per container (export/watch.py `ensure_hooks`), and the watcher ends
+    with the container's init. Like the idle arm, an adapter without `global_argv` (a test fake)
+    arms nothing. A failed step is a GINN-W-EXPORT-SYNC warning, and it never fails the start. A
+    watcher is not started when the hook could not be installed, because nothing would touch the
+    stamp. The arm runs under the realm lock, which the start holds, so the record has one writer.
+    """
+    if not hooks.watch.enabled or not callable(getattr(podman, "global_argv", None)):
+        return
+    if record.container_id is None:
+        return
+    cid = record.container_id
+    name = record.settings.name
+    try:
+        distro = load_distro(record.settings.distro.value)
+        notice = ensure_hooks(
+            podman,
+            env.paths,
+            name,
+            distro,
+            container_id=cid,
+            host_home=str(user.host_home),
+            user=exec_user(user.uid, user.uid if user.gid is None else user.gid, root=False),
+            services=bool(record.services_at_create),
+        )
+        if notice is None and distro.export_hook is not None:
+            notice = arm_export_watch(
+                env.paths,
+                name,
+                init_pid=podman.inspect(cid).pid,
+                hooks=hooks.watch,
+            )
+    except GinnError as err:
+        notice = unsynced(name, _detail(err))
     if notice is not None:
         mutation.warnings.append(notice)
 

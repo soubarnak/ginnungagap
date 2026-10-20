@@ -59,6 +59,15 @@ writable_layer_bytes = 23454481
 base_layer_allocated_bytes = 87920640
 stage_layer_allocated_bytes = 43008000
 
+[export_hook]
+# ADR-016 (FR-044, FR-045, NFR-009): an apt hook that runs after every dpkg run that apt makes,
+# whoever runs apt. It touches the stamp file in the Realm Home, which the host watches. The
+# `|| true` keeps a failed touch from failing the apt command. A plain `dpkg -i` does not run it.
+# Not verified on a host: that apt reads the file in the pinned image.
+path = "/etc/apt/apt.conf.d/99ginn-export"
+text = """DPkg::Post-Invoke {{ "/usr/bin/touch {stamp} 2>/dev/null || true"; }};
+"""
+
 [integration]
 packages = ["ca-certificates", "locales"]
 steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]

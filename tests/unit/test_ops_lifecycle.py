@@ -28,6 +28,8 @@ from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
+from ginn.export import watch as export_watch
+from ginn.export.watch import WatchHooks
 from ginn.ops import lifecycle
 from ginn.ops import rebuild as rebuild_module
 from ginn.ops._mutating import OpEnv, mutating
@@ -62,6 +64,7 @@ from tests.fakes.clock import FakeClock
 from tests.fakes.fake_podman import FakePodman
 
 UID = 1000
+GID = 1000
 USER = "alice"
 DIGEST = "registry.example/debian@sha256:" + "ab" * 32
 T0 = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
@@ -2595,7 +2598,7 @@ def _with_idle(hooks: LifecycleHooks, tmp_path: Path, spawns: IdleSpawns) -> Lif
         spawn=spawns,
         start_ticks=lambda pid: 500 + pid,
     )
-    return replace(hooks, idle=idle)
+    return replace(hooks, idle=idle, watch=WatchHooks(enabled=False))
 
 
 @pytest.mark.fr("FR-018")
@@ -2654,6 +2657,7 @@ def test_a_missing_helper_warns_and_the_services_off_start_still_succeeds(
     absent = replace(
         hooks,
         idle=IdleHooks(helper=str(tmp_path / "absent" / "ginn-idle"), spawn=spawns),
+        watch=WatchHooks(enabled=False),
     )
     notices: list[GinnWarning] = []
 
@@ -3562,3 +3566,278 @@ def test_a_container_that_stops_during_the_run_user_wait_ends_the_wait_at_once(
     assert warnings == []
     assert "unshare" not in fake.ops()
     assert stored(env, "lab").state is RealmState.STOPPED
+
+
+# ---- native package transactions: hook and watcher (FR-044, FR-045, ADR-016) ------------------
+
+
+class WatchPodman(LifecyclePodman):
+    """The fake plus the effect of the hook install: the realm user's exec makes the stamp
+    directory and the marker in the Realm Home, as the real exec does through the bind."""
+
+    def __init__(self, *, home_of: Callable[[str], Path], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.home_of = home_of
+        self.hook_execs: list[tuple[str, list[str], str | None]] = []
+        self.hook_exit = 0
+
+    def exec(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> ExecResult:
+        if list(argv)[:3] == ["sh", "-c", export_watch._WRITE_HOOK] or (
+            list(argv)[:3] == ["sh", "-c", export_watch._WRITE_STAMP]
+        ):
+            self.hook_execs.append((container_id, list(argv), kwargs.get("user")))
+            if self.hook_exit:
+                return ExecResult(self.hook_exit, "", "")
+            if argv[2] == export_watch._WRITE_STAMP:
+                directory = self.home_of(container_id) / ".local" / "state" / "ginn-export"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / export_watch.STAMP_NAME).write_bytes(b"")
+                (directory / export_watch.MARKER_NAME).write_text(container_id, encoding="utf-8")
+            return ExecResult(0, "", "")
+        return super().exec(container_id, argv, **kwargs)
+
+
+class WatchSpawns:
+    """The spawn seam of ginn-watch: records each argv, starts nothing."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.watched: list[str] = []
+
+    def __call__(self, argv: Any, log: Path, *, pass_fds: Sequence[int] = ()) -> int:
+        self.calls.append(list(argv))
+        # ginn-watch gets its directory as an inherited descriptor, `/proc/self/fd/<n>`.
+        self.watched += [os.readlink(f"/proc/self/fd/{fd}") for fd in pass_fds]
+        return 8888
+
+
+def _with_watch(
+    hooks: LifecycleHooks, tmp_path: Path, spawns: WatchSpawns, *, installed: bool = True
+) -> LifecycleHooks:
+    helper = tmp_path / "ginn-watch"
+    if installed:
+        helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o755)
+    watcher = WatchHooks(
+        helper=str(helper),
+        program="/usr/bin/ginn",
+        spawn=spawns,
+        start_ticks=lambda pid: 500 + pid,
+    )
+    return replace(_with_idle(hooks, tmp_path, IdleSpawns()), watch=watcher)
+
+
+@pytest.fixture
+def watch_fake(env: OpEnv, tmp_path: Path) -> WatchPodman:
+    fake = WatchPodman(root=str(tmp_path), home_of=lambda _cid: env.paths.homes / "lab")
+    fake.global_argv = lambda: list(PODMAN_PREFIX)  # type: ignore[attr-defined]
+    return fake
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("FR-045")
+@pytest.mark.fr("NFR-009")
+def test_a_services_off_start_installs_the_hook_and_starts_ginn_watch(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+    notices: list[GinnWarning] = []
+
+    record = start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_watch(hooks, tmp_path, spawns),
+        warnings=notices,
+    )
+
+    cid = container_id(env, "lab")
+    init = watch_fake.inspect(cid).pid
+    assert record.state is RealmState.RUNNING
+    assert [(c, u) for c, _, u in watch_fake.hook_execs] == [(cid, "0:0"), (cid, f"{UID}:{UID}")]
+    stamp_dir = env.paths.homes / "lab" / ".local" / "state" / "ginn-export"
+    assert spawns.watched == [str(stamp_dir)]
+    fd_path = spawns.calls[0][3]
+    assert fd_path.startswith("/proc/self/fd/")
+    assert spawns.calls == [
+        [
+            str(tmp_path / "ginn-watch"),
+            "--exit-with",
+            str(init),
+            fd_path,
+            "500",
+            "1500",
+            "/usr/bin/ginn",
+            "_sync",
+            "lab",
+        ]
+    ]
+    assert [notice.code for notice in notices] == []
+
+
+@pytest.mark.fr("FR-044")
+@pytest.mark.fr("NFR-004")
+def test_a_second_start_of_the_same_container_installs_nothing_and_starts_a_new_watcher(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+    armed = _with_watch(hooks, tmp_path, spawns)
+    start_realm(env, watch_fake, RealmName("lab"), session=user, hooks=armed)
+    stop_realm(env, watch_fake, RealmName("lab"), hooks=armed)
+    watch_fake.hook_execs.clear()
+
+    start_realm(env, watch_fake, RealmName("lab"), session=user, hooks=armed)
+
+    assert watch_fake.hook_execs == []
+    assert len(spawns.calls) == 2
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-044")
+def test_the_supervised_start_of_a_services_on_realm_arms_the_same_way(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    """Under runit the start runs in the supervisor leaf; the watcher starts there (ADR-016)."""
+    _supervised_realm(env, watch_fake, "lab", state=RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+
+    record = start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_watch(hooks, tmp_path, spawns),
+        supervised=True,
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert len(watch_fake.hook_execs) == 2
+    assert len(spawns.calls) == 1
+    assert spawns.calls[0][-2:] == ["_sync", "lab"]
+
+
+@pytest.mark.fr("FR-044")
+def test_a_missing_ginn_watch_warns_and_the_start_still_succeeds(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+    notices: list[GinnWarning] = []
+
+    record = start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_watch(hooks, tmp_path, spawns, installed=False),
+        warnings=notices,
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert spawns.calls == []
+    assert [notice.code for notice in notices] == ["GINN-W-EXPORT-SYNC"]
+
+
+@pytest.mark.fr("FR-044")
+def test_a_hook_that_cannot_be_installed_warns_and_starts_no_watcher(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    watch_fake.hook_exit = 1
+    spawns = WatchSpawns()
+    notices: list[GinnWarning] = []
+
+    record = start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_watch(hooks, tmp_path, spawns),
+        warnings=notices,
+    )
+
+    assert record.state is RealmState.RUNNING
+    assert spawns.calls == []
+    assert [notice.code for notice in notices] == ["GINN-W-EXPORT-SYNC"]
+
+
+@pytest.mark.fr("FR-044")
+def test_an_adapter_without_global_argv_installs_no_hook(
+    env: OpEnv, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    plain = WatchPodman(root=str(tmp_path), home_of=lambda _cid: env.paths.homes / "lab")
+    make_realm(env, plain, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+
+    start_realm(
+        env,
+        plain,
+        RealmName("lab"),
+        session=user,
+        hooks=_with_watch(hooks, tmp_path, spawns),
+    )
+
+    assert plain.hook_execs == []
+    assert spawns.calls == []
+
+
+@pytest.mark.fr("FR-044")
+def test_the_hook_exec_runs_as_the_realm_users_uid_and_gid(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=replace(user, gid=GID + 7),
+        hooks=_with_watch(hooks, tmp_path, WatchSpawns()),
+    )
+    assert [u for _, _, u in watch_fake.hook_execs] == ["0:0", f"{UID}:{GID + 7}"]
+
+
+@pytest.mark.fr("FR-021")
+@pytest.mark.fr("FR-044")
+def test_the_restart_of_a_rebuild_arms_its_watcher_from_its_own_hooks(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    """A rebuild restarts a running realm through `start_realm` with `RebuildHooks.lifecycle`,
+    which has no rebuild hooks of its own. The watcher still starts: its program is its own
+    `watch.program`, not one borrowed from `hooks.rebuild` (ADR-016)."""
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+    restart = replace(_with_watch(hooks, tmp_path, spawns), rebuild=None)
+    notices: list[GinnWarning] = []
+
+    start_realm(
+        env,
+        watch_fake,
+        RealmName("lab"),
+        session=user,
+        hooks=restart,
+        warnings=notices,
+        rebuild=False,
+    )
+
+    assert len(spawns.calls) == 1
+    assert spawns.calls[0][-3:] == ["/usr/bin/ginn", "_sync", "lab"]
+    assert [n.code for n in notices] == []
+
+
+@pytest.mark.fr("FR-044")
+def test_a_watch_with_no_program_warns_instead_of_borrowing_one(
+    env: OpEnv, watch_fake: WatchPodman, user: HostUser, hooks: LifecycleHooks, tmp_path: Path
+) -> None:
+    make_realm(env, watch_fake, "lab", RealmState.STOPPED, running=False)
+    spawns = WatchSpawns()
+    armed = _with_watch(hooks, tmp_path, spawns)
+    bare = replace(armed, watch=replace(armed.watch, program=None))
+    notices: list[GinnWarning] = []
+
+    start_realm(env, watch_fake, RealmName("lab"), session=user, hooks=bare, warnings=notices)
+
+    assert spawns.calls == []
+    assert [n.code for n in notices] == ["GINN-W-EXPORT-SYNC"]

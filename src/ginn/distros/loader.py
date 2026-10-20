@@ -74,6 +74,15 @@ cannot run the command (`CANNOT_RUN_EXIT`), which say nothing about the database
 `everything` is optional and defaults to an empty list. It names the packages of the everything
 option (FR-014, Kali only), and each one is matched with `package_name_regex`.
 
+`export_hook` is an optional table (ADR-016): the package manager's post-transaction hook that
+signals the host after a native package change, so the host menu follows `pacman -S`, `apt install`
+and `dnf install` run inside the realm (FR-044, FR-045). It holds `path` (the hook file inside the
+realm, absolute) and `text` (the file, with `{stamp}` for the stamp file that the hook touches and
+no other placeholder; the host makes the directory, never the hook). The table names no
+package: the Integration Package Set stays as FR-013 and CR-007 limit it (CL-35). A distribution
+without the table, or whose package manager lacks the needed plugin, gets no signal for native
+transactions; the sync after `ginn install` still runs.
+
 `services_packages` is optional and defaults to an empty list. It is the init set of a services-on
 realm (ADR-015), which the provisioning stage installs. `services_estimated_installed_bytes` is
 optional and defaults to 0. It is the installed size of that set, measured on the pinned image, and
@@ -146,6 +155,7 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
     {
         "check_fatal_warning_regex",
         "missing_package_regex",
+        "export_hook",
         "everything",
         "check_updates_count",
         "check_updates_count_regex",
@@ -249,6 +259,27 @@ class Integration:
     steps: tuple[tuple[str, ...], ...]
 
 
+STAMP_FIELD: Final = "stamp"
+"""The placeholder of an export hook's text for the stamp file the hook touches (ADR-016)."""
+_EXPORT_HOOK_KEYS: Final = frozenset({"path", "text"})
+
+
+@dataclass(frozen=True)
+class ExportHook:
+    """The post-transaction hook of one distribution's package manager (ADR-016).
+
+    `path` is the absolute hook file inside the realm. `text` is the file with `{stamp}` where the
+    stamp path goes.
+    """
+
+    path: str
+    text: str
+
+    def render(self, stamp: str) -> str:
+        """The hook file for the stamp path `stamp`. The path is inserted as text, never parsed."""
+        return _render(self.text, {STAMP_FIELD: stamp})
+
+
 @dataclass(frozen=True)
 class IntegrationSet:
     """The Integration Package Set for one host locale, with placeholders filled in.
@@ -325,6 +356,8 @@ class DistroDef:
     package_cache_peak_bytes: int = 0
     """The bytes that the clean steps remove from the provisioning layer: the `cache_peak` of the
     disk formula (FR-121, ADR-015 Decision 11). Measured in S-11, and on arch in T7.33."""
+    export_hook: ExportHook | None = None
+    """The package manager's post-transaction hook that signals the host (ADR-016), or None."""
     writable_layer_bytes: int = 0
     """The writable layer of one services-off container from the derived image, after an htop
     install, measured in S-11. It is the term of a reuse build's disk check (FR-121, ADR-015
@@ -657,6 +690,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
     everything = _everything(reader, raw.get("everything", []), name_pattern)
     services_packages, services_bytes = _services(reader, raw, name_pattern)
+    export_hook = _export_hook(reader, raw)
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs, check_steps, clean_steps = _verbs(reader, raw["verbs"])
@@ -687,6 +721,7 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         services_packages=services_packages,
         services_estimated_installed_bytes=services_bytes,
         clean_steps=clean_steps,
+        export_hook=export_hook,
         integration_estimated_installed_bytes=_disk_bytes(
             reader, raw, "integration_estimated_installed_bytes"
         ),
@@ -817,6 +852,31 @@ def _services(
     if names and not size:
         raise reader.fail(bytes_field, "must be positive when services_packages is set")
     return names, size
+
+
+def _export_hook(reader: "_Reader", raw: Mapping[str, object]) -> ExportHook | None:
+    """The optional `export_hook` table (ADR-016), or None when the file omits it.
+
+    `path` is absolute, with no `..` and no whitespace. `text` uses `{stamp}` at least once and no
+    placeholder.
+    """
+    if "export_hook" not in raw:
+        return None
+    table = reader.table(raw["export_hook"], "export_hook")
+    _only_keys(reader, table, _EXPORT_HOOK_KEYS, "export_hook")
+    path = reader.text(table["path"], "export_hook.path")
+    posix = PurePosixPath(path)
+    if not posix.is_absolute() or ".." in posix.parts or any(ch.isspace() for ch in path):
+        raise reader.fail("export_hook.path", "must be an absolute path with no '..' or blank")
+    text = reader.text(table["text"], "export_hook.text")
+    try:
+        names = _field_names(text)
+    except ValueError as exc:
+        raise reader.fail("export_hook.text", f"has a bad brace: {exc}") from None
+    if names != frozenset({STAMP_FIELD}):
+        rule = f"must use {{{STAMP_FIELD}}} and no other placeholder"
+        raise reader.fail("export_hook.text", rule)
+    return ExportHook(path=path, text=text)
 
 
 def _disk_bytes(reader: "_Reader", raw: Mapping[str, object], field: str) -> int:

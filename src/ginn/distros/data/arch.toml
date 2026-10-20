@@ -71,6 +71,27 @@ writable_layer_bytes = 676834
 base_layer_allocated_bytes = 434233344
 stage_layer_allocated_bytes = 35004416
 
+[export_hook]
+# ADR-016 (FR-044, FR-045, NFR-009): a pacman hook that runs after any transaction which adds,
+# changes or removes a .desktop file under /usr/share/applications, whoever runs pacman. It touches
+# the stamp file in the Realm Home, which the host watches.  The hook never makes the directory: the host
+# does (a root-made one would be owned by a subordinate id). If it is gone, touch fails and pacman
+# only warns. A failed hook is a warning in pacman and
+# never fails the transaction. Not verified on a host: that pacman runs the hook in the pinned image.
+path = "/etc/pacman.d/hooks/ginn-export.hook"
+text = """[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Path
+Target = usr/share/applications/*.desktop
+
+[Action]
+Description = Telling the ginn host that the application menu changed
+When = PostTransaction
+Exec = /usr/bin/touch {stamp}
+"""
+
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
 # CA-certificates item of FR-013, which every distribution has (ADR-011).

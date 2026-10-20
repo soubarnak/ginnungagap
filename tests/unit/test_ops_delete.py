@@ -1669,6 +1669,25 @@ def test_a_delete_removes_the_realms_idle_watcher_record_and_log(
     assert (directory / "other.json").exists(), "another realm's watcher is not touched"
 
 
+@pytest.mark.fr("FR-019")
+@pytest.mark.fr("FR-044")
+def test_a_delete_removes_the_realms_export_watcher_record_and_log(
+    env: OpEnv, fake: FakePodman
+) -> None:
+    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    directory = env.paths.runtime / "watch"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    (directory / "lab.json").write_text("{}", encoding="utf-8")
+    (directory / "lab.log").write_text("ginn-watch: x\n", encoding="utf-8")
+    (directory / "other.json").write_text("{}", encoding="utf-8")
+
+    delete_realm(env, fake, RealmName("lab"))
+
+    assert not (directory / "lab.json").exists()
+    assert not (directory / "lab.log").exists()
+    assert (directory / "other.json").exists(), "another realm's watcher is not touched"
+
+
 @pytest.mark.fr("FR-122")
 @pytest.mark.fr("FR-014")
 def test_a_killed_estimates_container_of_the_same_distribution_is_removed_before_the_image_check(

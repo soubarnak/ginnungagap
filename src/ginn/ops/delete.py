@@ -115,6 +115,7 @@ from typing import Final
 from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError, make, warn
 from ginn.errors import Warning as GinnWarning
+from ginn.export import watch as export_watch
 from ginn.export.sync import unexport_all
 from ginn.hostsetup.cgroups import DEFAULT_CGROUP_ROOT, SUPERVISOR_LEAF
 from ginn.ops._mutating import Mutation, OpEnv, mutating
@@ -353,6 +354,7 @@ def _delete(
     idle_watch.remove(
         env.paths, name
     )  # the idle watcher's record and log (FR-018, runtime/idle.py)
+    export_watch.remove(env.paths, name)  # the export watcher's record and log (ADR-016)
     _step(mutation, hooks, "service-removed")
 
     unexport_all(env.paths, name)

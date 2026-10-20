@@ -62,6 +62,21 @@ writable_layer_bytes = 117756852
 base_layer_allocated_bytes = 151834624
 stage_layer_allocated_bytes = 35848192
 
+[export_hook]
+# ADR-016, CL-35 (FR-044, FR-045, NFR-009): a dnf5 actions line that runs after every transaction,
+# whoever runs dnf5. It touches the stamp file in the Realm Home,
+# which the host watches. The file is inert unless the realm has libdnf5-plugin-actions. That
+# package is NOT in the Integration Package Set (FR-013, CR-007 limit it), so a native `dnf
+# install` is exported only after the user installs the plugin (`ginn install fedora
+# libdnf5-plugin-actions`). Not verified on a host: that the plugin is installable on
+# fedora-minimal:44, that it is enabled by default, that it reads an actions.d file added before
+# or after its install without a restart, the line's format (dnf5 actions(8):
+# callback:filter:direction:options:command), whether dnf5 runs the command as an argv with no
+# shell (the line holds no quote on purpose) and whether a failed touch fails the transaction.
+path = "/etc/dnf/libdnf5-plugins/actions.d/ginn-export.actions"
+text = """post_transaction::::/usr/bin/touch {stamp}
+"""
+
 [integration]
 packages = ["glibc-langpack-{lang}"]
 steps = []
