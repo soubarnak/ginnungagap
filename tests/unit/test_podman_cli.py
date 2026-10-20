@@ -801,6 +801,39 @@ def test_inspect_parses_the_container_fixture(shim: Path, tmp_path: Path) -> Non
     assert container.image_id == "320994c3b997e2ec6433f717f153e108023c5bec8fefa8d76b83451d16d05ea8"
 
 
+@pytest.mark.fr("NFR-008")
+def test_inspect_asks_for_the_size_only_when_told(shim: Path, tmp_path: Path) -> None:
+    use_cases("container-inspect=container-inspect-alpine")
+    cli = make_cli(tmp_path)
+    cli.inspect(CONTAINER)
+    cli.inspect(CONTAINER, size=True)
+    argvs = [entry["argv"] for entry in logged(shim)]
+    plain, sized = (a[a.index("container") :] for a in argvs)
+    assert plain == ["container", "inspect", "--format", "json", CONTAINER]
+    assert sized == ["container", "inspect", "--size", "--format", "json", CONTAINER]
+
+
+@pytest.mark.fr("NFR-008")
+def test_image_by_digest_lists_digests_then_inspects_the_match(shim: Path, tmp_path: Path) -> None:
+    use_fixture_dir(
+        tmp_path,
+        {
+            "images": {"exit": 0, "stdout": f"aaaaaaaaaaaa sha256:0\nbbbbbbbbbbbb {DIGEST}\n"},
+            "image-inspect": {"exit": 0, "stdout": [{"Id": ALPINE_ID, "Size": 42}]},
+        },
+    )
+    image = make_cli(tmp_path).image_by_digest(DIGEST)
+    assert image is not None and image.size == 42
+    argvs = [entry["argv"] for entry in logged(shim)]
+    assert any(
+        a[a.index("images") :] == ["images", "--digests", "--format", "{{.ID}} {{.Digest}}"]
+        for a in argvs
+        if "images" in a
+    )
+    assert any(a[-1] == "bbbbbbbbbbbb" for a in argvs)
+    assert make_cli(tmp_path).image_by_digest("sha256:" + "9" * 64) is None
+
+
 @pytest.mark.fr("FR-011")
 def test_create_returns_id_and_refuses_privileged_spec(shim: Path, tmp_path: Path) -> None:
     use_cases("create=create-ok")

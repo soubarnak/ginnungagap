@@ -189,8 +189,8 @@ class DetailPage:
     def _finished(self, progress: ProgressModel) -> None:
         # A run that failed or was cancelled may still have changed the realm, so it is read again.
         self.last_progress = progress
-        self.reload()
         self._session.control.refresh_dashboard()
+        self.reload()
 
     def _ask_rebuild(self) -> None:
         confirmation = model.rebuild_confirmation(self._name)
@@ -225,8 +225,8 @@ class DetailPage:
 
     def _deleted(self, progress: ProgressModel) -> None:
         self.last_progress = progress
+        self._session.control.refresh_dashboard()
         if progress.phase is Phase.DONE:
             self._session.pop()
         else:
             self.reload()
-        self._session.control.refresh_dashboard()

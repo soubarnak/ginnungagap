@@ -160,6 +160,8 @@ class FakePodman:
     (PODMAN_ERROR_EXIT), so 255 comes back as a result. Set 125 to model the raising case
     (FR-081, T7.16 section 11.8)."""
     fail_ops: dict[str, str] = field(default_factory=dict)
+    container_size_rw: dict[str, int] = field(default_factory=dict)
+    """The `SizeRw` that `inspect(..., size=True)` reports, by container ID. Zero when unset."""
     pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
     init_absent: bool = False
@@ -244,10 +246,16 @@ class FakePodman:
 
     def image_inspect(self, ref: str) -> ImageInfo:
         self._record("image_inspect", ref)
-        image = self.images.get(ref)
+        self._take_op_failure("image_inspect")
+        image = self._find_image(ref)
         if image is None:
             raise make("GINN-E-INTERNAL")
         return image
+
+    def image_by_digest(self, digest: str) -> ImageInfo | None:
+        self._record("image_by_digest", digest)
+        self._take_op_failure("image_by_digest")
+        return next((image for image in self.images.values() if image.digest == digest), None)
 
     def _find_image(self, ref: str) -> ImageInfo | None:
         """The image that `ref` names, by its name or by its ID, or None when none matches.
@@ -394,10 +402,13 @@ class FakePodman:
             "Labels": dict(container.labels),
         }
 
-    def inspect(self, container_id: str) -> ContainerInfo:
-        self._record("inspect", container_id)
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
+        self._record(*(("inspect", container_id, "--size") if size else ("inspect", container_id)))
         self._take_op_failure("inspect")
-        return ContainerInfo.from_inspect(self._inspect_json(self._container(container_id)))
+        obj = self._inspect_json(self._container(container_id))
+        if size:
+            obj["SizeRw"] = self.container_size_rw.get(container_id, 0)
+        return ContainerInfo.from_inspect(obj)
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
         self._record("ps", tuple(sorted((label_filter or {}).items())))

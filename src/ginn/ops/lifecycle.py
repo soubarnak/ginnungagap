@@ -103,9 +103,14 @@ AC-1), `unavailable` with its error code when runit does not answer, and None fo
   answer, or when podman reports its own "unknown" state: ginn cannot compare that one.
 - disk: `realm_home_bytes` is the allocated size of the Realm Home (FR-020), and
   `realm_home_partial` is true when the walk stopped early. The walk does not cross a file system
-  boundary, and it does not follow links. `container_bytes` is null: the CLI adapter never asks
-  podman for a size (no `--size`), so the container layer size is a gap. The walk is
-  `LifecycleHooks.tree_usage`, which T8.2 may replace.
+  boundary, and it does not follow links. The walk is `LifecycleHooks.tree_usage`, which T8.2 may
+  replace. `container_bytes`, `image_bytes` and `base_image_bytes` are the storage figures of
+  NFR-008: the container's writable layer (`SizeRw`), the realm's derived image, and the pinned
+  base that the derived image's `io.ginn.base-digest` label names (ADR-015 Decision 10). They are
+  filled only when `realm_status` is called with `sizes=True` (`ginn status REALM`), because podman
+  walks the container layer for `--size`. `list` leaves them null, and so does `status` without
+  `--sizes`. Each is null when podman cannot
+  tell it; a failed podman call never raises.
 - exported_apps: null until export/ exists (M5).
 - error: null for a readable record. A corrupt or unreadable record keeps its name, and `error`
   holds the catalogue code and the reason; every other value is null.
@@ -117,6 +122,7 @@ The grants of a start follow the record's tier and Custom permissions (FR-061..0
 """
 
 import os
+import re
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -156,6 +162,7 @@ from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.idle import IdleHooks, idle_stopped
 from ginn.runtime.idle import arm as arm_idle_watcher
 from ginn.runtime.mounts import AttachPlan, Exists, attach_plan, runtime_dir
+from ginn.runtime.provision import LABEL_BASE_DIGEST
 from ginn.runtime.realm_security import (
     SecurityHooks,
     agent_enabled,
@@ -348,17 +355,21 @@ class LifecycleHooks:
 
 @dataclass(frozen=True)
 class DiskUsage:
-    """The disk use of one realm. `container_bytes` is None until podman reports a size."""
+    """The disk use of one realm. The podman figures are None until podman reports them."""
 
     realm_home_bytes: int
     realm_home_partial: bool
     container_bytes: int | None
+    image_bytes: int | None = None
+    base_image_bytes: int | None = None
 
     def to_json(self) -> dict[str, object]:
         return {
             "realm_home_bytes": self.realm_home_bytes,
             "realm_home_partial": self.realm_home_partial,
             "container_bytes": self.container_bytes,
+            "image_bytes": self.image_bytes,
+            "base_image_bytes": self.base_image_bytes,
         }
 
 
@@ -433,6 +444,13 @@ def render_status_text(status: RealmStatus) -> str:
     if status.disk is not None:
         partial = " (partial)" if status.disk.realm_home_partial else ""
         lines.append(f"disk: realm home {status.disk.realm_home_bytes} bytes{partial}")
+        for label, value in (
+            ("container", status.disk.container_bytes),
+            ("image", status.disk.image_bytes),
+            ("base image", status.disk.base_image_bytes),
+        ):
+            if value is not None:
+                lines.append(f"disk: {label} {value} bytes")
     lines.extend(status.share_skipped or [])
     if status.restart_required:
         lines.append("restart required")
@@ -1630,17 +1648,54 @@ def _mismatch(state: RealmState, container_state: str | None) -> bool | None:
     return podman_runs != expected_running
 
 
+_DIGEST: Final = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _positive(value: int | None) -> int | None:
+    """`value`, or None when podman reports no size or zero (an unknown size is not zero bytes)."""
+    return value if value is not None and value > 0 else None
+
+
+def _storage(podman: Podman, record: RealmRecord) -> tuple[int | None, int | None, int | None]:
+    """The container layer, derived image and pinned base sizes, as NFR-008 counts them.
+
+    The container is inspected with `--size` (its `SizeRw`). Its image ID gives the derived image,
+    and the derived image's `io.ginn.base-digest` label gives the base. Any figure that podman
+    cannot give is None, and a failed podman call never raises.
+    """
+    cid = record.container_id
+    if cid is None:
+        return None, None, None
+    try:
+        info = podman.inspect(cid, size=True)
+    except GinnError:
+        return None, None, None
+    image_bytes = base_bytes = None
+    try:
+        if info.image_id:
+            derived = podman.image_inspect(info.image_id)
+            image_bytes = _positive(derived.size)
+            digest = derived.labels.get(LABEL_BASE_DIGEST, "")
+            base = podman.image_by_digest(digest) if _DIGEST.fullmatch(digest) else None
+            base_bytes = None if base is None else _positive(base.size)
+    except (GinnError, ValueError):
+        pass
+    return _positive(info.size_rw), image_bytes, base_bytes
+
+
 def _disk(
-    env: OpEnv, record: RealmRecord, info: ContainerInfo | None, hooks: LifecycleHooks
+    env: OpEnv, record: RealmRecord, hooks: LifecycleHooks, storage: Podman | None
 ) -> DiskUsage:
-    """The Realm Home's allocated bytes and the container's size, when podman reports one."""
+    """The Realm Home's allocated bytes and, when `storage` is given, podman's figures (NFR-008)."""
     home = env.paths.homes / record.name.value
     if os.path.lexists(home):
         home_bytes, partial = hooks.tree_usage(home)
     else:
         home_bytes, partial = 0, False
-    container_bytes = None if info is None else info.size_rw
-    return DiskUsage(home_bytes, partial, container_bytes)
+    container_bytes, image_bytes, base_bytes = (
+        (None, None, None) if storage is None else _storage(storage, record)
+    )
+    return DiskUsage(home_bytes, partial, container_bytes, image_bytes, base_bytes)
 
 
 def _exported_apps(env: OpEnv, name: RealmName) -> int | None:
@@ -1674,9 +1729,12 @@ def _describe(
     hooks: LifecycleHooks,
     *,
     disk: bool,
+    storage: Podman | None = None,
 ) -> RealmStatus:
     """The status of one readable record. Nothing is written (FR-020)."""
-    container_state, info = _container_state(record, probed)
+    container_state, _ = _container_state(record, probed)
+    if container_state in (_UNAVAILABLE, _ABSENT):
+        storage = None  # no container to size: podman cannot answer, or lists none
     idle = _idle_stopped_status(env, record, container_state)
     return RealmStatus(
         name=record.name.value,
@@ -1695,7 +1753,7 @@ def _describe(
         updated_at=utc_iso(record.updated_at),
         restart_required=record.restart_required or stale_container(record),
         share_skipped=list(record.share_skipped),
-        disk=_disk(env, record, info, hooks) if disk else None,
+        disk=_disk(env, record, hooks, storage) if disk else None,
         exported_apps=_exported_apps(env, record.name),
     )
 
@@ -1733,8 +1791,12 @@ def realm_status(
     *,
     hooks: LifecycleHooks | None = None,
     disk: bool = True,
+    sizes: bool = False,
 ) -> RealmStatus:
     """The status of realm `name`. Read-only: no lock, no journal, no audit (FR-020).
+
+    `sizes` adds podman's storage figures to `disk` (NFR-008). It costs a `--size` inspect, so only
+    `ginn status REALM --sizes` sets it.
 
     A missing realm raises GINN-E-NO-SUCH-REALM. A corrupt or unreadable record raises
     GINN-E-INTERNAL; `list_realms` reports it as an entry instead.
@@ -1742,7 +1804,7 @@ def realm_status(
     hooks = LifecycleHooks() if hooks is None else hooks
     record = _load(RealmStore(env.paths, env.clock), name)
     probed = _probe(podman, {LABEL_REALM: name.value}) if _probed(record) else None
-    return _describe(env, record, probed, hooks, disk=disk)
+    return _describe(env, record, probed, hooks, disk=disk, storage=podman if sizes else None)
 
 
 def list_realms(

@@ -258,3 +258,14 @@ def test_an_unreadable_marker_is_a_warning_and_status_still_succeeds(
             "PermissionError: [Errno 13] the marker directory is not readable",
         )
     ]
+
+
+@pytest.mark.fr("NFR-008")
+def test_status_asks_podman_for_sizes_only_with_the_flag(world: World) -> None:
+    make_realm(world, "arch", RealmState.STOPPED, running=False)
+
+    assert main(["status", "arch"]) == 0
+    assert not [call for call in world.fake.calls if call.args[1:] == ("--size",)]
+
+    assert main(["status", "arch", "--sizes"]) == 0
+    assert [call for call in world.fake.calls if call.op == "inspect" and "--size" in call.args]

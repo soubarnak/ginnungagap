@@ -402,7 +402,21 @@ class Podman(Protocol):
 
     def rm(self, container_id: str, force: bool) -> None: ...
 
-    def inspect(self, container_id: str) -> ContainerInfo: ...
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
+        """Inspect one container. `size` adds `--size`, which fills `ContainerInfo.size_rw`.
+
+        Podman walks the container layer to compute that size, which can be slow, so only
+        `ginn status REALM` asks for it (NFR-008).
+        """
+        ...
+
+    def image_by_digest(self, digest: str) -> ImageInfo | None:
+        """Return the local image whose manifest digest is `digest` (`sha256:<hex>`), or None.
+
+        None when no local image has that digest. Read only. NFR-008 uses it to find the pinned
+        base that a derived image names in its `io.ginn.base-digest` label (ADR-015 Decision 10).
+        """
+        ...
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
         """List all containers, optionally only those whose labels match every pair."""

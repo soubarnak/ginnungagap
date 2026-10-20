@@ -276,3 +276,10 @@ def test_gui_code_opens_no_socket_and_reaches_no_ops_or_runtime_module() -> None
                 )
             if name == "subprocess":
                 assert source.name == "backend.py", f"{source.name} starts processes"
+
+
+@pytest.mark.fr("NFR-008")
+def test_the_gui_status_call_never_asks_for_sizes(fake: FakeGinn) -> None:
+    StateReader(fake.runner()).realm_status("arch")
+
+    assert fake.calls() == [["--json", "status", "arch"]]

@@ -149,7 +149,10 @@ class _Podman:
         self.execs.append((container_id, tuple(argv), user))
         return ExecResult(self.exec_exit, self.listing, "")
 
-    def inspect(self, container_id: str) -> ContainerInfo:
+    def image_by_digest(self, digest: str) -> Any:
+        return None
+
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
         if self.inspect_fails or self.container is None:
             raise make("GINN-E-INTERNAL")
         return _info(container_id, self.container)
@@ -2023,7 +2026,10 @@ class _Generations:
             if all(labels.get(key) == value for key, value in wanted.items())
         ]
 
-    def inspect(self, container_id: str) -> ContainerInfo:
+    def image_by_digest(self, digest: str) -> Any:
+        return None
+
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
         if container_id not in self.labels:
             raise make("GINN-E-INTERNAL")
         return _info(container_id, self.states[container_id])

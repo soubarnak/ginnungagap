@@ -1665,7 +1665,13 @@ def test_status_json_has_the_pinned_keys_and_the_disk_keys(
 
     assert tuple(data) == STATUS_KEYS
     assert isinstance(disk, dict)
-    assert tuple(disk) == ("realm_home_bytes", "realm_home_partial", "container_bytes")
+    assert tuple(disk) == (
+        "realm_home_bytes",
+        "realm_home_partial",
+        "container_bytes",
+        "image_bytes",
+        "base_image_bytes",
+    )
     assert data["exported_apps"] == 0  # no host entry of the realm exists
     assert data["error"] is None
     assert json.loads(json.dumps(data)) == data
@@ -3841,3 +3847,133 @@ def test_a_watch_with_no_program_warns_instead_of_borrowing_one(
 
     assert spawns.calls == []
     assert [n.code for n in notices] == ["GINN-W-EXPORT-SYNC"]
+
+
+BASE_DIGEST_LABEL = "io.ginn.base-digest"
+BASE_DIGEST = "sha256:" + "ab" * 32
+
+
+def _storage_realm(env: OpEnv, fake: LifecyclePodman, *, with_base: bool = True) -> str:
+    """A realm whose container runs a derived image of 700 bytes built on a base of 300 bytes."""
+    record = make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
+    cid = record.container_id
+    assert cid is not None
+    base = ImageInfo(
+        id="b" * 64, digest=BASE_DIGEST, repo_digests=(), size=300, created="", labels={}
+    )
+    derived = ImageInfo(
+        id="d" * 64,
+        digest="",
+        repo_digests=(),
+        size=700,
+        created="",
+        labels={BASE_DIGEST_LABEL: BASE_DIGEST},
+    )
+    if with_base:
+        fake.images["base"] = base
+    fake.images["localhost/ginn-init-lab:g1"] = derived
+    fake.containers[cid].image_id = derived.id
+    fake.container_size_rw[cid] = 50
+    return cid
+
+
+@pytest.mark.fr("NFR-008")
+@pytest.mark.fr("FR-020")
+def test_status_with_sizes_reports_the_container_derived_image_and_base(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    cid = _storage_realm(env, fake)
+
+    status = realm_status(env, fake, RealmName("lab"), sizes=True)
+
+    assert status.disk is not None
+    assert status.disk.container_bytes == 50
+    assert status.disk.image_bytes == 700
+    assert status.disk.base_image_bytes == 300
+    assert ("inspect", (cid, "--size")) in [(call.op, call.args) for call in fake.calls]
+    data = status.to_json()["disk"]
+    assert isinstance(data, dict)
+    assert data["image_bytes"] == 700 and data["base_image_bytes"] == 300
+
+
+@pytest.mark.fr("NFR-008")
+def test_status_leaves_the_base_null_when_no_local_image_has_the_digest(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    _storage_realm(env, fake, with_base=False)
+
+    status = realm_status(env, fake, RealmName("lab"), sizes=True)
+
+    assert status.disk is not None
+    assert status.disk.container_bytes == 50 and status.disk.image_bytes == 700
+    assert status.disk.base_image_bytes is None
+
+
+@pytest.mark.fr("NFR-008")
+@pytest.mark.parametrize("failing", ["inspect", "image_inspect", "image_by_digest"])
+def test_status_sizes_are_null_and_never_raise_when_podman_fails(
+    env: OpEnv, fake: LifecyclePodman, failing: str
+) -> None:
+    _storage_realm(env, fake)
+    fake.fail_ops[failing] = "GINN-E-INTERNAL"
+
+    status = realm_status(env, fake, RealmName("lab"), sizes=True)
+
+    assert status.disk is not None
+    assert status.disk.realm_home_bytes >= 0
+    figures = (status.disk.container_bytes, status.disk.image_bytes, status.disk.base_image_bytes)
+    assert None in figures
+    if failing == "inspect":
+        assert figures == (None, None, None)
+
+
+@pytest.mark.fr("NFR-008")
+def test_status_and_list_do_not_ask_for_sizes_unless_told(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    _storage_realm(env, fake)
+
+    plain = realm_status(env, fake, RealmName("lab"))
+    (listed,) = list_realms(env, fake)
+
+    assert plain.disk is not None and listed.disk is not None
+    for disk in (plain.disk, listed.disk):
+        assert (disk.container_bytes, disk.image_bytes, disk.base_image_bytes) == (None,) * 3
+    assert not [call for call in fake.calls if call.op == "inspect"]
+
+
+@pytest.mark.fr("NFR-008")
+def test_status_skips_a_malformed_base_digest_and_a_zero_size(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    cid = _storage_realm(env, fake)
+    derived = fake.images["localhost/ginn-init-lab:g1"]
+    fake.images["localhost/ginn-init-lab:g1"] = replace(
+        derived, size=0, labels={BASE_DIGEST_LABEL: "not-a-digest"}
+    )
+    fake.container_size_rw[cid] = 0
+
+    status = realm_status(env, fake, RealmName("lab"), sizes=True)
+
+    assert status.disk is not None
+    assert (status.disk.container_bytes, status.disk.image_bytes, status.disk.base_image_bytes) == (
+        None,
+        None,
+        None,
+    )
+    assert "image_by_digest" not in fake.ops()
+
+
+@pytest.mark.fr("NFR-008")
+def test_status_sizes_skip_podman_when_the_container_is_absent(
+    env: OpEnv, fake: LifecyclePodman
+) -> None:
+    record = make_realm(env, fake, "lab", RealmState.RUNNING, running=False)
+    assert record.container_id is not None
+    del fake.containers[record.container_id]
+    fake.calls.clear()
+
+    status = realm_status(env, fake, RealmName("lab"), sizes=True)
+
+    assert status.disk is not None and status.disk.container_bytes is None
+    assert "inspect" not in fake.ops()

@@ -329,6 +329,8 @@ class DiskUse:
     realm_home_bytes: int
     realm_home_partial: bool
     container_bytes: int | None
+    image_bytes: int | None = None
+    base_image_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -492,7 +494,13 @@ def _disk(value: object) -> DiskUse | None:
     if not isinstance(home, int) or not isinstance(partial, bool):
         raise CliProtocolError("disk lacks realm_home_bytes or realm_home_partial")
     container = _opt_int(value, "container_bytes")
-    return DiskUse(realm_home_bytes=home, realm_home_partial=partial, container_bytes=container)
+    return DiskUse(
+        realm_home_bytes=home,
+        realm_home_partial=partial,
+        container_bytes=container,
+        image_bytes=_opt_int(value, "image_bytes"),
+        base_image_bytes=_opt_int(value, "base_image_bytes"),
+    )
 
 
 def realm_view(obj: Mapping[str, object]) -> RealmView:

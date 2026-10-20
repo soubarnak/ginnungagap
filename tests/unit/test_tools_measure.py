@@ -769,7 +769,7 @@ def test_skipping_the_gpu_leg_still_prints_a_not_run_line(tmp_path: Path) -> Non
 
 FAKE_STATUS_GINN = """
 import json, os, sys
-if sys.argv[1:] != ["--json", "status", "arch"]:
+if sys.argv[1:] != ["--json", "status", "arch", "--sizes"]:
     sys.exit(3)
 if os.environ.get("FAKE_FAIL"):
     sys.exit(1)
@@ -784,46 +784,75 @@ def _status_env(tmp_path: Path, payload: dict[str, Any], **extra: str) -> dict[s
     return env
 
 
-def _disk(home_mib: float, container_mib: float | None, partial: bool = False) -> dict[str, Any]:
+def _disk(
+    home_mib: float,
+    container_mib: float | None,
+    partial: bool = False,
+    image_mib: float | None = 100,
+    base_mib: float | None = 100,
+) -> dict[str, Any]:
     mib = 1024 * 1024
+
+    def to_bytes(value: float | None) -> int | None:
+        return None if value is None else int(value * mib)
+
     return {
         "name": "arch",
         "disk": {
-            "realm_home_bytes": int(home_mib * mib),
+            "realm_home_bytes": to_bytes(home_mib),
             "realm_home_partial": partial,
-            "container_bytes": None if container_mib is None else int(container_mib * mib),
+            "container_bytes": to_bytes(container_mib),
+            "image_bytes": to_bytes(image_mib),
+            "base_image_bytes": to_bytes(base_mib),
         },
     }
 
 
 @pytest.mark.fr("NFR-008")
-def test_the_real_status_shape_is_blocked_and_never_judged(tmp_path: Path) -> None:
-    # The real status has container_bytes null: the adapter never passes --size.
-    done = _script(NFR_008, ["--realm", "arch"], _status_env(tmp_path, _disk(5, None)))
+@pytest.mark.parametrize(
+    ("payload", "verdict", "value", "code"),
+    [
+        (_disk(5, 10, image_mib=100, base_mib=100), emit.PASS, 15.0, 0),
+        (_disk(100, 100, image_mib=100, base_mib=100), emit.PASS, 200.0, 0),
+        (_disk(101, 100, image_mib=100, base_mib=100), emit.FAIL, 201.0, 1),
+        (_disk(0, 0, image_mib=80, base_mib=100), emit.PASS, -20.0, 0),
+    ],
+)
+def test_the_total_is_judged_against_the_base_image_plus_200_mib(
+    tmp_path: Path, payload: dict[str, Any], verdict: str, value: float, code: int
+) -> None:
+    # total = derived image + container layer + Realm Home; target = pinned base + 200 MiB.
+    done = _script(NFR_008, ["--realm", "arch"], _status_env(tmp_path, payload))
     (entry,) = _json_lines(done.stdout)
-    assert entry["verdict"] == emit.NOT_RUN and entry["value"] is None
-    assert "status never reports container_bytes" in entry["note"]
-    assert "realm home 5.000 MiB, container_bytes null" in entry["note"]
-    assert done.returncode == 2
+    assert entry["verdict"] == verdict and entry["value"] == value
+    assert "official image" in entry["note"]
+    assert done.returncode == code
 
 
 @pytest.mark.fr("NFR-008")
-@pytest.mark.parametrize("container", [0, 150])
-def test_a_reported_container_size_does_not_make_the_figure_complete(
-    tmp_path: Path, container: float
+@pytest.mark.parametrize(
+    ("payload", "missing"),
+    [
+        (_disk(5, None), "container_bytes"),
+        (_disk(5, 1, image_mib=None), "image_bytes"),
+        (_disk(5, 1, base_mib=None), "base_image_bytes"),
+    ],
+)
+def test_a_null_figure_is_not_run_and_names_it(
+    tmp_path: Path, payload: dict[str, Any], missing: str
 ) -> None:
-    # The derived image and the keep-id copy are still unreported, so no verdict is possible.
-    done = _script(NFR_008, ["--realm", "arch"], _status_env(tmp_path, _disk(5, container)))
+    done = _script(NFR_008, ["--realm", "arch"], _status_env(tmp_path, payload))
     (entry,) = _json_lines(done.stdout)
     assert entry["verdict"] == emit.NOT_RUN and entry["value"] is None
-    assert "derived image or the keep-id copy" in entry["note"]
+    assert missing in entry["note"]
+    assert done.returncode == 2
 
 
 @pytest.mark.fr("NFR-008")
 @pytest.mark.parametrize(
     ("payload", "fail", "reason"),
     [
-        (_disk(5, 1, partial=True), "", "(partial)"),
+        (_disk(5, 1, partial=True), "", "partial"),
         ({"name": "arch", "disk": None}, "", "no disk object"),
         (_disk(5, 1), "1", "exited 1"),
     ],

@@ -661,6 +661,16 @@ class PodmanCli:
         self._expect("image inspect", result)
         return _image_id_output("image inspect", result.stdout)
 
+    def image_by_digest(self, digest: str) -> ImageInfo | None:
+        require_arg(digest, "digest")
+        result = self._run(["images", "--digests", "--format", "{{.ID}} {{.Digest}}"])
+        self._expect("images", result)
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == digest:
+                return self.image_inspect(parts[0])
+        return None
+
     def images_by_name(self, prefix: str) -> dict[str, ImageInfo]:
         if not prefix:
             raise ValueError("images_by_name needs a name prefix: an empty one matches every image")
@@ -707,8 +717,9 @@ class PodmanCli:
         args = ["rm", *(["--force"] if force else []), require_arg(container_id, "container")]
         self._expect("rm", self._run(args))
 
-    def inspect(self, container_id: str) -> ContainerInfo:
-        args = ["container", "inspect", "--format", "json", require_arg(container_id, "container")]
+    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
+        args = ["container", "inspect", *(["--size"] if size else [])]
+        args += ["--format", "json", require_arg(container_id, "container")]
         result = self._run(args)
         self._expect("container inspect", result)
         obj = _first("container inspect", self._json("container inspect", result))
