@@ -93,6 +93,53 @@ def nearest_rank(values: Sequence[float], fraction: float) -> float:
     return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
 
 
+def p95_line(
+    nfr: str,
+    metric: str,
+    values: Sequence[float],
+    *,
+    unit: str,
+    target: str,
+    limit: float,
+    runs_required: int,
+    timeouts: int = 0,
+    note: str | None = None,
+) -> dict[str, Any]:
+    """The p95 (nearest rank) of timed runs against `limit`. A timed-out run counts at its cap.
+
+    No values is NOT RUN. Fewer runs than the SRS asks for keep the verdict and add a note, because
+    the p95 of a short series is still a measurement. A timeout is a lower bound, so it can only
+    push the p95 up.
+    """
+    if not values:
+        return line(nfr, metric, None, unit, target, NOT_RUN, note or "no timed run completed")
+    p95 = nearest_rank(values, 0.95)
+    text = f"{metric}, p95 of {len(values)} runs"
+    parts = [f"median {statistics.median(values):.3f}, max {max(values):.3f} {unit}"]
+    if len(values) < runs_required:
+        parts.append(f"{len(values)} run(s) of the {runs_required} the SRS asks for")
+    if timeouts:
+        parts.append(f"{timeouts} run(s) timed out and count at the timeout")
+    if note:
+        parts.append(note)
+    return line(nfr, text, p95, unit, target, verdict_at_most(p95, limit), "; ".join(parts))
+
+
+def cap_at_not_run(entry: dict[str, Any], reason: str) -> dict[str, Any]:
+    """A PASS that rests on an incomplete series is NOT RUN. A FAIL stays a FAIL.
+
+    The value becomes null, as for every NOT RUN line, and the figure moves into the note.
+    """
+    if entry["verdict"] != PASS:
+        return entry
+    figure = f"{entry['metric']}: {entry['value']} {entry['unit']}"
+    entry = dict(entry)
+    entry["value"] = None
+    entry["verdict"] = NOT_RUN
+    entry["note"] = "; ".join(filter(None, [reason, f"not judged ({figure})", entry.get("note")]))
+    return entry
+
+
 def last_record(results: Path, item: str) -> dict[str, Any] | None:
     """The last record named `item` in a GINN_T49_RESULTS file, or None. Bad lines are skipped."""
     try:
