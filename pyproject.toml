@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 gui = ["PyGObject>=3.50"]
-dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy"]
+dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy", "pyyaml"]
 
 [project.scripts]
 ginn = "ginn.__main__:main"

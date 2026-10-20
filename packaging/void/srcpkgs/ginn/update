@@ -1,0 +1,2 @@
+site=https://github.com/soubarnak/ginnungagap/releases/latest
+pattern="(?<=releases/tag/ginn-v)[\d.]+"

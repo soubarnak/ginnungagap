@@ -3,8 +3,6 @@ name: ci
 on:
   push:
     branches: [void]
-    # A version tag builds the unsigned repository too (package job, docs/packaging.md).
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -40,7 +38,7 @@ jobs:
           xbps-install -yu </dev/null
           # bash is the login shell that su -l needs. python3-gobject lets mypy resolve the gi
           # imports in src/ginn/gui. gcc and make build native/ for the native unit tests.
-          xbps-install -y python3 python3-pytest python3-pytest-cov python3-hypothesis python3-mypy python3-gobject ruff git shadow bash gcc make </dev/null
+          xbps-install -y python3 python3-pytest python3-pytest-cov python3-hypothesis python3-yaml python3-mypy python3-gobject ruff git shadow bash gcc make </dev/null
           useradd -m tester
           # Copy the checkout so the mounted host tree keeps its owner.
           cp -a /src /home/tester/ginn
@@ -108,12 +106,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the ginn package in the Void container
-        env:
-          # "true" on a version tag: the container then also builds the unsigned repository.
-          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        # Build check only. Releases are built, signed and published by release.yml on a ginn-v* tag.
         run: |
           mkdir -p "$RUNNER_TEMP/binpkgs"
-          sudo podman run --rm -i --privileged -e "RELEASE_TAG=$RELEASE_TAG" -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/binpkgs:/out" ghcr.io/void-linux/void-glibc-full:latest sh -s <<'CONTAINER'
+          sudo podman run --rm -i --privileged -v "$GITHUB_WORKSPACE:/src:ro" -v "$RUNNER_TEMP/binpkgs:/out" ghcr.io/void-linux/void-glibc-full:latest sh -s <<'CONTAINER'
           set -eu
           xbps-install -Syu -y xbps </dev/null
           xbps-install -yu </dev/null
@@ -132,24 +128,10 @@ jobs:
           git config --system --add safe.directory /home/builder/void-packages
           su -l builder -c 'cd ~/ginnungagap && GINN_LOCAL_SOURCE=1 tools/xbps-build.sh ~/void-packages' </dev/null
           cp /home/builder/void-packages/hostdir/binpkgs/ginn*.xbps /out/
-          if [ "$RELEASE_TAG" = true ]; then
-              # release.sh repo runs the traceability check, which needs python3 in this container.
-              xbps-install -y python3 </dev/null
-              # No GINN_SIGNING_KEY here, so the repository is unsigned (docs/packaging.md).
-              su -l builder -c 'cd ~/ginnungagap && bash tools/release.sh repo ~/void-packages/hostdir/binpkgs ~/ginn-repo' </dev/null
-              cp -a /home/builder/ginn-repo /out/repo
-          fi
           CONTAINER
       - name: Upload the ginn packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ginn-xbps-x86_64-glibc
           path: ${{ runner.temp }}/binpkgs/ginn*.xbps
-          if-no-files-found: error
-      - name: Upload the unsigned repository (version tags only)
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ginn-unsigned-repo-x86_64-glibc
-          path: ${{ runner.temp }}/binpkgs/repo
           if-no-files-found: error

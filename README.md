@@ -8,7 +8,7 @@ Ginnungagap (`ginn`) gives a Void Linux host isolated, per-distribution environm
 
 Version 1.0.0 is the first release. On a Void Linux glibc x86_64 host with rootless Podman, you can create, start, stop, enter, install into, export from, update, rebuild and delete Realms. The Control Plane GUI (`ginn-gui`) is included, and its host run is still open.
 
-Not every requirement of [GINN-SRS-001 v1.0](GINN-SRS-001-v1.0.md) is verified yet. The [v1.0.0 release notes](docs/release-notes/v1.0.0.md) list each release gate that is not met, the Should requirements that are deferred, and the host runs still open. The release repository is unsigned (see [Install](#install)).
+Not every requirement of [GINN-SRS-001 v1.0](GINN-SRS-001-v1.0.md) is verified yet. The [v1.0.0 release notes](docs/release-notes/v1.0.0.md) list each release gate that is not met, the Should requirements that are deferred, and the host runs still open. The release repository is signed (see [Install](#install)).
 
 ## Requirements
 
@@ -21,25 +21,29 @@ Not every requirement of [GINN-SRS-001 v1.0](GINN-SRS-001-v1.0.md) is verified y
 
 ## Install
 
-### From the GitHub release
+### From the signed xbps repository
 
-The v1.0.0 release is at `https://github.com/soubarnak/ginnungagap/releases/tag/v1.0.0`. It has these files:
-
-- `ginn-1.0.0_1.x86_64.xbps` and `ginn-gui-1.0.0_1.x86_64.xbps`: the CLI and the Control Plane GUI.
-- `x86_64-repodata`: the repository index for those packages.
-- `SHA256SUMS`: checksums of the two packages and the index.
-- The source tarball and `template`, the xbps-src template, for building from source.
-- `traceability.md`: the requirement matrix.
-
-**The repository is unsigned.** xbps accepts a remote repository only when it is signed, so the release files must go into a local directory, and `xbps-install` reads them from that path. xbps cannot check that the packages came from the maintainer. `SHA256SUMS` only shows that the files match the release. A signed repository will follow once the maintainer has a release signing key (see [docs/packaging.md](docs/packaging.md)).
+Releases are published as a signed xbps repository. xbps reads it straight from the newest GitHub release. Add it once, then install:
 
 ```sh
-mkdir -p "$HOME/ginn-1.0.0" && cd "$HOME/ginn-1.0.0"
-# Download the release files listed above into this directory, then check them:
-sha256sum -c SHA256SUMS
-# Install from the local directory (the GUI is optional):
-sudo xbps-install -R "$HOME/ginn-1.0.0" ginn ginn-gui
+echo 'repository=https://github.com/soubarnak/ginnungagap/releases/latest/download' | sudo tee /etc/xbps.d/20-ginn.conf
+sudo xbps-install -S ginn          # add ginn-gui for the Control Plane GUI
 ```
+
+The first `xbps-install -S` shows the repository signing key and asks you to import it. Compare the fingerprint with this one before you accept:
+
+```
+fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25
+```
+
+Plain `-S` shows the fingerprint before the import. `-y` skips that check, so do not use it for the first install. Updates arrive with `sudo xbps-install -Su`.
+
+Each release carries these files, which `releases/latest/download` serves:
+
+- `ginn-1.0.0_1.x86_64.xbps` and `ginn-gui-1.0.0_1.x86_64.xbps`, each with a `.sig2` signature: the CLI and the Control Plane GUI.
+- `x86_64-repodata`: the signed repository index for those packages. The packages are built for glibc x86_64 only.
+- `SHA256SUMS`: checksums of the packages, signatures and index.
+- `template`, the xbps-src template with the checksum of the release tarball (attached after the release), for building from source, and `traceability.md`, the requirement matrix.
 
 ### From the xbps-src template
 
@@ -139,7 +143,7 @@ mypy src/ginn
 tools/traceability.py --check
 ```
 
-Integration tests run only with `GINN_INTEGRATION=1` on a Void host with rootless Podman. They create real Realms, so run them on a host where that is acceptable. The packaging steps (the xbps-src template, the release tooling and the unsigned repository) are in [docs/packaging.md](docs/packaging.md). See [AGENTS.md](AGENTS.md) for the full rules.
+Integration tests run only with `GINN_INTEGRATION=1` on a Void host with rootless Podman. They create real Realms, so run them on a host where that is acceptable. The packaging steps (the xbps-src template, the release tooling and the signed repository) are in [docs/packaging.md](docs/packaging.md). See [AGENTS.md](AGENTS.md) for the full rules.
 
 ## License
 
