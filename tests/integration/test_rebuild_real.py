@@ -431,14 +431,19 @@ def real() -> Iterator[Real]:
 
 @pytest.fixture(scope="module")
 def svc(real: Real) -> Iterator[str]:
-    """A running services-on arch realm with htop, supervised by the user's runit."""
-    made = run_ginn(
-        real, "create", "arch", "--name", SVC_REALM, "--services", "on", "--with", REPO_PKG
-    )
+    """A running services-on arch realm with htop, supervised by the user's runit.
+
+    A services-on create refuses `--with` (GINN-E-NOT-SUPPORTED-YET, ops/_create_plan.py, ADR-003),
+    so htop goes in with `ginn install` after the first supervised start, through the ADR-014 relay.
+    """
+    made = run_ginn(real, "create", "arch", "--name", SVC_REALM, "--services", "on")
     assert made.rc == 0, made.error_text()
     started = run_ginn(real, "start", SVC_REALM)
     assert started.rc == 0, started.error_text()
     wait_run_with_init(real.paths, SVC_REALM)
+    added = run_ginn(real, "install", SVC_REALM, REPO_PKG, timeout=CREATE_TIMEOUT)
+    assert added.rc == 0, added.error_text()
+    assert_runs_htop(real, SVC_REALM)
     yield SVC_REALM
 
 
