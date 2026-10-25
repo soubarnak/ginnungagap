@@ -223,6 +223,10 @@ class RealmRecord:
     # same value, so the realm keeps one identity. Added without a schema bump: a record without
     # the key reads as None, which is every services-off realm and a services-on one made before F6.
     machine_id: str | None = None
+    # ADR-015 Decision 6: the init image IDs. Added without a schema bump: a record without the key
+    # reads as None.
+    init_image_id: str | None = None
+    building_init_image_id: str | None = None
 
     def create_grants_match(self, toggles: frozenset[Toggle]) -> bool:
         """True when `toggles` asks for the GPU and fonts and timezone grants this container has.
@@ -260,6 +264,10 @@ class RealmRecord:
             raise ValueError("a create's request is kept only while the create is pending")
         if self.machine_id is not None and _MACHINE_ID.fullmatch(self.machine_id) is None:
             raise ValueError("machine_id must be 32 lowercase hex digits")
+        if self.init_image_id is not None and not self.init_image_id.startswith("sha256:"):
+            raise ValueError("init_image_id must be sha256:<hex>")
+        if self.building_init_image_id is not None and not self.building_init_image_id.startswith("sha256:"):
+            raise ValueError("building_init_image_id must be sha256:<hex>")
 
     @property
     def name(self) -> RealmName:
@@ -303,6 +311,8 @@ class RealmRecord:
             "with_at_create": list(self.with_at_create),
             "everything_confirmed": self.everything_confirmed,
             "machine_id": self.machine_id,
+            "init_image_id": self.init_image_id,
+            "building_init_image_id": self.building_init_image_id,
         }
         if self.gpg_extra_known:
             data["gpg_extra"] = self.gpg_extra
@@ -365,6 +375,8 @@ class RealmRecord:
                 with_at_create=_str_list(data.get("with_at_create", [])),
                 everything_confirmed=_bool(data.get("everything_confirmed", False)),
                 machine_id=_opt_str(data.get("machine_id")),
+                init_image_id=_opt_str(data.get("init_image_id")),
+                building_init_image_id=_opt_str(data.get("building_init_image_id")),
             )
         except (KeyError, TypeError, ValueError, GinnError) as exc:
             raise _corrupt(Path(source), f"{type(exc).__name__}: {exc}") from exc

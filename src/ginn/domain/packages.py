@@ -98,9 +98,18 @@ class ManifestEntry:
     name: str
     source: InstallSource
     method: InstallMethod
+    init: bool = False
+    """True when the package is in the init set (ADR-015 Decision 6, T7.19)."""
 
-    def to_dict(self) -> dict[str, str]:
-        return {"name": self.name, "source": self.source.value, "method": self.method.value}
+    def to_dict(self) -> dict[str, str | bool]:
+        data: dict[str, str | bool] = {
+            "name": self.name,
+            "source": self.source.value,
+            "method": self.method.value,
+        }
+        if self.init:
+            data["init"] = True
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> Self:
@@ -111,4 +120,7 @@ class ManifestEntry:
         method = data["method"]
         if not isinstance(source, str) or not isinstance(method, str):
             raise TypeError("manifest entry source and method must be strings")
-        return cls(name=name, source=InstallSource(source), method=InstallMethod(method))
+        init = data.get("init", False)
+        if not isinstance(init, bool):
+            raise TypeError("manifest entry init must be a boolean")
+        return cls(name=name, source=InstallSource(source), method=InstallMethod(method), init=init)
