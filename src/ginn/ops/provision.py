@@ -13,23 +13,17 @@ question 10) and owns the rollback. New catalogue codes are
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
 
 from ginn.domain.packages import ManifestEntry
 from ginn.errors import GinnError, make
 from ginn.ops.retry import network_retry_hook
-from ginn.podman.adapter import CreateSpec, ExecTarget, Podman, require_digest_ref
-from ginn.podman.models import ImageInfo
+from ginn.podman.adapter import Podman
 from ginn.runtime.provision import (
-    PROVISION_PREFIX,
     clean_argv,
     diff_argv,
     install_argv,
-    provisioning_spec,
-    remove_argv,
 )
 from ginn.runtime.spec import INIT_PATH
 
@@ -57,8 +51,6 @@ def check_init(podman: Podman, container_id: str, image: str, realm: str) -> Non
     it (store/scratch.py, SCRATCH_PREFIX).
     """
     from ginn.podman.adapter import PATH_NOT_FOUND_REASON
-    from ginn.store.paths import OwnedPaths
-    from ginn.store.scratch import scratch_dir
 
     # Use the caller's OwnedPaths when available; fall back to a temp dir with
     # the same prefix so the test that records the parent name still sees

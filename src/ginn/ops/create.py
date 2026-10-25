@@ -111,11 +111,11 @@ from ginn.ops._rollback import Rollback
 from ginn.ops.disk import check_free_paths, estimate_required
 from ginn.ops.estimate import measure_everything
 from ginn.ops.images import image_names, uses_image
+from ginn.ops.provision import check_init
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
 from ginn.packages.manifest import installed
-from ginn.ops.provision import check_init
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
 from ginn.runtime.attach import (
@@ -127,7 +127,6 @@ from ginn.runtime.attach import (
 )
 from ginn.runtime.mounts import attach_plan
 from ginn.runtime.spec import (
-    INIT_PATH,
     MACHINE_ID_PATH,
     RUN_USER_TMPFILES_PATH,
     create_spec,

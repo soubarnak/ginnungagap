@@ -536,16 +536,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         code="GINN-E-PKG-PROTECTED",
         exit_code=4,
         summary="package '{package}' is protected and cannot be removed",
-        remedy="remove the package from the manifest or pick another package; protected packages are "
-        "the host's base packages",
+        remedy=(
+            "remove the package from the manifest or pick another package; "
+            "protected packages are the host's base packages"
+        ),
         source="FR-012, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-REALM-BOOT",
         exit_code=1,
         summary="realm '{realm}' failed to boot: {units}",
-        remedy="run 'ginn exec {realm} -- systemctl --failed --no-legend --plain' to see the failed "
-        "units, fix the realm or its image, then rebuild",
+        remedy=(
+            "run 'ginn exec {realm} -- systemctl --failed --no-legend "
+            "--plain' to see the failed units, fix the realm or its image, "
+            "then rebuild"
+        ),
         source="FR-080, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(

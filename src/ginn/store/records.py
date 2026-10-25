@@ -266,7 +266,9 @@ class RealmRecord:
             raise ValueError("machine_id must be 32 lowercase hex digits")
         if self.init_image_id is not None and not self.init_image_id.startswith("sha256:"):
             raise ValueError("init_image_id must be sha256:<hex>")
-        if self.building_init_image_id is not None and not self.building_init_image_id.startswith("sha256:"):
+        if self.building_init_image_id is not None and not self.building_init_image_id.startswith(
+            "sha256:"
+        ):
             raise ValueError("building_init_image_id must be sha256:<hex>")
 
     @property
