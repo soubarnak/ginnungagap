@@ -3,21 +3,21 @@
 
 This document is the roadmap to v1 of GINN-SRS-001. It sets the target architecture, the spikes that retire the main technical risks, the milestones and their tasks, the testing strategy and the checks that close each milestone. The SRS remains the single source of truth for requirement IDs and behaviour.
 
-## Status 2026-10-25 — release readiness and next course
+## Status 2026-10-26 — release readiness and next course
 
-Snapshot after hygiene fix (a90c2f2) + T7.17 distro init/clean (999be41) + T7.20 podman adapter (e693854). Baseline reset 2455 files CR-004/005. `pytest tests/unit/test_repo_hygiene.py` 3 passed. `pytest --collect-only` 5599 tests. `pytest tests/unit/test_distros_loader.py` 488 passed. `pytest tests/unit/test_podman_cli.py` 97 passed. `mypy src/ginn/podman` Success.
+Snapshot after hygiene (a90c2f2) + T7.17 (999be41) + T7.20 (e693854) + T7.18 spec/provision (34d326e) + T7.19 records/manifest (04e5c31). Baseline reset 2455 files CR-004/005. `pytest tests/unit/test_repo_hygiene.py` 3 passed. `pytest --collect-only` 5599 tests. `pytest tests/unit/test_distros_loader.py` 488 passed, `test_runtime_spec.py` 139 passed, `test_podman` 97 passed, `test_store_records`+`test_packages_manifest` 94 passed. `mypy` Success, `ruff` All checks passed.
 
-Done: M0 skeleton/CI/packaging (T0.1–T0.8), M1 spikes S-01..S-10 with residuals documented, M2 domain/store/podman/distros **+ T7.17 services init/clean (arch 0, debian 19166208, fedora 24586672, kali 22935552)**, M3 hostsetup/doctor/integrity, M4 realm lifecycle (arch/debian/fedora, ADR-010), M5 packages/export/AUR, M6 tiers/perms/Agent/D-Bus/NVIDIA, M7 services/runit/idle (T7.1–T7.6, T7.9–T7.15, T7.28–T7.29) **+ T7.20 commit/image_id/diff/images_by_name + ImageInfo.labels + CreateSpec.image_id/ginn_provision_ --entrypoint []**, M8 rebuild/update/crash-safety, M9 GUI backend/views. Traceability `tools/traceability.py --check` 79 deferred (72 partial), 0 missing. `ruff` All checks passed, `mypy` Success.
+Done: M0 skeleton/CI/packaging (T0.1–T0.8), M1 spikes S-01..S-10 with residuals documented, M2 domain/store/podman/distros **+ T7.17 services init/clean (arch 0, debian 19166208, fedora 24586672, kali 22935552) + T7.20 commit/image_id/diff/images_by_name + ImageInfo.labels + CreateSpec.image_id/ginn_provision_ --entrypoint []**, M3 hostsetup/doctor/integrity, M4 realm lifecycle, M5 packages/export/AUR, M6 tiers/perms/Agent/D-Bus/NVIDIA, M7 services/runit/idle (T7.1–T7.6, T7.9–T7.15, T7.28–T7.29) **+ T7.18 RealmSpec.image_id + services-on INIT_PATH no command + runtime/provision.py + T7.19 init_image_id/building_init_image_id + ManifestEntry.init**, M8 rebuild/update/crash-safety, M9 GUI backend/views. Traceability `tools/traceability.py --check` 79 deferred (72 partial), 0 missing.
 
 Left, blocking release gates (§9):
-- **ADR-015 wave T7.18–T7.27** not built (T7.17+ T7.20 done, remainder: T7.18 spec/provision, T7.19 records, T7.21 ops/provision, T7.22–T7.26 create/rebuild/delete/start/init). Services-on still fails on debian/fedora/kali (no `/sbin/init`, F1). Depends on ADR-014 Proposed → Accepted.
+- **ADR-015 wave T7.21–T7.27** not built (T7.17, T7.18, T7.19, T7.20 done; remainder: T7.21 ops/provision, T7.22–T7.26 create/rebuild/delete/start/init). Services-on still fails on debian/fedora/kali (no `/sbin/init`, F1) until T7.21-22 land. Depends on ADR-014 Proposed → Accepted.
 - **Host gates:** T7.27 (13 items, 4 distros), T7.8 real logout (S-04/S-08), S-03 musl host, NVIDIA host, M5 gate 3 (export/AUR), T10.2 host-diff, T10.3 trace-no-xbps, provenance scan. Verification report draft unsigned, gates 1–8 NOT RUN/FAIL (NFR-003 VmRSS 87 vs 40, NFR-021 437 vs 200).
 - **Packaging:** `pyproject.toml` 0.1.0.dev0 vs `packaging/void/srcpkgs/ginn/template` 1.0.0; `release.sh check` needs clean tree and version alignment.
 - **Deferred Should:** FR-085 (dockerd), FR-014 nmap file-cap, AUR PGP key-trust ADR.
 
 Next course (implementation-ready, one commit per task, stage only owned files):
 1. Accept ADR-014/015 (Proposed → Accepted), close CL-30..34 wording.
-2. Wave 1B remainder T7.18 spec/provision + T7.19 records, Wave 2 T7.21 provision, Wave 3 T7.22–T7.26. Each proves its `fr` marks, `ruff`/`mypy`/`traceability` gates. T7.17 and T7.20 already landed.
+2. Wave 2 T7.21 ops/provision (one commit, ExecTarget, rollback, GINN-E-IMAGE-DERIVED etc.), Wave 3 T7.22–T7.26 create/rebuild/delete/start/init. Each proves its `fr` marks, `ruff`/`mypy`/`traceability` gates. T7.17, T7.18, T7.19, T7.20 already landed on `void-release-2026-10-26`.
 3. Host gates one at a time on Void glibc host (`GINN_INTEGRATION=1`), then musl/NVIDIA hosts, recording `spikes/results/`.
 4. T10.5 two-user/security, T10.2/10.3 host-diff/provenance, fill and sign verification report, `release.sh check/cut` with signed repo (tag `ginn-vX.Y.Z`, needs explicit push/tag OK).
 
