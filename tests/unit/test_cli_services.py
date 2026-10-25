@@ -10,7 +10,6 @@ The host world (tests/unit/conftest.py) pins the paths, so nothing is written.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -18,34 +17,12 @@ import pytest
 from ginn.__main__ import main
 from ginn.cli.commands import services as services_cmd
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
-from ginn.domain.packages import InstallMethod, InstallSource, ManifestEntry
 from ginn.domain.permissions import Permissions
 from ginn.errors import GinnError, warn
-from ginn.store.records import RealmRecord, RealmStore
-from tests.unit.realm_cli_support import World, make_realm
+from ginn.store.records import RealmRecord
+from tests.unit.realm_cli_support import World
 
 pytestmark = [pytest.mark.fr("FR-083")]
-
-INIT_ID = "3" * 64
-"""The image ID of a services-on realm's derived image, as its record names it (ADR-015)."""
-
-
-def _services_on_realm(world: World) -> None:
-    """A stopped services-on realm whose derived image and init entries are recorded (ADR-015)."""
-    seeded = make_realm(world, "lab", RealmState.STOPPED, running=False)
-    init = [
-        ManifestEntry(name=name, source=InstallSource.REPO, method=InstallMethod.GINN, init=True)
-        for name in ("systemd", "dbus")
-    ]
-    RealmStore(world.paths).save(
-        replace(
-            seeded,
-            settings=replace(seeded.settings, services=True),
-            services_at_create=True,
-            init_image_id=INIT_ID,
-            manifest=init,
-        )
-    )
 
 
 def _record(services: bool) -> RealmRecord:
@@ -169,46 +146,6 @@ def test_a_change_warns_that_the_next_start_rebuilds(
     err = capsys.readouterr().err
     assert err.startswith("GINN-W-REBUILD-PENDING: ")
     assert "because the services mode changed" in err
-
-
-@pytest.mark.fr("FR-083")
-def test_turning_services_off_keeps_the_init_set_and_the_notice_says_so(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """AC-1: services off keeps the derived image and the init entries. The notice that the next
-    start rebuilds the realm says that the init set is kept (ADR-015 Decision 7, FR-082)."""
-    _services_on_realm(world)
-
-    assert main(["services", "lab", "off"]) == 0
-
-    stored = RealmStore(world.paths).load(RealmName("lab"))
-    assert stored.settings.services is False
-    assert stored.init_image_id == INIT_ID
-    assert [entry.name for entry in stored.manifest if entry.init] == ["systemd", "dbus"]
-    err = capsys.readouterr().err
-    assert err.startswith("GINN-W-REBUILD-PENDING: ")
-    assert "because the services mode changed to off; the init set is kept" in err
-
-
-@pytest.mark.fr("FR-083")
-def test_turning_services_on_warns_that_a_start_that_provisions_runs_under_the_notice(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """CL-19: a realm with no derived image that is turned on is provisioned at its next start,
-    which downloads the init set and uses disk. The notice names both and says the start runs under
-    it, with no prompt."""
-    make_realm(world, "lab", RealmState.STOPPED, running=False)
-
-    assert main(["services", "lab", "on"]) == 0
-
-    stored = RealmStore(world.paths).load(RealmName("lab"))
-    assert stored.settings.services is True
-    assert stored.init_image_id is None
-    err = capsys.readouterr().err
-    assert err.startswith("GINN-W-REBUILD-PENDING: ")
-    assert "because the services mode changed" in err
-    assert "downloads the init set and uses disk" in err
-    assert "runs under this notice" in err
 
 
 @pytest.mark.fr("FR-084")

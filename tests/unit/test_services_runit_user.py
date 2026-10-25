@@ -23,7 +23,6 @@ from ginn.runtime.spec import (
     SERVICES_BASE_MASKED_UNITS,
     SERVICES_LOGIND_UNIT,
     SERVICES_MASKED_UNITS,
-    SERVICES_USERDBD_UNITS,
 )
 from ginn.services import supervise
 from ginn.services.runit_user import (
@@ -223,11 +222,8 @@ def test_the_journald_drop_in_is_the_adr_007_text_under_the_data_root(paths: Own
     assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
-@pytest.mark.fr("NFR-003")
-@pytest.mark.fr("FR-080")
-def test_the_masked_units_are_the_s05_units_logind_and_the_userdbd_pair() -> None:
-    """ADR-007 mitigation b: the ten base units of the S-05 file, then logind (CL-28), then the
-    userdb service and socket (ADR-007 D9, T7.32)."""
+def test_the_masked_units_are_the_ten_s05_base_units_and_logind() -> None:
+    """ADR-007 mitigation b: the ten base units of the S-05 file, then logind (CL-28)."""
 
     def listed(path: Path) -> tuple[str, ...]:
         return tuple(
@@ -238,13 +234,8 @@ def test_the_masked_units_are_the_s05_units_logind_and_the_userdbd_pair() -> Non
 
     assert listed(MASKS_FILE) == SERVICES_BASE_MASKED_UNITS
     assert listed(LOGIND_MASKS_FILE) == (SERVICES_LOGIND_UNIT,)
-    assert SERVICES_USERDBD_UNITS == ("systemd-userdbd.service", "systemd-userdbd.socket")
-    assert SERVICES_MASKED_UNITS == (
-        *SERVICES_BASE_MASKED_UNITS,
-        SERVICES_LOGIND_UNIT,
-        *SERVICES_USERDBD_UNITS,
-    )
-    assert len(SERVICES_MASKED_UNITS) == 13
+    assert SERVICES_MASKED_UNITS == (*SERVICES_BASE_MASKED_UNITS, SERVICES_LOGIND_UNIT)
+    assert len(SERVICES_MASKED_UNITS) == 11
 
 
 def test_the_crash_window_gives_up_on_the_fifth_crash_within_sixty_seconds() -> None:

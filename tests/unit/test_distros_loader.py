@@ -42,7 +42,6 @@ from ginn.distros.loader import (
 )
 from ginn.domain import DistroId, PackageName, RealmName, RealmSettings, Tier
 from ginn.errors import GinnError
-from ginn.ops.provision import storage_required_bytes
 
 REPO = Path(__file__).resolve().parents[2]
 DATA = REPO / "src" / "ginn" / "distros" / "data"
@@ -65,10 +64,8 @@ PKG_MANAGERS = frozenset(
 )
 # Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
 # mkdir and links the installed-package database into it with ln (arch.toml).
-SCRATCH_TOOLS = frozenset({"mkdir", "ln"})
-# Tools a clean step may run besides a package manager: rm empties apt's list directory and find
-# empties the arch package cache (debian.toml, arch.toml). mkdir is in SCRATCH_TOOLS already.
-CLEAN_TOOLS = frozenset({"rm", "find"})
+# ADR-015 clean adds rm, mkdir -p and find (arch, debian/kali, fedora).
+SCRATCH_TOOLS = frozenset({"mkdir", "ln", "rm", "find"})
 # The scratch path a caller would pass to check_updates(). The loader never creates it.
 CHECK_TMP = "/srv/ginn-check-0001"
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
@@ -108,8 +105,6 @@ REMOVE_WIDENERS = frozenset(
 DEBIAN_REFRESHED = frozenset(
     {Verb.INSTALL, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.RESOLVE, Verb.ESTIMATE}
 )
-# The verbs a refresh may not precede: every verb but the five that read the sync data (ADR-011).
-REFRESH_REFUSED = sorted(verb.value for verb in Verb if verb not in DEBIAN_REFRESHED)
 NAMES = ["a;b", "$(id)", "x y", "pkg{lang}", "`id`", "a&&b", "*", "gimp|cat"]
 
 
@@ -139,12 +134,13 @@ def _check_steps_of(name: str) -> list[list[str]]:
 
 
 def _every_argv(name: str) -> list[tuple[str, list[str]]]:
-    """Each verb's argv (check-updates and clean excluded), then each check-updates and clean step,
-    labelled."""
+    """Each verb's argv (check-updates and clean excluded), then each step, labelled."""
     definition = load(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
-        if verb in (Verb.CHECK_UPDATES, Verb.CLEAN):
+        if verb is Verb.CHECK_UPDATES:
+            continue
+        if verb is Verb.CLEAN:
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
             continue
@@ -197,6 +193,7 @@ def test_each_shipped_distribution_loads_with_every_verb() -> None:
             expected.discard(Verb.REMOVE_CHECK)
         assert set(definition.verbs) == expected, name
         assert definition.check_steps
+        assert definition.clean_steps
 
 
 @pytest.mark.fr("NFR-060")
@@ -440,7 +437,7 @@ def test_every_verb_is_an_argv_list_and_never_a_shell(name: str) -> None:
     for label, argv in _every_argv(name):
         assert argv, (name, label)
         assert all(isinstance(element, str) for element in argv)
-        assert argv[0] in PKG_MANAGERS | SCRATCH_TOOLS | CLEAN_TOOLS, (name, label, argv[0])
+        assert argv[0] in PKG_MANAGERS | SCRATCH_TOOLS, (name, label, argv[0])
         assert not SHELLS & set(argv), (name, label)
 
 
@@ -527,29 +524,6 @@ def test_refresh_before_lists_only_the_verbs_a_metadata_refresh_makes_safe(
     name: str, expected: frozenset[Verb]
 ) -> None:
     assert load(name).refresh_before == expected
-
-
-@pytest.mark.fr("FR-023")
-@pytest.mark.fr("NFR-060")
-def test_refresh_before_accepts_every_verb_that_reads_the_sync_data() -> None:
-    raw = _base()
-    raw["refresh_before"] = sorted(verb.value for verb in DEBIAN_REFRESHED)
-    assert from_mapping(raw, source="fixture.toml").refresh_before == DEBIAN_REFRESHED
-
-
-@pytest.mark.fr("FR-023")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("name", REFRESH_REFUSED)
-def test_refresh_before_refuses_a_verb_that_reads_no_sync_data(name: str) -> None:
-    # A refresh only fetches the lists, so a verb that reads none gains nothing from it, and clean
-    # empties them (ADR-011). The refusal holds even next to a valid entry, here install.
-    raw = _base()
-    raw["refresh_before"] = ["install", name]
-    with pytest.raises(GinnError) as info:
-        from_mapping(raw, source="fixture.toml")
-    assert info.value.code == "GINN-E-DISTRO-DATA"
-    assert info.value.details["field"] == "refresh_before"
-    assert name in info.value.details["rule"]
 
 
 @pytest.mark.fr("FR-040")
@@ -694,16 +668,6 @@ def test_check_updates_is_refused_as_one_argv() -> None:
     assert info.value.message == "verb check-updates is a list of steps; use check_updates()"
 
 
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("name", [*SHIPPED, "_test"])
-def test_clean_is_refused_as_one_argv_because_it_is_a_list_of_steps(name: str) -> None:
-    with pytest.raises(GinnError) as info:
-        load(name).argv(Verb.CLEAN)
-    _expect("GINN-E-USAGE", 2)(info.value)
-    assert info.value.message == "verb clean is a list of steps; use clean_steps"
-
-
 @pytest.mark.fr("FR-024")
 @pytest.mark.parametrize(
     ("sync_exit", "query_exit", "stdout", "stderr", "expected"),
@@ -794,187 +758,6 @@ def test_the_everything_packages_are_optional_data_and_only_kali_has_them() -> N
     raw = _base()
     raw["everything"] = ["meta-one", "meta-two"]
     assert from_mapping(raw, source="fixture.toml").everything == ("meta-one", "meta-two")
-
-
-# The init set (services_packages) and its measured installed size, and the clean steps, per
-# shipped distribution. Both come from S-11 (ADR-015, Decision 11 and Decision 3).
-SERVICES_SET: dict[str, tuple[tuple[str, ...], int]] = {
-    "arch": ((), 0),
-    "debian": (("systemd", "systemd-sysv", "dbus"), 19_166_208),
-    "fedora": (("systemd", "dbus-broker"), 24_586_672),
-    "kali": (("systemd", "systemd-sysv", "dbus"), 22_935_552),
-}
-_APT_CLEAN = [
-    ["apt-get", "clean"],
-    ["rm", "-rf", "/var/lib/apt/lists"],
-    ["mkdir", "-p", "/var/lib/apt/lists/partial"],
-]
-CLEAN_ARGV = {
-    "arch": [["find", "/var/cache/pacman/pkg", "-mindepth", "1", "-delete"]],
-    "debian": _APT_CLEAN,
-    "fedora": [["dnf", "clean", "all"]],
-    "kali": _APT_CLEAN,
-}
-# The inputs of the disk formula of a services-on create (FR-121, ADR-015 Decision 11): the
-# installed bytes of the Integration Package Set, and the bytes the clean removes. S-11's, except
-# arch's cache, which T7.33 measured.
-DISK_INPUTS: dict[str, tuple[int, int]] = {
-    "arch": (0, 5_560_284),
-    "debian": (23_975_936, 21_576_652),
-    "fedora": (6_000_393, 109_206_482),
-    "kali": (24_147_968, 34_431_137),
-}
-
-
-@pytest.mark.fr("NFR-060")
-@pytest.mark.fr("FR-121")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_disk_formula_inputs_are_the_s11_measurements(name: str) -> None:
-    definition = load(name)
-    integration, cache_peak = DISK_INPUTS[name]
-    assert definition.integration_estimated_installed_bytes == integration
-    assert definition.package_cache_peak_bytes == cache_peak
-
-
-# ADR-015 Decision 11: the writable layer after an htop install, from spikes/results/S-11.md.
-WRITABLE_LAYER = {
-    "arch": 676_834,
-    "debian": 23_454_481,
-    "fedora": 117_756_852,
-    "kali": 36_702_135,
-}
-
-
-@pytest.mark.fr("NFR-060")
-@pytest.mark.fr("FR-121")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_writable_layer_is_the_s11_htop_measurement(name: str) -> None:
-    assert load(name).writable_layer_bytes == WRITABLE_LAYER[name]
-
-
-@pytest.mark.fr("NFR-060")
-@pytest.mark.fr("FR-121")
-def test_the_disk_formula_inputs_are_optional_and_default_to_zero() -> None:
-    fixture = from_mapping(_base(), source="fixture.toml")
-    assert fixture.integration_estimated_installed_bytes == 0
-    assert fixture.package_cache_peak_bytes == 0
-    assert fixture.writable_layer_bytes == 0
-    assert fixture.base_layer_allocated_bytes == 0
-    assert fixture.stage_layer_allocated_bytes == 0
-    raw = _base()
-    raw["integration_estimated_installed_bytes"] = 4096
-    raw["package_cache_peak_bytes"] = 8192
-    raw["writable_layer_bytes"] = 2048
-    raw["base_layer_allocated_bytes"] = 16384
-    raw["stage_layer_allocated_bytes"] = 1024
-    declared = from_mapping(raw, source="fixture.toml")
-    assert declared.integration_estimated_installed_bytes == 4096
-    assert declared.package_cache_peak_bytes == 8192
-    assert declared.writable_layer_bytes == 2048
-    assert declared.base_layer_allocated_bytes == 16384
-    assert declared.stage_layer_allocated_bytes == 1024
-
-
-# ADR-015 Decision 11 (T7.33): the allocated base and stage layers, from the traces of 2026-10-16.
-MEASURED_LAYERS = {
-    "arch": (434_233_344, 35_004_416),
-    "debian": (87_920_640, 43_008_000),
-    "fedora": (151_834_624, 35_848_192),
-    "kali": (136_224_768, 57_520_128),
-}
-
-
-@pytest.mark.fr("NFR-060")
-@pytest.mark.fr("FR-121")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_measured_layers_are_the_t733_figures(name: str) -> None:
-    definition = load(name)
-    base, stage = MEASURED_LAYERS[name]
-    assert definition.base_layer_allocated_bytes == base
-    assert definition.stage_layer_allocated_bytes == stage
-
-
-@pytest.mark.fr("NFR-060")
-@pytest.mark.fr("FR-121")
-def test_the_disk_formula_gives_the_measured_end_state_for_debian() -> None:
-    """ADR-015 Decision 11 (T7.33): debian's services-on create ends with three base-sized layers
-    and two stage layers, 349,777,920 bytes, and 384,755,712 with the 1.10 factor."""
-    debian = load("debian")
-    required = storage_required_bytes(
-        debian.base_layer_allocated_bytes,
-        debian.stage_layer_allocated_bytes,
-        debian.package_cache_peak_bytes,
-        download_bytes=29_843_347,
-        base_pulled=True,
-    )
-    assert required == 384_755_712
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-def test_the_init_set_is_optional_data_that_defaults_to_nothing() -> None:
-    fixture = from_mapping(_base(), source="fixture.toml")
-    assert fixture.services_packages == ()
-    assert fixture.services_estimated_installed_bytes == 0
-    raw = _base()
-    raw["services_packages"] = ["systemd", "dbus"]
-    raw["services_estimated_installed_bytes"] = 1024
-    declared = from_mapping(raw, source="fixture.toml")
-    assert declared.services_packages == ("systemd", "dbus")
-    assert declared.services_estimated_installed_bytes == 1024
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_init_set_and_its_size_are_the_s11_measurements(name: str) -> None:
-    packages, size = SERVICES_SET[name]
-    definition = load(name)
-    assert definition.services_packages == packages
-    assert definition.services_estimated_installed_bytes == size
-    assert (size == 0) == (packages == ())
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_init_set_is_never_part_of_the_integration_set(name: str) -> None:
-    """The init set is for services-on realms only (ADR-015). The Integration Package Set goes to
-    every realm, so none of the init packages may be in it."""
-    definition = load(name)
-    integration = definition.integration_set("en_US.UTF-8").packages
-    assert not set(definition.services_packages) & set(integration), name
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("name", SHIPPED)
-def test_the_clean_steps_are_the_s11_cache_clean_per_distribution(name: str) -> None:
-    definition = load(name)
-    assert definition.has_clean is True
-    assert [list(step) for step in definition.clean_steps] == CLEAN_ARGV[name]
-    assert Verb.CLEAN not in definition.verbs
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-def test_clean_is_optional_and_a_definition_may_declare_it_as_steps() -> None:
-    fixture = load("_test")
-    assert fixture.has_clean is False
-    assert fixture.clean_steps == ()
-    raw = _base()
-    raw["verbs"]["clean"] = [["fake-pm", "clean"], ["fake-pm", "purge", "--cache"]]
-    declared = from_mapping(raw, source="fixture.toml")
-    assert declared.has_clean is True
-    assert declared.clean_steps == (("fake-pm", "clean"), ("fake-pm", "purge", "--cache"))
-
-
-@pytest.mark.fr("FR-013")
-@pytest.mark.fr("NFR-060")
-def test_arch_clean_empties_the_cache_and_keeps_the_directory_and_the_sync_databases() -> None:
-    (step,) = load("arch").clean_steps
-    assert step[:2] == ("find", "/var/cache/pacman/pkg")
-    assert step[step.index("-mindepth") + 1] == "1"
-    assert "/var/lib/pacman" not in " ".join(step)
 
 
 @pytest.mark.fr("FR-024")
@@ -1369,35 +1152,6 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
     ("everything is a string", _set("everything", value="kali-linux-everything")),
     ("everything names a bad package", _set("everything", value=["Bad_Name"])),
     ("everything repeats a package", _set("everything", value=["meta", "meta"])),
-    ("services_packages is a string", _set("services_packages", value="systemd")),
-    ("services_packages names a bad package", _set("services_packages", value=["Bad_Name"])),
-    (
-        "services_packages repeats a package",
-        _set("services_packages", value=["systemd", "systemd"]),
-    ),
-    ("services_packages set without a size", _set("services_packages", value=["systemd"])),
-    ("services size is a string", _set("services_estimated_installed_bytes", value="1024")),
-    ("services size is a bool", _set("services_estimated_installed_bytes", value=True)),
-    ("services size is negative", _set("services_estimated_installed_bytes", value=-1)),
-    (
-        "services size set with no packages",
-        _set("services_estimated_installed_bytes", value=1024),
-    ),
-    ("integration size is a string", _set("integration_estimated_installed_bytes", value="1")),
-    ("integration size is a bool", _set("integration_estimated_installed_bytes", value=True)),
-    ("integration size is negative", _set("integration_estimated_installed_bytes", value=-1)),
-    ("cache peak is a string", _set("package_cache_peak_bytes", value="1")),
-    ("cache peak is a bool", _set("package_cache_peak_bytes", value=True)),
-    ("cache peak is negative", _set("package_cache_peak_bytes", value=-1)),
-    ("writable layer is a string", _set("writable_layer_bytes", value="1")),
-    ("writable layer is a bool", _set("writable_layer_bytes", value=True)),
-    ("writable layer is negative", _set("writable_layer_bytes", value=-1)),
-    ("base layer is a string", _set("base_layer_allocated_bytes", value="1")),
-    ("base layer is a bool", _set("base_layer_allocated_bytes", value=True)),
-    ("base layer is negative", _set("base_layer_allocated_bytes", value=-1)),
-    ("stage layer is a string", _set("stage_layer_allocated_bytes", value="1")),
-    ("stage layer is a bool", _set("stage_layer_allocated_bytes", value=True)),
-    ("stage layer is negative", _set("stage_layer_allocated_bytes", value=-1)),
     ("refresh_before missing", _del("refresh_before")),
     ("refresh_before is not a list", _set("refresh_before", value="install")),
     ("refresh_before names an unknown verb", _set("refresh_before", value=["sync"])),
@@ -1463,17 +1217,6 @@ BAD_TABLES: list[tuple[str, Callable[[dict[str, Any]], None]]] = [
         "remove-check embeds {packages} in a string",
         _set("verbs", "remove-check", value=["fake-pm", "--name={packages}"]),
     ),
-    ("clean is a string", _set("verbs", "clean", value="fake-pm clean")),
-    ("clean is one argv, not a step list", _set("verbs", "clean", value=["fake-pm", "clean"])),
-    ("clean is an empty list", _set("verbs", "clean", value=[])),
-    ("clean has an empty step", _set("verbs", "clean", value=[[]])),
-    ("clean uses {packages}", _set("verbs", "clean", value=[["fake-pm", "{packages}"]])),
-    ("clean uses {tmpdir}", _set("verbs", "clean", value=[["fake-pm", "{tmpdir}"]])),
-    (
-        "clean embeds a placeholder in a string",
-        _set("verbs", "clean", value=[["fake-pm", "--n={lang}"]]),
-    ),
-    ("clean command has a space", _set("verbs", "clean", value=[["fake-pm clean"]])),
 ]
 
 

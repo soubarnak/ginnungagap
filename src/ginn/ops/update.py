@@ -6,8 +6,8 @@ locale (ADR-011). Realms are never updated by ginn on its own (FR-023 AC-1). A c
 check-updates and reports whether updates exist (FR-024). It changes no installed package.
 
 Order of an update of one realm:
-1. The record is read (FR-025). A state other than stopped, failed or running is
-   GINN-E-REALM-STATE.
+1. The record is read (FR-025). A Kali realm is refused with GINN-E-NOT-SUPPORTED-YET (M10), as
+   install refuses it. A state other than stopped, failed or running is GINN-E-REALM-STATE.
 2. A stopped or failed realm starts first, as install starts one (FR-017). The start takes the
    realm lock itself, so it runs before `mutating`.
 3. Inside `mutating("update")`, the container must still run. The record moves to `updating`
@@ -52,13 +52,15 @@ from ginn.ops.retry import network_retry_hook
 from ginn.packages.manager import CheckResult, database_inconsistent, run_check, run_step
 from ginn.podman.adapter import ExecTarget, Podman
 from ginn.podman.models import ContainerState
-from ginn.runtime.spec import LABEL_REALM
+from ginn.runtime.spec import KALI, LABEL_REALM
 from ginn.services.exec_relay import relay_failure, sync_exec_service
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
 
 OP_UPDATE: Final = "update"
 """The audit operation name of `ginn update` (FR-124)."""
+KALI_MILESTONE: Final = "M10"
+"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 DISK_PRECHECK_SKIPPED: Final = "skipped: no estimate verb sizes an upgrade (FR-121)"
 """The disk precheck note of an update. The estimate verbs take named packages, not an upgrade."""
 _ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmState.FAILED})
@@ -98,6 +100,16 @@ class RealmCheck:
     result: CheckResult | None = None
     skipped: str | None = None
     error: GinnError | None = None
+
+
+def _refuse_kali(record: RealmRecord) -> None:
+    if record.settings.distro.value == KALI:
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=record.name.value,
+            feature="an update of a Kali realm",
+            milestone=KALI_MILESTONE,
+        )
 
 
 def _running(podman: Podman, record: RealmRecord) -> bool:
@@ -341,6 +353,7 @@ def update_realm(
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
+    _refuse_kali(record)
     if record.state not in _ENTERABLE:
         raise make(
             "GINN-E-REALM-STATE",
@@ -429,6 +442,7 @@ def check_realm(
     """
     hooks = PackageHooks() if hooks is None else hooks
     record = RealmStore(env.paths, env.clock).load(name)
+    _refuse_kali(record)
     state = record.state.value
     if record.state is not RealmState.RUNNING:
         return RealmCheck(name.value, state, skipped=f"the realm is {state}; start it to check")

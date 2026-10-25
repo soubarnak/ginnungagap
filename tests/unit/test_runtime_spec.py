@@ -19,7 +19,6 @@ from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
 from ginn.podman.adapter import CreateSpec
-from ginn.runtime import spec as spec_module
 from ginn.runtime._enter_plan import login_argv
 from ginn.runtime.mounts import Skipped, create_binds
 from ginn.runtime.spec import (
@@ -42,7 +41,6 @@ GID = 1000
 DIGEST = "quay.io/archlinux/archlinux@sha256:" + "ab" * 32
 
 FONTS = "/usr/share/fonts"
-FONTS_TARGET = "/usr/share/fonts/ginn-host"
 LOCALTIME = "/etc/localtime"
 GPU = "/dev/dri"
 STABLE_PATHS = (FONTS, LOCALTIME, GPU)
@@ -100,7 +98,7 @@ GOLDEN_ARCH = [
     "--mount",
     "type=bind,source=/home/alice/.local/share/ginn/homes/arch,target=/home/alice",
     "--mount",
-    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts/ginn-host,ro",
+    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
     "--mount",
     "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
     "--tmpfs",
@@ -149,7 +147,7 @@ GOLDEN_ARCH_SERVICES_ON = [
     "--mount",
     "type=bind,source=/home/alice/.local/share/ginn/homes/arch,target=/home/alice",
     "--mount",
-    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts/ginn-host,ro",
+    "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
     "--mount",
     "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
     "--tmpfs",
@@ -179,7 +177,6 @@ def make_spec(
     services: bool = False,
     tier: Tier = Tier.BASIC,
     generation: int = 1,
-    image_id: str | None = None,
 ) -> RealmSpec:
     """A spec with the stable binds planned from `present`. Its binds are always Basic's."""
     binds = create_binds(
@@ -205,7 +202,6 @@ def make_spec(
         services=services,
         conmon_pidfile=f"/run/ginn/{uid}/services/{name}.conmon.pid" if services else None,
         generation=generation,
-        image_id=image_id,
     )
 
 
@@ -298,7 +294,7 @@ def test_basic_services_off_golden_argv() -> None:
 def test_stable_binds_only_and_no_variable_grant_even_when_every_source_exists() -> None:
     spec = make_spec(present=(*STABLE_PATHS, *VARIABLE_PATHS))
     argv = create_argv(spec)
-    assert mount_targets(argv) == [str(HOME), FONTS_TARGET, LOCALTIME]
+    assert mount_targets(argv) == [str(HOME), FONTS, LOCALTIME]
     assert option_values(argv, "--tmpfs") == ["/run/user/1000:mode=0700,U"]
     assert option_values(argv, "--device") == [GPU]
     for path in VARIABLE_PATHS:
@@ -507,78 +503,14 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str 
     entry = argv[argv.index("--passwd-entry") + 1]
     assert entry.endswith(f":alice:/home/alice:{load_distro(distro).shell}")
     assert argv[-1] == (pull_reference(distro) if distro == "kali" else DIGEST)
+    assert argv[-1] != "/sbin/init"
+    assert argv.count("/sbin/init") == 0
 
 
 @pytest.mark.fr("FR-080")
 def test_services_on_golden_argv_for_arch() -> None:
-    """The ADR-003 flag set on the S-01 crun row, after the realm's own options, with `/sbin/init`
-    as the explicit entrypoint before the image (ADR-015 Decision 4)."""
+    """The ADR-003 flag set on the S-01 crun row, after the realm's own options, command last."""
     assert create_argv(make_spec(services=True)) == GOLDEN_ARCH_SERVICES_ON
-
-
-DERIVED_ID = "cd" * 32
-"""A derived image's ID: 64 lowercase hex digits, with no `sha256:` prefix (ADR-015 Decision 4)."""
-
-
-@pytest.mark.fr("FR-080")
-def test_services_on_names_sbin_init_as_its_entrypoint_and_gives_no_command() -> None:
-    """The services-on form has no command. `/sbin/init` is the explicit entrypoint, so the
-    derived image's own command cannot reach it (ADR-015 Decision 4)."""
-    spec = create_spec(make_spec(services=True))
-    assert spec.entrypoint_argv == ["/sbin/init"]
-    assert spec.command == []
-    assert spec.init is False
-    argv = create_argv(make_spec(services=True))
-    assert argv[-3:] == ["--entrypoint", '["/sbin/init"]', DIGEST]
-
-
-@pytest.mark.fr("FR-080")
-def test_services_on_from_a_derived_image_runs_sbin_init_with_the_id_as_the_last_argument() -> None:
-    argv = create_argv(make_spec(services=True, image_id=DERIVED_ID))
-    assert argv[-3:] == ["--entrypoint", '["/sbin/init"]', DERIVED_ID]
-    assert DIGEST not in argv
-
-
-@pytest.mark.fr("FR-083")
-def test_services_off_from_a_derived_image_keeps_the_keep_alive_and_the_id() -> None:
-    argv = create_argv(make_spec(image_id=DERIVED_ID))
-    assert argv[-4:] == ["--entrypoint", '["sleep"]', DERIVED_ID, "infinity"]
-    assert DIGEST not in argv
-
-
-@pytest.mark.fr("FR-080")
-def test_the_services_on_command_constant_is_gone_and_the_init_path_is_the_entrypoint() -> None:
-    assert not hasattr(spec_module, "SERVICES_COMMAND")
-    assert spec_module.INIT_PATH == "/sbin/init"
-
-
-@pytest.mark.fr("FR-011")
-def test_the_derived_image_id_is_optional_and_the_digest_is_still_the_checked_base() -> None:
-    assert make_spec().image_id is None
-    assert create_spec(make_spec()).image_id is None
-    spec = make_spec(services=True, image_id=DERIVED_ID)
-    assert spec.image == DIGEST
-    assert create_spec(spec).image_digest_ref == DIGEST
-    assert create_spec(spec).image_id == DERIVED_ID
-    with pytest.raises(ValueError, match="FR-011"):
-        make_spec(image="arch:latest", image_id=DERIVED_ID)
-
-
-@pytest.mark.fr("FR-011")
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "sha256:" + "cd" * 32,
-        "CD" * 32,
-        "cd" * 31,
-        "cd" * 33,
-        "cd" * 31 + "xy",
-    ],
-    ids=["prefixed", "uppercase", "short", "long", "not-hex"],
-)
-def test_a_derived_image_id_must_be_bare_64_lowercase_hex(bad: str) -> None:
-    with pytest.raises(ValueError, match="ADR-015"):
-        make_spec(services=True, image_id=bad)
 
 
 @pytest.mark.fr("FR-080")
@@ -742,8 +674,8 @@ def test_a_custom_realm_with_the_gpu_toggle_on_gets_the_dri_device_and_off_gets_
 def test_a_custom_realm_with_the_fonts_timezone_toggle_off_has_no_fonts_or_localtime_bind() -> None:
     on = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES)))
     off = mount_targets(create_argv(_custom_realm_spec(BASIC_TOGGLES - {Toggle.FONTS_TIMEZONE})))
-    assert {FONTS_TARGET, LOCALTIME} <= set(on)
-    assert not {FONTS_TARGET, LOCALTIME} & set(off)
+    assert {FONTS, LOCALTIME} <= set(on)
+    assert not {FONTS, LOCALTIME} & set(off)
 
 
 @pytest.mark.fr("FR-061")

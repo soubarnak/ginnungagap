@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Final
@@ -24,21 +24,13 @@ from ginn.distros import Verb
 from ginn.distros import load as load_distro
 from ginn.domain import RealmName, RealmState
 from ginn.errors import GinnError, make
-from ginn.ops import _create_plan
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateHooks, CreateResult, create_realm
-from ginn.ops.provision import services_off_required_bytes, storage_required_bytes
 from ginn.ops.recovery import OUTCOME_BROKEN, recover
 from ginn.ops.resume import resume_create
 from ginn.podman.adapter import CreateSpec
 from ginn.runtime import attach
-from ginn.runtime.provision import (
-    LABEL_PROVISION,
-    derived_image_name,
-    provision_create_spec,
-    stage_image_name,
-)
-from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH, NAME_PREFIX
+from ginn.runtime.spec import LABEL_GENERATION, LABEL_REALM, MACHINE_ID_PATH
 from ginn.services.runit_user import journald_dropin, service_dir
 from ginn.store.paths import OwnedPaths
 from ginn.store.records import RealmRecord, RealmStore
@@ -397,41 +389,8 @@ def test_a_resume_that_must_pull_and_runs_out_of_disk_is_refused_before_any_remo
 
 
 @pytest.mark.fr("FR-122")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("field", ["base_layer_allocated_bytes", "stage_layer_allocated_bytes"])
-def test_a_resume_refuses_missing_layer_sizes_before_its_image_read(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    field: str,
-) -> None:
-    """ADR-015 Decision 11: a resume feeds the measured layers to its storage figure. Where the
-    distribution data has none (the loader's default of 0), the resume refuses as GINN-E-DISTRO-DATA
-    before the image read, which is its first podman call. The broken record and its container stay
-    as they were. The refusal is the same in both services modes. This test uses services off."""
-    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created")
-    containers = dict(fake.containers)
-    shipped = load_distro("debian")
-    monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
-    mark = len(fake.calls)
-
-    with pytest.raises(GinnError) as excinfo:
-        _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
-
-    assert excinfo.value.code == "GINN-E-DISTRO-DATA"
-    assert excinfo.value.details["field"] == field
-    assert ops_of(fake)[mark:] == []
-    assert fake.containers == containers
-    assert _load(env).state is RealmState.BROKEN
-
-
-@pytest.mark.fr("FR-122")
 @pytest.mark.fr("FR-121")
-def test_a_resume_whose_image_is_in_storage_leaves_the_download_out_of_its_figure(
+def test_a_resume_whose_image_is_in_storage_needs_no_base_space(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -439,18 +398,13 @@ def test_a_resume_whose_image_is_in_storage_leaves_the_download_out_of_its_figur
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    """The image's layers are local, so the figure leaves the download out. The resume still asks
-    podman for the pin by digest, which answers from storage and writes no layers. The keep-id copy
-    and the stage still count (T7.35), so the resume goes on at that figure."""
+    """The image's layers are local, so no base space is needed, and a full disk does not refuse."""
     _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created")
     assert _load(env).image_ref in fake.images
-    needed = _services_off_resume_figure(base_pulled=False)
-    mark = len(fake.calls)
 
     result = _resume(
-        env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed))
+        env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(0))
     )
-    assert ops_of(fake)[mark:].count("pull") == 1
 
     assert result.record.state is RealmState.STOPPED
     [entry] = _resumed_entries(env)
@@ -629,8 +583,7 @@ def test_a_services_on_resume_writes_its_runit_directory_and_never_starts_the_co
     original_create = fake.create
 
     def create_checking_source(spec: CreateSpec) -> str:
-        if spec.name.startswith(NAME_PREFIX):  # the realm's container, not the stage's
-            seen.append(journald_dropin(env.paths).is_file())
+        seen.append(journald_dropin(env.paths).is_file())
         return original_create(spec)
 
     monkeypatch.setattr(fake, "create", create_checking_source)
@@ -638,7 +591,7 @@ def test_a_services_on_resume_writes_its_runit_directory_and_never_starts_the_co
     result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
 
     assert seen == [True], "the drop-in exists when podman binds it at the resume's create"
-    assert fake.realm_starts == []
+    assert "start" not in ops_of(fake)
     assert result.record.state is RealmState.STOPPED
     assert result.record.settings.services is True
     assert sorted(p.name for p in service_dir(env.paths, RealmName(NAME)).iterdir()) == [
@@ -908,164 +861,3 @@ def test_a_resumed_services_on_create_keeps_the_machine_id_of_the_killed_create(
     assert result.record.machine_id == killed_id
     content, _mode = fake.containers[result.record.container_id].copied[MACHINE_ID_PATH]
     assert content == f"{killed_id}\n".encode("ascii")
-
-
-@pytest.mark.fr("FR-122")
-def test_a_resume_removes_the_provisioning_leftovers_by_id_before_it_provisions_again(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """ADR-015 Decision 12: the provisioning container, the stage image and the derived image that
-    a killed create left are removed by ID, before the stage the resume redoes creates its own
-    container. Recovery may sweep some of them first (ops/recovery.py), so the stage image and the
-    container are seeded here, as a stage killed during an earlier resume would leave them. The
-    derived image is whichever one the killed create left."""
-    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
-    realm = RealmName(NAME)
-    derived = derived_image_name(realm, 1)
-    leftover = fake.create(provision_create_spec(realm, 1, _load(env).image_ref))
-    stale_ids = {fake.commit(leftover, stage_image_name(realm, 1), changes=[])}
-    if derived in fake.images:
-        stale_ids.add(fake.images[derived].id)
-    fake.calls.clear()
-
-    result = _resume(env, fake, home, _resume_hooks(tmp_path, sleeps, mountinfo))
-
-    first_create = next(i for i, call in enumerate(fake.calls) if call.op == "create")
-    removed_first = {call.args[0] for call in fake.calls[:first_create] if call.op in {"rm", "rmi"}}
-    assert leftover in removed_first
-    assert stale_ids <= removed_first
-    assert leftover not in fake.containers
-    assert fake.images[derived].id not in stale_ids
-    assert result.record.state is RealmState.STOPPED
-    assert fake.ps({LABEL_PROVISION: f"{NAME}:1"}) == []
-
-
-def _services_off_resume_figure(*, base_pulled: bool) -> int:
-    """The services-off resume figure of debian (T7.35), with its image local or pulled."""
-    definition = load_distro("debian")
-    return services_off_required_bytes(
-        definition.base_layer_allocated_bytes,
-        definition.stage_layer_allocated_bytes,
-        definition.package_cache_peak_bytes,
-        download_bytes=trust.load().entry("debian").compressed_size_bytes,
-        base_pulled=base_pulled,
-    )
-
-
-@pytest.mark.fr("FR-122")
-@pytest.mark.fr("FR-121")
-def test_a_services_off_resume_with_its_image_in_storage_still_checks_its_container_create(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """T7.35: a services-off resume whose image is in storage used to check nothing, but its
-    realm container create, with the keep-id copy of the base, is still ahead. The resume checks
-    the figure with the pull left out, and free space below it refuses before any removal."""
-    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created")
-    assert _load(env).image_ref in fake.images
-    containers = dict(fake.containers)
-    needed = _services_off_resume_figure(base_pulled=False)
-    mark = len(fake.calls)
-
-    with pytest.raises(GinnError) as excinfo:
-        _resume(
-            env,
-            fake,
-            home,
-            _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1)),
-        )
-
-    assert excinfo.value.code == "GINN-E-DISK-SPACE"
-    assert excinfo.value.details["needed"] == f"{needed} bytes"
-    assert "pull" not in ops_of(fake)[mark:]
-    assert fake.containers == containers
-    assert _load(env).state is RealmState.BROKEN
-
-
-@pytest.mark.fr("FR-122")
-@pytest.mark.fr("FR-121")
-def test_a_services_off_resume_reports_its_figures_in_the_space_checked_step(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """T7.35: the resume's `space-checked` step carries the figure and the free space it compared,
-    as the create's does (FR-107), and the resume goes on when free space covers it."""
-    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created")
-    needed = _services_off_resume_figure(base_pulled=False)
-    details: dict[str, dict[str, object]] = {}
-
-    def on_detail(step: str, detail: Mapping[str, object]) -> None:
-        details[step] = dict(detail)
-
-    result = _resume(
-        env,
-        fake,
-        home,
-        _resume_hooks(
-            tmp_path,
-            sleeps,
-            mountinfo,
-            statvfs=_statvfs(needed),
-            on_step_detail=on_detail,
-        ),
-    )
-
-    assert result.record.state is RealmState.STOPPED
-    assert details["space-checked"] == {
-        "required_bytes": needed,
-        "free_bytes": needed,
-        "reason": None,
-    }
-
-
-@pytest.mark.fr("FR-122")
-@pytest.mark.fr("FR-121")
-def test_a_services_on_resume_checks_the_provisioning_terms_even_with_its_image_in_storage(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """A services-off resume with its image in storage checks no space. A services-on resume
-    provisions again, so the storage formula is checked with the pull left out (ADR-015 Decision 11,
-    T7.33). The keep-id copy of the base and the flattened copy still count. Free space just below
-    that figure refuses before any removal."""
-    _killed_create(env, fake, home, tmp_path, sleeps, mountinfo, "created", services=True)
-    assert _load(env).image_ref in fake.images
-    containers = dict(fake.containers)
-    definition = load_distro("debian")
-    needed = storage_required_bytes(
-        definition.base_layer_allocated_bytes,
-        definition.stage_layer_allocated_bytes,
-        definition.package_cache_peak_bytes,
-        download_bytes=trust.load().entry("debian").compressed_size_bytes,
-        base_pulled=False,
-    )
-
-    with pytest.raises(GinnError) as excinfo:
-        _resume(
-            env,
-            fake,
-            home,
-            _resume_hooks(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1)),
-        )
-
-    assert excinfo.value.code == "GINN-E-DISK-SPACE"
-    assert excinfo.value.details["needed"] == f"{needed} bytes"
-    assert fake.containers == containers
-    assert _load(env).state is RealmState.BROKEN

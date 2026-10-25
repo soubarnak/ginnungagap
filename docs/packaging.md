@@ -11,32 +11,34 @@ The package is built for `x86_64` (glibc) and `x86_64-musl` (NFR-062).
 
 The `ginn-gui` subpackage (the Control Plane GUI, FR-100..107) is defined in the same template. It packages the GUI module in `src/ginn/gui`, with the desktop entry and the icon. xbps-src rejects an empty subpackage, so it needed `src/ginn/gui` to exist first.
 
-## Install from the release
+## Install from the release repository
 
-Every GitHub release carries a complete signed xbps repository: the packages with their `.sig2` signatures, the signed `x86_64-repodata` index, `SHA256SUMS`, the xbps-src template (`template`) and `traceability.md`. xbps reads the repository straight from the newest release, so no other hosting is used (no gh-pages branch, no GitHub Pages).
+The packages are published as assets of each GitHub release, with signed repository metadata.
 
-1. Add the repository once, then install. The Control Plane GUI is the second package, `ginn-gui`:
+1. Add the repository:
 
    ```sh
-   echo 'repository=https://github.com/soubarnak/ginnungagap/releases/latest/download' | sudo tee /etc/xbps.d/20-ginn.conf
-   sudo xbps-install -S ginn ginn-gui
+   sudo tee /etc/xbps.d/20-ginn.conf <<'EOF'
+   repository=https://github.com/soubarnak/ginnungagap/releases/latest/download
+   EOF
    ```
 
-2. The first `-S` shows the signing key fingerprint and asks to import it. The fingerprint must match this one. Plain `-S` shows it before the import. `-y` skips the check:
+2. Install the package. The first install asks to import the release signing key. Compare the fingerprint it shows with the one below before you accept it:
 
-   ```
-   fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25
+   Release signing key fingerprint: `<FINGERPRINT: set at the first release>`
+
+   ```sh
+   sudo xbps-install -S ginn
    ```
 
-3. Updates arrive with `sudo xbps-install -Su`.
-4. Prepare the host once. This is a root step and it is idempotent:
+   The Control Plane GUI is a second package in the same repository. Install it with `sudo xbps-install -S ginn-gui`.
+
+3. Prepare the host once. This is a root step and it is idempotent:
 
    ```sh
    sudo ginn host-setup --user $USER
    ginn doctor
    ```
-
-The packages are built for glibc x86_64 only. The template lists `x86_64-musl` in `archs`, but the release workflow does not build it, so the release carries `x86_64-repodata` and no other index. A noarch package would be indexed under all nine Void architectures (`tools/release.sh repo` does this); ginn is not noarch, because it builds the native helpers.
 
 ## Build locally
 
@@ -60,9 +62,7 @@ The CI workflow (`.github/workflows/ci.yaml`) runs these jobs on every push to `
 
 - `test`: the unit suite, ruff, mypy and coverage on the Void glibc and musl containers (NFR-061, NFR-062).
 - `provenance`: the code-similarity scan against the reference sources (NFR-063). It reads the reference URLs from `PROVENANCE_REPOS` in that job. It uploads the `provenance-report` artifact even when the gate fails. The report shows reference code, so it is for human triage only. See `docs/provenance.md`.
-- `package`: a build check. It builds the glibc package with `tools/xbps-build.sh` inside a privileged Void container, as a non-root user, and uploads the `.xbps` files as a workflow artifact. The artifact is unsigned and is not a release. The privileged container matches the Void project's own CI. It builds from HEAD (`GINN_LOCAL_SOURCE=1`). The musl target is not built in CI yet.
-
-The release workflow (`.github/workflows/release.yml`) runs only on a pushed tag `ginn-v*` (see Release procedure).
+- `package`: builds the glibc package with `tools/xbps-build.sh` inside a privileged Void container, as a non-root user, and uploads the `.xbps` files as a workflow artifact. The privileged container matches the Void project's own CI. It builds from HEAD (`GINN_LOCAL_SOURCE=1`) because the release tag may not exist yet. The musl target is not built in CI yet.
 
 To run the provenance scan locally, pass the reference URLs yourself. An entry is `URL` or `URL@REF`, where `REF` is a branch, tag or commit SHA:
 
@@ -75,46 +75,53 @@ The scan prints a table of every scanned file and the commit of each reference. 
 
 ## Release procedure
 
-Releases are tag-driven. Never build or upload release assets by hand. The version is the project version in `pyproject.toml`, without the `.dev0` marker, and it equals the template `version=`. The tag is `ginn-vX.Y.Z` and must equal that version: the workflow fails otherwise.
+Versions follow the project version in `pyproject.toml`. The package version is that version exactly, so a release cannot carry the `.dev0` marker.
 
-1. Set the release version in `pyproject.toml` and in the template `version=`. Commit.
+1. Set the release version in `pyproject.toml` without `.dev0` (for example `0.1.0`) and update the template `version=` to match. Commit.
 2. Check the release state:
 
    ```sh
    tools/release.sh check
    ```
 
-   It fails when the template and `pyproject.toml` versions differ (a `.dev0` marker counts as a difference), when the tag `ginn-v<version>` already exists, or when the working tree has changes.
+   It fails when the template and `pyproject.toml` versions differ (a `.dev0` marker counts as a difference), when the tag already exists, or when the working tree has changes.
 
-3. Push the commit, then the tag. Pushing needs the maintainer's explicit go-ahead each time:
+3. Tag the release:
 
    ```sh
-   git push origin void
-   tools/release.sh cut          # creates the annotated tag ginn-v<version> locally
-   git push origin ginn-v<version>
+   tools/release.sh cut
+   git push origin v<version>
    ```
 
-4. The workflow `.github/workflows/release.yml` does the rest, in four jobs:
-   - `verify`: `tools/release.sh verify-tag` compares the tag with `pyproject.toml` and the template.
-   - `test`: the full suite, ruff, mypy and the traceability check in the Void glibc container.
-   - `release`: builds the packages with `tools/xbps-build.sh` (from the tagged commit, `GINN_LOCAL_SOURCE=1`), then `tools/release.sh repo` with the key. For each architecture it runs `XBPS_ARCH=<arch> xbps-rindex -a` on the packages, signs the index (`xbps-rindex --privkey KEY --signedby "Bongbetic <soubarna@live.in>" -s .`) and signs each package (`-S`, which writes the `.sig2`). It writes `SHA256SUMS` and attaches everything to the GitHub release, with `docs/release-notes/v<version>.md` as the notes when that file exists. A noarch package would be indexed for `x86_64`, `x86_64-musl`, `i686`, `aarch64`, `aarch64-musl`, `armv7l`, `armv7l-musl`, `armv6l` and `armv6l-musl`; ginn is arch-specific, so only `x86_64-repodata` is built.
-   - `bump`: runs `tools/release.sh bump`, which writes the `version` and the sha256 `checksum` of the GitHub tag archive into `packaging/void/srcpkgs/ginn/template`, sets the package names in the README, and commits both straight to `void` (no pull request).
+4. Write the checksum of the GitHub tag archive into the template, then commit it:
 
-The release `latest` must carry the full index and the packages, because users read `releases/latest/download`. A release is complete only when the `release` job succeeds.
+   ```sh
+   tools/release.sh checksum https://github.com/soubarnak/ginnungagap/archive/refs/tags/v<version>.tar.gz
+   ```
 
-`packaging/void/srcpkgs/ginn/update` lets `./xbps-src update-check ginn` and Void's update bot find new tags: it reads `releases/latest` and matches the number after `releases/tag/ginn-v`.
+5. Build both targets:
+
+   ```sh
+   GINN_MUSL=1 tools/xbps-build.sh ~/void-packages
+   ```
+
+6. Sign the packages and build the repository. The script indexes each package under its own architecture and signs the repository index once per architecture found in the binaries directory. The key is never committed, and `*.pem` and `*.key` are ignored by git:
+
+   ```sh
+   GINN_SIGNING_KEY=/secure/path/ginn-release.pem \
+       tools/release.sh repo ~/void-packages/hostdir/binpkgs ./release-repo
+   ```
+
+7. Create the GitHub release for the tag. Upload every file in `./release-repo` as a release asset, so that `latest/download/` serves the repository files.
 
 GitHub regenerates tag archives on request. If a checksum stops matching, attach a fixed source tarball as a release asset and point `distfiles` at it instead.
 
-To test the repository steps without a release, run `tools/release.sh repo <binpkgs-dir> <empty-out-dir>` in a Void container. Without `GINN_SIGNING_KEY` it builds an unsigned repository, which xbps refuses as a remote repository; use it for a local check only.
-
 ## Signing key
 
-The repository is signed with an RSA 4096 key shared with the maintainer's other xbps repositories, so users accept one fingerprint: `fa:d1:00:32:ce:b1:b9:fd:73:05:05:76:75:54:37:25`. Changing the key forces every user to import a new one, so do not replace it.
+Generate the release key once, outside the repository:
 
-- The private key stays on the maintainer's machine (`~/.local/share/taema-release/privkey.pem`, mode 600) and is never committed. `*.pem` and `*.key` are ignored by git.
-- The workflow reads it from the Actions secret `XBPS_PRIVKEY`. It writes it to a mode 600 temporary file, mounts it read-only into the build container and removes it afterwards. Set the secret once:
+```sh
+openssl genrsa -out /secure/path/ginn-release.pem 4096
+```
 
-  ```sh
-  gh secret set XBPS_PRIVKEY < ~/.local/share/taema-release/privkey.pem
-  ```
+Keep the key offline or in a secret store. Record its fingerprint in this document, in the install section above, before the first release.

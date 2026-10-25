@@ -32,16 +32,11 @@ def installed(
     """`entries` with each name in `names` set to `source` and `method` (FR-040).
 
     An entry already present for a name is replaced, so a package that `ginn install` names again
-    takes the `ginn` method. An init entry keeps its `init` flag through the replacement, so the
-    init set of a services-on realm stays complete (ADR-015 Decision 6). The other entries stay as
-    they are.
+    takes the `ginn` method. The other entries stay as they are.
     """
     chosen = set(names)
-    init = {entry.name for entry in entries if entry.init}
     kept = [entry for entry in entries if entry.name not in chosen]
-    added = [
-        ManifestEntry(name=name, source=source, method=method, init=name in init) for name in chosen
-    ]
+    added = [ManifestEntry(name=name, source=source, method=method) for name in chosen]
     return _sorted([*kept, *added])
 
 

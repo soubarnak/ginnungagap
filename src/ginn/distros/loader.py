@@ -19,17 +19,15 @@ braces. Four names are defined, each valid in one place only:
 - `{tmpdir}` in the `check-updates` steps, as a whole element or inside one. It is the scratch
   directory the caller passes to `check_updates()`: an absolute path that does not exist yet.
 
-Every distribution defines every verb in `Verb` except four. `check-updates` is a list of steps,
-run in order, and `check_updates()` returns them. `clean` is an optional list of steps too
-(ADR-015): `clean_steps` holds them, and `has_clean` says whether the data defines it.
-`remove-check` and `db-check` are optional: a distribution that omits one has no such check.
-`DistroDef.has_remove_check` and `has_db_check` say whether it defines one (ADR-011). A caller that
-asks for an undefined one anyway gets GINN-E-INTERNAL: callers check the flag first. `db-check`
-takes no packages, and no placeholder. `clean` takes no placeholder either.
+Every distribution defines every verb in `Verb` except three. `check-updates` is a list of steps,
+run in order, and `check_updates()` returns them. `remove-check` and `db-check` are optional: a
+distribution that omits one has no such check. `DistroDef.has_remove_check` and `has_db_check` say
+whether it defines one (ADR-011). A caller that asks for an undefined one anyway gets
+GINN-E-INTERNAL: callers check the flag first. `db-check` takes no packages, and no placeholder.
 Every other verb is one argv. `refresh`
 loads the package metadata a manager needs and never upgrades an installed package. `refresh_before`
-lists the verbs the caller runs `refresh` before (ADR-011). Only the verbs in `_REFRESH_PRECEDES`
-may be listed. The list is empty where the verb already refreshes what it needs:
+lists the verbs the caller runs `refresh` before (ADR-011). The list is empty where the verb already
+refreshes what it needs:
 - Arch never refreshes the sync database outside a full upgrade (`upgrade` is `pacman -Syu`),
   because Arch does not support partial upgrades. Its `check-updates` syncs a scratch database
   selected by `--dbpath`, so the realm's own sync database is never written (ADR-011).
@@ -73,34 +71,6 @@ cannot run the command (`CANNOT_RUN_EXIT`), which say nothing about the database
 
 `everything` is optional and defaults to an empty list. It names the packages of the everything
 option (FR-014, Kali only), and each one is matched with `package_name_regex`.
-
-`export_hook` is an optional table (ADR-016): the package manager's post-transaction hook that
-signals the host after a native package change, so the host menu follows `pacman -S`, `apt install`
-and `dnf install` run inside the realm (FR-044, FR-045). It holds `path` (the hook file inside the
-realm, absolute) and `text` (the file, with `{stamp}` for the stamp file that the hook touches and
-no other placeholder; the host makes the directory, never the hook). The table names no
-package: the Integration Package Set stays as FR-013 and CR-007 limit it (CL-35). A distribution
-without the table, or whose package manager lacks the needed plugin, gets no signal for native
-transactions; the sync after `ginn install` still runs.
-
-`services_packages` is optional and defaults to an empty list. It is the init set of a services-on
-realm (ADR-015), which the provisioning stage installs. `services_estimated_installed_bytes` is
-optional and defaults to 0. It is the installed size of that set, measured on the pinned image, and
-it is 0 exactly when the set is empty. Arch's set is empty, because its image already ships systemd.
-
-`integration_estimated_installed_bytes` and `package_cache_peak_bytes` are the other two inputs of
-the disk formula of a services-on create (FR-121, ADR-015 Decision 11). The first is the installed
-size of the Integration Package Set, and the second is the bytes that the clean removes from the
-provisioning layer (the package cache, and on debian, kali and fedora the lists). Arch's first is 0,
-because its image already holds the set. `writable_layer_bytes` is the writable layer of one
-services-off container after an htop install, the term of a reuse build's check. All three are
-optional non-negative integers, and each defaults to 0.
-
-`base_layer_allocated_bytes` and `stage_layer_allocated_bytes` are the allocated bytes of the base
-layer and of the stage layer, measured on podman 5.8.8 on ext4 (T7.33, ADR-015 Decision 11). They
-are the base and stage terms of the services-on storage formula. Arch's stage layer is not 0 with
-an empty init set, because the refresh leaves its sync databases in it. Both are optional
-non-negative integers, and each defaults to 0.
 
 Shipped data that fails validation raises GINN-E-DISTRO-DATA, because it is a ginn bug. An unknown
 distribution name, or a fixture name while the switch is off, raises GINN-E-USAGE.
@@ -155,7 +125,6 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
     {
         "check_fatal_warning_regex",
         "missing_package_regex",
-        "export_hook",
         "everything",
         "check_updates_count",
         "check_updates_count_regex",
@@ -164,11 +133,6 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
         "db_check_stdout_inconsistent",
         "services_packages",
         "services_estimated_installed_bytes",
-        "integration_estimated_installed_bytes",
-        "package_cache_peak_bytes",
-        "writable_layer_bytes",
-        "base_layer_allocated_bytes",
-        "stage_layer_allocated_bytes",
     }
 )
 # The keys that read the db-check result. A file that defines the db-check verb must define them.
@@ -177,8 +141,7 @@ _DB_CHECK_KEYS: Final = frozenset({"db_check_ok_exit", "db_check_stdout_inconsis
 
 class Verb(StrEnum):
     """The package-manager verbs (FR-040, FR-041). Every distribution defines each one except
-    check-updates (a list of steps), clean (a list of steps, optional, ADR-015), remove-check and
-    db-check (optional, ADR-011)."""
+    check-updates (a list of steps), remove-check and db-check (optional, ADR-011)."""
 
     REFRESH = "refresh"
     INSTALL = "install"
@@ -198,12 +161,6 @@ _OPTIONAL_VERB_KEYS: Final = frozenset(
     {Verb.REMOVE_CHECK.value, Verb.DB_CHECK.value, Verb.CLEAN.value}
 )
 _REQUIRED_VERB_KEYS: Final = frozenset(verb.value for verb in Verb) - _OPTIONAL_VERB_KEYS
-# The verbs a metadata refresh may precede (ADR-011): the ones that read the realm's sync data. The
-# verbs that need no lists (remove, remove-check, list-explicit, db-check) are not in it, and clean
-# is not either, because it empties the lists that a refresh would have fetched.
-_REFRESH_PRECEDES: Final = frozenset(
-    {Verb.INSTALL, Verb.UPGRADE, Verb.CHECK_UPDATES, Verb.RESOLVE, Verb.ESTIMATE}
-)
 
 
 class UpdateStatus(StrEnum):
@@ -259,27 +216,6 @@ class Integration:
     steps: tuple[tuple[str, ...], ...]
 
 
-STAMP_FIELD: Final = "stamp"
-"""The placeholder of an export hook's text for the stamp file the hook touches (ADR-016)."""
-_EXPORT_HOOK_KEYS: Final = frozenset({"path", "text"})
-
-
-@dataclass(frozen=True)
-class ExportHook:
-    """The post-transaction hook of one distribution's package manager (ADR-016).
-
-    `path` is the absolute hook file inside the realm. `text` is the file with `{stamp}` where the
-    stamp path goes.
-    """
-
-    path: str
-    text: str
-
-    def render(self, stamp: str) -> str:
-        """The hook file for the stamp path `stamp`. The path is inserted as text, never parsed."""
-        return _render(self.text, {STAMP_FIELD: stamp})
-
-
 @dataclass(frozen=True)
 class IntegrationSet:
     """The Integration Package Set for one host locale, with placeholders filled in.
@@ -300,17 +236,16 @@ class DistroDef:
     """One validated distribution definition.
 
     `trust_key` names a table in the Trust Manifest. Only its non-emptiness is checked here (T2.14
-    checks it against the manifest). `verbs` maps each Verb except check-updates and clean to its
-    argv template, and holds remove-check only where the data defines it. `check_steps` is the
-    check-updates step list, one argv template per step. `clean_steps` is the clean step list, one
-    argv per step, with no placeholder.
+    checks it against the manifest). `verbs` maps each Verb except check-updates to its argv
+    template, and holds remove-check only where the data defines it. `check_steps` is the
+    check-updates step list, one argv template per step.
     `name_pattern` is matched with fullmatch, by argv() and by the Integration Package Set.
     `signature_error` and `stale_metadata` are matched with search against the package manager's
     output (FR-012, ADR-011). `missing_package` is matched the same way, and None when the data
     omits the key (FR-022 AC-1). `refresh_before` lists the verbs that the caller runs `refresh`
-    before (ADR-011), each one in `_REFRESH_PRECEDES`. `check_fatal_warnings` are matched with
-    search against each stderr line of the check-updates query, and a match makes the check fail
-    closed (ADR-011). It is empty when the data omits the key.
+    before (ADR-011). `check_fatal_warnings` are matched with search against each stderr line of the
+    check-updates query, and a match makes the check fail closed (ADR-011). It is empty when the
+    data omits the key.
     """
 
     id: str
@@ -342,35 +277,11 @@ class DistroDef:
     db_check_stdout_inconsistent: bool = False
     """True when, with an ok exit status, any stdout of the db-check verb means inconsistent."""
     services_packages: tuple[str, ...] = ()
-    """The init set of a services-on realm (ADR-015): the packages that the provisioning stage
-    installs for systemd and its D-Bus. Empty where the image already ships an init (Arch)."""
+    """The init set for services-on realms (ADR-015 Decision 3). Empty on arch."""
     services_estimated_installed_bytes: int = 0
-    """The installed size of `services_packages` on the pinned image, measured in S-11 (ADR-015).
-    It is 0 exactly when `services_packages` is empty."""
+    """Estimated installed bytes of the init set (ADR-015 Decision 11). Zero on arch."""
     clean_steps: tuple[tuple[str, ...], ...] = ()
-    """The clean verb (ADR-015): argv lists, run in order, that empty the package cache. Empty when
-    the data defines none. See `has_clean`."""
-    integration_estimated_installed_bytes: int = 0
-    """The installed size of the Integration Package Set, the `ips_delta` of the disk formula
-    (FR-121, ADR-015 Decision 11), measured in S-11. 0 where the image already holds the set."""
-    package_cache_peak_bytes: int = 0
-    """The bytes that the clean steps remove from the provisioning layer: the `cache_peak` of the
-    disk formula (FR-121, ADR-015 Decision 11). Measured in S-11, and on arch in T7.33."""
-    export_hook: ExportHook | None = None
-    """The package manager's post-transaction hook that signals the host (ADR-016), or None."""
-    writable_layer_bytes: int = 0
-    """The writable layer of one services-off container from the derived image, after an htop
-    install, measured in S-11. It is the term of a reuse build's disk check (FR-121, ADR-015
-    Decision 11). 0 is no term."""
-    base_layer_allocated_bytes: int = 0
-    """The allocated bytes of the pinned base layer, measured on podman 5.8.8 on ext4 with 4 KiB
-    blocks (T7.33). It is the base term of the services-on storage formula (FR-121, ADR-015
-    Decision 11). 0 is no term."""
-    stage_layer_allocated_bytes: int = 0
-    """The allocated bytes of the stage layer, which holds the init set, the Integration Package
-    Set, the locale steps and the refresh residue (arch's sync databases), measured on podman 5.8.8
-    on ext4 with 4 KiB blocks (T7.33). It is the stage term of the services-on storage formula
-    (FR-121, ADR-015 Decision 11). 0 is no term."""
+    """The clean verb steps (ADR-015 Decision 3). Empty when the distribution omits clean."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -382,8 +293,8 @@ class DistroDef:
         package name must fullmatch `name_pattern` (DR-003),
         or GINN-E-PKG-NAME-INVALID is raised before any element is built. No shipped pattern accepts
         a leading `-`, so a name that passes can never be read as an option. domain.packages checks
-        AS-027 first; this check is the second line of defence. check-updates and clean are not one
-        argv each, so they are refused here; see check_updates() and clean_steps.
+        AS-027 first; this check is the second line of defence. check-updates is not one argv, so
+        it is refused here; see check_updates().
         """
         if isinstance(packages, str):
             raise TypeError("packages must be a sequence of names, not one str")
@@ -391,8 +302,6 @@ class DistroDef:
             raise make(
                 "GINN-E-USAGE", detail="verb check-updates is a list of steps; use check_updates()"
             )
-        if verb is Verb.CLEAN:
-            raise make("GINN-E-USAGE", detail="verb clean is a list of steps; use clean_steps")
         template = self.verbs.get(verb)
         if template is None:
             err = make("GINN-E-INTERNAL")
@@ -420,11 +329,6 @@ class DistroDef:
     def has_db_check(self) -> bool:
         """True when the data defines db-check, the package database check (FR-120 AC-2)."""
         return Verb.DB_CHECK in self.verbs
-
-    @property
-    def has_clean(self) -> bool:
-        """True when the data defines the clean verb, which empties the package cache (ADR-015)."""
-        return bool(self.clean_steps)
 
     @property
     def check_updates_needs_tmpdir(self) -> bool:
@@ -689,14 +593,18 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     )
     fatal_warnings = _fatal_warnings(reader, raw.get("check_fatal_warning_regex", []))
     everything = _everything(reader, raw.get("everything", []), name_pattern)
-    services_packages, services_bytes = _services(reader, raw, name_pattern)
-    export_hook = _export_hook(reader, raw)
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
     verbs, check_steps, clean_steps = _verbs(reader, raw["verbs"])
     count, count_regex = _check_count(reader, raw)
     exit_for_updates = _exit_for_updates(reader, raw, len(check_steps))
     ok_exit, stdout_inconsistent = _db_check(reader, raw, Verb.DB_CHECK in verbs)
+    services_packages = _services_packages(
+        reader, raw.get("services_packages", []), name_pattern
+    )
+    services_estimated = _services_estimated(
+        reader, raw.get("services_estimated_installed_bytes", 0)
+    )
     return DistroDef(
         id=distro_id,
         source=source,
@@ -719,16 +627,8 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         db_check_ok_exit=ok_exit,
         db_check_stdout_inconsistent=stdout_inconsistent,
         services_packages=services_packages,
-        services_estimated_installed_bytes=services_bytes,
+        services_estimated_installed_bytes=services_estimated,
         clean_steps=clean_steps,
-        export_hook=export_hook,
-        integration_estimated_installed_bytes=_disk_bytes(
-            reader, raw, "integration_estimated_installed_bytes"
-        ),
-        package_cache_peak_bytes=_disk_bytes(reader, raw, "package_cache_peak_bytes"),
-        writable_layer_bytes=_disk_bytes(reader, raw, "writable_layer_bytes"),
-        base_layer_allocated_bytes=_disk_bytes(reader, raw, "base_layer_allocated_bytes"),
-        stage_layer_allocated_bytes=_disk_bytes(reader, raw, "stage_layer_allocated_bytes"),
     )
 
 
@@ -827,66 +727,6 @@ def _everything(reader: "_Reader", value: object, name_pattern: re.Pattern[str])
     return names
 
 
-def _services(
-    reader: "_Reader", raw: Mapping[str, object], name_pattern: re.Pattern[str]
-) -> tuple[tuple[str, ...], int]:
-    """The optional init set of a services-on realm (ADR-015) and its installed size in bytes.
-
-    `services_packages` is a list of package names, maybe empty, and each name matches
-    `package_name_regex`. `services_estimated_installed_bytes` is a non-negative integer, and it
-    is 0 exactly when the list is empty. Both default to empty and 0, so a file may omit them.
-    """
-    packages_field = "services_packages"
-    bytes_field = "services_estimated_installed_bytes"
-    names = reader.strings(raw.get(packages_field, []), packages_field)
-    for name in names:
-        if name_pattern.fullmatch(name) is None:
-            raise reader.fail(packages_field, f"{name!r} does not match package_name_regex")
-    if len(set(names)) != len(names):
-        raise reader.fail(packages_field, "must not repeat a package")
-    size = raw.get(bytes_field, 0)
-    if type(size) is not int or size < 0:
-        raise reader.fail(bytes_field, "must be a non-negative integer")
-    if not names and size:
-        raise reader.fail(bytes_field, "must be 0 when services_packages is empty")
-    if names and not size:
-        raise reader.fail(bytes_field, "must be positive when services_packages is set")
-    return names, size
-
-
-def _export_hook(reader: "_Reader", raw: Mapping[str, object]) -> ExportHook | None:
-    """The optional `export_hook` table (ADR-016), or None when the file omits it.
-
-    `path` is absolute, with no `..` and no whitespace. `text` uses `{stamp}` at least once and no
-    placeholder.
-    """
-    if "export_hook" not in raw:
-        return None
-    table = reader.table(raw["export_hook"], "export_hook")
-    _only_keys(reader, table, _EXPORT_HOOK_KEYS, "export_hook")
-    path = reader.text(table["path"], "export_hook.path")
-    posix = PurePosixPath(path)
-    if not posix.is_absolute() or ".." in posix.parts or any(ch.isspace() for ch in path):
-        raise reader.fail("export_hook.path", "must be an absolute path with no '..' or blank")
-    text = reader.text(table["text"], "export_hook.text")
-    try:
-        names = _field_names(text)
-    except ValueError as exc:
-        raise reader.fail("export_hook.text", f"has a bad brace: {exc}") from None
-    if names != frozenset({STAMP_FIELD}):
-        rule = f"must use {{{STAMP_FIELD}}} and no other placeholder"
-        raise reader.fail("export_hook.text", rule)
-    return ExportHook(path=path, text=text)
-
-
-def _disk_bytes(reader: "_Reader", raw: Mapping[str, object], field: str) -> int:
-    """An optional size of the disk formula (FR-121): a non-negative integer, 0 when omitted."""
-    size = raw.get(field, 0)
-    if type(size) is not int or size < 0:
-        raise reader.fail(field, "must be a non-negative integer")
-    return size
-
-
 def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:
     names = reader.strings(value, "refresh_before")
     known = {verb.value for verb in Verb}
@@ -895,10 +735,6 @@ def _refresh_before(reader: "_Reader", value: object) -> frozenset[Verb]:
             raise reader.fail("refresh_before", f"unknown verb {name!r}")
         if name == Verb.REFRESH.value:
             raise reader.fail("refresh_before", "must not list refresh; it is the metadata load")
-        if Verb(name) not in _REFRESH_PRECEDES:
-            allowed = ", ".join(sorted(verb.value for verb in _REFRESH_PRECEDES))
-            rule = f"{name!r} reads no sync data; only {allowed} may follow a refresh"
-            raise reader.fail("refresh_before", rule)
     if len(set(names)) != len(names):
         raise reader.fail("refresh_before", "must not repeat a verb")
     return frozenset(Verb(name) for name in names)
@@ -932,7 +768,9 @@ def _verbs(
     allowed = frozenset({"packages"})
     verbs: dict[Verb, tuple[str, ...]] = {}
     for key in table:
-        if key in (Verb.CHECK_UPDATES.value, Verb.CLEAN.value):
+        if key == Verb.CHECK_UPDATES.value:
+            continue
+        if key == Verb.CLEAN.value:
             continue
         if key == Verb.DB_CHECK.value:
             # db-check names no package, so no placeholder is allowed in it at all.
@@ -942,35 +780,59 @@ def _verbs(
         if key == Verb.REMOVE_CHECK.value and PACKAGES_ELEMENT not in argv:
             raise reader.fail(f"verbs.{key}", "must include {packages} as one element")
         verbs[Verb(key)] = argv
-    check_steps = _step_list(
-        reader, table[Verb.CHECK_UPDATES.value], Verb.CHECK_UPDATES, frozenset({TMPDIR_FIELD})
-    )
-    # clean is optional. Its steps name no placeholder at all (ADR-015).
-    clean_steps = (
-        _step_list(reader, table[Verb.CLEAN.value], Verb.CLEAN, frozenset())
-        if Verb.CLEAN.value in table
-        else ()
-    )
+    check_steps = _check_steps(reader, table[Verb.CHECK_UPDATES.value])
+    clean_steps: tuple[tuple[str, ...], ...] = ()
+    if Verb.CLEAN.value in table:
+        clean_steps = _clean_steps(reader, table[Verb.CLEAN.value])
     return verbs, check_steps, clean_steps
 
 
-def _step_list(
-    reader: "_Reader", value: object, verb: Verb, allowed: frozenset[str]
-) -> tuple[tuple[str, ...], ...]:
-    """Validate a verb that is a list of steps: a non-empty list of argv lists (ADR-011, ADR-015).
-
-    `allowed` names the placeholders that a step may use. check-updates allows {tmpdir}, and clean
-    allows none.
-    """
-    field = f"verbs.{verb.value}"
+def _check_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...]:
+    """Validate the check-updates step list: a non-empty list of argv lists (ADR-011)."""
+    field = f"verbs.{Verb.CHECK_UPDATES.value}"
     if not isinstance(value, list) or not value:
         raise reader.fail(field, "must be a non-empty list of argv lists")
     steps: list[tuple[str, ...]] = []
     for step in value:
         if not isinstance(step, list):
             raise reader.fail(field, "every step must be an argv list")
-        steps.append(reader.argv(step, field, allowed, frozenset()))
+        steps.append(reader.argv(step, field, frozenset({TMPDIR_FIELD}), frozenset()))
     return tuple(steps)
+
+
+def _clean_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...]:
+    """Validate the clean verb: a non-empty list of argv lists (ADR-015 Decision 3)."""
+    field = f"verbs.{Verb.CLEAN.value}"
+    if not isinstance(value, list) or not value:
+        raise reader.fail(field, "must be a non-empty list of argv lists")
+    steps: list[tuple[str, ...]] = []
+    for step in value:
+        if not isinstance(step, list):
+            raise reader.fail(field, "every step must be an argv list")
+        # clean steps take no packages and no tmpdir, no placeholders
+        steps.append(reader.argv(step, field, frozenset(), frozenset()))
+    return tuple(steps)
+
+
+def _services_packages(
+    reader: "_Reader", value: object, name_pattern: re.Pattern[str]
+) -> tuple[str, ...]:
+    """The init set for services-on (ADR-015 Decision 3): a list of package names."""
+    names = reader.strings(value, "services_packages")
+    for name in names:
+        if name_pattern.fullmatch(name) is None:
+            raise reader.fail("services_packages", f"{name!r} does not match package_name_regex")
+    if len(set(names)) != len(names):
+        raise reader.fail("services_packages", "must not repeat a package")
+    return names
+
+
+def _services_estimated(reader: "_Reader", value: object) -> int:
+    """Estimated installed bytes of the init set (ADR-015 Decision 11)."""
+    field = "services_estimated_installed_bytes"
+    if type(value) is not int or value < 0:
+        raise reader.fail(field, "must be a non-negative integer")
+    return value
 
 
 class _Reader:

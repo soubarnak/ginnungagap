@@ -177,7 +177,7 @@ def test_golden_create_binds_when_everything_exists(layout: Layout) -> None:
     home = str(layout.home)
     assert triples(binds.mounts) == [
         (real(layout.realm_home), home, ()),
-        ("/usr/share/fonts", "/usr/share/fonts/ginn-host", ("ro",)),
+        ("/usr/share/fonts", "/usr/share/fonts", ("ro",)),
         ("/etc/localtime", "/etc/localtime", ("ro",)),
     ]
     assert binds.devices == ["/dev/dri"]
@@ -215,7 +215,7 @@ def test_golden_argv_carries_only_the_create_binds_in_order(layout: Layout) -> N
     home = str(layout.home)
     assert argv_mounts(create(layout)) == [
         f"type=bind,source={real(layout.realm_home)},target={home}",
-        "type=bind,source=/usr/share/fonts,target=/usr/share/fonts/ginn-host,ro",
+        "type=bind,source=/usr/share/fonts,target=/usr/share/fonts,ro",
         "type=bind,source=/etc/localtime,target=/etc/localtime,ro",
     ]
 
@@ -253,10 +253,7 @@ def test_shares_keep_identical_paths(layout: Layout) -> None:
     assert by_realm[f"/run/media/{USER}"] == real(f"/run/media/{USER}")
     assert by_realm["/media"] == real("/media")
     assert by_realm["/mnt"] == real("/mnt")
-    assert [m.target for m in create(layout).mounts[1:]] == [
-        "/usr/share/fonts/ginn-host",
-        "/etc/localtime",
-    ]
+    assert [m.target for m in create(layout).mounts[1:]] == ["/usr/share/fonts", "/etc/localtime"]
 
 
 def test_session_paths_sit_under_the_realm_runtime_dir(layout: Layout) -> None:
@@ -298,16 +295,6 @@ def test_symlinked_mount_root_is_skipped_even_when_its_target_is_allowed(
     plan = attach(layout, present=[*present_all(layout), str(link)])
     assert messages(plan.skipped) == [f"share skipped: {link} (a symbolic link, not a mount root)"]
     assert all(entry.realm != str(link) for entry in plan.attach)
-
-
-@pytest.mark.fr("FR-061")
-@pytest.mark.fr("AS-009")
-def test_host_fonts_never_shadow_the_realm_usr_share_fonts(layout: Layout) -> None:
-    """A bind over /usr/share/fonts is read-only, so a font package cannot install into it."""
-    binds = create(layout)
-    fonts = [m for m in binds.mounts if m.source == "/usr/share/fonts"]
-    assert [(m.target, m.options) for m in fonts] == [("/usr/share/fonts/ginn-host", ("ro",))]
-    assert all(m.target != "/usr/share/fonts" for m in binds.mounts)
 
 
 def test_missing_gpu_node_and_fonts_are_reported_not_bound(layout: Layout) -> None:

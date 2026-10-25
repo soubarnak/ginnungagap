@@ -27,7 +27,6 @@ from ginn.ops.create import CreateHooks, CreateRequest, SizeEstimate
 from ginn.ops.delete import DeleteHooks, delete_realm
 from ginn.ops.disk import estimate_required
 from ginn.ops.estimate import LABEL_ESTIMATE, EverythingEstimate, estimate_everything
-from ginn.ops.provision import storage_peak_for
 from ginn.ops.recovery import OUTCOME_BLOCKED, OUTCOME_BUSY, OUTCOME_SWEPT, sweep_estimates
 from ginn.podman.adapter import CreateSpec, ExecTarget, RetryHook
 from ginn.podman.models import ExecResult, ImageInfo
@@ -232,17 +231,6 @@ def _hooks(sleeps: list[float], **overrides: Any) -> CreateHooks:
     return CreateHooks(**values)
 
 
-def _base_peak() -> int:
-    """The raw services-off storage peak of the kali base, pulled (T7.35): the estimate's figure."""
-    entry = trust.load().entry("kali")
-    return storage_peak_for(
-        load_distro("kali"),
-        services=False,
-        download_bytes=entry.compressed_size_bytes,
-        base_pulled=True,
-    )
-
-
 def _image_ref() -> str:
     return trust.pull_reference("kali")
 
@@ -318,12 +306,8 @@ def test_the_estimate_reads_the_sizes_and_keeps_nothing(
         distro="kali",
         everything=("kali-linux-everything",),
         size=SizeEstimate(packages=3, download_bytes=DOWNLOAD, installed_bytes=INSTALLED),
-        base_peak_bytes=_base_peak(),
     )
-    # T7.35: the figure of the whole create is the base's storage peak and the set, times 1.10.
-    assert result.required_bytes == estimate_required(_base_peak() + TOTAL)
-    assert result.base_required_bytes == estimate_required(_base_peak())
-    assert result.everything_required_bytes == estimate_required(TOTAL)
+    assert result.required_bytes == estimate_required(TOTAL)
     assert (_tree(env.paths.data), _tree(env.paths.state)) == before
     _assert_nothing_kept(env, fake, home)
     assert fake.images == {}  # the base image was pulled here, so it is removed here
@@ -484,33 +468,8 @@ def test_a_short_base_disk_is_refused_before_the_image_is_pulled(
         )
 
     assert caught.value.code == "GINN-E-DISK-SPACE"
-    assert caught.value.details["needed"] == f"{estimate_required(_base_peak())} bytes"
     assert "pull" not in fake.ops()
     assert fake.calls == []
-
-
-@pytest.mark.fr("FR-121")
-@pytest.mark.fr("FR-107")
-def test_the_space_checked_step_reports_the_base_figure_it_compared(
-    env: OpEnv, fake: KaliFake, home: Path, sleeps: list[float]
-) -> None:
-    """T7.35: the estimate's `space-checked` carries the base's figure and the free space it was
-    held to, before any pull, so the progress line of `create --everything --estimate` shows it."""
-    _kali_answers(fake)
-    details: dict[str, dict[str, object]] = {}
-    hooks = _hooks(
-        sleeps,
-        statvfs=lambda _path: _Vfs(AMPLE),
-        on_step_detail=lambda step, detail: details.setdefault(step, dict(detail)),
-    )
-
-    estimate_everything(env, fake, _request(home), hooks=hooks)
-
-    assert details["space-checked"] == {
-        "required_bytes": estimate_required(_base_peak()),
-        "free_bytes": AMPLE,
-        "reason": None,
-    }
 
 
 @pytest.mark.fr("FR-121")

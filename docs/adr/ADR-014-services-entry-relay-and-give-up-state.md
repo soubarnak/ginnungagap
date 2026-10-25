@@ -1,6 +1,6 @@
 # ADR-014: Services-on entry through the supervisor relay, and the give-up state
 
-- Status: Accepted, merged to `void` in cfed445 (PR #1, merged by the user on 2026-10-15). Decision 2 was accepted by the user on 2026-10-14.
+- Status: Proposed (Decision 2 accepted by the user on 2026-10-14)
 - Date: 2026-10-14
 - Amended: 2026-10-15 (T7.9 review: four helpers, the worker-to-run contract, the relay root argument, the undo step, and the env-name, flag and LOCKED rules; T7.12 review: the stop rule of Decision 2; T7.13 review: the orphan marker; T7.10 review; T7.16 host gates; T7.28: the runtime directory of a services-on realm; T7.29: the token kill joins the rootless pause namespace). See the dated amendments at the end.
 

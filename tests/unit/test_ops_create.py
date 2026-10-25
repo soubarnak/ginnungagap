@@ -20,7 +20,7 @@ import errno
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -52,22 +52,11 @@ from ginn.ops.create import (
     required_bytes,
 )
 from ginn.ops.disk import estimate_required
-from ginn.ops.provision import services_off_required_bytes, storage_required_bytes
 from ginn.podman.adapter import CreateSpec, ExecTarget
 from ginn.podman.models import ContainerState, ExecResult, ImageInfo
 from ginn.runtime import attach
-from ginn.runtime.provision import (
-    clean_argvs,
-    derived_image_name,
-    install_argv,
-    integration_step_argvs,
-    keep_id_entry_check_argv,
-    keep_id_entry_drop_argv,
-    refresh_argv,
-    stage_image_name,
-)
 from ginn.runtime.realm_security import SecurityHooks
-from ginn.runtime.spec import LABEL_REALM, MACHINE_ID_PATH, NAME_PREFIX, RUN_USER_TMPFILES_PATH
+from ginn.runtime.spec import MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
 from ginn.security.nvidia import NvidiaPlan, Status
 from ginn.services.runit_user import journald_dropin
 from ginn.store.locks import image_lock
@@ -111,21 +100,11 @@ SERVICES_STEPS = (
     "recorded",
     "homed",
     "pulled",
-    "provision-created",
-    "init-installed",
-    "ips-installed",
-    "stage-committed",
-    "reset-created",
-    "image-committed",
-    "reset-removed",
-    "stage-removed",
-    "provision-removed",
     "created",
     "service",
     "stopped",
 )
-"""A services-on create provisions its derived image (ADR-015 Decision 2), makes the realm container
-from it, and stops there: the realm container never runs in this create (ADR-003)."""
+"""A services-on create makes the container and stops there: nothing runs in it (ADR-003)."""
 FORBIDDEN_TOKENS = frozenset(
     {
         "--privileged",
@@ -153,19 +132,6 @@ class _Vfs:
 def _statvfs(available: int) -> Callable[[str], _Vfs]:
     """A statvfs seam that reports the same free space for every path."""
     return lambda _path: _Vfs(available)
-
-
-def _services_off_needed(*, base_pulled: bool) -> int:
-    """The storage figure of a services-off create of debian (T7.35), with or without the pull."""
-    entry = trust.load().entry("debian")
-    definition = load_distro("debian")
-    return services_off_required_bytes(
-        definition.base_layer_allocated_bytes,
-        definition.stage_layer_allocated_bytes,
-        definition.package_cache_peak_bytes,
-        download_bytes=entry.compressed_size_bytes,
-        base_pulled=base_pulled,
-    )
 
 
 def _helper_rows(argv: Sequence[str], root: str) -> str:
@@ -205,9 +171,6 @@ class ScriptedPodman(FakePodman):
         super().__init__(**kwargs)
         self.root = root
         self.created_specs: list[CreateSpec] = []
-        self.realm_starts: list[str] = []
-        """The IDs of the realm containers that podman started, read at the start call. A removed
-        container leaves no label to read later, so the call is where a services-on start shows."""
         self.exec_errors: dict[tuple[str, ...], list[GinnError]] = {}
         self.pull_error: BaseException | None = None
         self.interrupt_after_create = False
@@ -219,12 +182,6 @@ class ScriptedPodman(FakePodman):
         if self.interrupt_after_create:
             raise KeyboardInterrupt  # the container exists, and the call never returns its id
         return cid
-
-    def start(self, container_id: str) -> None:
-        held = self.containers.get(container_id)
-        if held is not None and LABEL_REALM in held.labels:
-            self.realm_starts.append(container_id)
-        super().start(container_id)
 
     def pull(self, ref_with_digest: str, *, retry_hook: Any = None) -> ImageInfo:
         if self.pull_error is not None:
@@ -383,12 +340,6 @@ def execs(fake: FakePodman) -> list[list[str]]:
     return [list(call.args[1]) for call in fake.calls if call.op == "exec"]  # type: ignore[misc]
 
 
-def realm_specs(fake: ScriptedPodman) -> list[CreateSpec]:
-    """The specs of the realm's own containers. A services-on create also makes the provisioning and
-    reset containers, which are named `ginn_provision_...` (ADR-015 Decision 10)."""
-    return [spec for spec in fake.created_specs if spec.name.startswith(NAME_PREFIX)]
-
-
 def create_entries(env: OpEnv, name: str = "debian") -> list[Any]:
     return [entry for entry in env.audit.read() if entry.op == "create" and entry.realm == name]
 
@@ -447,14 +398,14 @@ def test_a_services_on_create_copies_the_run_user_drop_in_before_any_start(
     realm user's owner line goes in with `podman cp` after the create and before any start."""
     hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
     record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
-    (spec,) = realm_specs(fake)
+    (spec,) = fake.created_specs
     assert spec.tmpfs == [f"/run/user/{UID}:mode=0700,U"]
     content, mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
     assert content == f"d /run/user/{UID} 0700 {UID} {GID} -\n".encode("ascii")
     assert mode == 0o644
     ops = ops_of(fake)
     assert ops.index("create") < ops.index("cp_into")
-    assert fake.realm_starts == []
+    assert "start" not in ops
 
 
 @pytest.mark.fr("FR-080")
@@ -473,7 +424,7 @@ def test_the_drop_in_carries_the_realm_uid_and_gid_it_was_planned_for(
     record = create_realm(env, fake, wanted, hooks=hooks).record
     content, _mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
     assert content == b"d /run/user/1001 0700 1001 1002 -\n"
-    (spec,) = realm_specs(fake)
+    (spec,) = fake.created_specs
     assert spec.tmpfs == ["/run/user/1001:mode=0700,U"]
 
 
@@ -584,7 +535,7 @@ def test_a_services_off_create_copies_no_run_user_drop_in(
 
 @pytest.mark.fr("FR-010")
 @pytest.mark.fr("FR-080")
-def test_a_services_on_create_makes_the_container_from_the_derived_image_and_stops_with_no_start(
+def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -592,8 +543,6 @@ def test_a_services_on_create_makes_the_container_from_the_derived_image_and_sto
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    """ADR-015 Decision 2 and 4: the stage builds the derived image, and the realm container is made
-    from its ID. Only the provisioning container runs, and it is gone when the create ends."""
     steps: list[str] = []
     hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append, program=GINN_PROGRAM)
     result = create_realm(env, fake, request(home, services=True), hooks=hooks)
@@ -605,279 +554,19 @@ def test_a_services_on_create_makes_the_container_from_the_derived_image_and_sto
     assert record.container_id in fake.containers
     assert [c.state for c in fake.containers.values()] == [ContainerState.CREATED]
     assert record.grants == []
+    assert record.manifest == []
     assert steps == list(SERVICES_STEPS)
-    assert fake.realm_starts == []
-    assert record.container_id not in {call.args[0] for call in fake.calls if call.op == "exec"}
-    assert "unshare" not in ops_of(fake)
+    assert {"start", "exec", "stop", "unshare"}.isdisjoint(ops_of(fake))
     assert [w.code for w in result.warnings] == ["GINN-W-SERVICES-PENDING"]
-    (spec,) = realm_specs(fake)
+    (spec,) = fake.created_specs
     argv = spec.to_argv()
     assert "--systemd=always" in argv
     assert "--init" not in argv
+    assert "--entrypoint" in argv
     assert argv[argv.index("--entrypoint") + 1] == '["/sbin/init"]'
-    assert spec.image_id is not None
-    assert argv[-1] == spec.image_id == record.init_image_id
-    assert fake.images[derived_image_name(RealmName("debian"), 1)].id == record.init_image_id
-    assert stage_image_name(RealmName("debian"), 1) not in fake.images
+    assert argv[-1] != "/sbin/init"
     assert RealmStore(env.paths).load(RealmName("debian")) == record
     assert env.journal.pending() == []
-
-
-@pytest.mark.fr("FR-080")
-@pytest.mark.fr("FR-048")
-def test_a_services_on_create_drops_the_keep_id_line_of_the_realm_uid_before_the_commit(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """T7.30: the derived image must not keep podman's keep-id line for the realm uid. The realm
-    container's `--passwd-entry` is written only when the uid is absent, so a kept line would fail
-    its user check. The drop runs in the provisioning container, before the stage commit."""
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
-    create_realm(env, fake, request(home, services=True), hooks=hooks)
-    drop = tuple(keep_id_entry_drop_argv(UID))
-    drops = [i for i, call in enumerate(fake.calls) if call.op == "exec" and call.args[1] == drop]
-    commits = [i for i, call in enumerate(fake.calls) if call.op == "commit"]
-    assert len(drops) == 1
-    assert drops[0] < commits[0]
-    assert fake.exec_calls[[c.argv for c in fake.exec_calls].index(drop)].user == "0:0"
-
-
-@pytest.mark.fr("FR-080")
-def test_a_services_on_create_writes_its_init_entries_and_the_derived_id_at_finish(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """ADR-015 Decision 6: the record keeps the derived image's ID, and the Install Manifest lists
-    the init set with `init` set. Nothing else is in it, because no package was asked for."""
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
-    record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
-    expected = [
-        ManifestEntry(name=name, source=InstallSource.REPO, method=InstallMethod.GINN, init=True)
-        for name in sorted(load_distro("debian").services_packages)
-    ]
-    assert record.manifest == expected
-    derived = fake.images[derived_image_name(RealmName("debian"), 1)]
-    assert record.init_image_id == derived.id
-    assert record.image_digest == trust.load().entry("debian").digest
-
-
-@pytest.mark.fr("FR-010")
-@pytest.mark.fr("FR-013")
-@pytest.mark.parametrize("name", ["arch", "debian", "fedora", "kali"])
-def test_the_services_on_set_is_the_refresh_the_init_set_the_integration_set_and_the_clean(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-    name: str,
-) -> None:
-    """FR-010 for a services-on realm: the stage runs the refresh, the init set, the Integration
-    Package Set with its locale step, the keep-id drop of the realm uid and its getent check
-    (T7.30), and the clean steps, in that order, in its own container. Arch has no init set, but it
-    still provisions, for the Integration Package Set and the commit (ADR-015 Decision 3). The realm
-    container runs none of them."""
-    distro = load_distro(name)
-    integration = distro.integration_set("en_US.UTF-8")
-    expected: list[list[str]] = [refresh_argv(distro)]
-    init = install_argv(distro, distro.services_packages)
-    if init is not None:
-        expected.append(init)
-    if integration.packages:
-        expected.append(distro.argv(Verb.INSTALL, integration.packages))
-    expected.extend(integration_step_argvs(integration))
-    expected.append(keep_id_entry_drop_argv(UID))
-    expected.append(keep_id_entry_check_argv(UID))
-    expected.extend(clean_argvs(distro))
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
-    wanted = request(home, name=name, distro=name, services=True, host_env={"LANG": "en_US.UTF-8"})
-    record = create_realm(env, fake, wanted, hooks=hooks).record
-    assert execs(fake) == expected
-    assert record.container_id not in {c.args[0] for c in fake.calls if c.op == "exec"}
-    assert record.init_image_id is not None
-
-
-@pytest.mark.fr("FR-121")
-@pytest.mark.fr("FR-010")
-def test_a_services_on_create_needs_the_disk_formula_before_its_pull(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """ADR-015 Decision 11: the free space covers the base estimate, but not the copies of the base,
-    the stage layer and the package cache of a services-on create (T7.33). The create refuses before
-    its pull. A services-off create needs its own figure (T7.35): the pull, the keep-id copy and the
-    stage's room, so the same free space refuses it too, and its own figure goes on."""
-    entry = trust.load().entry("debian")
-    definition = load_distro("debian")
-    base_only = required_bytes(entry)
-    formula = storage_required_bytes(
-        definition.base_layer_allocated_bytes,
-        definition.stage_layer_allocated_bytes,
-        definition.package_cache_peak_bytes,
-        download_bytes=entry.compressed_size_bytes,
-        base_pulled=True,
-    )
-    assert base_only < formula
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(base_only))
-    with pytest.raises(GinnError) as caught:
-        create_realm(env, fake, request(home, services=True), hooks=hooks)
-    assert caught.value.code == "GINN-E-DISK-SPACE"
-    assert caught.value.details["needed"] == f"{formula} bytes"
-    assert "pull" not in ops_of(fake)
-    assert_nothing_left(env, fake)
-    off_needed = _services_off_needed(base_pulled=True)
-    assert base_only < off_needed < formula
-    short = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(off_needed - 1))
-    with pytest.raises(GinnError) as off:
-        create_realm(env, fake, request(home), hooks=short)
-    assert off.value.code == "GINN-E-DISK-SPACE"
-    assert off.value.details["needed"] == f"{off_needed} bytes"
-    assert_nothing_left(env, fake)
-    enough = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(off_needed))
-    result = create_realm(env, fake, request(home), hooks=enough)
-    assert result.record.state is RealmState.STOPPED
-
-
-@pytest.mark.fr("FR-121")
-@pytest.mark.fr("NFR-060")
-@pytest.mark.parametrize("field", ["base_layer_allocated_bytes", "stage_layer_allocated_bytes"])
-def test_a_services_on_create_refuses_missing_layer_sizes_before_any_podman_call(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    field: str,
-) -> None:
-    """NFR-060, ADR-015 Decision 11: the loader defaults the measured layer sizes to 0, so a
-    fixture loads without them. A services-on create would estimate near zero from them, so it
-    refuses before its first podman call with GINN-E-DISTRO-DATA, which names the file and the key.
-    A services-off create refuses the same way (T7.35): its storage figure reads the same layers,
-    so a fixture without them is not a create of either mode."""
-    shipped = load_distro("debian")
-    monkeypatch.setattr(_create_plan, "load_distro", lambda _name: replace(shipped, **{field: 0}))
-    hooks = hooks_for(tmp_path, sleeps, mountinfo)
-    with pytest.raises(GinnError) as caught:
-        create_realm(env, fake, request(home, services=True), hooks=hooks)
-    assert caught.value.code == "GINN-E-DISTRO-DATA"
-    assert caught.value.details["file"] == shipped.source
-    assert caught.value.details["field"] == field
-    assert fake.calls == []
-    assert_nothing_left(env, fake)
-    with pytest.raises(GinnError) as off:
-        create_realm(env, fake, request(home), hooks=hooks)
-    assert off.value.code == "GINN-E-DISTRO-DATA"
-    assert off.value.details["field"] == field
-    assert fake.calls == []
-    assert_nothing_left(env, fake)
-
-
-@pytest.mark.fr("DR-018")
-@pytest.mark.fr("FR-080")
-def test_a_failure_after_the_derived_image_is_made_removes_it_with_the_realm(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """The stage returns its image, and then a later step fails. The create's undo removes the
-    realm container, then the derived image by ID, then the pinned image it pulled (ADR-015 Decision
-    13)."""
-
-    def fail_at_created(name: str) -> None:
-        if name == "created":
-            raise make("GINN-E-INTERNAL")
-
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at_created, program=GINN_PROGRAM)
-    with pytest.raises(GinnError) as caught:
-        create_realm(env, fake, request(home, services=True), hooks=hooks)
-    assert caught.value.code == "GINN-E-INTERNAL"
-    assert_nothing_left(env, fake)
-
-
-@pytest.mark.fr("DR-018")
-@pytest.mark.fr("FR-080")
-def test_an_interrupt_right_after_the_stage_returns_leaves_no_derived_image(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The derived image's undo is registered before the stage runs, so a cancel after the stage has
-    committed its image, but before the create keeps its ID, still removes the image (ADR-015
-    Decision 13). The cancel becomes GINN-E-INTERRUPTED, and no image of the realm is left."""
-    stage = create_ops.provision_init
-
-    def returns_then_interrupts(stage_env: Any, plan: Any, journal: Any) -> Any:
-        stage(stage_env, plan, journal)
-        raise KeyboardInterrupt  # the image exists, and the create never records its ID
-
-    monkeypatch.setattr(create_ops, "provision_init", returns_then_interrupts)
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
-    with pytest.raises(GinnError) as caught:
-        create_realm(env, fake, request(home, services=True), hooks=hooks)
-    assert caught.value.code == "GINN-E-INTERRUPTED"
-    assert not [name for name in fake.images if name.startswith("localhost/ginn-init-debian:")]
-    assert_nothing_left(env, fake)
-
-
-@pytest.mark.fr("FR-080")
-def test_a_stage_removal_that_fails_after_the_commit_is_a_note_and_the_create_finishes(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """ADR-015 Decision 2h: the reset container cannot be removed once the derived image is
-    committed and checked. The create still finishes. The failure is a note on the result, and the
-    sweep removes the container later."""
-    fake.fail_ops["rm"] = "GINN-E-INTERNAL"
-    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
-    result = create_realm(env, fake, request(home, services=True), hooks=hooks)
-    assert result.record.state is RealmState.STOPPED
-    assert any(note.startswith("reset-removed failed") for note in result.notes)
-
-
-@pytest.mark.fr("FR-013")
-def test_a_services_on_create_reports_the_stages_locale_note(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    result = create_realm(
-        env,
-        fake,
-        request(home, services=True, host_env={"LANG": "en.UTF-8"}),
-        hooks=hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM),
-    )
-    assert result.locale_note is not None
-    assert "en.UTF-8" in result.locale_note
-    assert result.record.state is RealmState.STOPPED
 
 
 @pytest.mark.fr("NFR-003")
@@ -897,15 +586,14 @@ def test_the_journald_drop_in_exists_before_podman_binds_it_at_create(
     original = fake.create
 
     def create_checking_source(spec: CreateSpec) -> str:
-        if spec.name.startswith(NAME_PREFIX):  # the realm's container, not the stage's
-            seen.append(journald_dropin(env.paths).is_file())
+        seen.append(journald_dropin(env.paths).is_file())
         return original(spec)
 
     monkeypatch.setattr(fake, "create", create_checking_source)
     hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
     create_realm(env, fake, request(home, services=True), hooks=hooks)
     assert seen == [True]
-    assert "source=" + str(journald_dropin(env.paths)) in " ".join(realm_specs(fake)[0].to_argv())
+    assert "source=" + str(journald_dropin(env.paths)) in " ".join(fake.created_specs[0].to_argv())
 
 
 @pytest.mark.fr("FR-010")
@@ -1275,7 +963,7 @@ def test_two_realms_of_one_distribution_have_separate_homes_and_containers(
 
 @pytest.mark.fr("FR-121")
 @pytest.mark.fr("AS-023")
-def test_free_space_below_the_services_off_figure_refuses_before_any_podman_call(
+def test_free_space_below_the_estimate_refuses_before_any_download(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -1283,25 +971,22 @@ def test_free_space_below_the_services_off_figure_refuses_before_any_podman_call
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    """T7.35: a services-off create needs the keep-id copy of its base, and the stage's room, not
-    only the base estimate. Free space one byte short of the figure refuses before any podman call,
-    and the refusal names the figure and the podman root."""
-    needed = _services_off_needed(base_pulled=True)
+    needed = required_bytes(trust.load().entry("debian"))
     hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1))
     with pytest.raises(GinnError) as caught:
         create_realm(env, fake, request(home), hooks=hooks)
     assert caught.value.code == "GINN-E-DISK-SPACE"
     assert caught.value.exit_code == 73
     assert caught.value.details["needed"] == f"{needed} bytes"
-    assert caught.value.details["available"] == f"{needed - 1} bytes"
     assert caught.value.details["path"] == str(env.paths.podman_root)
-    assert fake.calls == []
+    assert "pull" not in ops_of(fake)
+    assert "create" not in ops_of(fake)
     assert_nothing_left(env, fake)
     assert [e.error_code for e in create_entries(env)] == ["GINN-E-DISK-SPACE"]
 
 
 @pytest.mark.fr("FR-121")
-def test_free_space_equal_to_the_services_off_figure_is_enough(
+def test_free_space_equal_to_the_estimate_times_1_10_is_enough(
     env: OpEnv,
     fake: ScriptedPodman,
     home: Path,
@@ -1309,50 +994,10 @@ def test_free_space_equal_to_the_services_off_figure_is_enough(
     sleeps: list[float],
     mountinfo: Path,
 ) -> None:
-    needed = _services_off_needed(base_pulled=True)
+    needed = required_bytes(trust.load().entry("debian"))
     hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed))
     result = create_realm(env, fake, request(home), hooks=hooks)
     assert result.record.state is RealmState.STOPPED
-
-
-@pytest.mark.fr("FR-121")
-@pytest.mark.fr("FR-107")
-def test_the_space_checked_step_reports_the_figures_it_compared(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-) -> None:
-    """T7.35: the `space-checked` step carries `required_bytes` (the figure with the margin),
-    `free_bytes` (the smallest free space checked) and no `reason`, before the step is reported."""
-    needed = _services_off_needed(base_pulled=True)
-    details: dict[str, dict[str, object]] = {}
-    order: list[str] = []
-
-    def on_detail(step: str, detail: Mapping[str, object]) -> None:
-        details[step] = dict(detail)
-        order.append(f"detail:{step}")
-
-    def on_step(step: str) -> None:
-        order.append(f"step:{step}")
-
-    hooks = hooks_for(
-        tmp_path,
-        sleeps,
-        mountinfo,
-        statvfs=_statvfs(needed + 7),
-        on_step=on_step,
-        on_step_detail=on_detail,
-    )
-    create_realm(env, fake, request(home), hooks=hooks)
-    assert details["space-checked"] == {
-        "required_bytes": needed,
-        "free_bytes": needed + 7,
-        "reason": None,
-    }
-    assert order.index("detail:space-checked") < order.index("step:space-checked")
 
 
 @pytest.mark.fr("FR-121")
@@ -1367,74 +1012,15 @@ def test_the_space_check_covers_the_podman_root_and_the_realm_home(
 ) -> None:
     """Both filesystems that the create fills are checked, each with the same requirement."""
     checked: list[tuple[list[Path], int]] = []
-    real = create_ops.check_space
 
-    def record(paths: Sequence[Path], required: int, *, statvfs: Any) -> Any:
+    def record(paths: Sequence[Path], required: int, **_: object) -> None:
         checked.append((list(paths), required))
-        return real(paths, required, statvfs=statvfs)
 
-    monkeypatch.setattr(create_ops, "check_space", record)
+    monkeypatch.setattr(create_ops, "check_free_paths", record)
     create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
     assert checked == [
-        ([env.paths.podman_root, env.paths.homes], _services_off_needed(base_pulled=True))
+        ([env.paths.podman_root, env.paths.homes], required_bytes(trust.load().entry("debian")))
     ]
-
-
-@pytest.mark.fr("FR-121")
-@pytest.mark.fr("FR-107")
-@pytest.mark.parametrize(
-    ("root_offset", "homes_offset", "refused"),
-    [
-        pytest.param(50, 7, False, id="homes-smaller-both-enough"),
-        pytest.param(7, 50, False, id="root-smaller-both-enough"),
-        pytest.param(50, -1, True, id="homes-short"),
-        pytest.param(-1, -9, True, id="both-short-homes-smaller"),
-    ],
-)
-def test_the_space_check_reads_each_filesystem_and_decides_by_the_smaller_free_space(
-    env: OpEnv,
-    fake: ScriptedPodman,
-    home: Path,
-    tmp_path: Path,
-    sleeps: list[float],
-    mountinfo: Path,
-    root_offset: int,
-    homes_offset: int,
-    refused: bool,
-) -> None:
-    """The podman root and the Realm Home can be on two filesystems, so each is read on its own.
-    The step's `free_bytes` is the smaller of the two. When the smaller one is short, the refusal
-    names that path and its own free space, even when the other path is checked first."""
-    root, homes = env.paths.podman_root, env.paths.homes
-    root.mkdir(parents=True, exist_ok=True)
-    homes.mkdir(parents=True, exist_ok=True)
-    needed = _services_off_needed(base_pulled=True)
-    free = {str(root): needed + root_offset, str(homes): needed + homes_offset}
-    details: dict[str, dict[str, object]] = {}
-    hooks = hooks_for(
-        tmp_path,
-        sleeps,
-        mountinfo,
-        statvfs=lambda path: _Vfs(free.get(path, AMPLE)),
-        on_step_detail=lambda step, detail: details.setdefault(step, dict(detail)),
-    )
-
-    if not refused:
-        create_realm(env, fake, request(home), hooks=hooks)
-        assert details["space-checked"] == {
-            "required_bytes": needed,
-            "free_bytes": min(free.values()),
-            "reason": None,
-        }
-        return
-
-    with pytest.raises(GinnError) as caught:
-        create_realm(env, fake, request(home), hooks=hooks)
-    assert caught.value.code == "GINN-E-DISK-SPACE"
-    assert caught.value.details["needed"] == f"{needed} bytes"
-    assert caught.value.details["available"] == f"{needed + homes_offset} bytes"
-    assert caught.value.details["path"] == str(homes)
-    assert fake.calls == []
 
 
 @pytest.mark.fr("FR-121")
@@ -2837,7 +2423,7 @@ def test_a_services_on_create_copies_a_machine_id_into_the_container_before_any_
     assert RealmStore(env.paths).load(RealmName("debian")).machine_id == record.machine_id
     ops = ops_of(fake)
     assert ops.index("create") < ops.index("cp_into")
-    assert fake.realm_starts == []
+    assert "start" not in ops
 
 
 @pytest.mark.fr("FR-080")
@@ -2875,8 +2461,7 @@ def test_a_services_on_image_without_sbin_init_is_refused_as_no_init_and_rolled_
     assert caught.value.details["realm"] == "debian"
     assert "@sha256:" in caught.value.details["image"]
     assert fake.containers == {}
-    assert fake.images == {}
-    assert fake.realm_starts == []
+    assert "start" not in ops_of(fake)
     assert not RealmStore(env.paths).exists(RealmName("debian"))
     assert not (env.paths.homes / "debian").exists()
     assert env.journal.pending() == []
@@ -2932,10 +2517,8 @@ def test_the_init_check_stages_its_copy_in_a_create_scratch_directory_that_is_th
     monkeypatch.setattr(fake, "cp_from", cp_from_recording)
     hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
     create_realm(env, fake, request(home, services=True), hooks=hooks)
-    # The stage checks before its commit (ADR-015 Decision 2d), and the create checks again after it
-    # created the container (Decision 12). Each copy has its own scratch directory.
-    assert len(staged) == 2
-    assert all(name.startswith(SCRATCH_PREFIX) for name in staged)
+    assert len(staged) == 1
+    assert staged[0].startswith(SCRATCH_PREFIX)
     assert _scratch_left(env) == []
 
 

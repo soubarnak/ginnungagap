@@ -6,11 +6,8 @@
 journal step. `CreateHooks.on_step` runs after each step is recorded.
 
 - checked: the realm name is free. Neither a record nor a Realm Home exists (FR-010 AC-3).
-- space-checked: free space in the podman root and the Realm Home filesystems covers the storage
-  figure of ADR-015 Decision 11 times 1.10, rounded up (FR-121, ops/disk.py, ops/_create_plan.py
-  `storage_required`). The figure is the services mode's: a services-off create counts its pull,
-  its keep-id copy and its stage, as a services-on create does (T7.35). The step's progress line
-  carries `required_bytes`, `free_bytes` and `reason` (`SpaceCheck`, FR-107).
+- space-checked: free space in the podman root and the Realm Home filesystems covers the base
+  estimate times 1.10, rounded up (FR-121, ops/disk.py).
 - recorded: the record is saved as `creating` (DR-020), with the pinned reference and digest. It is
   saved before the pull, so an interrupted create leaves a record that recovery can find (FR-122).
   It also keeps the request that `create --resume` needs: `create_pending`, the `--with` packages
@@ -20,23 +17,17 @@ journal step. `CreateHooks.on_step` runs after each step is recorded.
   config in the Realm Home (ADR-006, security/seccomp.py, security/nested.py).
 - pulled: the image is pulled by digest, with the FR-120 retries. Its digest must equal the pin
   (FR-011). A mismatch removes the image, and nothing is kept.
-- provisioning: services on only, and no journal step of its own. The provisioning stage
-  (ops/provision.py, ADR-015 Decision 2) builds the derived image from the pin. Its journal steps,
-  `provision-created` to `provision-removed`, go into this create's journal, and the stage rolls
-  back its own failure. The derived image is an undo of this create from the start of the stage, so
-  an interrupt inside the stage leaves no image.
 - created: `podman create` runs from the realm's spec, Basic with services off (FR-010 AC-1), or
-  with services on, from the derived image's ID and never the pin (ADR-003, ADR-015 Decision 4). The
-  record is saved again with the container ID, so a crash cannot leave an unnamed container. A
-  services-on container then gets two checks before its first start: the image must hold
-  `/sbin/init` (GINN-E-NO-INIT, F3), and the realm's machine-id is copied into `/etc/machine-id`
-  with `podman cp` (ADR-007, F6). The id is kept on the record, so a rebuild writes the same one.
+  with services on (ADR-003, runtime/spec.py). The record is saved again with the container ID, so a
+  crash cannot leave an unnamed container. A services-on container then gets two checks before its
+  first start: the image must hold `/sbin/init` (GINN-E-NO-INIT, F3), and the realm's machine-id is
+  copied into `/etc/machine-id` with `podman cp` (ADR-007, F6). The id is kept on the record, so a
+  rebuild writes the same one.
 - services on: the create stops after `created`. Its container is made and never started: a
   services-on realm starts only through its runit entry (FR-081, ADR-003), and the CLI never starts
-  it. So this create runs no `podman start`, `exec` or `stop` in that container, attaches no grant,
-  and runs no user check, integration step or package step there. The final record is saved as
-  `stopped`, with `init_image_id` and the init entries (FR-080). GINN-W-SERVICES-PENDING says what
-  this create left out (FR-010).
+  it. So this create runs no `podman start`, `exec` or `stop`, attaches no grant, and runs no user
+  check, integration step or package step. The final record is saved as `stopped`, and
+  GINN-W-SERVICES-PENDING says what this create left out (FR-010).
 - started: the container starts, and its init process is read.
 - attached: the variable grants are attached (ADR-008 amendment). A failed attach fails the create.
 - user: the realm user is the passwd entry that podman wrote at create from `--passwd-entry`. No
@@ -89,7 +80,7 @@ and the Install Manifest (M5).
 import contextlib
 import os
 import shutil
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final
@@ -98,7 +89,6 @@ from ginn.distros import Verb
 from ginn.domain import (
     InstallMethod,
     InstallSource,
-    ManifestEntry,
     RealmName,
     RealmState,
     transition,
@@ -110,27 +100,18 @@ from ginn.ops._create_plan import (
     CreateHooks,
     CreateRequest,
     SizeEstimate,
-    SpaceCheck,
     _Plan,
     _validate,
-    check_space,
+    estimate_bytes,
     human_bytes,
     required_bytes,
-    storage_required,
 )
 from ginn.ops._mutating import Mutation, OpEnv, mutating
 from ginn.ops._rollback import Rollback
 from ginn.ops.disk import check_free_paths, estimate_required
 from ginn.ops.estimate import measure_everything
 from ginn.ops.images import image_names, uses_image
-from ginn.ops.provision import (
-    ProvisionEnv,
-    ProvisionPlan,
-    ProvisionResult,
-    check_init,
-    provision_init,
-    remove_derived,
-)
+from ginn.ops.provision import check_init
 from ginn.ops.retry import RETRY_DELAYS, network_retry_hook
 from ginn.ops.security_ops import write_nvidia
 from ginn.packages.manager import ROOT_USER, run_step
@@ -148,7 +129,6 @@ from ginn.runtime.mounts import attach_plan
 from ginn.runtime.spec import (
     MACHINE_ID_PATH,
     RUN_USER_TMPFILES_PATH,
-    RealmSpec,
     create_spec,
     new_machine_id,
     run_user_tmpfiles,
@@ -178,8 +158,6 @@ class CreateResult:
     the host LANG cannot be used, so the realm gets C.UTF-8 instead (FR-013, distros/loader.py).
     `estimate` is the size of the everything set that was confirmed, or None (FR-014). `resumed` is
     True when the result comes from `create --resume` (ops/resume.py).
-    `notes` are what the provisioning stage could not remove after its commit (ADR-015 Decision 2h).
-    The image stays until the sweep removes it, and the CLI shows each note as it shows gpu_note.
     """
 
     record: RealmRecord
@@ -188,7 +166,6 @@ class CreateResult:
     gpu_note: str | None = None
     estimate: SizeEstimate | None = None
     resumed: bool = False
-    notes: tuple[str, ...] = ()
 
 
 def _remove_tree(path: Path) -> None:
@@ -222,36 +199,6 @@ def _cleared_request() -> dict[str, Any]:
     return {"create_pending": False, "with_at_create": [], "everything_confirmed": False}
 
 
-def _with_init_entries(
-    manifest: Sequence[ManifestEntry], init_entries: Sequence[ManifestEntry]
-) -> list[ManifestEntry]:
-    """The Install Manifest with the stage's init entries, sorted by name (ADR-015 Decision 6).
-
-    An entry of the same name is replaced, so each init package is listed once. The stage marks its
-    entries `init`, so `exec` never installs them and `remove` refuses them (FR-040, FR-041).
-    """
-    names = {entry.name for entry in init_entries}
-    kept = [entry for entry in manifest if entry.name not in names]
-    return sorted([*kept, *init_entries], key=lambda entry: entry.name)
-
-
-class _StageJournal:
-    """The journal of the provisioning stage, written into the create's own journal (NFR-030).
-
-    Each stage step is journaled with its params, then shown through `on_step`, as the create's own
-    steps are (AS-018). The stage calls `step` only, so it needs nothing else from the create.
-    """
-
-    def __init__(self, mutation: Mutation, on_step: Callable[[str], None] | None) -> None:
-        self._mutation = mutation
-        self._on_step = on_step
-
-    def step(self, name: str, params: Mapping[str, Any] | None = None) -> None:
-        self._mutation.step(name, params)
-        if self._on_step is not None:
-            self._on_step(name)
-
-
 class _Create:
     """The state of one create, from its first step to its last. `create_realm` drives it."""
 
@@ -281,8 +228,6 @@ class _Create:
         self._skips: list[str] = []
         self._locale_note: str | None = None
         self._estimate: SizeEstimate | None = None
-        self._init: ProvisionResult | None = None
-        self._notes: tuple[str, ...] = ()
         self._retry = network_retry_hook(hooks.sleep)
 
     @property
@@ -292,11 +237,6 @@ class _Create:
     @property
     def estimate(self) -> SizeEstimate | None:
         return self._estimate
-
-    @property
-    def notes(self) -> tuple[str, ...]:
-        """What the provisioning stage could not clean up after its commit (ADR-015 Decision 2h)."""
-        return self._notes
 
     @property
     def gpu_note(self) -> str | None:
@@ -312,8 +252,6 @@ class _Create:
         self._save_creating()
         self._make_home()
         self._pull()
-        if self._plan.spec.services:
-            self._provision()
         self._create_container()
         if self._plan.spec.services:
             return self._finish_services()
@@ -366,38 +304,14 @@ class _Create:
         self._step("checked")
 
     def _check_space(self) -> None:
-        """FR-121: the storage figure must fit on each filesystem the create fills.
-
-        The figure assumes the pull, so no podman call runs before the refusal (the figure of
-        ops/_create_plan.py `storage_required`). A create that finds its image local checks less
-        in a resume and in a pinned rebuild, which pass `base_in_storage` themselves.
-        """
-        self._check_space_for(base_in_storage=False)
-
-    def _check_space_for(self, *, base_in_storage: bool) -> None:
-        """`space-checked`: free space covers the requirement, which `base_in_storage` may lower.
-
-        The check and the figures it compared go to the step, so the progress line carries them
-        (FR-121, FR-107). A short filesystem raises GINN-E-DISK-SPACE before the step is recorded.
-        """
+        """FR-121: the base estimate times 1.10 must fit on each filesystem the create fills."""
         paths = self._env.paths
-        check = check_space(
+        check_free_paths(
             [paths.podman_root, paths.homes],
-            storage_required(self._plan, base_in_storage=base_in_storage),
+            required_bytes(self._plan.entry),
             statvfs=self._hooks.statvfs,
         )
-        self._space_checked(check)
-
-    def _space_checked(self, check: SpaceCheck, staging: SpaceCheck | None = None) -> None:
-        """Record `space-checked` with the figures of its check (FR-121).
-
-        `staging` is the image tmpdir check of a provision build (ADR-015 Decision 11), which the
-        progress line carries under its own key, so the storage figures keep their meaning.
-        """
-        detail: dict[str, object] = dict(check.fields())
-        if staging is not None:
-            detail["staging"] = staging.fields()
-        self._step("space-checked", detail)
+        self._step("space-checked")
 
     def _save_creating(self) -> None:
         plan = self._plan
@@ -472,49 +386,6 @@ class _Create:
             raise err
         self._step("pulled")
 
-    def _provision(self) -> None:
-        """`provisioned`: build the derived image of a services-on create (ADR-015 Decisions 2, 12).
-
-        The stage runs under the caller's realm lock and image lock (ops/provision.py). Its steps go
-        into this create's journal, so each one is a kill point (NFR-030). A GinnError from the
-        stage is rolled back by the stage itself. The derived image's undo is registered before the
-        stage runs, so an interrupt after the stage returns, or inside it, still finds it. The undo
-        finds nothing when the stage made no image. The locale note is the stage's.
-        """
-        plan = self._plan
-        definition = plan.definition
-        env = ProvisionEnv(
-            podman=self._podman,
-            paths=self._env.paths,
-            sleep=self._hooks.sleep,
-            statvfs=self._hooks.statvfs,
-        )
-        stage = ProvisionPlan(
-            realm=self._request.name,
-            generation=plan.spec.generation,
-            distro=definition,
-            image_digest_ref=plan.spec.image,
-            lang=self._request.host_env.get("LANG"),
-            ips_installed_bytes=definition.integration_estimated_installed_bytes,
-            keep_ids=frozenset(),
-            uid=plan.spec.uid,
-        )
-        # Registered before the stage runs. The undo finds nothing until the stage commits an image,
-        # so an interrupt right after the stage returns, before `self._init` is set, leaves none.
-        self._rollback.add("derived image", self._undo_derived)
-        result = provision_init(env, stage, _StageJournal(self._mutation, self._hooks.on_step))
-        self._init = result
-        self._locale_note = result.locale_note
-        self._notes = result.notes
-
-    def _container_spec(self) -> RealmSpec:
-        """The spec of the realm's container. A services-on container runs from its derived image,
-        named by its ID, and never from the pin (ADR-015 Decision 4). Other creates keep the spec.
-        """
-        if self._init is None:
-            return self._plan.spec
-        return replace(self._plan.spec, image_id=self._init.image_id)
-
     def _create_container(self) -> None:
         # Podman reads a bind source when the container is created, so the journald drop-in (ADR-007
         # a) must exist before the call. The drop-in is shared by all realms, so no undo removes it.
@@ -523,7 +394,7 @@ class _Create:
         # Registered before the call. An interrupt inside the call can leave a container whose id
         # was never stored, and the undo finds it by its labels.
         self._rollback.add("container", self._remove_container)
-        cid = self._podman.create(create_spec(self._container_spec()))
+        cid = self._podman.create(create_spec(self._plan.spec))
         self._cid = cid
         self._update(container_id=cid)
         if self._plan.spec.services:
@@ -538,17 +409,14 @@ class _Create:
         (ADR-003). The rebuild inherits this, so a rebuilt generation gets the same checks. A
         failure is a GinnError, so the create or the rebuild is rolled back.
         """
-        check_init(
-            self._podman,
-            self._env.paths,
-            cid,
-            image=self._plan.spec.image,
-            realm=self._request.name.value,
-        )
+        self._check_init(cid)
         machine_id = self._current().machine_id or new_machine_id()
         self._copy_machine_id(cid, machine_id)
         self._copy_run_user_tmpfiles(cid)
         self._update(machine_id=machine_id)
+
+    def _check_init(self, cid: str) -> None:
+        check_init(self._podman, cid, self._plan.spec.image, self._request.name.value)
 
     def _copy_machine_id(self, cid: str, machine_id: str) -> None:
         """Write the realm's machine-id into the container with `podman cp` (ADR-007, F6).
@@ -787,13 +655,12 @@ class _Create:
         self._step("packages")
 
     def _finish_services(self) -> RealmRecord:
-        """Finish a services-on create with no start (ADR-003, FR-081, ADR-015 Decision 12).
+        """Finish a services-on create with no start (ADR-003, FR-081).
 
-        The container is made from the derived image and left stopped. Its start goes through the
-        runit entry, so nothing runs in it here. The runit service directory is written with `down`
-        present, so runit does not start the realm until it is turned on (DR-012). The record keeps
-        the derived image's ID, and the Install Manifest gets the init entries (FR-080, ADR-015
-        Decision 6). The notice names what this create did not do.
+        The container is made and left stopped. Its start goes through the runit entry, so nothing
+        runs in it here. The runit service directory is written with `down` present, so runit does
+        not start the realm until it is turned on (DR-012). The Install Manifest is left as it is,
+        because no package is installed. The notice names what this create did not do.
         """
         self._write_service()
         try:
@@ -805,15 +672,7 @@ class _Create:
         self._step("stopped")
         record = self._current()
         transition(record.state, RealmState.STOPPED, record.previous_state)
-        init = self._init
-        if init is None:
-            raise RuntimeError("the derived image is provisioned before a services-on create ends")
-        self._update(
-            state=RealmState.STOPPED,
-            init_image_id=init.image_id,
-            manifest=_with_init_entries(record.manifest, init.init_entries),
-            **_cleared_request(),
-        )
+        self._update(state=RealmState.STOPPED, **_cleared_request())
         return self._current()
 
     def _finish(self) -> RealmRecord:
@@ -857,19 +716,6 @@ class _Create:
                 return  # another container still uses the image, so it stays
         self._podman.rmi(ref)
 
-    def _undo_derived(self) -> None:
-        """Remove the derived image of this create, and its leftovers, by ID (ADR-015 Decision 13).
-
-        The rollback is newest first, so the realm's container has gone already and no container
-        uses the image. The keep set is empty: a create that did not finish records no image.
-        An image that stays is a failed undo, and the rollback notes its reason.
-        """
-        removal = remove_derived(self._podman, self._request.name, ())
-        if removal.kept:
-            err = make("GINN-E-INTERNAL")
-            err.details.update({"detail": f"derived image not removed: {'; '.join(removal.notes)}"})
-            raise err
-
     def _remove_container(self) -> None:
         """Stop and force-remove this realm's container. Absent is a no-op.
 
@@ -885,15 +731,8 @@ class _Create:
 
     # Helpers.
 
-    def _step(self, name: str, detail: Mapping[str, object] | None = None) -> None:
-        """Journal one step, then report it. A step's `detail` reaches the hook before the step.
-
-        The detail is progress only. The journal keeps the step name, so a free-space figure that
-        varies between runs never changes what recovery reads (FR-122).
-        """
+    def _step(self, name: str) -> None:
         self._mutation.step(name)
-        if detail is not None and self._hooks.on_step_detail is not None:
-            self._hooks.on_step_detail(name, detail)
         if self._hooks.on_step is not None:
             self._hooks.on_step(name)
 
@@ -916,10 +755,9 @@ class _Create:
     def _target(self, *, mutating: bool) -> ExecTarget:
         """The exec target of this operation, by the services mode of the container it builds.
 
-        A services-on create runs no exec in its realm container, which it never starts. Its only
-        execs are the stage's, in the provisioning container, which is services off (ADR-015
-        Decision 2c). A rebuild overrides nothing here: its plan carries the mode of the new
-        generation (ADR-014, Decision 1).
+        A services-on create stops after `created` and runs no exec, so its execs are all services
+        off. A rebuild overrides nothing here: its plan carries the mode of the new generation
+        (ADR-014, Decision 1).
         """
         return ExecTarget(
             realm=self._request.name.value, services=self._plan.spec.services, mutating=mutating
@@ -983,7 +821,6 @@ def run_journaled(
         gpu_note=create.gpu_note,
         estimate=create.estimate,
         resumed=resumed,
-        notes=create.notes,
     )
 
 
@@ -1024,6 +861,7 @@ __all__ = [
     "CreateResult",
     "SizeEstimate",
     "create_realm",
+    "estimate_bytes",
     "human_bytes",
     "required_bytes",
 ]

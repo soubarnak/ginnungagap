@@ -37,8 +37,6 @@ from ginn.store.paths import OwnedPaths, fsync_dir, write_bytes_atomic
 
 _MACHINE_ID: re.Pattern[str] = re.compile(r"[0-9a-f]{32}")
 """A machine-id as systemd writes it: 32 lowercase hex digits (ADR-007, F6)."""
-_IMAGE_ID: re.Pattern[str] = re.compile(r"[0-9a-f]{64}")
-"""A podman image ID as ginn stores it: 64 lowercase hex digits, with no `sha256:` prefix."""
 _PREVIOUS_BOUND: frozenset[RealmState] = frozenset({RealmState.UPDATING, RealmState.REBUILDING})
 _RESTORE_TO: frozenset[RealmState] = frozenset({RealmState.STOPPED, RealmState.RUNNING})
 """The only states that lead to `updating` or `rebuilding`, so the only valid previous states."""
@@ -225,11 +223,8 @@ class RealmRecord:
     # same value, so the realm keeps one identity. Added without a schema bump: a record without
     # the key reads as None, which is every services-off realm and a services-on one made before F6.
     machine_id: str | None = None
-    # The derived image of a services-on realm (ADR-015 Decision 6). `init_image_id` is the image
-    # that the last finished build made, and `building_init_image_id` is the image that a rebuild
-    # is making. Each is a bare image ID: 64 lowercase hex digits, with no `sha256:` prefix. Added
-    # without a schema bump: a record without the keys reads as None, which is every services-off
-    # realm and a services-on one made before the provisioning stage.
+    # ADR-015 Decision 6: the init image IDs. Added without a schema bump: a record without the key
+    # reads as None.
     init_image_id: str | None = None
     building_init_image_id: str | None = None
 
@@ -258,11 +253,9 @@ class RealmRecord:
         if self.settings.tier is not Tier.CUSTOM and self.permissions != Permissions():
             raise ValueError("only a Custom realm keeps toggles or shares (FR-063)")
         if self.state is not RealmState.REBUILDING and (
-            self.building_container_id is not None
-            or self.building_generation is not None
-            or self.building_init_image_id is not None
+            self.building_container_id is not None or self.building_generation is not None
         ):
-            raise ValueError(f"{self.state.value} must not record a building container or image")
+            raise ValueError(f"{self.state.value} must not record a building container")
         if self.services_at_create is None:
             self.services_at_create = self.settings.services
         if self.create_pending and self.state not in _PENDING_STATES:
@@ -271,13 +264,12 @@ class RealmRecord:
             raise ValueError("a create's request is kept only while the create is pending")
         if self.machine_id is not None and _MACHINE_ID.fullmatch(self.machine_id) is None:
             raise ValueError("machine_id must be 32 lowercase hex digits")
-        if self.init_image_id is not None and _IMAGE_ID.fullmatch(self.init_image_id) is None:
-            raise ValueError("init_image_id must be 64 lowercase hex digits")
-        if (
-            self.building_init_image_id is not None
-            and _IMAGE_ID.fullmatch(self.building_init_image_id) is None
+        if self.init_image_id is not None and not self.init_image_id.startswith("sha256:"):
+            raise ValueError("init_image_id must be sha256:<hex>")
+        if self.building_init_image_id is not None and not self.building_init_image_id.startswith(
+            "sha256:"
         ):
-            raise ValueError("building_init_image_id must be 64 lowercase hex digits")
+            raise ValueError("building_init_image_id must be sha256:<hex>")
 
     @property
     def name(self) -> RealmName:
@@ -479,9 +471,8 @@ class RealmStore:
         """Move the realm to `new_state` if DR-020 allows it, then save and return the record.
 
         Entering `updating` or `rebuilding` records the current state as `previous_state`.
-        Leaving either one clears it. Leaving `rebuilding` also clears the building container and
-        the building image ID, so a rollback or a recovery that returns the record to stopped leaves
-        no container or image named. `init_image_id` is not a building field and is kept.
+        Leaving either one clears it. Leaving `rebuilding` also clears the building container, so
+        a rollback or a recovery that returns the record to stopped leaves no container named.
         An illegal move raises IllegalTransition and nothing is written. Removal is `delete()`, so
         a REMOVED target is refused here. `give_up` is passed only by the supervisor's give-up,
         which is the one caller that may move a stopped realm to failed (CL-24).
@@ -498,7 +489,6 @@ class RealmStore:
             previous_state=previous,
             building_container_id=None if leaving_rebuild else record.building_container_id,
             building_generation=None if leaving_rebuild else record.building_generation,
-            building_init_image_id=None if leaving_rebuild else record.building_init_image_id,
             updated_at=utc_from_epoch(self._clock()),
         )
         self.save(updated)

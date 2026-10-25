@@ -16,8 +16,6 @@ The argv is the subcommand only. `PodmanCli` adds the global flags to every call
 What the argv carries, and the decision behind each item (docs/capabilities.md, Base argv and
 Basic table, unless a row says otherwise):
 - `--name ginn-<realm>-g<generation>`. A services toggle makes a new generation (ADR-003, FR-083).
-- The image argument. It is the pinned digest (FR-011). A realm built from a derived image
-  (ADR-015) names that image by its ID instead, with `CreateSpec.image_id`, and the digest stays.
 - `--user <uid>:<gid>` with `--userns keep-id`. The ids are the host user's (roadmap, design).
 - `--passwd-entry <user>:*:<uid>:<gid>:<user>:<home>:<shell>`. Under keep-id, podman writes this
   entry for the realm user, verbatim (T4.9b measurement). The realm user is that entry: ginn runs
@@ -39,8 +37,7 @@ Basic table, unless a row says otherwise):
   the S-02 spike (ADR-010). Without it the image's shell exits at once with no terminal, and
   `podman start` would leave the realm stopped. Both are given explicitly, so the image's CMD is
   not used, whichever way podman treats it. The T4.9 host gate confirms the running process.
-  A services-on realm names `/sbin/init` as its explicit entrypoint and gives no command (ADR-015
-  Decision 4), so the derived image's own command cannot reach it.
+  A services-on realm has no entrypoint. Its command is `/sbin/init`, after the image.
 - The services-on options of ADR-003, added to the same argv when `services` is set:
   `--systemd=always`, `--cgroupns private`, `--cgroup-parent /ginn/<uid>/<realm>`, `--user 0:0`,
   `--stop-signal SIGRTMIN+3`, `--stop-timeout 30` and `--env SYSTEMD_LOG_LEVEL=warning` (ADR-007
@@ -92,9 +89,7 @@ KEEP_ALIVE_COMMAND: Final[tuple[str, ...]] = ("infinity",)
 """The services-off realm's keep-alive, `sleep infinity`, under `--init`. Entrypoint and command
 are both given, so the container keeps running whatever podman does with the image's CMD."""
 INIT_PATH: Final = "/sbin/init"
-"""The path of systemd in a services-on image. The create checks it exists (GINN-E-NO-INIT, F3).
-A services-on container names it as its explicit entrypoint, with no command (ADR-003, ADR-015
-Decision 4), so it is PID 1 whatever the image's own command is."""
+"""The path of systemd in a services-on image. The create checks it exists (GINN-E-NO-INIT, F3)."""
 MACHINE_ID_PATH: Final = "/etc/machine-id"
 """Where a services-on container gets its machine-id, copied in with `podman cp` before the
 first start (ADR-007, F6). A bind mount is not used: it breaks systemd-machine-id-commit.service."""
@@ -131,22 +126,9 @@ tests pin it."""
 SERVICES_LOGIND_UNIT: Final = "systemd-logind.service"
 """The logind unit that ADR-007 mitigation b also masks (decided by the user, 2026-10-14, CL-28).
 The list is spikes/s05/masks-logind.txt (tests pin it)."""
-SERVICES_USERDBD_UNITS: Final[tuple[str, ...]] = (
-    "systemd-userdbd.service",
-    "systemd-userdbd.socket",
-)
-"""The userdb service and its socket, which ADR-007 mitigation b also masks (decided by the user,
-2026-10-16, T7.32, ADR-007 D9). The realm user is in /etc/passwd, so userdbd is not needed. The
-socket is masked too, so socket activation cannot start the masked service, as for the udev
-sockets. No spikes/s05 file lists them: S-05 never measured userdbd."""
-SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (
-    *SERVICES_BASE_MASKED_UNITS,
-    SERVICES_LOGIND_UNIT,
-    *SERVICES_USERDBD_UNITS,
-)
-"""The thirteen units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over
-its unit path under /etc/systemd/system. The base ten, then logind (CL-28), then the userdb pair
-(T7.32)."""
+SERVICES_MASKED_UNITS: Final[tuple[str, ...]] = (*SERVICES_BASE_MASKED_UNITS, SERVICES_LOGIND_UNIT)
+"""The eleven units that ADR-007 mitigation b masks: each gets a read-only `/dev/null` bind over its
+unit path under /etc/systemd/system. The base ten, then logind (CL-28)."""
 UNIT_DIR: Final = "/etc/systemd/system"
 KALI: Final = "kali"
 HOST_NETWORK: Final = "host"
@@ -193,6 +175,8 @@ class RealmSpec:
     login_shell: str
     home: Path
     binds: CreateBinds
+    image_id: str | None = None
+    """The committed stage image ID for the reset create (ADR-015 Decision 4)."""
     tier: Tier = Tier.BASIC
     services: bool = False
     """Services on: systemd is the realm's init, and only its runit entry starts it (ADR-003)."""
@@ -203,9 +187,6 @@ class RealmSpec:
     journald_dropin: str | None = None
     """Host path of the ginn-owned journald drop-in, bound when `services_mitigations` is set."""
     generation: int = 1
-    image_id: str | None = None
-    """A derived image's ID, bare 64 lowercase hex digits (ADR-015 Decision 4). When it is set, the
-    create takes this image in place of `image`. `image` stays the verified base digest (FR-011)."""
     options: CreateOptions = field(default_factory=CreateOptions)
     """The tier's create-time options, beyond the Basic binds (security/caps.py, ADR-006)."""
 
@@ -408,9 +389,8 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
     """The adapter's `CreateSpec` for `spec`. Pure: the spec is read and nothing else happens.
 
     Services off is the base spec: catatonit as init and the keep-alive command. Services on
-    replaces the init, the entrypoint and command, the user, the cgroup and the stop options, and
-    adds the environment, as ADR-003, ADR-007 and ADR-015 Decision 4 set them. Every other field is
-    the same in both.
+    replaces the init, the command, the user, the cgroup and the stop options, and adds the
+    environment, as ADR-003 and ADR-007 set them. Every other field is the same in both.
     """
     base = CreateSpec(
         name=spec.container_name,

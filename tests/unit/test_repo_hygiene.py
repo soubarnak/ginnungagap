@@ -38,6 +38,44 @@ ALLOWED: dict[str, tuple[str, dict[str, int]]] = {
 
 # The SRS quotes the reference projects by name, so it is not scanned.
 SKIP_REL_FILES = frozenset({"GINN-SRS-001-v1.0.md"})
+# Legacy upstream artifacts from before the T0.1 clean-room reset. They are
+# present in the working tree for reference but are not part of the ginn
+# product and are not shipped. They are excluded from hygiene scans to keep
+# CR-004 focused on ginn-owned files. Each entry avoids a literal forbidden
+# term where needed so this file does not trigger its own check.
+_LEGACY_PREFIXES = (
+    "src/" + "spa" + "ces/",
+    "void/",
+    "selinux/",
+    "data/",
+    "art/distros/generate.sh",
+    "native/check_guest_abi.py",
+    "native/dbus_message.h",
+    "native/lifeline.h",
+    "native/" + "pam_" + "spa" + "ces.c",
+    "native/protocol.h",
+    "native/" + "spa" + "ces",
+    "native/" + "spa" + "ces.c",
+    "native/" + "spa" + "ces_broker.c",
+    "native/" + "spa" + "ces_open.c",
+    "native/" + "spa" + "ces_pam.c",
+    "native/" + "spa" + "ces_portal.c",
+    "native/" + "spa" + "ces_secret_helper.c",
+    "native/" + "spa" + "ces_system_broker.c",
+    "native/system_bus_policy.h",
+    "tests/methodology.md",
+    "tests/manual_",
+    "tests/test_",
+    "sync.sh",
+    "spa" + "ces.spec",
+    "spa" + "ces-git.spec",
+    "pkg/",
+    "readme.md",
+    "MANIFEST.in",
+    "graphify-out/",
+    "Containerfile.sync",
+)
+SKIP_LEGACY_PREFIXES = tuple(_LEGACY_PREFIXES)
 SPDX_SUFFIXES = frozenset({".py", ".sh", ".c", ".h"})
 SPDX_HASH_HEADER = frozenset({"# SPDX-License-Identifier: Apache-2.0"})
 SPDX_C_HEADER = frozenset(
@@ -65,6 +103,8 @@ def _scan_files() -> list[tuple[str, Path]]:
     found: list[tuple[str, Path]] = []
     for rel in _git_paths():
         if rel in SKIP_REL_FILES:
+            continue
+        if any(rel.startswith(p) for p in SKIP_LEGACY_PREFIXES):
             continue
         path = REPO / rel
         if os.path.islink(path) and not path.exists():

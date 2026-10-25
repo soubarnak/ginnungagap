@@ -7,7 +7,8 @@ through the verbs of packages/manager.py. Each one is a mutating operation. Its 
 realm lock, journals its steps and writes one audit entry with the packages and the `aur` flag.
 
 Order of an install, and why:
-1. The record is read (FR-025).
+1. The record is read (FR-025). A Kali realm is refused with GINN-E-NOT-SUPPORTED-YET (M10), as
+   enter refuses it.
 2. Each name is checked against DR-003 (PackageName) before any side effect (FR-040 AC-2,
    NFR-SEC-005). No names is GINN-E-USAGE.
 3. `--aur` is checked. On a distribution other than Arch it is GINN-E-OPTION-INVALID. On Arch the
@@ -27,14 +28,6 @@ Order of a remove. Steps 1, 2 and 4 are the same. Inside the lock, a distributio
 a package the user did not name is refused with GINN-E-PKG-DEPENDENTS before anything is removed.
 Then `remove` runs with no cascade flag (FR-041), and the names leave the manifest. The menu
 sync follows, as step 7 of an install does.
-
-Init entries (ADR-015 Decision 14). An init entry is a package that the provisioning stage
-installed for a services-on realm, and its manifest entry carries `init`. An install that names one
-is a manifest no-op: that name is not passed to the package manager, and `notes` gets a line that
-says so. An install of init entries only changes nothing and starts nothing. A remove that names one
-is refused as a whole with GINN-E-PKG-PROTECTED, before any step, because the init set is what lets
-the realm boot. A start can rebuild the realm and change its init set, so the remove checks it again
-under the lock, before its first step.
 
 The realm stays running after an install or a remove, as enter leaves it (ADR-008).
 
@@ -83,7 +76,6 @@ from ginn.packages.manager import (
     explicit_packages,
     name_batches,
     printable,
-    refresh_for_verb,
     removal_dependents,
     remove_passes,
     run_step,
@@ -92,7 +84,7 @@ from ginn.packages.manager import (
 from ginn.packages.manifest import installed, removed
 from ginn.podman.adapter import ExecTarget, Podman, RetryHook
 from ginn.podman.models import ContainerState
-from ginn.runtime.spec import LABEL_REALM
+from ginn.runtime.spec import KALI, LABEL_REALM
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
 
@@ -102,6 +94,8 @@ OP_REMOVE: Final = "remove"
 """The audit operation name of `ginn remove` (FR-124)."""
 AUR_DISTRO: Final = "arch"
 """The one distribution whose AUR packages `--aur` names (FR-043)."""
+KALI_MILESTONE: Final = "M10"
+"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 _ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmState.FAILED})
 """The record states that an install or a remove accepts. Any other state is GINN-E-REALM-STATE."""
 _HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
@@ -140,35 +134,20 @@ def _checked(record: RealmRecord, packages: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(packages))
 
 
+def _refuse_kali(record: RealmRecord) -> None:
+    if record.settings.distro.value == KALI:
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=record.name.value,
+            feature="a package change in a Kali realm",
+            milestone=KALI_MILESTONE,
+        )
+
+
 def _refuse_non_arch_aur(distro: DistroId) -> None:
     """`--aur` is Arch-only (FR-043). On any other distribution it is an option error."""
     if distro.value != AUR_DISTRO:
         raise make("GINN-E-OPTION-INVALID", option="--aur", distro=distro.value)
-
-
-def _init_names(record: RealmRecord) -> frozenset[str]:
-    """The names of the realm's init entries (ADR-015 Decision 14). Install and remove read them."""
-    return frozenset(entry.name for entry in record.manifest if entry.init)
-
-
-def _init_note(realm: str, name: str) -> str:
-    """The printed note of an install that names an init entry (ADR-015 Decision 14)."""
-    return (
-        f"'{name}' is an init package of realm '{realm}': it is already installed, "
-        "so ginn install changed nothing for it"
-    )
-
-
-def _refuse_protected(record: RealmRecord, names: Sequence[str]) -> None:
-    """Refuse a removal that names init entries, as a whole (GINN-E-PKG-PROTECTED, FR-041).
-
-    Every protected name is listed. The check runs before a start, and again under the lock in
-    `_remove_body`, because a start can rebuild the realm and change its init set (ADR-015).
-    """
-    init = _init_names(record)
-    protected = [raw for raw in names if raw in init]
-    if protected:
-        raise make("GINN-E-PKG-PROTECTED", realm=record.name.value, name=shown(protected))
 
 
 def _running(podman: Podman, record: RealmRecord) -> bool:
@@ -178,18 +157,6 @@ def _running(podman: Podman, record: RealmRecord) -> bool:
         return False
     listed = podman.ps({LABEL_REALM: record.name.value})
     return any(info.id == cid and info.state not in _HALTED for info in listed)
-
-
-def _refuse_state(record: RealmRecord, *, action: str) -> None:
-    """Refuse a state the verb does not allow (GINN-E-REALM-STATE)."""
-    if record.state not in _ENTERABLE:
-        raise make(
-            "GINN-E-REALM-STATE",
-            realm=record.name.value,
-            state=record.state.value,
-            action=action,
-            allowed="stopped, failed or running",
-        )
 
 
 def _ensure_started(
@@ -203,7 +170,14 @@ def _ensure_started(
     notices: list[GinnWarning],
 ) -> None:
     """Refuse a state the verb does not allow, then start a stopped realm (FR-017, enter's rule)."""
-    _refuse_state(record, action=action)
+    if record.state not in _ENTERABLE:
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=record.name.value,
+            state=record.state.value,
+            action=action,
+            allowed="stopped, failed or running",
+        )
     if not _running(podman, record):
         start_realm(
             env,
@@ -257,19 +231,14 @@ def _reconcile_failed(
     *,
     installed_now: bool,
     clock: float,
-    mutation: Mutation,
-    failure: GinnError,
 ) -> None:
     """After a failed install or remove, make the manifest match what the realm now lists.
 
     A failed transaction can leave some of the requested packages changed (FR-040, FR-041). The
-    explicit-package list tells which, but a failed transaction is as uncertain per name as an
-    interrupted one, so an entry that exists keeps its source and method (`keep_existing`, as in
-    recovery): an `aur` or `native` entry is never rewritten to `repo`. After an install, each
-    requested name the realm lists as explicit and has no entry is recorded as `ginn`. After a
-    remove, each requested name it no longer lists is dropped. A list that cannot be read, or is
-    over the caps, changes nothing and is the warning GINN-W-MANIFEST-UNVERIFIED, which rides on
-    `failure` as a note because the caller re-raises the operation's own error either way.
+    explicit-package list tells which. After an install, each requested name the realm lists as
+    explicit is recorded as `ginn`. After a remove, each requested name it no longer lists is
+    dropped. A list that cannot be read, or is over the caps, changes nothing, and the caller
+    re-raises the operation's own error either way.
     """
     manifest = explicit_manifest(
         podman,
@@ -280,19 +249,8 @@ def _reconcile_failed(
         manifest=current.manifest,
         names=names,
         installed_now=installed_now,
-        keep_existing=True,
     )
-    if manifest is None:
-        warning = warn(
-            "GINN-W-MANIFEST-UNVERIFIED",
-            realm=name.value,
-            op=OP_INSTALL if installed_now else OP_REMOVE,
-            reason="the realm's explicit-package list could not be read, or is over the limits",
-        )
-        mutation.warnings.append(warning)
-        failure.add_note(f"{warning.code}: {warning.message}. {warning.remedy}")
-        return
-    if manifest == current.manifest:
+    if manifest is None or manifest == current.manifest:
         return
     store.save(replace(current, manifest=manifest, updated_at=utc_from_epoch(clock)))
 
@@ -389,16 +347,18 @@ def _install_body(
     retry = _retry(hooks)
     realm = name.value
     target = ExecTarget(realm=realm, services=bool(current.services_at_create), mutating=True)
-    if refresh_for_verb(
-        podman,
-        cid,
-        definition,
-        Verb.INSTALL,
-        realm=realm,
-        retry_hook=retry,
-        target=target,
-        on_ack=_acked(mutation),
-    ):
+    if Verb.INSTALL in definition.refresh_before:
+        run_step(
+            podman,
+            cid,
+            definition,
+            definition.argv(Verb.REFRESH),
+            realm=realm,
+            step="refresh",
+            retry_hook=retry,
+            target=target,
+            on_ack=_acked(mutation),
+        )
         mutation.step("refreshed")
     try:
         # A relay route installs in calls of its own size. A failed call leaves the earlier ones
@@ -415,7 +375,7 @@ def _install_body(
                 target=target,
                 on_ack=_acked(mutation),
             )
-    except GinnError as failure:
+    except GinnError:
         _reconcile_failed(
             store,
             podman,
@@ -426,8 +386,6 @@ def _install_body(
             names,
             installed_now=True,
             clock=env.clock(),
-            mutation=mutation,
-            failure=failure,
         )
         raise
     mutation.step("installed")
@@ -457,9 +415,6 @@ def _remove_body(
     """The steps of a remove, under the realm lock. The dry run comes first where it is defined."""
     store = RealmStore(env.paths, env.clock)
     current, cid = _load_running(store, podman, name, action=OP_REMOVE)
-    # The init set can change during the start (a rebuild), so the refusal is checked again here,
-    # under the lock, before any step (ADR-015 Decision 14).
-    _refuse_protected(current, names)
     retry = _retry(hooks)
     realm = name.value
     services = bool(current.services_at_create)
@@ -514,7 +469,7 @@ def _remove_body(
             remove_batch,
             still_present=still_present if len(batches) > 1 else None,
         )
-    except GinnError as failure:
+    except GinnError:
         _reconcile_failed(
             store,
             podman,
@@ -525,8 +480,6 @@ def _remove_body(
             names,
             installed_now=False,
             clock=env.clock(),
-            mutation=mutation,
-            failure=failure,
         )
         raise
     mutation.step("removed")
@@ -550,8 +503,6 @@ def install_packages(
     gid: int | None = None,
     hooks: PackageHooks | None = None,
     warnings: list[GinnWarning] | None = None,
-    notes: list[str] | None = None,
-    sent: list[str] | None = None,
 ) -> RealmRecord:
     """Install `packages` in realm `name` and record them as `ginn` installs (FR-040).
 
@@ -559,27 +510,14 @@ def install_packages(
     `gid` is the host group of the realm user; it defaults to this process's group, as enter does.
     The checks of the module docstring run before any side effect. The FR-006 warnings of a start
     and of the install are appended to `warnings` when it is given, after the operation finished.
-    A name that is an init entry of the realm is a manifest no-op (ADR-015 Decision 14): it is not
-    passed on. Its note is appended to `notes` when it is given, before the install runs, so the
-    note is still there when the install fails. `sent` is filled, when it is given, with the names
-    that were passed to the package manager or the AUR build, once the install finished. A request
-    of init entries only changes nothing and starts nothing.
     """
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
+    _refuse_kali(record)
     names = _checked(record, packages)
     if aur:
         _refuse_non_arch_aur(record.settings.distro)
-    init = _init_names(record)
-    skipped = [raw for raw in names if raw in init]
-    names = [raw for raw in names if raw not in init]
-    init_notes = [_init_note(record.name.value, raw) for raw in skipped]
-    if not names:
-        _refuse_state(record, action=OP_INSTALL)
-        if notes is not None:
-            notes.extend(init_notes)
-        return record
     definition = load_distro(record.settings.distro.value)
     notices: list[GinnWarning] = []
     _ensure_started(
@@ -591,8 +529,6 @@ def install_packages(
         hooks=hooks,
         notices=notices,
     )
-    if notes is not None:
-        notes.extend(init_notes)
     with mutating(env, OP_INSTALL, name, {"packages": names, "aur": aur}) as mutation:
         if aur:
             group = os.getgid() if gid is None else gid
@@ -605,8 +541,6 @@ def install_packages(
     notices.extend(mutation.warnings)
     if warnings is not None:
         warnings.extend(notices)
-    if sent is not None:
-        sent.extend(names)
     return store.load(name)
 
 
@@ -623,15 +557,13 @@ def remove_packages(
     """Remove `packages` from realm `name` and drop them from the manifest (FR-041).
 
     A removal that would take another package is refused before it runs (ADR-011), so the
-    realm's packages are never changed by a removal the user did not ask for. A request that names
-    an init entry is refused as a whole with GINN-E-PKG-PROTECTED, before any step (ADR-015
-    Decision 14), so none of its packages is removed.
+    realm's packages are never changed by a removal the user did not ask for.
     """
     hooks = PackageHooks() if hooks is None else hooks
     store = RealmStore(env.paths, env.clock)
     record = store.load(name)
+    _refuse_kali(record)
     names = _checked(record, packages)
-    _refuse_protected(record, names)
     definition = load_distro(record.settings.distro.value)
     notices: list[GinnWarning] = []
     _ensure_started(

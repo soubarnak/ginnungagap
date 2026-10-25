@@ -410,16 +410,6 @@ def test_ensure_refuses_a_symlink_in_place_of_an_owned_directory(tmp_path: Path)
 
 
 @pytest.mark.fr("DR-010")
-def test_image_copy_tmpdir_is_the_owned_image_tmp_whatever_its_spelling(tmp_path: Path) -> None:
-    """The image copy directory is the owned one, quoted as TOML whatever characters it holds."""
-    awkward = tmp_path / 'data "quoted"' / "back\\slash"
-    text = store_paths._containers_conf_text(awkward)
-    engine = tomllib.loads(text)["engine"]
-    assert engine["image_copy_tmp_dir"] == str(awkward)
-    assert engine["runtime"] == "crun"
-
-
-@pytest.mark.fr("DR-010")
 @pytest.mark.fr("CR-006")
 def test_ensure_config_writes_both_files_mode_0600_with_the_pinned_settings(
     tmp_path: Path,

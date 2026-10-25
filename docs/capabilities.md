@@ -28,7 +28,7 @@ FR-061 grants exactly: `~/Downloads` (read-write); the external drive mount root
 | X11 authority file | start (attach) | Decided (2026-10-12). Attach the file that the host `XAUTHORITY` names, read-only, at the fixed realm path `/run/user/<uid>/ginn-xauthority`. Exec sets `XAUTHORITY` to that path (session environment row). Only when the host sets `XAUTHORITY`. A copy of the file is not used, because it would add a second cookie file to disk. A rotated cookie file is an ordinary re-attach (ADR-008 amendment). | FR-046 AC-2. FR-061 names no authority file. | none. S-06 section 5 recommends the bind. `XAUTHORITY` is unset on the reference host (S-06 section 2), so no mount ran. | decided. Design-only until the T4.9 host gate and a real Xorg session (FR-046 AC-2). Without the attach, Xlib is expected to fall back to `$HOME/.Xauthority` in the Realm Home, where no file exists, and the X connection is expected to be refused. Not tested. |
 | Audio socket | start (attach) | Attach `$XDG_RUNTIME_DIR/pipewire-0` at `/run/user/<uid>/pipewire-0`. Attach the Pulse socket `pulse/native` at `/run/user/<uid>/pulse/native`. | FR-061 | S-06 section 2 (runc), as create-time binds | exercised as binds only: both sockets were bound and visible. No connection was made, because the image has no `pactl`. The attach form is pending the T4.9 host gate. |
 | GPU device nodes | create | `--device /dev/dri`, which exposes `card0`, `card1`, `renderD128` and `renderD129`, including the NVIDIA DRM nodes | FR-061 | S-06 sections 2 and 3 (runc) | exercised on runc. The AMD renderer checks ran. Pending crun (T6.6). |
-| Host fonts | create | `-v /usr/share/fonts:/usr/share/fonts/ginn-host:ro` | FR-061 | S-06 section 2 (runc) | exercised |
+| Host fonts | create | `-v /usr/share/fonts:/usr/share/fonts:ro` | FR-061 | S-06 section 2 (runc) | exercised |
 | Host timezone | create | `-v /etc/localtime:/etc/localtime:ro` | FR-061 | S-06 section 2 (runc) | exercised |
 | Runtime directory (support for the session paths; FR-061 names no directory) | create | `--tmpfs /run/user/<uid>:mode=0700,U`. `XDG_RUNTIME_DIR` is set at exec (session environment row). | ADR-012 Decision | S-06 section 2 (runc) | exercised. `U` gives the container's process user as owner: the realm user on a services-off realm, and root on a services-on realm (T716-1). Services-on realms also get a tmpfiles.d drop-in (`d /run/user/<uid> 0700 <uid> <gid> -`), copied in by create and rebuild before the first start, so systemd-tmpfiles-setup gives the directory to the realm user at each boot (ADR-014, T7.28). Plain `mode=0700` gives owner 0:0. podman refused `uid=`. |
 | NVIDIA libraries and nodes (FR-069, when the host has the NVIDIA driver) | create (CDI); `LD_LIBRARY_PATH` at exec | `--cdi-spec-dir <CDI dir> --device nvidia.com/gpu=all`, with the spec written under the ginn data directory; `LD_LIBRARY_PATH=/usr/lib/ginn-nvidia` | FR-069, GPU permission | S-06 sections 2, 4 and 5 (runc) | exercised: `nvidia-smi` and the GLX, EGL and Vulkan checks ran with the spec attached. Pending T6.6: the CDI `env` field, the mismatch case, and crun. |
@@ -170,18 +170,6 @@ Kali is a distro, not a tier (FR-026, FR-027). Its extra options:
 Not added: NET_ADMIN. S-09 C shows that NET_ADMIN lets the stock nmap run, but the stock binary is not needed (S-09 Finding 2 and 6).
 
 Open, not decided: remove the file capabilities from `/usr/lib/nmap/nmap` in the Kali realm (S-09 Finding 2). This is a candidate fix and was not tested. It removes a capability rather than adding one, so it is not in the enumerated set. It conflicts with pulling the official image by digest unless a build step is added (CR-007). Decision for T10.1.
-
-## Package-manager hook files in a realm (ADR-016, CL-35)
-
-These are not podman options. They are files that ginn writes into a realm's `/etc`, as container root, once per container (`ensure_hooks`, `export/watch.py`), so that the host menu follows the realm's own package manager (FR-044, FR-045, NFR-009). Each file makes the package manager run `/usr/bin/touch <stamp>` after a package transaction (the apt form goes through apt's shell, see the table). The stamp is `<Realm Home>/.local/state/ginn-export/transaction.desktop`. The host watches it and runs `ginn _sync <realm>`. A hook never makes the stamp directory (the installer does make the hook's own `/etc` parent with `mkdir -p`). A failed hook never fails the transaction (unverified for dnf5, CL-35). Source: the `[export_hook]` table of `src/ginn/distros/data/<distro>.toml`. Not run on a host yet (F14 host gate).
-
-| Distribution | File inside the realm | What it does |
-|---|---|---|
-| arch | `/etc/pacman.d/hooks/ginn-export.hook` | A pacman hook, `When = PostTransaction`, on `usr/share/applications/*.desktop` for Install, Upgrade and Remove. |
-| debian, kali | `/etc/apt/apt.conf.d/99ginn-export` | `DPkg::Post-Invoke { "/usr/bin/touch <stamp> 2>/dev/null || true"; };`, run through apt's shell after every dpkg run that apt makes. A bare `dpkg -i` does not run it. |
-| fedora | `/etc/dnf/libdnf5-plugins/actions.d/ginn-export.actions` | One dnf5 actions line, `post_transaction::::/usr/bin/touch <stamp>`. It does nothing unless the realm has `libdnf5-plugin-actions`, which is not in the Integration Package Set. The user installs it with `ginn install fedora libdnf5-plugin-actions`. |
-
-Beside the hook, ginn writes a marker `hooks-for` (the container id) in the same stamp directory, as the realm user. CR-007 reading: see CL-35.
 
 ## Not in this document
 

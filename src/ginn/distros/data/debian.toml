@@ -38,35 +38,9 @@ check_updates_count_regex = '\[upgradable from: '
 # inconsistent (loader.py). Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = true
-# ADR-015: the init set of a services-on realm, which the provisioning stage installs. S-11 booted
-# this set with zero failed units on the pinned image (spikes/results/S-11.md).
+# ADR-015 Decision 3 and 11: init set and its estimated installed bytes (S-11).
 services_packages = ["systemd", "systemd-sysv", "dbus"]
-# ADR-015 Decision 11: the installed bytes of services_packages, measured in S-11.
 services_estimated_installed_bytes = 19166208
-# ADR-015 Decision 11: the installed bytes of the Integration Package Set (the ips_delta of the disk
-# formula, FR-121), measured in S-11. The set is ca-certificates and locales.
-integration_estimated_installed_bytes = 23975936
-# ADR-015 Decision 11: the package cache during the installs, before the clean (the cache_peak of
-# the disk formula, FR-121). S-11 measured the apt lists before clean.
-package_cache_peak_bytes = 21576652
-# ADR-015 Decision 11: the writable layer of one services-off container from the derived image,
-# after an htop install (S-11, the reuse term of the disk check, FR-121).
-writable_layer_bytes = 23454481
-# ADR-015 Decision 11 (T7.33): the allocated bytes of the pinned base layer (the pulled layer)
-# and of the stage layer (the provisioning commit), measured on podman 5.8.8 on ext4 with 4 KiB
-# blocks on 2026-10-16. Reproduced across two runs. Tied to the pin in trust.toml: a pin rotation
-# (ADR-005) re-measures both.
-base_layer_allocated_bytes = 87920640
-stage_layer_allocated_bytes = 43008000
-
-[export_hook]
-# ADR-016 (FR-044, FR-045, NFR-009): an apt hook that runs after every dpkg run that apt makes,
-# whoever runs apt. It touches the stamp file in the Realm Home, which the host watches. The
-# `|| true` keeps a failed touch from failing the apt command. A plain `dpkg -i` does not run it.
-# Not verified on a host: that apt reads the file in the pinned image.
-path = "/etc/apt/apt.conf.d/99ginn-export"
-text = """DPkg::Post-Invoke {{ "/usr/bin/touch {stamp} 2>/dev/null || true"; }};
-"""
 
 [integration]
 packages = ["ca-certificates", "locales"]
@@ -112,11 +86,5 @@ resolve = [
 ]
 # apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
 estimate = ["apt-cache", "show", "{packages}"]
-# ADR-015 Decision 3: the clean steps of the provisioning stage, run after the packages are installed.
-# They empty the package cache and the apt lists. The last step leaves the empty partial directory
-# that the pinned image ships with (checked in S-11). Each step is one argv, with no placeholder.
-clean = [
-    ["apt-get", "clean"],
-    ["rm", "-rf", "/var/lib/apt/lists"],
-    ["mkdir", "-p", "/var/lib/apt/lists/partial"],
-]
+# ADR-015 Decision 3: clean the apt cache and lists.
+clean = [["apt-get", "clean"], ["rm", "-rf", "/var/lib/apt/lists"], ["mkdir", "-p", "/var/lib/apt/lists/partial"]]

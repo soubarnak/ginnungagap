@@ -9,8 +9,9 @@ convention; cli.py maps the same way a signal that ends podman itself (IR-011 na
 
 The steps, in order:
 
-1. The record is read (FR-025: GINN-E-NO-SUCH-REALM), and a state that does not allow enter is
-   refused with GINN-E-REALM-STATE (DR-020). Both come before any podman call.
+1. The record is read (FR-025: GINN-E-NO-SUCH-REALM). A Kali realm is refused with
+   GINN-E-NOT-SUPPORTED-YET, and a state that does not allow enter with GINN-E-REALM-STATE
+   (DR-020). Both come before any podman call.
 2. The session is read from the host (runtime/env.py). Proxy values stay in podman's environment,
    and the argv carries only their names (ADR-004 amendment).
 3. One `podman ps` answers whether the container runs. Its state and its pid come from that one
@@ -33,15 +34,12 @@ The steps, in order:
 6. `podman exec` runs the command as the realm user (`--user uid:gid`, or `0:0` under `--root`),
    with HOME and the workdir at the host home path (FR-048). Under `--root` both are `/root`
    (`ROOT_HOME`). The session environment is passed, and the proxy names go as `--env NAME`
-   (ADR-004 amendment). A status of 125 or 255 may be podman's own failure, so enter reads the
-   listing once more. Podman 5.8.8 answers an exec on a stopped container with 255 (ADR-014). If
-   the container no longer runs, GINN-E-REALM-STATE is raised inside the exec step. Otherwise the
-   status comes back unchanged, so the command's own 125 or 255 passes through. The exec is never
-   retried. Under `--root`, the `root_session` hook (EnterHooks) wraps the exec: it receives the
-   record, the container and the exec as a callable, and it returns the status of that exec, or it
-   propagates the GINN-E-REALM-STATE of a stopped realm, so no status reaches the hook. The hook
-   records the packages that a root session installs (FR-042 AC-1). Without the hook, or without
-   `--root`, nothing wraps it.
+   (ADR-004 amendment). A status of 125 is podman's own failure or the command's own 125, so enter
+   reads the listing once more. If the container no longer runs, GINN-E-REALM-STATE is raised.
+   Otherwise the status comes back unchanged. The exec is never retried. Under `--root`, the
+   `root_session` hook (EnterHooks) wraps the exec: it receives the record, the container and the
+   exec as a callable, and it returns the status of that exec. The hook records the packages that
+   a root session installs (FR-042 AC-1). Without the hook, or without `--root`, nothing wraps it.
 
 A failed re-attach raises GINN-E-ATTACH-FAILED for this enter only. The realm keeps running, since
 enter never stops a realm (ADR-008 amendment). A services-on realm is stopped only by its `sv`
@@ -65,9 +63,9 @@ registration.
 
 Decisions and open items (see the report): a user exec's workdir is the host home, not the host
 working directory; `--root` uses `/root` for HOME and the workdir, since a root write into the bound
-Realm Home would land on a subordinate uid (FR-042); a 125 or 255 is returned unchanged while the
-realm runs, and the CLI maps a ginn-side failure to EXEC_GINN_FAILURE (IR-011, T4.11); the pid
-comes from the listing, as ADR-010's amendment of 2026-10-13 decides.
+Realm Home would land on a subordinate uid (FR-042); a 125 is returned unchanged, and the CLI maps a
+ginn-side failure to EXEC_GINN_FAILURE (IR-011, T4.11); the pid comes from the listing, as ADR-010's
+amendment of 2026-10-13 decides.
 """
 
 import os
@@ -93,7 +91,7 @@ from ginn.runtime._enter_plan import exec_home, exec_user, login_argv, share_aft
 from ginn.runtime.attach import Admit, admission, needs_reattach, reattach
 from ginn.runtime.env import SessionEnv, session_env
 from ginn.runtime.realm_security import agent_enabled, session_extras, stored_gpg_extra
-from ginn.runtime.spec import LABEL_REALM
+from ginn.runtime.spec import KALI, LABEL_REALM
 from ginn.security._proc import Proc
 from ginn.store._time import utc_from_epoch
 from ginn.store.records import RealmRecord, RealmStore
@@ -113,11 +111,8 @@ _ENTERABLE: Final = frozenset({RealmState.RUNNING, RealmState.STOPPED, RealmStat
 """The record states an enter accepts. Any other state is refused with GINN-E-REALM-STATE."""
 _HALTED: Final = frozenset({ContainerState.CREATED, ContainerState.EXITED})
 """The container states that mean the process is not running. Any other state is running."""
-_PODMAN_EXEC_EXITS: Final = frozenset({PODMAN_ERROR_EXIT, 255})
-"""The exec statuses that may be podman's own failure. Podman 5.8.8 answers an exec on a container
-that is not running with 255 and returns it as a result, not as an error (ADR-014, amendment of
-2026-10-15). The listing decides which it was, so a 255 from a running realm's command is returned
-unchanged."""
+_KALI_MILESTONE: Final = "M10"
+"""The milestone that adds Kali realms (docs/roadmap.md, T10.1)."""
 _STOPPED_SINCE_LOOK: Final = "the realm stopped after the pre-check"
 """The `noop` reason when the realm stopped between the look and the lock."""
 
@@ -151,10 +146,8 @@ class EnterHooks:
     runs, so the caller can show it first (the command's own output comes after). `root_session`
     wraps the exec of a `--root` session: it is called with the record, the container id and a
     callable that runs the exec, and it returns that exec's status. It is never called without
-    `--root`, so the non-root path costs nothing (NFR-004). A stopped realm raises
-    GINN-E-REALM-STATE through it, and the hook may add a note to that error (ops/native.py). `kill`
-    sends a signal to the command's client while it runs (FR-068); a test replaces it to see what is
-    forwarded.
+    `--root`, so the non-root path costs nothing (NFR-004). `kill` sends a signal to the command's
+    client while it runs (FR-068); a test replaces it to see what is forwarded.
     """
 
     lifecycle: LifecycleHooks = field(default_factory=LifecycleHooks)
@@ -240,6 +233,13 @@ def _look(
     the command has done both, and the app is released once, by that first look's owner.
     """
     record = _load(RealmStore(env.paths, env.clock), name)
+    if record.settings.distro.value == KALI:
+        raise make(
+            "GINN-E-NOT-SUPPORTED-YET",
+            realm=name.value,
+            feature="a Kali realm",
+            milestone=_KALI_MILESTONE,
+        )
     if record.state not in _ENTERABLE:
         raise make(
             "GINN-E-REALM-STATE",
@@ -572,22 +572,21 @@ def _enter_look(
         finally:
             client.exited()
         _observe(hooks, "exec", hooks.clock() - exec_started)
-        if status in _PODMAN_EXEC_EXITS and not _running(_listed(podman, name, cid)):
-            # Inside the exec, so a root session's hook gets the refusal and no status. The command
-            # ran before this check, so the hook adds a note to the refusal (ops/native.py). It
-            # does not read the packages after the session, because the realm no longer runs.
-            raise make(
-                "GINN-E-REALM-STATE",
-                realm=name.value,
-                state="stopped",
-                action=action,
-                allowed="running",
-            )
         return status
 
     if root and hooks.root_session is not None:
-        return hooks.root_session(record, cid, run)
-    return run()
+        status = hooks.root_session(record, cid, run)
+    else:
+        status = run()
+    if status == PODMAN_ERROR_EXIT and not _running(_listed(podman, name, cid)):
+        raise make(
+            "GINN-E-REALM-STATE",
+            realm=name.value,
+            state="stopped",
+            action=action,
+            allowed="running",
+        )
+    return status
 
 
 def _noop(mutation: Mutation, reason: str) -> None:

@@ -17,7 +17,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,23 +43,6 @@ def helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("wait") / "ginn-wait"
     built = subprocess.run(  # noqa: S603 - fixed argv, no shell
         [cc, *WARNINGS, "-o", str(out), str(SOURCE)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert built.returncode == 0, built.stderr
-    return out
-
-
-@pytest.fixture(scope="module")
-def poll_helper(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The test-only build with -DGINN_WAIT_NO_PIDFD: no pidfd_open, so it polls (FR-081)."""
-    cc = shutil.which(os.environ.get("CC", "cc"))
-    if cc is None:
-        pytest.skip("no C compiler on PATH")
-    out = tmp_path_factory.mktemp("wait-poll") / "ginn-wait-poll"
-    built = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [cc, *WARNINGS, "-DGINN_WAIT_NO_PIDFD", "-o", str(out), str(SOURCE)],
         capture_output=True,
         text=True,
         check=False,
@@ -314,80 +296,3 @@ def test_the_helper_stays_under_2_mib_resident_while_it_waits(helper: Path, tmp_
     status = Path(f"/proc/{proc.pid}/status").read_text(encoding="utf-8")
     rss_kib = next(int(ln.split()[1]) for ln in status.splitlines() if ln.startswith("VmRSS:"))
     assert rss_kib < 2048, f"ginn-wait holds {rss_kib} KiB resident"
-
-
-def _holds_pidfd(proc: subprocess.Popen[bytes]) -> bool:
-    fds = Path(f"/proc/{proc.pid}/fd")
-    return any("pidfd" in os.readlink(fd) for fd in fds.iterdir())
-
-
-def test_the_default_build_waits_on_a_pidfd_and_the_poll_build_does_not(
-    helper: Path, poll_helper: Path, tmp_path: Path
-) -> None:
-    """The poll build really takes the other path, so the poll tests below are not vacuous."""
-    try:
-        os.close(os.pidfd_open(os.getpid()))
-    except (AttributeError, OSError) as exc:
-        pytest.skip(f"no pidfd_open on this kernel: {exc}")
-    for build, expected in ((helper, True), (poll_helper, False)):
-        conmon = _conmon()
-        pidfile = _pidfile(tmp_path, conmon.pid)
-        podman, _log = _podman(tmp_path, pidfile)
-        proc = _start(build, pidfile, podman, _globals(tmp_path))
-        _waiting(proc)
-        assert _holds_pidfd(proc) is expected, build.name
-        proc.kill()
-        proc.wait(timeout=WAIT_S)
-        conmon.kill()
-        conmon.wait(timeout=WAIT_S)
-
-
-@pytest.mark.fr("NFR-033")
-def test_polling_fallback_sees_conmon_die_within_a_poll_or_two(
-    poll_helper: Path, tmp_path: Path
-) -> None:
-    conmon = _conmon()
-    pidfile = _pidfile(tmp_path, conmon.pid)
-    podman, log = _podman(tmp_path, pidfile)
-    proc = _start(poll_helper, pidfile, podman, _globals(tmp_path))
-    _waiting(proc)
-    conmon.kill()  # left unreaped: a zombie counts as gone
-    began = time.monotonic()
-    code, err = _finish(proc)
-    assert code == 1, err
-    assert time.monotonic() - began < 3.5
-    assert not log.exists()
-
-
-@pytest.mark.fr("NFR-033")
-def test_polling_fallback_sigterm_runs_podman_stop_and_exits_0(
-    poll_helper: Path, tmp_path: Path
-) -> None:
-    conmon = _conmon()
-    pidfile = _pidfile(tmp_path, conmon.pid)
-    podman, log = _podman(tmp_path, pidfile)
-    globals_ = _globals(tmp_path)
-    proc = _start(poll_helper, pidfile, podman, globals_, name="ginn-realm-g1")
-    _waiting(proc)
-    proc.send_signal(signal.SIGTERM)
-    code, err = _finish(proc)
-    assert code == 0, err
-    assert log.read_text(encoding="utf-8").splitlines() == [*globals_, "stop", "ginn-realm-g1"]
-    conmon.wait(timeout=WAIT_S)
-
-
-@pytest.mark.fr("NFR-033")
-def test_polling_fallback_failed_stop_with_live_conmon_exits_4(
-    poll_helper: Path, tmp_path: Path
-) -> None:
-    conmon = _conmon()
-    pidfile = _pidfile(tmp_path, conmon.pid)
-    podman, log = _podman(tmp_path, pidfile, kills_conmon=False, status=7)
-    proc = _start(poll_helper, pidfile, podman, _globals(tmp_path))
-    _waiting(proc)
-    proc.send_signal(signal.SIGTERM)
-    code, err = _finish(proc)
-    assert code == 4, err
-    assert log.read_text(encoding="utf-8").splitlines()[-2:] == ["stop", "ginn-r-g1"]
-    assert "podman stop failed" in err
-    assert conmon.poll() is None

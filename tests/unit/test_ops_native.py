@@ -28,7 +28,6 @@ from ginn.domain import (
     RealmState,
     Tier,
 )
-from ginn.errors import GinnError, make
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import OpEnv
 from ginn.ops.native import OP_RECORD_NATIVE, UNRECORDED_CODE, root_session_recorder
@@ -284,75 +283,3 @@ def test_a_diff_over_the_name_cap_is_a_warning_and_writes_nothing(
     assert "more than 5000" in notice.message
     assert _stored(env).manifest == []
     assert _audit(env) == []
-
-
-@pytest.mark.fr("FR-042")
-@pytest.mark.fr("DR-020")
-def test_a_refusal_raised_by_the_command_comes_out_of_the_session_with_no_warning(
-    env: OpEnv, fake: FakePodman
-) -> None:
-    """A stopped realm is refused by enter, inside the exec. The error comes out of the session, so
-    the diff writes no warning and records nothing for a command that never ran."""
-    cid = _running(env, fake)
-    notices: list[GinnWarning] = []
-    recorder = root_session_recorder(env, fake, notify=notices.append)
-
-    def refused() -> int:
-        raise make(
-            "GINN-E-REALM-STATE", realm=REALM, state="stopped", action="exec", allowed="running"
-        )
-
-    with pytest.raises(GinnError) as info:
-        recorder(_stored(env), cid, refused)
-
-    assert info.value.code == "GINN-E-REALM-STATE"
-    assert notices == []
-    assert _audit(env) == []
-
-
-def _refused_session(env: OpEnv, fake: FakePodman) -> tuple[GinnError, list[GinnWarning]]:
-    """Run the recorder around a command that enter refuses as a stopped realm. Return the error
-    that came out and the notices made."""
-    cid = _running(env, fake)
-    notices: list[GinnWarning] = []
-    recorder = root_session_recorder(env, fake, notify=notices.append)
-
-    def refused() -> int:
-        raise make(
-            "GINN-E-REALM-STATE", realm=REALM, state="stopped", action="exec", allowed="running"
-        )
-
-    with pytest.raises(GinnError) as info:
-        recorder(_stored(env), cid, refused)
-    return info.value, notices
-
-
-@pytest.mark.fr("FR-042")
-@pytest.mark.fr("DR-020")
-def test_a_refusal_after_a_readable_before_list_says_the_packages_may_be_unrecorded(
-    env: OpEnv, fake: FakePodman
-) -> None:
-    """The command ran, so the packages it installed may be unrecorded. The note says so, and it
-    names the remedy of GINN-W-MANIFEST-UNRECORDED. The refusal still comes out, with no warning."""
-    error, notices = _refused_session(env, fake)
-
-    assert error.code == "GINN-E-REALM-STATE"
-    (note,) = getattr(error, "__notes__", [])
-    assert "may be unrecorded in the Install Manifest" in note
-    assert f"run 'ginn install {REALM} PACKAGE'" in note
-    assert notices == []
-
-
-@pytest.mark.fr("FR-042")
-@pytest.mark.fr("DR-020")
-def test_a_refusal_after_an_unreadable_before_list_gets_no_note(
-    env: OpEnv, fake: FakePodman
-) -> None:
-    """The before-read failed, so no diff could run and nothing is claimed about the packages."""
-    fake.exec_results[LIST] = ExecResult(1, "", "")
-
-    error, notices = _refused_session(env, fake)
-
-    assert error.code == "GINN-E-REALM-STATE"
-    assert getattr(error, "__notes__", []) == []
-    assert notices == []

@@ -55,16 +55,14 @@ _STOP_FAILED: Final = "ginn-idle: podman stop failed"
 _LOG_LIMIT: Final = 64 * 1024
 
 Spawn = Callable[[Sequence[str], Path], int]
-"""Starts argv detached, with its stderr in the log, and returns its pid. Tests replace it.
-export/watch.py starts ginn-watch the same way."""
+"""Starts argv detached, with its stderr in the log, and returns its pid. Tests replace it."""
 
 
-def spawn_detached(argv: Sequence[str], log: Path, *, pass_fds: Sequence[int] = ()) -> int:
+def _spawn(argv: Sequence[str], log: Path) -> int:
     """Start argv in a session of its own, with no stdin or stdout, and its stderr in `log`.
 
     The log is a new file each time. An earlier watcher that still runs keeps writing to the file it
-    had open, so the log describes only the watcher that this call starts. The descriptors in
-    `pass_fds` stay open in the child, under the same numbers (the export watcher's directory).
+    had open, so the log describes only the watcher that this call starts.
     """
     log.unlink(missing_ok=True)
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
@@ -76,7 +74,6 @@ def spawn_detached(argv: Sequence[str], log: Path, *, pass_fds: Sequence[int] = 
             stderr=fd,
             start_new_session=True,
             close_fds=True,
-            pass_fds=tuple(pass_fds),
         )
     finally:
         os.close(fd)
@@ -94,7 +91,7 @@ class IdleHooks:
 
     helper: str = IDLE_HELPER
     grace_s: int = IDLE_GRACE_S
-    spawn: Spawn = spawn_detached
+    spawn: Spawn = _spawn
     start_ticks: Callable[[int], int | None] = process_start_ticks
 
 

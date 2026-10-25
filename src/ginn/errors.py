@@ -12,13 +12,10 @@ GINN-E-UNDO-SUPERVISE-STATE (FR-003), GINN-E-REALM-STATE (DR-020), GINN-E-ATTACH
 (ADR-008), GINN-E-REALM-USER (FR-048, ADR-006), GINN-E-AGENT-FILTER (FR-067),
 GINN-E-DBUS-PROXY (FR-068), GINN-E-NVIDIA-STALE and GINN-E-NVIDIA-CDI (FR-069), and
 GINN-E-SUPERVISOR-DOWN, GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL and GINN-E-SERVICE-MISSING
-(FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-IMAGE-DERIVED (ADR-015 Decision 9),
-GINN-E-PKG-PROTECTED (ADR-015 Decision 14), GINN-E-REALM-BOOT (ADR-015 Decision 5),
-GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
+(FR-081, AS-028), GINN-E-NO-INIT (FR-080, F3), GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED,
 GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST and GINN-E-RELAY-BUSY (FR-049, ADR-014),
 GINN-W-RELAY-ORPHAN (FR-123, ADR-014), GINN-W-ORPHAN-UNKNOWN (FR-124, ADR-014),
-GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014).
-GINN-W-PROVISION-LEFTOVER (ADR-015 Decisions 2 and 13). `source` cites
+GINN-W-RUN-USER-PENDING (FR-083, ADR-014), and GINN-W-RELAY-SYNC (FR-084, ADR-014). `source` cites
 the requirement that defines the failure.
 
 Exit statuses by category are in EXIT_CATEGORIES. Every catalogue entry's exit status must
@@ -484,7 +481,7 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=2,
         summary="realm '{realm}' cannot be used yet: {feature} arrives in {milestone}",
         remedy="use a realm this build can run; docs/roadmap.md lists the milestones",
-        source="ADR-003, ADR-015 (ginn-defined; not an SRS code)",
+        source="FR-026, FR-027, ADR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-SUPERVISOR-DOWN",
@@ -529,28 +526,32 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ),
     ErrorSpec(
         code="GINN-E-IMAGE-DERIVED",
-        exit_code=65,
-        summary="the derived image of realm '{realm}' could not be built, or does not hold its "
-        "recorded ID: {detail}",
-        remedy="the build is rolled back or left to recovery: retry the create, or run "
-        "'ginn rebuild {realm}' for an existing realm",
-        source="ADR-015 Decision 9, DR-040, NFR-SEC-004 (ginn-defined; not an SRS code)",
+        exit_code=4,
+        summary="image '{image}' is derived, not pinned: expected '{expected}'",
+        remedy="remove the derived image with 'podman rmi {image}' and pull the pinned image with "
+        "'podman pull {expected}'",
+        source="FR-011, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-PKG-PROTECTED",
         exit_code=4,
-        summary="'{name}' is an init package of realm '{realm}' and cannot be removed",
-        remedy="keep it: the init set is what lets a services-on realm boot; 'ginn delete {realm}' "
-        "removes the whole realm",
-        source="ADR-015 Decision 14, FR-041 (ginn-defined; not an SRS code)",
+        summary="package '{package}' is protected and cannot be removed",
+        remedy=(
+            "remove the package from the manifest or pick another package; "
+            "protected packages are the host's base packages"
+        ),
+        source="FR-012, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-REALM-BOOT",
         exit_code=1,
-        summary="services-on realm '{realm}' did not reach running after its build: {detail}",
-        remedy="run 'ginn doctor' and follow the failed units in the detail; the previous "
-        "generation is kept, so the realm still has its old root",
-        source="ADR-015 Decision 5, FR-021 AC-2 (ginn-defined; not an SRS code)",
+        summary="realm '{realm}' failed to boot: {units}",
+        remedy=(
+            "run 'ginn exec {realm} -- systemctl --failed --no-legend "
+            "--plain' to see the failed units, fix the realm or its image, "
+            "then rebuild"
+        ),
+        source="FR-080, ADR-015 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-E-RELAY-UNAVAILABLE",
@@ -684,14 +685,6 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-042 AC-1, DR-007 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
-        code="GINN-W-MANIFEST-UNVERIFIED",
-        exit_code=0,
-        summary="the Install Manifest of realm '{realm}' could not be checked against the "
-        "installed packages after a failed {op}: {reason}",
-        remedy="run the same install or remove again to reconcile it",
-        source="FR-040, FR-041 (ginn-defined; not an SRS code)",
-    ),
-    ErrorSpec(
         code="GINN-E-BIN-NAME-INVALID",
         exit_code=2,
         summary="binary name '{binary}' is not valid",
@@ -781,10 +774,10 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec(
         code="GINN-W-SERVICES-PENDING",
         exit_code=0,
-        summary="realm '{realm}' is created stopped with services on: its init set and Integration "
-        "Package Set are in its derived image, and nothing is started in it",
-        remedy="a services-on realm starts through its runit entry ('ginn start'); its packages go "
-        "in after that first supervised start, with 'ginn install'",
+        summary="realm '{realm}' is created stopped with services on: its container is made, and "
+        "nothing is started or installed in it",
+        remedy="a services-on realm starts through its runit entry ('ginn start'); its Integration "
+        "Package Set comes with 'ginn rebuild', which a plain start does not run",
         source="FR-010, FR-080, ADR-003 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
@@ -794,15 +787,6 @@ _SPECS: tuple[ErrorSpec, ...] = (
         remedy="it holds no ginn state; once no process runs in it, 'rmdir' of that directory "
         "removes it, and a realm created again reuses it",
         source="FR-019, ADR-003 (ginn-defined; not an SRS code)",
-    ),
-    ErrorSpec(
-        code="GINN-W-PROVISION-LEFTOVER",
-        exit_code=0,
-        summary="realm '{realm}': a provisioning or derived-image leftover was not "
-        "removed: {detail}",
-        remedy="the next provisioning of this realm removes it, and 'ginn delete {realm}' removes "
-        "every derived image of the realm",
-        source="ADR-015 Decisions 2 and 13 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-REBUILD-DEFERRED",
@@ -818,11 +802,9 @@ _SPECS: tuple[ErrorSpec, ...] = (
         exit_code=0,
         summary="realm '{realm}': the next start rebuilds it into a new container, because "
         "{change}",
-        remedy="its packages and Realm Home are kept, and a rebuild that does not reuse the "
-        "derived image pulls the pinned image and replays the packages without a prompt "
-        "(CL-19); a start that must provision downloads the init set and uses disk for "
-        "its derived image, and runs under this notice; run 'ginn rebuild {realm}' to do it now",
-        source="FR-066, FR-083, CL-19, ADR-015 Decision 7 (ginn-defined; not an SRS code)",
+        remedy="its packages and Realm Home are kept, and the rebuild pulls the pinned image and "
+        "replays the packages without a prompt (CL-19); run 'ginn rebuild {realm}' to do it now",
+        source="FR-066, FR-083, CL-19 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
         code="GINN-W-IDLE-STOP",
@@ -844,8 +826,7 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "GINN-E-REALM-USER, GINN-E-AGENT-FILTER, GINN-E-DBUS-PROXY, GINN-E-NVIDIA-STALE, "
         "GINN-E-NVIDIA-CDI, GINN-E-HOST-DEVICE, GINN-E-SECCOMP-SOURCE, GINN-E-SUPERVISOR-DOWN, "
         "GINN-E-SERVICE-TIMEOUT, GINN-E-SERVICE-CONTROL, GINN-E-SERVICE-MISSING, GINN-E-NO-INIT, "
-        "GINN-E-REALM-BOOT, GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, "
-        "GINN-E-RELAY-LOST",
+        "GINN-E-RELAY-UNAVAILABLE, GINN-E-RELAY-REJECTED, GINN-E-RELAY-TIMEOUT, GINN-E-RELAY-LOST",
     ),
     (2, "input validation: usage, names, options, paths"),
     (3, "not found: GINN-E-NO-SUCH-REALM"),
@@ -854,14 +835,9 @@ EXIT_CATEGORIES: tuple[tuple[int, str], ...] = (
         "conflict with existing state: name taken, undo refused, unacknowledged host change, "
         "interrupted operation not yet recovered, a realm in a state its verb does not allow "
         "(GINN-E-REALM-STATE), a removal that would take other packages (GINN-E-PKG-DEPENDENTS), "
-        "a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM), an init "
-        "entry that the manifest refuses to remove (GINN-E-PKG-PROTECTED)",
+        "a realm whose shares and toggles need a Custom tier (GINN-E-TIER-NOT-CUSTOM)",
     ),
-    (
-        65,
-        "data error (EX_DATAERR): image or package signature not verified, or a derived image "
-        "that could not be built or does not hold its recorded ID (GINN-E-IMAGE-DERIVED)",
-    ),
+    (65, "data error (EX_DATAERR): image or package signature not verified"),
     (69, "network failure"),
     (70, "internal error (EX_SOFTWARE)"),
     (73, "not enough disk space"),

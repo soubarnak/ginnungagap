@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Scratch directories of a services-on create, under the runtime root (F3, F6).
 
-A services-on create reads `/sbin/init` out of its created container (`check_init`, in
-ops/provision.py), and it stages the realm's machine-id as a file for `podman cp`
-(`_copy_machine_id`). Both use the scratch directory that `scratch_dir` makes. It lies under the
-runtime root, which is owned by the user with mode 0700, and its name starts with SCRATCH_PREFIX. A
-create killed with SIGKILL leaves its directory behind, so ops/recovery.py `sweep_scratch` calls
-`remove_leftovers`, which removes what it finds with that prefix. It touches only what the user
-owns, and it never follows a link.
+A services-on create reads `/sbin/init` out of its created container (ops/create.py `_check_init`),
+and it stages the realm's machine-id as a file for `podman cp` (`_copy_machine_id`). Both use the
+scratch directory that `scratch_dir` makes. It lies under the runtime root, which is owned by the
+user with mode 0700, and its name starts with SCRATCH_PREFIX. A create killed with SIGKILL leaves
+its directory behind, so ops/recovery.py `sweep_scratch` calls `remove_leftovers`, which removes
+what it finds with that prefix. It touches only what the user owns, and it never follows a link.
 """
 
 import os

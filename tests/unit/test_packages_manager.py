@@ -16,7 +16,6 @@ import pytest
 
 from ginn.distros import DistroDef, Verb, load
 from ginn.distros.loader import UpdateStatus, from_mapping
-from ginn.domain import InstallMethod, InstallSource, ManifestEntry
 from ginn.errors import GinnError
 from ginn.packages.aur import (
     BUILD_ROOT,
@@ -41,14 +40,12 @@ from ginn.packages.manager import (
     CheckResult,
     database_inconsistent,
     decisive_line,
-    explicit_manifest,
     explicit_packages,
     failure,
     network_failure,
     parse_names,
     parse_removals,
     printable,
-    refresh_for_verb,
     removal_dependents,
     run_check,
     run_step,
@@ -112,23 +109,25 @@ def _definition(name: str) -> DistroDef:
 
 
 def _argvs(name: str) -> list[tuple[str, list[str]]]:
-    """Every verb argv (with a sample package), then every check-updates and clean step."""
+    """Every verb argv (with a sample package), then every check-updates step, labelled."""
     definition = _definition(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
-        if verb in (Verb.CHECK_UPDATES, Verb.CLEAN):
+        if verb is Verb.CHECK_UPDATES:
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
             continue
         if verb is Verb.DB_CHECK and not definition.has_db_check:
+            continue
+        if verb is Verb.CLEAN:
+            for idx, step in enumerate(definition.clean_steps):
+                out.append((f"clean[{idx}]", list(step)))
             continue
         packages = ["gimp"] if verb in PACKAGE_VERBS else []
         out.append((verb.value, definition.argv(verb, packages)))
     tmpdir = CHECK_TMP if definition.check_updates_needs_tmpdir else None
     for index, step in enumerate(definition.check_updates(tmpdir)):
         out.append((f"check-updates[{index}]", list(step)))
-    for index, step in enumerate(definition.clean_steps):
-        out.append((f"clean[{index}]", list(step)))
     if name == "arch":
         out.extend(_aur_argvs())
     return out
@@ -299,64 +298,6 @@ def test_run_step_raises_the_mapped_error_on_a_non_zero_status() -> None:
     assert caught.value.details["step"] == "install"
 
 
-@pytest.mark.fr("FR-040")
-def test_refresh_for_verb_refreshes_only_a_verb_the_data_lists_in_refresh_before() -> None:
-    fake = FakePodman()
-    cid = _running(fake)
-    debian = _definition("debian")
-    refresh = debian.argv(Verb.REFRESH)
-    _canned(fake, refresh, 0, "")
-    assert debian.refresh_before and Verb.REMOVE not in debian.refresh_before
-    kwargs: dict[str, Any] = {"realm": REALM, "retry_hook": None, "target": DIRECT_TARGET}
-    assert refresh_for_verb(fake, cid, debian, Verb.INSTALL, **kwargs) is True
-    assert refresh_for_verb(fake, cid, debian, Verb.REMOVE, **kwargs) is False
-    assert [tuple(call.argv) for call in fake.exec_calls] == [tuple(refresh)]
-    assert fake.exec_calls[0].user == ROOT_USER
-    assert fake.exec_calls[0].env == dict(LOCALE)
-
-
-@pytest.mark.fr("FR-040")
-@pytest.mark.parametrize("name", ["arch", "fedora"])
-def test_refresh_for_verb_never_refreshes_before_an_install_where_the_data_does_not(
-    name: str,
-) -> None:
-    fake = FakePodman()
-    cid = _running(fake)
-    definition = _definition(name)
-    assert Verb.INSTALL not in definition.refresh_before
-    ran = refresh_for_verb(
-        fake,
-        cid,
-        definition,
-        Verb.INSTALL,
-        realm=REALM,
-        retry_hook=None,
-        target=DIRECT_TARGET,
-    )
-    assert ran is False
-    assert fake.exec_calls == []
-
-
-@pytest.mark.fr("FR-040")
-def test_a_refused_refresh_raises_the_install_error_at_the_refresh_step() -> None:
-    fake = FakePodman()
-    cid = _running(fake)
-    definition = _definition("debian")
-    _canned(fake, definition.argv(Verb.REFRESH), 100, "", "E: Failed to fetch\n")
-    with pytest.raises(GinnError) as caught:
-        refresh_for_verb(
-            fake,
-            cid,
-            definition,
-            Verb.INSTALL,
-            realm=REALM,
-            retry_hook=None,
-            target=DIRECT_TARGET,
-        )
-    assert caught.value.code == "GINN-E-PKG-MANAGER"
-    assert caught.value.details["step"] == "refresh"
-
-
 @pytest.mark.fr("FR-120")
 def test_a_network_failure_is_offered_to_the_retry_hook_and_raised_when_refused() -> None:
     fake = FakePodman(fail_exec_with="GINN-E-NETWORK")
@@ -415,38 +356,6 @@ def test_explicit_packages_raises_rather_than_return_an_empty_list() -> None:
     with pytest.raises(GinnError) as caught:
         explicit_packages(fake, cid, definition, realm=REALM, target=DIRECT_TARGET)
     assert caught.value.code == "GINN-E-PKG-MANAGER"
-
-
-@pytest.mark.fr("FR-040")
-@pytest.mark.parametrize("keep_existing", [False, True])
-def test_explicit_manifest_keep_existing_decides_whether_an_entry_is_replaced(
-    keep_existing: bool,
-) -> None:
-    fake = FakePodman()
-    cid = _running(fake)
-    definition = _definition("arch")
-    _canned(fake, definition.argv(Verb.LIST_EXPLICIT), 0, "htop\nvim\n")
-    old = ManifestEntry(name="htop", source=InstallSource.AUR, method=InstallMethod.NATIVE)
-    result = explicit_manifest(
-        fake,
-        cid,
-        definition,
-        realm=REALM,
-        services=False,
-        manifest=[old],
-        names=["htop", "vim"],
-        installed_now=True,
-        keep_existing=keep_existing,
-    )
-    assert result is not None
-    entries = {entry.name: entry for entry in result}
-    assert entries["vim"].source is InstallSource.REPO
-    assert entries["vim"].method is InstallMethod.GINN
-    if keep_existing:
-        assert entries["htop"] == old
-    else:
-        assert entries["htop"].source is InstallSource.REPO
-        assert entries["htop"].method is InstallMethod.GINN
 
 
 @pytest.mark.fr("FR-041")

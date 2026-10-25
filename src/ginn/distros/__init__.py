@@ -5,7 +5,6 @@ from ginn.distros.loader import (
     TEST_SWITCH_ENV,
     TMPDIR_FIELD,
     DistroDef,
-    ExportHook,
     HostLocale,
     Integration,
     IntegrationSet,
@@ -22,6 +21,6 @@ from ginn.distros.loader import (
 )
 
 __all__ = ["TEST_SWITCH_ENV", "TMPDIR_FIELD"]
-__all__ += ["DistroDef", "ExportHook", "HostLocale", "Integration", "IntegrationSet", "Verb"]
+__all__ += ["DistroDef", "HostLocale", "Integration", "IntegrationSet", "Verb"]
 __all__ += ["available", "clear_cache", "distro_fixtures_enabled", "from_mapping"]
 __all__ += ["host_locale", "load", "load_file", "parse_text", "unknown_distribution_error"]

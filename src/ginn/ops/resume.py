@@ -17,17 +17,13 @@ Order of a resume:
 2. Inside `mutating("create")`, under the realm lock (`_Resume._check_name`). The record is checked
    again. A Realm Home that is a link or a file is refused with GINN-E-INTERNAL.
 3. The create phases run, with the step names that create records:
-   - `space-checked`: the free-space check runs again, with the storage figure of the resume's mode
-     (FR-121, ADR-015 Decision 11). When the pinned image is already in storage, the pull is left
-     out of the figure, but the realm container's keep-id copy still counts, for either mode
-     (T7.35). A missing image is downloaded, and the full figure applies.
+   - `space-checked`: the free-space check runs again. When the pinned image is already in storage,
+     nothing is downloaded, so the base estimate is not checked (FR-121).
    - `cleared` (`_Resume._clear`): a services-on realm is told `d` first, so runsv does not restart
      a container that is removed (ADR-003). Every container of the generation is stopped and removed
-     by its labels, and the runit directory is removed, since the create writes it again. A
-     services-on resume then removes the provisioning leftovers by ID: the provisioning containers,
-     then the derived and stage images, with the record's keep set (ADR-015 Decisions 12 and 13).
-     The image of an older pin is removed when no container uses it, best effort (FR-011). The
-     record still reads `broken` here.
+     by its labels, and the runit directory is removed, since the create writes it again. The image
+     of an older pin is removed when no container uses it, best effort (FR-011). The record still
+     reads `broken` here.
    - `recorded` (`_Resume._save_creating`): the record moves `broken` to `creating` (DR-020), with
      the current pin and the create-time fields of the new plan. The pending request is kept.
    - `homed` (`_Resume._make_home`): the Realm Home is kept, or made when the crash came before it.
@@ -66,7 +62,6 @@ from ginn.ops._create_plan import CreateHooks, CreateRequest, _validate
 from ginn.ops._mutating import OpEnv
 from ginn.ops.create import CreateResult, _Create, run_journaled
 from ginn.ops.delete import remove_image
-from ginn.ops.provision import remove_derived, require_storage_layers
 from ginn.podman.adapter import Podman
 from ginn.services.runit_user import remove_service, service_dir
 from ginn.services.supervise import signal_runsv_down
@@ -193,9 +188,7 @@ class _Resume(_Create):
         removed (ADR-003). A runsv that is not running is not an error (services/supervise.py).
         The containers of the generation are then stopped and removed by their labels, which also
         finds a container whose id was never stored. The runit directory is removed too, since
-        `service` writes it again. The provisioning leftovers go next, by ID
-        (`_remove_leftover_images`). The image of an older pin goes last
-        (`_remove_superseded_image`).
+        `service` writes it again. The image of an older pin goes last (`_remove_superseded_image`).
         """
         paths = self._env.paths
         name = self._request.name
@@ -210,29 +203,8 @@ class _Resume(_Create):
             err = make("GINN-E-INTERNAL")
             err.details.update({"detail": f"runit service directory: {exc}"})
             raise err from exc
-        if services:
-            self._remove_leftover_images()
         self._remove_superseded_image()
         self._step("cleared")
-
-    def _remove_leftover_images(self) -> None:
-        """Remove the provisioning leftovers of the killed create, by ID, before the redo (FR-122).
-
-        The provisioning containers go first, then every derived and stage image of the realm
-        (ADR-015 Decision 12). The keep set is the record's `init_image_id` and
-        `building_init_image_id`, which a create that did not finish leaves empty. An image that
-        stays for any other reason is refused with GINN-E-INTERNAL, before the stage is redone.
-        """
-        record = self._current()
-        keep = (record.init_image_id, record.building_init_image_id)
-        removal = remove_derived(self._podman, self._request.name, keep)
-        stays = [image_id for image_id in removal.kept if image_id not in keep]
-        if stays:
-            err = make("GINN-E-INTERNAL")
-            err.details.update(
-                {"detail": f"a leftover of the killed create stays: {'; '.join(removal.notes)}"}
-            )
-            raise err
 
     def _remove_superseded_image(self) -> None:
         """Remove the image that the killed create pulled, when the pin has changed since (FR-011).
@@ -249,20 +221,20 @@ class _Resume(_Create):
             remove_image(self._podman, old)
 
     def _check_space(self) -> None:
-        """`space-checked`: the storage figure of this resume, by its image's presence (FR-121).
+        """`space-checked`: the base image's share of the estimate is checked only for a download.
 
-        A resume whose pinned image is already in storage pulls nothing, so the pull is left out of
-        the figure (`base_in_storage`). The keep-id copy of the base still counts, and so does the
-        stage of a services-on resume, because the realm container is made again (ADR-015
-        Decision 11). A missing image is downloaded, and the full figure applies. A services-off
-        resume is checked too, since its container create may still be ahead (T7.35).
+        A resume whose pinned image is already in storage downloads nothing: its layers are local.
+        The base estimate is the image's download and installed size (FR-121), so no space for it
+        is needed, and the check is skipped. The step is recorded as create records it. A missing
+        image is downloaded, and then the full check runs.
 
-        The measured layers are checked first (`require_storage_layers`), so a distribution without
-        them is refused as GINN-E-DISTRO-DATA before the image read, which is a podman call.
+        The skip assumes the estimate is the image alone (`estimate_bytes`). A component added to
+        the estimate later would be skipped here too, so this override must change with it.
         """
-        require_storage_layers(self._plan.definition)
-        local = self._podman.image_exists(self._plan.spec.image)
-        self._check_space_for(base_in_storage=local)
+        if self._podman.image_exists(self._plan.spec.image):
+            self._step("space-checked")
+            return
+        super()._check_space()
 
     def _save_creating(self) -> None:
         """`recorded`: the record moves from broken to creating, with the current pin (DR-020).

@@ -248,40 +248,6 @@ def run_step(
     return result
 
 
-def refresh_for_verb(
-    podman: Podman,
-    container_id: str,
-    definition: DistroDef,
-    verb: Verb,
-    *,
-    realm: str,
-    retry_hook: RetryHook | None,
-    target: ExecTarget,
-    on_ack: Callable[[int], None] | None = None,
-) -> bool:
-    """Run `refresh` before `verb` when the distribution's data lists `verb` in `refresh_before`.
-
-    Return True when the refresh ran, so the caller can journal it. The install (ops/packages.py)
-    and the replay of a rebuild (ops/rebuild.py) both call it, so they keep one rule (ADR-011):
-    Debian and Kali refresh their lists before an install, and Arch and Fedora do not. A failed
-    refresh raises as `run_step` does, so it is never read as a missing package (FR-022).
-    """
-    if verb not in definition.refresh_before:
-        return False
-    run_step(
-        podman,
-        container_id,
-        definition,
-        definition.argv(Verb.REFRESH),
-        realm=realm,
-        step="refresh",
-        retry_hook=retry_hook,
-        target=target,
-        on_ack=on_ack,
-    )
-    return True
-
-
 def refused(realm: str, step: str, detail: str) -> GinnError:
     """GINN-E-PKG-MANAGER for output that is not read, with the step and the reason."""
     err = make("GINN-E-PKG-MANAGER", realm=realm)
@@ -356,7 +322,6 @@ def explicit_manifest(
     manifest: Sequence[ManifestEntry],
     names: Sequence[str],
     installed_now: bool,
-    keep_existing: bool = False,
 ) -> list[ManifestEntry] | None:
     """The Install Manifest that the realm's explicit-package list gives for `names`.
 
@@ -364,10 +329,6 @@ def explicit_manifest(
     the realm lists as explicit is recorded as `ginn`. After a remove, each name it no longer lists
     is dropped. None when the list cannot be read or is over the caps, and the caller keeps the
     manifest it had. A result equal to `manifest` means nothing changes.
-
-    `keep_existing` (recovery and the reconcile after a failed install or remove) records after an
-    install just the names that have no entry yet, so an entry that exists keeps its source and
-    method: neither can tell that the install reached that name.
     """
     try:
         explicit = explicit_packages(
@@ -380,8 +341,7 @@ def explicit_manifest(
     except Exception:  # noqa: BLE001 - the caller's own error is the one that counts
         return None
     if installed_now:
-        have = {entry.name for entry in manifest} if keep_existing else set()
-        present = [raw for raw in names if raw in explicit and raw not in have]
+        present = [raw for raw in names if raw in explicit]
         if not present:
             return list(manifest)
         return installed(manifest, present, source=InstallSource.REPO, method=InstallMethod.GINN)

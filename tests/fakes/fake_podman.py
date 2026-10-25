@@ -97,8 +97,6 @@ class _Container:
     """The `--passwd-entry` podman writes for the keep-id user. `getent passwd` reads it (T4.9b)."""
     copied: dict[str, tuple[bytes, int]] = field(default_factory=dict)
     """The files `cp_into` put in the container: destination to (content, mode bits)."""
-    image_id: str = ""
-    """The ID of the image the container was created from, fixed at create as podman fixes it."""
 
 
 def _cat(files: Mapping[str, bytes], path: str) -> ExecResult:
@@ -117,8 +115,6 @@ def _error(code: str, ref: str) -> GinnError:
 
 _FAKE_INIT: Final = b"systemd\n"
 """The stand-in for systemd's binary at `/sbin/init`, which the fake image carries by default."""
-_ZERO_TIME: Final = "0001-01-01T00:00:00Z"
-"""The time that podman prints for a container that has not started or finished."""
 
 
 def _path_not_found() -> GinnError:
@@ -160,21 +156,15 @@ class FakePodman:
     (PODMAN_ERROR_EXIT), so 255 comes back as a result. Set 125 to model the raising case
     (FR-081, T7.16 section 11.8)."""
     fail_ops: dict[str, str] = field(default_factory=dict)
-    container_size_rw: dict[str, int] = field(default_factory=dict)
-    """The `SizeRw` that `inspect(..., size=True)` reports, by container ID. Zero when unset."""
     pull_digest_override: str | None = None
     files: dict[str, bytes] = field(default_factory=dict)
     init_absent: bool = False
     """True makes the image lack `/sbin/init`: `cp_from` of it fails as podman's cp does (F3).
     Every other image path is answered from `files`, and `/sbin/init` is present by default."""
     tops: dict[str, list[tuple[int, int, str]]] = field(default_factory=dict)
-    diffs: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
-    """The (kind, path) rows `diff` returns for each container ID. Empty unless a test sets them."""
     log_text: dict[str, str] = field(default_factory=dict)
     images: dict[str, ImageInfo] = field(default_factory=dict)
     containers: dict[str, _Container] = field(default_factory=dict)
-    create_specs: list[CreateSpec] = field(default_factory=list)
-    """Every spec `create` accepted, in order. The argv of a create is what the tests check."""
     calls: list[FakeCall] = field(default_factory=list)
     exec_users: list[str | None] = field(default_factory=list)
     exec_calls: list[ExecCall] = field(default_factory=list)
@@ -246,97 +236,94 @@ class FakePodman:
 
     def image_inspect(self, ref: str) -> ImageInfo:
         self._record("image_inspect", ref)
-        self._take_op_failure("image_inspect")
-        image = self._find_image(ref)
+        image = self.images.get(ref)
         if image is None:
             raise make("GINN-E-INTERNAL")
         return image
 
-    def image_by_digest(self, digest: str) -> ImageInfo | None:
-        self._record("image_by_digest", digest)
-        self._take_op_failure("image_by_digest")
-        return next((image for image in self.images.values() if image.digest == digest), None)
-
-    def _find_image(self, ref: str) -> ImageInfo | None:
-        """The image that `ref` names, by its name or by its ID, or None when none matches.
-
-        A name is a key of `images`. An ID is 64 lowercase hex digits, and a `sha256:` prefix on it
-        is read too, as podman reads it. Returned IDs are always the bare hex.
-        """
-        found = self.images.get(ref)
-        if found is None:
-            bare = ref.removeprefix("sha256:")
-            found = next((image for image in self.images.values() if image.id == bare), None)
-        return found
-
-    def _image_by_ref(self, ref: str) -> ImageInfo:
-        """The image that `ref` names. Nothing matching raises GINN-E-INTERNAL, as podman does."""
-        found = self._find_image(ref)
-        if found is None:
+    def rmi(self, ref: str) -> None:
+        self._record("rmi", ref)
+        self._take_op_failure("rmi")
+        if self.images.pop(ref, None) is None:
             raise make("GINN-E-INTERNAL")
-        return found
+
+    def commit(
+        self,
+        container_id: str,
+        image_ref: str,
+        *,
+        changes: Sequence[str] = (),
+        pause: bool = True,
+    ) -> str:
+        self._record("commit", container_id, image_ref, tuple(changes), pause)
+        self._take_op_failure("commit")
+        container = self._container(container_id)
+        # Simulate commit by creating a new image with a deterministic ID
+        digest = hashlib.sha256(f"{container_id}:{image_ref}:{len(changes)}".encode()).hexdigest()
+        image_id = f"sha256:{digest}"
+        # Store image with ref as key and also by ID
+        info = ImageInfo(
+            id=image_id,
+            digest=f"sha256:{digest}",
+            repo_digests=(),
+            size=_FAKE_IMAGE_SIZE,
+            created=_FAKE_IMAGE_CREATED,
+            labels={},
+        )
+        # Simplify: store under image_ref and also under image_id
+        self.images[image_ref] = info
+        self.images[image_id] = info
+        # Update container's image to new image_id for diff tracking
+        container.image = image_id
+        return image_id
 
     def image_id(self, ref: str) -> str:
         self._record("image_id", ref)
         self._take_op_failure("image_id")
-        return self._image_by_ref(ref).id
-
-    def images_by_name(self, prefix: str) -> dict[str, ImageInfo]:
-        self._record("images_by_name", prefix)
-        self._take_op_failure("images_by_name")
-        if not prefix:
-            raise ValueError("images_by_name needs a name prefix: an empty one matches every image")
-        # A pull keeps its digest reference as the key. podman lists such an image with no tag,
-        # so it is not a name here (the CLI skips `<none>` tags the same way).
-        return {
-            name: image
-            for name, image in self.images.items()
-            if "@" not in name and name.startswith(prefix)
-        }
-
-    def rmi(self, ref: str) -> None:
-        """Remove one image, as podman's rmi does (ADR-015 Decision 13).
-
-        A name untags only that name, and the image goes when no name holds it. An ID is refused
-        while more than one name holds it: podman does not remove such an image by ID, and the
-        adapter never passes force. The images are keyed by name, so one key is one name.
-        """
-        self._record("rmi", ref)
-        self._take_op_failure("rmi")
-        if ref in self.images:
-            del self.images[ref]
-            return
-        found = self._find_image(ref)
-        if found is None:
+        info = self.images.get(ref)
+        if info is None:
+            # Try lookup by ID substring or exact
+            for img in self.images.values():
+                if img.id == ref:
+                    return img.id
             raise make("GINN-E-INTERNAL")
-        names = [name for name, image in self.images.items() if image.id == found.id]
-        if len(names) > 1:
-            err = make("GINN-E-INTERNAL")
-            err.details["reason"] = "image is referenced in multiple repositories"
-            raise err
-        for name in names:
-            del self.images[name]
+        return info.id
+
+    def diff(self, container_id: str) -> list[str]:
+        self._record("diff", container_id)
+        self._take_op_failure("diff")
+        self._container(container_id)
+        # Fake: return empty diff; provision tests check that diff is handled
+        return []
+
+    def images_by_name(self, name: str) -> list[ImageInfo]:
+        self._record("images_by_name", name)
+        self._take_op_failure("images_by_name")
+        out: list[ImageInfo] = []
+        for ref, info in self.images.items():
+            # Match repository name before colon or @, similar to CLI
+            repo = ref.split(":")[0].split("@")[0]
+            if repo == name or repo.endswith("/" + name):
+                # Avoid duplicates when stored under both ref and ID
+                if info not in out:
+                    out.append(info)
+        return out
 
     def create(self, spec: CreateSpec) -> str:
         self._record("create", spec.name)
         self._take_op_failure("create")
         spec.to_argv()  # validates the spec, including the privileged refusal (NFR-SEC-001)
-        self.create_specs.append(spec)
-        if spec.image_id is not None:
-            self._image_by_ref(spec.image_id)  # podman refuses an image ID it does not hold
         if any(c.name == spec.name for c in self.containers.values()):
             raise make("GINN-E-INTERNAL")
         container_id = f"{self._next:064x}"
         self._next += 1
-        source = spec.image_id if spec.image_id is not None else spec.image_digest_ref
-        found = self._find_image(source)
+        image_ref = spec.image_id if spec.image_id is not None else spec.image_digest_ref
         self.containers[container_id] = _Container(
             id=container_id,
             name=spec.name,
-            image=source,
+            image=image_ref,
             labels=dict(spec.labels),
             passwd_entry=spec.passwd_entry,
-            image_id=found.id if found is not None else "",
         )
         return container_id
 
@@ -366,49 +353,23 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         del self.containers[container_id]
 
-    def _inspect_json(self, container: _Container) -> dict[str, object]:
-        """The object that `podman container inspect` prints for `container`, in the fields ginn
-        reads. The top-level `Image` is the image ID, and it is "" when the fake holds no image for
-        the reference the container was created from, as podman never prints that for a container.
-        `ContainerInfo.from_inspect` parses it, so the image ID is read as it is from podman."""
-        return {
-            "Id": container.id,
-            "Name": container.name,
-            "Image": container.image_id,
-            "ImageName": container.image,
-            "State": {
-                "Status": container.state.value,
-                "Pid": container.pid,
-                "ExitCode": container.exit_code,
-                "StartedAt": _ZERO_TIME,
-                "FinishedAt": _ZERO_TIME,
-            },
-            "Config": {"Labels": dict(container.labels)},
-        }
+    def _info_for(self, container: _Container) -> ContainerInfo:
+        return ContainerInfo(
+            id=container.id,
+            name=container.name,
+            image=container.image,
+            state=container.state,
+            pid=container.pid,
+            exit_code=container.exit_code,
+            started_at="",
+            finished_at="",
+            labels=dict(container.labels),
+        )
 
-    def _ps_json(self, container: _Container) -> dict[str, object]:
-        """The row that `podman ps --all --format json` prints for `container`, in the fields ginn
-        reads. `ContainerInfo.from_ps` parses it, which reads the image ID from `ImageID`."""
-        return {
-            "Id": container.id,
-            "Names": [container.name],
-            "Image": container.image,
-            "ImageID": container.image_id,
-            "State": container.state.value,
-            "Pid": container.pid,
-            "ExitCode": container.exit_code,
-            "StartedAt": 0,
-            "ExitedAt": 0,
-            "Labels": dict(container.labels),
-        }
-
-    def inspect(self, container_id: str, *, size: bool = False) -> ContainerInfo:
-        self._record(*(("inspect", container_id, "--size") if size else ("inspect", container_id)))
+    def inspect(self, container_id: str) -> ContainerInfo:
+        self._record("inspect", container_id)
         self._take_op_failure("inspect")
-        obj = self._inspect_json(self._container(container_id))
-        if size:
-            obj["SizeRw"] = self.container_size_rw.get(container_id, 0)
-        return ContainerInfo.from_inspect(obj)
+        return self._info_for(self._container(container_id))
 
     def ps(self, label_filter: Mapping[str, str] | None = None) -> list[ContainerInfo]:
         self._record("ps", tuple(sorted((label_filter or {}).items())))
@@ -416,50 +377,8 @@ class FakePodman:
         matches: list[ContainerInfo] = []
         for container in self.containers.values():
             if all(container.labels.get(k) == v for k, v in wanted.items()):
-                matches.append(ContainerInfo.from_ps(self._ps_json(container)))
+                matches.append(self._info_for(container))
         return matches
-
-    def commit(self, container_id: str, image_name: str, *, changes: Sequence[str] = ()) -> str:
-        """Store the image under `image_name` and return its ID.
-
-        A name that already holds an image is refused, because podman would move the tag and leave
-        the old image untagged (ADR-015 Decision 13).
-
-        The labels start from the image the container was created from, when that image is held.
-        Each `LABEL key=value` change sets its key, and an empty value stays as the key with "". The
-        other instructions are recorded in `calls` and not applied, since no test reads them.
-        """
-        self._record("commit", container_id, image_name, tuple(changes))
-        self._take_op_failure("commit")
-        container = self._container(container_id)
-        if image_name in self.images:
-            # podman would move the tag and leave the old image untagged (ADR-015 Decision 13).
-            err = make("GINN-E-INTERNAL")
-            err.details["reason"] = f"the name {image_name!r} already holds an image"
-            raise err
-        base = self._find_image(container.image)
-        labels = dict(base.labels) if base is not None else {}
-        for change in changes:
-            instruction, _, rest = change.partition(" ")
-            if instruction == "LABEL":
-                key, _, value = rest.partition("=")
-                labels[key] = value
-        digest = hashlib.sha256(f"{container_id}|{image_name}|{changes!r}".encode()).hexdigest()
-        self.images[image_name] = ImageInfo(
-            id=digest,
-            digest="",
-            repo_digests=(),
-            size=_FAKE_IMAGE_SIZE,
-            created=_FAKE_IMAGE_CREATED,
-            labels=labels,
-        )
-        return digest
-
-    def diff(self, container_id: str) -> list[tuple[str, str]]:
-        self._record("diff", container_id)
-        self._take_op_failure("diff")
-        self._container(container_id)
-        return list(self.diffs.get(container_id, []))
 
     def _note_exec(
         self,

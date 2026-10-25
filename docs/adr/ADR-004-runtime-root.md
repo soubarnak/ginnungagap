@@ -5,7 +5,6 @@
 - Amended: 2026-10-12 (R11). The Podman configuration finding is verified, the environment is an allowlist, the config files and the image tmpdir are Owned Paths, and the runtime root is checked for owner and mode. See Verification.
 - Amended: 2026-10-12 (D7). Status qualifier added. The logout evidence is the simulation in the addendum below, and the real logout run is pending T7.8. No decision changes.
 - Amended: 2026-10-12 (proxy names). The allowlist also holds the proxy variable names `http_proxy`, `https_proxy` and `no_proxy`, and their upper-case forms `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`. A name passes only when the parent sets it. The reason: exec and launch pass the proxy variables to podman as `--env NAME` (T4.6), and podman reads the value from its own environment. The values stay in that environment and never reach the argv. The list is these six names. Any other proxy name needs a new amendment. No other decision changes.
-- Amended: 2026-10-15 (`--http-proxy=false` on creates). Every realm create passes `--http-proxy=false` (T4.1), so podman does not copy the host's proxy variables into the container config. The provisioning-stage creates of ADR-015 pass it too (Decisions 2b and 2g, T7.18, 621e8df), because the commit copies the container configuration, Env included, into a derived image, and a proxy variable can carry credentials. The values of the 2026-10-12 proxy names still reach podman only through its environment, never through an argv. No other decision changes.
 
 ## Context
 

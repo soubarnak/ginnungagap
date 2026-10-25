@@ -7,7 +7,7 @@ paths under tmp_path answer, so an attach runs for real. No test runs podman, su
 socket on the test host never becomes a grant.
 
 Covered: the exit status of the command, the login shell and the argv, `--root` as container root,
-HOME and the workdir, the proxy names as `--env NAME`, the refusals (unknown realm, the DR-020
+HOME and the workdir, the proxy names as `--env NAME`, the refusals (unknown realm, Kali, the DR-020
 states), auto-start, the lazy re-attach (only when a host source changed, none otherwise), a failed
 re-attach that leaves the realm running, a services-on realm that is never stopped, a stop that
 races the pre-check, and the share list rebuilt at enter.
@@ -26,14 +26,12 @@ from typing import Any
 
 import pytest
 
-from ginn.distros import Verb, load
 from ginn.domain import DistroId, RealmName, RealmSettings, RealmState, Tier
 from ginn.domain.grants import GrantRecord, SourceIdentity
 from ginn.errors import GinnError
 from ginn.errors import Warning as GinnWarning
 from ginn.ops._mutating import OpEnv
 from ginn.ops.lifecycle import HostUser, LifecycleHooks, start_realm
-from ginn.ops.native import root_session_recorder
 from ginn.ops.security_ops import proxy_state_path
 from ginn.podman.adapter import PODMAN_ERROR_EXIT, CreateSpec, ExecTarget
 from ginn.podman.models import ContainerInfo, ExecResult
@@ -130,28 +128,12 @@ class AtTheLockedListing(EnterPodman):
 
 
 class StopsDuringExec(EnterPodman):
-    """The container stops as the exec starts, and podman reports the failure as `exec_status`:
-    125 for its own failure, or 255 as podman 5.8.8 answers an exec on a stopped container."""
-
-    exec_status: int = PODMAN_ERROR_EXIT
+    """The container stops as the exec starts, and podman reports its own failure (125)."""
 
     def exec_interactive(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> int:
         self.stop(container_id, 0)
         self._record("exec_interactive", container_id, tuple(argv))
-        return self.exec_status
-
-
-LIST_DEBIAN = tuple(load("debian").argv(Verb.LIST_EXPLICIT))
-
-
-class StopsAtPackageRead(EnterPodman):
-    """The container stops as the root session reads its packages, the read that runs before the
-    command (FR-042 AC-1). The read and the command both then find a stopped realm."""
-
-    def exec(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> ExecResult:
-        if tuple(argv) == LIST_DEBIAN:
-            self.stop(container_id, 0)
-        return super().exec(container_id, argv, **kwargs)
+        return PODMAN_ERROR_EXIT
 
 
 class FakeTime:
@@ -503,26 +485,9 @@ def test_an_unknown_realm_is_refused_before_any_podman_call(
     assert fake.calls == []
 
 
-@pytest.mark.fr("FR-049")
-@pytest.mark.fr("IR-011")
-def test_a_kali_realm_runs_a_command_and_returns_its_status_like_debian(
-    env: OpEnv,
-    fake: EnterPodman,
-    user: HostUser,
-    lifecycle_hooks: LifecycleHooks,
-) -> None:
-    make_realm(env, fake, "lab", RealmState.RUNNING, running=True, distro="kali")
-    command = ["sh", "-c", "exit 3"]
-    fake.exec_results[tuple(command)] = ExecResult(3, "", "")
-
-    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=command) == 3
-
-    assert exec_call(fake).argv == tuple(command)
-
-
-@pytest.mark.fr("FR-017")
-@pytest.mark.fr("FR-048")
-def test_a_stopped_kali_realm_starts_then_opens_the_login_shell_like_debian(
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+def test_a_kali_realm_is_refused_with_a_catalogued_error_and_no_podman_call(
     env: OpEnv,
     fake: EnterPodman,
     user: HostUser,
@@ -530,11 +495,12 @@ def test_a_stopped_kali_realm_starts_then_opens_the_login_shell_like_debian(
 ) -> None:
     make_realm(env, fake, "lab", RealmState.STOPPED, running=False, distro="kali")
 
-    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks)) == 0
+    with pytest.raises(GinnError) as info:
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["true"])
 
-    assert fake.ops().count("start") == 1
-    assert exec_call(fake).argv == ("/bin/bash", "-l")
-    assert stored(env, "lab").state is RealmState.RUNNING
+    assert info.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert info.value.details["milestone"] == "M10"
+    assert fake.calls == []
 
 
 @pytest.mark.fr("DR-020")
@@ -1177,35 +1143,33 @@ def test_a_lock_that_finds_no_work_records_a_noop_step_and_attaches_nothing(
 
 @pytest.mark.fr("DR-020")
 @pytest.mark.fr("IR-011")
-@pytest.mark.parametrize("status", [PODMAN_ERROR_EXIT, 255])
-def test_a_125_or_255_with_the_container_still_running_is_returned_unchanged(
+def test_a_125_with_the_container_still_running_is_returned_unchanged(
     env: OpEnv,
     fake: EnterPodman,
     user: HostUser,
     lifecycle_hooks: LifecycleHooks,
-    status: int,
 ) -> None:
-    """The command's own status and podman's failure look the same. With the realm still running,
-    enter returns the status and does not guess (IR-011)."""
+    """The command's own 125 and podman's 125 look the same. With the realm still running, enter
+    returns the status and does not guess (IR-011)."""
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
-    fake.exec_results[("false",)] = ExecResult(status, "", "")
+    fake.exec_results[("false",)] = ExecResult(PODMAN_ERROR_EXIT, "", "")
 
-    assert enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["false"]) == status
+    assert (
+        enter(env, fake, "lab", user, make_hooks(lifecycle_hooks), argv=["false"])
+        == PODMAN_ERROR_EXIT
+    )
     assert fake.ops().count("exec_interactive") == 1
 
 
 @pytest.mark.fr("DR-020")
 @pytest.mark.fr("IR-011")
-@pytest.mark.parametrize("status", [PODMAN_ERROR_EXIT, 255])
-def test_a_125_or_255_after_the_container_stopped_is_a_realm_state_error_and_is_not_retried(
+def test_a_125_after_the_container_stopped_is_a_realm_state_error_and_is_not_retried(
     env: OpEnv,
     lifecycle_hooks: LifecycleHooks,
     tmp_path: Path,
     user: HostUser,
-    status: int,
 ) -> None:
     fake = StopsDuringExec(root=str(tmp_path))
-    fake.exec_status = status
     make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
 
     with pytest.raises(GinnError) as info:
@@ -1234,120 +1198,6 @@ def test_a_record_that_says_running_while_its_container_exited_is_started_again(
     assert "start" in fake.ops()
     assert stored(env, "lab").state is RealmState.RUNNING
     assert exec_call(fake).container_id == container_id(env, "lab")
-
-
-def _root_hooks(
-    env: OpEnv, fake: EnterPodman, lifecycle: LifecycleHooks, notices: list[GinnWarning]
-) -> EnterHooks:
-    """The seams of a `--root` enter: the package recorder around the exec (FR-042 AC-1), and every
-    warning it or enter makes kept in `notices`."""
-    return replace(
-        make_hooks(lifecycle),
-        notify=notices.append,
-        root_session=root_session_recorder(env, fake, notify=notices.append),
-    )
-
-
-@pytest.mark.fr("FR-017")
-@pytest.mark.fr("FR-042")
-def test_a_root_exec_on_a_stopped_realm_starts_it_then_reads_packages_and_records_the_new_one(
-    env: OpEnv,
-    fake: EnterPodman,
-    user: HostUser,
-    lifecycle_hooks: LifecycleHooks,
-) -> None:
-    """The auto-start stays (FR-017), and the package read after it finds the realm running."""
-    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
-    fake.exec_sequences[LIST_DEBIAN] = [ExecResult(0, "", ""), ExecResult(0, "htop\n", "")]
-    notices: list[GinnWarning] = []
-
-    status = enter(
-        env,
-        fake,
-        "lab",
-        user,
-        _root_hooks(env, fake, lifecycle_hooks, notices),
-        argv=["true"],
-        root=True,
-    )
-
-    assert status == 0
-    assert notices == []
-    assert [entry.name for entry in stored(env, "lab").manifest] == ["htop"]
-    reads = [
-        index
-        for index, call in enumerate(fake.calls)
-        if call.op == "exec" and call.args[-1] == LIST_DEBIAN
-    ]
-    assert fake.ops().index("start") < reads[0]
-
-
-@pytest.mark.fr("FR-042")
-@pytest.mark.fr("DR-020")
-def test_a_root_exec_whose_realm_stops_before_the_read_is_refused_with_no_manifest_warning(
-    env: OpEnv,
-    user: HostUser,
-    lifecycle_hooks: LifecycleHooks,
-    tmp_path: Path,
-) -> None:
-    """The T7.27 gate case. The realm starts, then stops as the package read runs. The read and the
-    command both find it stopped, so enter refuses with GINN-E-REALM-STATE. No session ran, and the
-    package read failed, so the refusal gets no note and the session prints no warning."""
-    fake = StopsAtPackageRead(root=str(tmp_path))
-    make_realm(env, fake, "lab", RealmState.STOPPED, running=False)
-    notices: list[GinnWarning] = []
-
-    with pytest.raises(GinnError) as info:
-        enter(
-            env,
-            fake,
-            "lab",
-            user,
-            _root_hooks(env, fake, lifecycle_hooks, notices),
-            argv=["true"],
-            root=True,
-        )
-
-    assert info.value.code == "GINN-E-REALM-STATE"
-    assert info.value.details["state"] == "stopped"
-    assert fake.ops().count("start") == 1
-    assert notices == []
-    assert getattr(info.value, "__notes__", []) == []
-    assert stored(env, "lab").manifest == []
-
-
-@pytest.mark.fr("FR-042")
-@pytest.mark.fr("DR-020")
-def test_a_root_command_whose_realm_stops_during_it_is_refused_with_a_note_and_no_warning(
-    env: OpEnv,
-    user: HostUser,
-    lifecycle_hooks: LifecycleHooks,
-    tmp_path: Path,
-) -> None:
-    """The realm stops inside the command, which ran. The before-read worked, so the refusal says
-    the session's packages may be unrecorded. The session prints no GINN-W-MANIFEST-UNRECORDED
-    warning, and it does not read the packages after the session."""
-    fake = StopsDuringExec(root=str(tmp_path))
-    make_realm(env, fake, "lab", RealmState.RUNNING, running=True)
-    notices: list[GinnWarning] = []
-
-    with pytest.raises(GinnError) as info:
-        enter(
-            env,
-            fake,
-            "lab",
-            user,
-            _root_hooks(env, fake, lifecycle_hooks, notices),
-            argv=["true"],
-            root=True,
-        )
-
-    assert info.value.code == "GINN-E-REALM-STATE"
-    (note,) = getattr(info.value, "__notes__", [])
-    assert "may be unrecorded in the Install Manifest" in note
-    assert "run 'ginn install lab PACKAGE'" in note
-    assert notices == []
-    assert stored(env, "lab").manifest == []
 
 
 def _launched_apps(paths: OwnedPaths, name: str) -> list[dict[str, Any]]:

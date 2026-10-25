@@ -93,17 +93,13 @@ class ManifestEntry:
 
     The manifest holds one entry per package name, and it belongs to one realm (DR-001). A stored
     entry is read back with `from_dict`, which raises TypeError or ValueError on a bad field.
-
-    `init` marks an entry that the provisioning stage installed (ADR-015 Decision 6). Such an entry
-    is part of the realm's init set, which the services-on boot needs. `to_dict` writes the key only
-    when it is true, so a manifest without init entries keeps the shape it always had, and a stored
-    entry without the key reads as `init=False`.
     """
 
     name: str
     source: InstallSource
     method: InstallMethod
     init: bool = False
+    """True when the package is in the init set (ADR-015 Decision 6, T7.19)."""
 
     def to_dict(self) -> dict[str, str | bool]:
         data: dict[str, str | bool] = {
@@ -127,9 +123,4 @@ class ManifestEntry:
         init = data.get("init", False)
         if not isinstance(init, bool):
             raise TypeError("manifest entry init must be a boolean")
-        return cls(
-            name=name,
-            source=InstallSource(source),
-            method=InstallMethod(method),
-            init=init,
-        )
+        return cls(name=name, source=InstallSource(source), method=InstallMethod(method), init=init)
