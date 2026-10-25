@@ -525,6 +525,30 @@ _SPECS: tuple[ErrorSpec, ...] = (
         source="FR-080, ADR-003, F3 (ginn-defined; not an SRS code)",
     ),
     ErrorSpec(
+        code="GINN-E-IMAGE-DERIVED",
+        exit_code=4,
+        summary="image '{image}' is derived, not pinned: expected '{expected}'",
+        remedy="remove the derived image with 'podman rmi {image}' and pull the pinned image with "
+        "'podman pull {expected}'",
+        source="FR-011, ADR-015 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-PKG-PROTECTED",
+        exit_code=4,
+        summary="package '{package}' is protected and cannot be removed",
+        remedy="remove the package from the manifest or pick another package; protected packages are "
+        "the host's base packages",
+        source="FR-012, ADR-015 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
+        code="GINN-E-REALM-BOOT",
+        exit_code=1,
+        summary="realm '{realm}' failed to boot: {units}",
+        remedy="run 'ginn exec {realm} -- systemctl --failed --no-legend --plain' to see the failed "
+        "units, fix the realm or its image, then rebuild",
+        source="FR-080, ADR-015 (ginn-defined; not an SRS code)",
+    ),
+    ErrorSpec(
         code="GINN-E-RELAY-UNAVAILABLE",
         exit_code=1,
         summary="the exec relay of realm '{realm}' does not answer after 'sv up': {detail}",

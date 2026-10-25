@@ -57,6 +57,7 @@ _CONTAINERS_CONF = """\
 [engine]
 runtime = "crun"
 events_logger = "file"
+image_copy_tmp_dir = "{tmp_dir}"
 """
 
 
@@ -388,13 +389,19 @@ class OwnedPaths:
     def ensure_config(self) -> None:
         """Write ginn's containers.conf and storage.conf, mode 0600, atomically (ADR-004).
 
-        containers.conf holds `[engine] runtime = "crun"` and `events_logger = "file"`. storage.conf
-        holds `driver = "overlay"`, with runroot and graphroot equal to the --runroot and --root
-        flags. The text follows containers.conf(5) and containers-storage.conf(5). A file is
-        rewritten only when its bytes or mode differ, so repeated calls change nothing.
+        containers.conf holds `[engine] runtime = "crun"` and `events_logger = "file"` and
+        ``image_copy_tmp_dir``. storage.conf holds `driver = "overlay"`, with runroot and
+        graphroot equal to the --runroot and --root flags. The text follows
+        containers.conf(5) and containers-storage.conf(5). A file is rewritten only when its
+        bytes or mode differ, so repeated calls change nothing.
         """
         _ensure_dir(self.config, None)
-        _write_owned_file(self.podman_containers_conf, _CONTAINERS_CONF.encode("utf-8"))
+        # TOML-quoted absolute path under [engine] (T7.21, Open question 10).
+        tmp_dir = str(self.image_tmp)
+        # Quote as TOML string: escape backslashes and quotes.
+        quoted = tmp_dir.replace("\\", "\\\\").replace('"', '\\"')
+        text = _CONTAINERS_CONF.format(tmp_dir=quoted)
+        _write_owned_file(self.podman_containers_conf, text.encode("utf-8"))
         storage = _storage_conf_text(self.podman_root, self.podman_runroot)
         _write_owned_file(self.podman_storage_conf, storage.encode("utf-8"))
 

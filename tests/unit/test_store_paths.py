@@ -418,7 +418,13 @@ def test_ensure_config_writes_both_files_mode_0600_with_the_pinned_settings(
     paths.ensure_config()
 
     containers = tomllib.loads(paths.podman_containers_conf.read_text(encoding="utf-8"))
-    assert containers == {"engine": {"runtime": "crun", "events_logger": "file"}}
+    assert containers == {
+        "engine": {
+            "runtime": "crun",
+            "events_logger": "file",
+            "image_copy_tmp_dir": str(paths.image_tmp),
+        }
+    }
     storage = tomllib.loads(paths.podman_storage_conf.read_text(encoding="utf-8"))
     assert storage == {
         "storage": {
