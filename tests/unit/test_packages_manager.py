@@ -119,6 +119,10 @@ def _argvs(name: str) -> list[tuple[str, list[str]]]:
             continue
         if verb is Verb.DB_CHECK and not definition.has_db_check:
             continue
+        if verb is Verb.CLEAN:
+            for idx, step in enumerate(definition.clean_steps):
+                out.append((f"clean[{idx}]", list(step)))
+            continue
         packages = ["gimp"] if verb in PACKAGE_VERBS else []
         out.append((verb.value, definition.argv(verb, packages)))
     tmpdir = CHECK_TMP if definition.check_updates_needs_tmpdir else None
