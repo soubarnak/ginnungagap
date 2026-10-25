@@ -1,0 +1,2 @@
+2026-10-12T15:17:44+05:30	pid=8896	sudo sh -c 'echo 8896 > /sys/fs/cgroup/ginn/1000/s05r-launch/cgroup.procs'
+2026-10-12T15:17:44+05:30	pid=8896	  rc=0

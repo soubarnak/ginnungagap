@@ -1,0 +1,54 @@
+{
+  "boot_state": "ok",
+  "container_proc_names": [
+    "24664:systemd",
+    "24688:systemd-journal",
+    "24694:systemd-userdbd",
+    "24699:systemd-userwor",
+    "24700:systemd-userwor",
+    "24701:systemd-userwor",
+    "24702:systemd-nsresou",
+    "24703:systemd-nsresou",
+    "24704:systemd-nsresou",
+    "24705:systemd-nsresou",
+    "24706:systemd-nsresou",
+    "24707:systemd-nsresou",
+    "24716:systemd-userwor",
+    "24752:systemd-logind"
+  ],
+  "container_procs": 14,
+  "helpers": {
+    "conmon": [
+      24661
+    ],
+    "ginn-wait": [
+      24625
+    ],
+    "pause": [
+      16718
+    ],
+    "runsv": [
+      24624
+    ]
+  },
+  "host": {
+    "MemAvailable_kib": 8180316,
+    "psi": "some avg10=0.00 avg60=0.00 avg300=0.00 total=80926822"
+  },
+  "kib": {
+    "Pss": 26143,
+    "RssAnon": 12440,
+    "RssFile": 86492,
+    "VmRSS": 99064
+  },
+  "name": "f6v-v0-r1-ec02",
+  "pss_mib_readable": 25.53,
+  "pss_unreadable": 0,
+  "run": 1,
+  "settle": [
+    "degraded",
+    "degraded"
+  ],
+  "variant": "v0",
+  "vmrss_mib": 96.74
+}

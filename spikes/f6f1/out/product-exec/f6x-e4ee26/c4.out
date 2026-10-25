@@ -1,0 +1,5 @@
+-r--r--r-- 1 root root   14 Oct 14 22:30 /etc/machine-id
+
+/var/lib/dbus:
+total 0
+lrwxrwxrwx 1 root root 15 Oct 14 22:30 machine-id -> /etc/machine-id

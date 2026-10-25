@@ -1,96 +1,56 @@
-[project]
-name = "spaces"
-version = "0.0.4"
-authors = [
-  { name="Kapenekakis Antheas", email="pypi@antheas.dev" },
-]
-description = "Spaces. Develop on the distribution of your choice, securely."
-readme = "readme.md"
-requires-python = ">=3.12"
-license = {text = "AGPL-3.0-or-later"}
-classifiers = [
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Operating System :: POSIX :: Linux",
-]
-
-dependencies = [
-  "Pillow>=11.0",
-  "rich>=13.5.2",
-  "textual>=4.0",
-]
-
-[project.urls]
-"Homepage" = "https://github.com/anatase-org/spaces"
-"Bug Tracker" = "https://github.com/anatase-org/spaces/issues"
-
-[project.entry-points."console_scripts"]
-spaces = "spaces.__main__:main"
-"spaces.priv" = "spaces.priv:main"
-
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
+[project]
+name = "ginn"
+version = "0.1.0.dev0"
+description = "Ginnungagap (ginn) is a Void Linux tool that creates isolated per-distribution Realms on rootless Podman and runs their applications as native desktop and terminal applications, without modifying the host."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Bongbetic" }]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PyGObject>=3.50"]
+dev = ["pytest>=8", "pytest-cov", "hypothesis", "ruff", "mypy"]
+
+[project.scripts]
+ginn = "ginn.__main__:main"
+ginn-gui = "ginn.gui.app:main"
+
 [tool.setuptools.packages.find]
-where = ["src"]  # list of folders that contain the packages (["."] by default)
-include = ["spaces*"]
+where = ["src"]
 
 [tool.setuptools.package-data]
-spaces = ["overlay/*.png"]
+ginn = ["py.typed", "**/*.toml"]
 
-[tool.setuptools.data-files]
-"share/polkit-1/actions" = ["data/org.anatase.spaces.policy"]
-"share/spaces/pam" = [
-  "data/pam/spaces.common-auth",
-  "data/pam/spaces.system-auth",
-  "data/pam/spaces.ubuntu",
-  "data/pam/spaces.kali",
-]
-"share/spaces/keys" = [
-  "data/keys/RPM-GPG-KEY-fedora-44-primary",
-  "data/keys/kali-archive-key.asc",
-  "data/keys/kali-archive-key.gpg.base64",
-]
-"share/spaces/repos" = ["data/repos/fedora.repo"]
-"share/spaces/systemd" = [
-  "data/run-spaces-proc.mount",
-  "data/local-fs-spaces-proc.conf",
-]
-"lib/systemd/system" = ["data/spaces@.service"]
-"lib/systemd/user" = ["data/systemd/user/spaces@.service"]
-"share/spaces/portal/dbus-1/services" = [
-  "data/portal/dbus-1/services/org.freedesktop.FileManager1.service",
-  "data/portal/dbus-1/services/org.freedesktop.Notifications.service",
-  "data/portal/dbus-1/services/org.freedesktop.PowerManagement.service",
-  "data/portal/dbus-1/services/org.freedesktop.ScreenSaver.service",
-  "data/portal/dbus-1/services/org.freedesktop.portal.Desktop.service",
-  "data/portal/dbus-1/services/org.freedesktop.secrets.service",
-  "data/portal/dbus-1/services/org.kde.secretservicecompat.service",
-  "data/portal/dbus-1/services/org.kde.kwalletd5.service",
-  "data/portal/dbus-1/services/org.kde.kwalletd6.service",
-  "data/portal/dbus-1/services/org.kde.StatusNotifierWatcher.service",
-]
-"share/spaces/portal/systemd/user" = [
-  "data/portal/systemd/user/spaces-graphical-session.target",
-  "data/portal/systemd/user/spaces-portal.service",
-]
-"share/spaces/portal/systemd/user/xdg-desktop-portal.service.d" = [
-  "data/portal/systemd/user/xdg-desktop-portal.service.d/spaces.conf",
-]
-"share/spaces/portal/config" = [
-  "data/portal/config/kwalletrc",
-]
+[tool.ruff]
+line-length = 100
+target-version = "py312"
 
-"share/spaces/system-bridge" = [
-  "data/system-bridge/host-service.conf",
-  "data/system-bridge/multi-user.conf",
-  "data/system-bridge/spaces-system-broker.service",
-  "data/system-bridge/system.conf",
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/property", "tests/integration", "tests/gui"]
+pythonpath = ["src"]
+markers = [
+    "fr(id): SRS requirement id",
+    "host_glibc",
+    "host_musl",
+    "host_nvidia",
 ]
-"share/spaces/system-bridge/dbus-1/system-services" = [
-  "data/system-bridge/dbus-1/system-services/org.freedesktop.resolve1.service",
-  "data/system-bridge/dbus-1/system-services/org.freedesktop.NetworkManager.service",
-  "data/system-bridge/dbus-1/system-services/org.freedesktop.UPower.service",
-]
+addopts = "--strict-markers"
+
+[tool.coverage.run]
+source = ["ginn"]
+omit = ["src/ginn/gui/views/*"]

@@ -1,0 +1,77 @@
+Oct 14 22:30:36 xserve (stemd-resolved)[49]: systemd-resolved.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+Oct 14 22:30:36 xserve (stemd-resolved)[49]: systemd-resolved.service: Failed at step USER spawning /usr/lib/systemd/systemd-resolved: Operation not permitted
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve (stemd-resolved)[53]: systemd-resolved.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+Oct 14 22:30:37 xserve (stemd-resolved)[53]: systemd-resolved.service: Failed at step USER spawning /usr/lib/systemd/systemd-resolved: Operation not permitted
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve (stemd-resolved)[56]: systemd-resolved.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+Oct 14 22:30:37 xserve (stemd-resolved)[56]: systemd-resolved.service: Failed at step USER spawning /usr/lib/systemd/systemd-resolved: Operation not permitted
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve (stemd-resolved)[62]: systemd-resolved.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+Oct 14 22:30:37 xserve (stemd-resolved)[62]: systemd-resolved.service: Failed at step USER spawning /usr/lib/systemd/systemd-resolved: Operation not permitted
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve (stemd-resolved)[66]: systemd-resolved.service: Failed to keep CAP_SYS_ADMIN: Operation not permitted
+Oct 14 22:30:37 xserve (stemd-resolved)[66]: systemd-resolved.service: Failed at step USER spawning /usr/lib/systemd/systemd-resolved: Operation not permitted
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Start request repeated too quickly.
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved.service: Failed with result 'start-limit-hit'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Network Name Resolution.
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved-monitor.socket: Failed with result 'service-start-limit-hit'.
+Oct 14 22:30:37 xserve systemd[1]: systemd-resolved-varlink.socket: Failed with result 'service-start-limit-hit'.
+Oct 14 22:30:37 xserve (temd-firstboot)[71]: systemd-firstboot.service: Failed to set up standard input: No such file or directory
+Oct 14 22:30:37 xserve (temd-firstboot)[71]: systemd-firstboot.service: Failed at step STDIN spawning systemd-firstboot: No such file or directory
+Oct 14 22:30:37 xserve systemd[1]: systemd-firstboot.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Initial Setup.
+Oct 14 22:30:37 xserve dbus-broker-launch[81]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 22:30:37 xserve dbus-broker-launch[80]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 22:30:37 xserve dbus-broker-launch[80]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 22:30:37 xserve dbus-broker-launch[80]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 22:30:37 xserve dbus-broker-launch[80]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 22:30:37 xserve dbus-broker-launch[80]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 22:30:37 xserve dbus-broker-launch[80]: Exiting due to fatal error: -107
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve dbus-broker-launch[95]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 22:30:37 xserve dbus-broker-launch[87]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 22:30:37 xserve dbus-broker-launch[87]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 22:30:37 xserve dbus-broker-launch[87]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 22:30:37 xserve dbus-broker-launch[87]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 22:30:37 xserve dbus-broker-launch[87]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 22:30:37 xserve dbus-broker-launch[87]: Exiting due to fatal error: -107
+Oct 14 22:30:37 xserve systemd-homed[82]: Watching /home.
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve dbus-broker-launch[99]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 22:30:37 xserve dbus-broker-launch[98]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 22:30:37 xserve dbus-broker-launch[98]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 22:30:37 xserve dbus-broker-launch[98]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 22:30:37 xserve dbus-broker-launch[98]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 22:30:37 xserve dbus-broker-launch[98]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 22:30:37 xserve dbus-broker-launch[98]: Exiting due to fatal error: -107
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve dbus-broker-launch[103]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 22:30:37 xserve dbus-broker-launch[102]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 22:30:37 xserve dbus-broker-launch[102]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 22:30:37 xserve dbus-broker-launch[102]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 22:30:37 xserve dbus-broker-launch[102]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 22:30:37 xserve dbus-broker-launch[102]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 22:30:37 xserve dbus-broker-launch[102]: Exiting due to fatal error: -107
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve dbus-broker-launch[107]: ERROR launcher_run_child @ ../dbus-broker-37/src/launch/launcher.c +344: Package not installed
+Oct 14 22:30:37 xserve dbus-broker-launch[106]: ERROR service_add @ ../dbus-broker-37/src/launch/service.c +1011: Transport endpoint is not connected
+Oct 14 22:30:37 xserve dbus-broker-launch[106]:       launcher_add_services @ ../dbus-broker-37/src/launch/launcher.c +823
+Oct 14 22:30:37 xserve dbus-broker-launch[106]:       launcher_run @ ../dbus-broker-37/src/launch/launcher.c +1439
+Oct 14 22:30:37 xserve dbus-broker-launch[106]:       run @ ../dbus-broker-37/src/launch/main.c +152
+Oct 14 22:30:37 xserve dbus-broker-launch[106]:       main @ ../dbus-broker-37/src/launch/main.c +178
+Oct 14 22:30:37 xserve dbus-broker-launch[106]: Exiting due to fatal error: -107
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Start request repeated too quickly.
+Oct 14 22:30:37 xserve systemd[1]: dbus-broker.service: Failed with result 'start-limit-hit'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start D-Bus System Message Bus.
+Oct 14 22:30:37 xserve systemd[1]: dbus.socket: Failed with result 'service-start-limit-hit'.
+Oct 14 22:30:37 xserve systemd-homed[82]: Event loop failed: Connection reset by peer
+Oct 14 22:30:37 xserve systemd[1]: systemd-homed.service: Failed with result 'exit-code'.
+Oct 14 22:30:37 xserve systemd[1]: Failed to start Home Area Manager.

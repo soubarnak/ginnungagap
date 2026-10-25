@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07f Fedora useradd check (FR-062 AC-3, FR-013). Not a Realm image, and no podman inside: only realm user creation
+# is tested. Base: the Fedora 44 minimal platform digest pinned in src/ginn/trust/data/trust.toml.
+# The realm user is created with the decided form (useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0).
+FROM registry.fedoraproject.org/fedora-minimal@sha256:86d2e2423cce020de50ff67579216b799e57247f5565b2891f3870189d84dd4b
+ARG REALM_USERADD="-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev"
+RUN echo "== before useradd"; command -v useradd; ls -l /etc/subuid /etc/subgid 2>&1 || true; \
+    grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs || true; \
+    echo "== useradd $REALM_USERADD"; useradd $REALM_USERADD; \
+    echo "-- /etc/subuid"; cat /etc/subuid 2>&1 || echo absent; \
+    echo "-- /etc/subgid"; cat /etc/subgid 2>&1 || echo absent; \
+    id dev

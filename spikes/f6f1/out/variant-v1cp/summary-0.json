@@ -1,0 +1,12 @@
+[
+  {
+    "boot_state": "ok",
+    "name": "f6v-v1cp-r1-7a4f",
+    "run": 1,
+    "settle": [
+      "running",
+      "running"
+    ],
+    "variant": "v1cp"
+  }
+]

@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+# Arch Linux distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps), {tmpdir} (check-updates steps). Write {{ and }} for literal braces.
+# Every command is an argv list.
+#
+# Image: trust_key names [distro.arch] in src/ginn/trust/data/trust.toml (DR-040). Image facts from
+# S-10b (spikes/results/S-10.md section 7): pacman 137 packages; ca-certificates present; en_US.UTF-8
+# absent, with its sources present under /usr/share/i18n. S-10b did not record the sync database or
+# /var/lib/pacman/local; M4 checks both in a fresh realm. Not verified on a host (M4): every verb, the
+# locale step, the check-updates steps and their exit statuses (ADR-011), the db-check verb and its
+# exit statuses, the stale metadata text and the missing-database warning text.
+schema = 1
+id = "arch"
+trust_key = "arch"
+shell = "/bin/bash"
+# DR-003 (Arch and AUR), matched with fullmatch.
+package_name_regex = '[a-z0-9@_+][a-z0-9@._+-]{0,127}'
+# FR-012: pacman messages for an unknown or untrusted signing key, or a corrupt signed package.
+signature_error_regex = 'signature from .* is unknown trust|invalid or corrupted package \(PGP signature\)|could not be looked up remotely|One or more PGP signatures could not be verified'
+# ADR-011: a sync database older than the mirror's packages fails the download with a 404. Runtime
+# text, not verified until M4. The remedy is `ginn update <realm>`, the one full upgrade.
+stale_metadata_regex = 'failed retrieving file .* from .*: The requested URL returned error: 404'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = 'Could not resolve host|Failed to connect to|Connection timed out|Connection refused|Operation timed out|Operation too slow|Temporary failure in name resolution'
+# FR-022 AC-1: pacman's refusal of a name that no repository has, and git's refusal of an AUR name
+# with no repository (ops/rebuild.py). Runtime text, not verified until M4.
+missing_package_regex = "target not found: |repository '[^']*' not found"
+# ADR-011: a stderr line of the check-updates query that matches one of these makes the check fail
+# closed (error), whatever the exit status. Matched with search, one line at a time. Without a sync
+# database, pacman is expected to print `warning: database file for <repo> does not exist`. That
+# line would otherwise read as "no updates", because it starts with `warning:`. Caveat: the wording
+# is not in pacman(8), and it is not yet observed on a host. M4 confirms it in a realm. Add a
+# pattern here, not in Python, when another pacman warning means a repository was skipped.
+check_fatal_warning_regex = ['database file for .* does not exist']
+# FR-024: the check-updates query prints one non-blank line per upgradable package, so the count is
+# the number of non-blank lines of its stdout (ADR-011).
+check_updates_count = "nonblank-lines"
+# ADR-011: no verb refreshes first. The sync database moves only with a full upgrade (`upgrade`),
+# because Arch does not support partial upgrades (Arch Wiki, System maintenance).
+refresh_before = []
+# FR-120 AC-2, ADR-011: the db-check verb below reads the local package database. Exit 0 is
+# consistent. Any other status is inconsistent and marks the realm broken, except the statuses that
+# podman reports when it cannot run the command, which are unknown (loader.py). stdout is not read.
+# Not verified until M4: pacman(8) documents no exit statuses for -D.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = false
+
+[integration]
+# ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
+# CA-certificates item of FR-013, which every distribution has (ADR-011).
+packages = ["ca-certificates"]
+# S-10b generated en_US with locale-gen from /etc/locale.gen, offline, as container root. This step
+# runs localedef, which S-10b did not run, so it is not verified until M4.
+steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
+
+[verbs]
+# -Syu, not -Sy: Arch does not support partial upgrades. The only refresh of the sync database is a
+# full upgrade, so `refresh` and `upgrade` are the same argv. Realm creation runs it once before the
+# first install. That full upgrade is the creation rule of CL-9 (ADR-011).
+refresh = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+# No --refresh and no --sysupgrade: install uses the sync database as the last full upgrade left it,
+# so it never upgrades the realm (FR-040 AC-1, ADR-011).
+install = ["pacman", "--sync", "--needed", "--noconfirm", "{packages}"]
+# No --recursive and no --cascade: pacman refuses to remove a package that another installed package
+# needs. A refusal is the native form of the dependents rule (ADR-011). So Arch omits remove-check:
+# the ops layer needs no dry run before remove here.
+remove = ["pacman", "--remove", "--noconfirm", "{packages}"]
+# --sync --refresh --sysupgrade is -Syu: refresh the sync databases, then upgrade (FR-023).
+upgrade = ["pacman", "--sync", "--refresh", "--sysupgrade", "--noconfirm"]
+# check-updates is a list of steps, run in order by the caller, and none of them writes the realm's
+# sync database. --dbpath sets the whole database directory (pacman(8)), so every step that uses
+# pacman reads or writes only under {tmpdir}. The caller chooses a path whose parent exists and
+# whose last element does not, and removes it after the last step whether or not a step failed.
+# Removal must delete the `local` link, not follow it into /var/lib/pacman/local. --logfile keeps
+# the realm's pacman log unchanged.
+# Step 1 is mkdir without -p, so it fails when {tmpdir} exists and a leftover path stops the check.
+# Step 2 is ln with -T, so {tmpdir}/local is the link itself: ln never links inside a directory it
+# finds there, and it fails when the name exists.
+# The sync step has --refresh without --sysupgrade. That is allowed here only, because it refreshes
+# the scratch copy and never a full upgrade (ADR-011).
+# Exit statuses, observed in a scratch probe and not in pacman(8), which documents none (ADR-011):
+# the sync step exits 0 on success. The query exits 0 with the upgradable packages on stdout. It
+# exits 1 with nothing on stdout, and with nothing or only `warning:` lines on stderr, when nothing
+# is upgradable. It exits 1 with another message on stderr when it cannot run. The caller applies
+# arch_check_status() in loader.py to these results. A stderr line that matches
+# check_fatal_warning_regex is an error, whatever the exit status (ADR-011). M4 confirms these in a
+# realm.
+check-updates = [
+    ["mkdir", "{tmpdir}"],
+    ["ln", "-s", "-T", "/var/lib/pacman/local", "{tmpdir}/local"],
+    ["pacman", "--sync", "--refresh", "--dbpath", "{tmpdir}", "--logfile", "/dev/null"],
+    ["pacman", "--query", "--upgrades", "--dbpath", "{tmpdir}"],
+]
+# db-check reads the local package database (FR-120 AC-2). It names no package and no placeholder.
+# The result is read by the db_check_* keys above. Not verified until M4.
+db-check = ["pacman", "--database", "--check"]
+# --query --explicit --quiet is -Qeq: explicitly installed package names only (DR-007).
+list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
+# --print with --print-format %n: names of the packages a sync would fetch. Changes nothing.
+resolve = ["pacman", "--sync", "--print", "--print-format", "%n", "{packages}"]
+# --info is -Si: repository info, including Download Size and Installed Size. Changes nothing.
+estimate = ["pacman", "--sync", "--info", "{packages}"]

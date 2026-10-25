@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Replay shim for the podman command line (NFR-061, ADR-002). Test use only.
+
+This file stands in for `podman` on PATH. It never runs a real podman. Each call:
+
+1. appends one JSON line {"argv": [...], "key": "...", "case": "..."} to $GINN_FAKE_PODMAN_LOG,
+   when that variable is set;
+2. skips the global flags --remote, --root, --runroot, --tmpdir, --runtime and --cdi-spec-dir, each
+   with its value, or as one `--flag=value` token;
+3. builds a route key: the first word after the global flags, or `<word>-<verb>` when the word is
+   `image` or `container` (for example `pull`, `info`, `image-inspect`, `container-inspect`);
+4. picks the case: the route key's entry in $GINN_FAKE_PODMAN_CASE, a comma-separated list of
+   `key=case` pairs, else the route key itself;
+5. replays $GINN_FAKE_PODMAN_FIXTURES/<case>.json.
+
+Fixture formats:
+- envelope: a JSON object with an "exit" integer and optional "stdout" and "stderr" strings. A
+  non-string "stdout" is written as JSON. The envelope sets the exit status.
+- raw: any other JSON value. The file text goes to stdout unchanged, with exit status 0. Use it for
+  real Podman output such as `info.json`.
+
+A missing fixture writes a message to stderr and exits with status 98.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+GLOBAL_WITH_VALUE = frozenset(
+    {"--remote", "--root", "--runroot", "--tmpdir", "--runtime", "--cdi-spec-dir"}
+)
+GROUPS = frozenset({"image", "container"})
+MISSING_FIXTURE_EXIT = 98
+
+
+def strip_globals(args: list[str]) -> list[str]:
+    index = 0
+    while index < len(args):
+        token = args[index]
+        name, eq, _ = token.partition("=")
+        if name not in GLOBAL_WITH_VALUE:
+            break
+        index += 1 if eq else 2
+    return args[index:]
+
+
+def route_key(args: list[str]) -> str:
+    if not args:
+        return ""
+    if args[0] in GROUPS and len(args) > 1 and not args[1].startswith("-"):
+        return f"{args[0]}-{args[1]}"
+    return args[0]
+
+
+def chosen_case(key: str) -> str:
+    mapping: dict[str, str] = {}
+    for pair in os.environ.get("GINN_FAKE_PODMAN_CASE", "").split(","):
+        left, sep, right = pair.partition("=")
+        if sep and left.strip():
+            mapping[left.strip()] = right.strip()
+    return mapping.get(key, key)
+
+
+def log_call(argv: list[str], key: str, case: str) -> None:
+    log = os.environ.get("GINN_FAKE_PODMAN_LOG")
+    if not log:
+        return
+    record = {"argv": argv, "case": case, "key": key}
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    args = strip_globals(argv)
+    key = route_key(args)
+    case = chosen_case(key)
+    log_call(argv, key, case)
+    fixtures = os.environ.get("GINN_FAKE_PODMAN_FIXTURES", "")
+    path = Path(fixtures) / f"{case}.json"
+    if not fixtures or not path.is_file():
+        sys.stderr.write(f"fake podman: no fixture for {key!r}: {path}\n")
+        return MISSING_FIXTURE_EXIT
+    text = path.read_text(encoding="utf-8")
+    doc = json.loads(text)
+    if isinstance(doc, dict) and "exit" in doc:
+        stdout = doc.get("stdout", "")
+        if not isinstance(stdout, str):
+            stdout = json.dumps(stdout) + "\n"
+        sys.stdout.write(stdout)
+        sys.stderr.write(str(doc.get("stderr", "")))
+        return int(doc["exit"])
+    sys.stdout.write(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

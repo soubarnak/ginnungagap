@@ -1,0 +1,54 @@
+T7.7 F10 trace excerpts, 2026-10-14, host Void glibc, arch services-on realm.
+Trimmed. Host paths are kept, and there are no secrets. Summary of spikes/results/T7.7-services-real.md, section 7 (F10).
+
+Capture: each supervised `_service-run` (the realm's runit `run`) ran under `strace -f -ff -y -tt -s 400`,
+one run directory per invocation, with the same product code and helper paths as the gate launcher. The
+launcher and drivers were harness files in the session scratchpad and are not committed. The raw
+per-process traces are kept in that scratchpad, not in the repository.
+
+Cgroups
+  login shell `cat /proc/self/cgroup` (bash -lc):  0::/2
+  driver process (python from the tool shell):      0::/2
+  supervised run process (wrapper, every traced run): 0::/ginn/1000/supervisor
+
+Runs (driver summaries, audit = ginn audit entries for the realm in that cycle)
+  T1  six restarts, each kill 8 s after the previous restart.
+      audit: start ok x6; restart 9.1 to 10.7 s (under strace).
+      into-cgroup clone3: 177 clones, 0 failed.
+  T2  gate AC-3 kill pattern (kill at first sight of a new init).
+      audit: start GINN-E-INTERNAL; start GINN-E-ATTACH-FAILED x3; service-exit gave-up, state_kept stopped.
+      into-cgroup clone3: 7 clones in the five restart directories, 0 failed.
+  T3  the same five kills, each 3 s after its new init appeared.
+      audit: start ok x4; service-exit gave-up, no state_kept (the realm reached failed).
+  T4  kills after `ginn status` read running.
+      audit: start GINN-E-ATTACH-FAILED; start ok; start GINN-E-INTERNAL; start ok; service-exit ok.
+  T5  gate AC-2 sequence on three fresh realms.
+      audit: start ok in each cycle; restart 10.8 to 11.1 s; `ginn status` read failed at the restart and
+      running after 20 s (F13).
+
+The decisive failure (T2, run directory 1791992780521851521-427, local time)
+  21:16:23.410  execve podman start (supervised restart)
+  21:16:23.608  execve podman inspect (the new init is visible)
+  21:16:23.654  driver sends SIGKILL to the new init (pid 1175)
+  21:16:23.655  trace.1175: +++ killed by SIGKILL +++
+  21:16:23.807  execve podman exec --user 0:0 -- <container> mkdir -p -- /
+  service-run.stderr:
+    GINN-E-ATTACH-FAILED: attaching the grants into the realm failed: Error: can only create exec sessions on
+    running containers: container state improper
+      fix: retry the start, enter or launch; if it fails again, run 'ginn doctor' and report the detail
+
+Entry into the realm cgroup (the attach's exec; no cgroup.procs write() occurs in any traced restart)
+  T1 trace.21234, line 36:
+    21:09:53.328737 clone3({flags=CLONE_INTO_CGROUP, exit_signal=SIGCHLD, stack=NULL, stack_size=0, cgroup=10}, 88) = 21235
+
+Errnos on realm cgroup paths (/sys/fs/cgroup/ginn/1000/t77-f10-arch/...), all traces
+  No EACCES and no EPERM on any realm cgroup path.
+  mkdir(realm) -> EEXIST (the directory already exists).
+  write(cgroup.subtree_control) -> ENOENT, when the realm cgroup is created.
+  rmdir(libpod-<old id>) -> EBUSY during a restart: podman's cleanup of the old container. It is not on the
+  attach path; the failing check is podman's container-state test.
+EACCES elsewhere in the traces (not on the attach path)
+  openat of config and probe paths (supervise, ssl, secrets, rules.d, pre-up.d, pre-down.d, exports.d),
+  openat(O_WRONLY) of /sys/fs/cgroup/cgroup.subtree_control and /sys/fs/cgroup/ginn/cgroup.subtree_control
+  (the root cgroups, not writable by the user), and write(/proc/<pid>/oom_score_adj). They appear in
+  successful and failed runs alike.

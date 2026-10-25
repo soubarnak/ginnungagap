@@ -1,0 +1,808 @@
+{
+  "argv": {
+    "clean": [
+      [
+        "apt-get",
+        "clean"
+      ],
+      [
+        "rm",
+        "-rf",
+        "/var/lib/apt/lists"
+      ],
+      [
+        "mkdir",
+        "-p",
+        "/var/lib/apt/lists/partial"
+      ]
+    ],
+    "init": [
+      "systemd",
+      "systemd-sysv",
+      "dbus"
+    ],
+    "ips_packages": [
+      "ca-certificates",
+      "locales"
+    ],
+    "ips_steps": [
+      [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ]
+    ],
+    "lang": "en_US.UTF-8",
+    "locale_note": null,
+    "refresh": [
+      "apt-get",
+      "update"
+    ]
+  },
+  "base": {
+    "cmd": [
+      "bash"
+    ],
+    "digest": "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "LANG=C.UTF-8"
+    ],
+    "id": "91b400198c517f11ed10e768277f3158c06a57887bb8aa2de94f0b852ba38fe6",
+    "labels": {
+      "io.buildah.version": "1.43.2",
+      "org.opencontainers.image.authors": "Kali Developers <devel@kali.org>",
+      "org.opencontainers.image.created": "2026-10-11T04:11:35Z",
+      "org.opencontainers.image.description": "Official Kali Linux container image for kali-rolling",
+      "org.opencontainers.image.revision": "4d1ddb93",
+      "org.opencontainers.image.source": "https://gitlab.com/kalilinux/build-scripts/kali-docker",
+      "org.opencontainers.image.title": "Kali Linux (kali-rolling branch)",
+      "org.opencontainers.image.url": "https://www.kali.org/",
+      "org.opencontainers.image.vendor": "OffSec",
+      "org.opencontainers.image.version": "2026.10.11"
+    },
+    "repo_digests": [
+      "docker.io/kalilinux/kali-rolling@sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54"
+    ],
+    "size": 125316242,
+    "user": null
+  },
+  "boot": [
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 11.5,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "3019:systemd",
+        "3031:systemd-journal",
+        "3052:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "diag": {
+        "failed-full": "  UNIT LOAD ACTIVE SUB DESCRIPTION\n\n0 loaded units listed.\n",
+        "journal-warnings": "Oct 14 18:56:46 xserve systemd-sysusers[16]: Failed to connect to audit log, ignoring: Invalid argument\nOct 14 18:56:46 xserve systemd[1]: systemd-logind-varlink.socket: Socket service systemd-logind.service not loaded, refusing.\nOct 14 18:56:46 xserve systemd[1]: Failed to listen on systemd-logind-varlink.socket - User Login Management Varlink Socket.\n",
+        "machine-id-ls": "-rw-r--r-- 1 root root 33 Oct 14 18:56 /etc/machine-id\n",
+        "procs": "      1 cat\n      1 dbus-daemon\n      1 sh\n      1 systemd\n      1 systemd-journal\n",
+        "version": "systemd 262 (262-1)\n+PAM +AUDIT +SELINUX +APPARMOR +IMA +IPE +SMACK +SECCOMP -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 +KMOD +LIBCRYPTSETUP +LIBCRYPTSETUP_PLUGINS +LIBFDISK +PCRE2 +PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD +BPF_FRAMEWORK +BTF -XKBCOMMON -UTMP +LIBARCHIVE\n"
+      },
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          3016
+        ],
+        "ginn-wait": [
+          2842
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          2841
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8907828
+      },
+      "idle_s": 60,
+      "index": 1,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "12f897e4d2986b0a59703e43b5bc5168",
+      "machine_id_in_container": "12f897e4d2986b0a59703e43b5bc5168",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-kali-r1-be35",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 17.71,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 178614624,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "failed-full": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "machine-id-ls": 0,
+        "pid1": 0,
+        "procs": 0,
+        "state": 0,
+        "version": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 31.01,
+      "writable_layer_bytes": 293714
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 11.0,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "7149:systemd",
+        "7161:systemd-journal",
+        "7183:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          7146
+        ],
+        "ginn-wait": [
+          7050
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          7049
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8805912
+      },
+      "idle_s": 60,
+      "index": 2,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "11f58c128050a3303d096a32eda0e69c",
+      "machine_id_in_container": "11f58c128050a3303d096a32eda0e69c",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-kali-r2-2fcd",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 17.54,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 178614624,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 30.39,
+      "writable_layer_bytes": 293714
+    },
+    {
+      "boot_job_state": "ok",
+      "boot_rc": {
+        "cp": 0,
+        "create": 0,
+        "start": 0
+      },
+      "boot_seconds": 11.5,
+      "busctl_rc": 0,
+      "container_cmd": null,
+      "container_entrypoint": [
+        "/sbin/init"
+      ],
+      "container_proc_names": [
+        "11140:systemd",
+        "11153:systemd-journal",
+        "11175:dbus-daemon"
+      ],
+      "container_procs": 3,
+      "failed_units": [],
+      "failed_units_plain": "",
+      "helpers": {
+        "conmon": [
+          11125
+        ],
+        "ginn-wait": [
+          10991
+        ],
+        "pause": [
+          14164
+        ],
+        "runsv": [
+          10990
+        ]
+      },
+      "host": {
+        "MemAvailable_kib": 8622440
+      },
+      "idle_s": 60,
+      "index": 3,
+      "is_system_running": "running",
+      "journald_dropin_matches": true,
+      "machine_id": "4ca86606470d2b8710874011e6d038c9",
+      "machine_id_in_container": "4ca86606470d2b8710874011e6d038c9",
+      "masks": {
+        "apt-daily-upgrade.timer": "LoadState=masked ActiveState=inactive",
+        "apt-daily.timer": "LoadState=masked ActiveState=inactive",
+        "console-getty.service": "LoadState=masked ActiveState=inactive",
+        "e2scrub_all.timer": "LoadState=masked ActiveState=inactive",
+        "fstrim.timer": "LoadState=masked ActiveState=inactive",
+        "getty@tty1.service": "LoadState=masked ActiveState=inactive",
+        "systemd-logind.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udev-trigger.service": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-control.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd-kernel.socket": "LoadState=masked ActiveState=inactive",
+        "systemd-udevd.service": "LoadState=masked ActiveState=inactive"
+      },
+      "masks_all_masked_inactive": true,
+      "name": "s11-boot-kali-r3-42e3",
+      "pass_zero_failed_running": true,
+      "pid1": "systemd",
+      "pss_mib": 17.63,
+      "pss_unreadable": 0,
+      "rm_rc": 0,
+      "rootfs_bytes": 178614625,
+      "settle_rc": {
+        "busctl": 0,
+        "failed": 0,
+        "journald-dropin": 0,
+        "machine-id": 0,
+        "pid1": 0,
+        "state": 0,
+        "wait": 0
+      },
+      "vmrss_mib": 31.28,
+      "writable_layer_bytes": 293715
+    }
+  ],
+  "compare": {
+    "cmd": null,
+    "entrypoint": null,
+    "env_extra_in_derived": [
+      "container=podman"
+    ],
+    "env_missing_in_derived": [],
+    "labels_changed": {},
+    "labels_extra": {
+      "io.ginn.base-digest": "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": ""
+    },
+    "labels_missing": [],
+    "size_base": 125316242,
+    "size_delta": 53003644,
+    "size_derived": 178319886,
+    "user": "0"
+  },
+  "derived": {
+    "cmd": null,
+    "digest": "sha256:f3e2a6a4fcc26bb65f4c420454d33ff38c796d25b6b4f48723f445faf917c470",
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "container=podman",
+      "LANG=C.UTF-8"
+    ],
+    "id": "5fbf88a92c7cc8717bcbecbd9742bb6300848c3dc2f35f5c471617b9f5d0360f",
+    "labels": {
+      "io.buildah.version": "1.43.2",
+      "io.ginn.base-digest": "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+      "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+      "io.ginn.provision": "",
+      "org.opencontainers.image.authors": "Kali Developers <devel@kali.org>",
+      "org.opencontainers.image.created": "2026-10-11T04:11:35Z",
+      "org.opencontainers.image.description": "Official Kali Linux container image for kali-rolling",
+      "org.opencontainers.image.revision": "4d1ddb93",
+      "org.opencontainers.image.source": "https://gitlab.com/kalilinux/build-scripts/kali-docker",
+      "org.opencontainers.image.title": "Kali Linux (kali-rolling branch)",
+      "org.opencontainers.image.url": "https://www.kali.org/",
+      "org.opencontainers.image.vendor": "OffSec",
+      "org.opencontainers.image.version": "2026.10.11"
+    },
+    "repo_digests": [
+      "localhost/ginn-init-s11-kali@sha256:f3e2a6a4fcc26bb65f4c420454d33ff38c796d25b6b4f48723f445faf917c470"
+    ],
+    "size": 178319886,
+    "user": "0"
+  },
+  "distro": "kali",
+  "finished": "2026-10-15T00:30:28+0530",
+  "image_id": "5fbf88a92c7cc8717bcbecbd9742bb6300848c3dc2f35f5c471617b9f5d0360f",
+  "image_name": "localhost/ginn-init-s11-kali:g1",
+  "init_set_hash": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+  "off": {
+    "create_rc": 0,
+    "create_stderr": "",
+    "htop_after_restart": 0,
+    "htop_before_restart": 0,
+    "id_u": "1000",
+    "install_htop_rc": 0,
+    "install_refresh_rc": 0,
+    "name": "s11-off-kali",
+    "pass_services_off": true,
+    "pid1": "podman-init",
+    "restart_rc": 0,
+    "start_rc": 0,
+    "start_stderr": "",
+    "systemd_process_present": false,
+    "writable_layer_bytes_after_install": 36702135
+  },
+  "phases": [
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_provision_s11-kali_g1",
+        "--user",
+        "0:0",
+        "--userns",
+        "keep-id",
+        "--network",
+        "host",
+        "--http-proxy=false",
+        "--init",
+        "--entrypoint",
+        "[\"sleep\"]",
+        "--label",
+        "io.ginn.provision=s11-kali:g1",
+        "docker.io/kalilinux/kali-rolling@sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+        "infinity"
+      ],
+      "phase": "create",
+      "rc": 0,
+      "root_bytes": 122085242,
+      "seconds": 16.0,
+      "stderr": ""
+    },
+    {
+      "phase": "start",
+      "rc": 0,
+      "root_bytes": 122096866,
+      "seconds": 0.1,
+      "stderr": ""
+    },
+    {
+      "container_bytes": 121182577,
+      "count": 79,
+      "phase": "base-packages"
+    },
+    {
+      "argv": [
+        "apt-get",
+        "update"
+      ],
+      "container_bytes_after_refresh": 155613714,
+      "phase": "refresh",
+      "rc": 0,
+      "root_bytes": 122096866,
+      "seconds": 3.4,
+      "tail": [
+        "Get:1 http://kali.download/kali kali-rolling InRelease [34.0 kB]",
+        "Get:2 http://kali.download/kali kali-rolling/non-free-firmware amd64 Packages [16.3 kB]",
+        "Get:3 http://kali.download/kali kali-rolling/contrib amd64 Packages [104 kB]",
+        "Get:4 http://kali.download/kali kali-rolling/main amd64 Packages [21.6 MB]",
+        "Get:5 http://kali.download/kali kali-rolling/non-free amd64 Packages [168 kB]",
+        "Fetched 22.0 MB in 3s (7900 kB/s)",
+        "Reading package lists..."
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "systemd",
+        "systemd-sysv",
+        "dbus"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 22935552,
+        "new_names": [
+          "dbus",
+          "dbus-bin",
+          "dbus-daemon",
+          "dbus-session-bus-common",
+          "dbus-system-bus-common",
+          "libapparmor1",
+          "libdbus-1-3",
+          "libexpat1",
+          "libsystemd-shared",
+          "systemd",
+          "systemd-sysv"
+        ],
+        "new_packages": 11
+      },
+      "phase": "init-install",
+      "rc": 0,
+      "root_bytes": 122096866,
+      "seconds": 4.2,
+      "tail": [
+        "Unpacking dbus-bin (1.16.2-5+b1) ...",
+        "Selecting previously unselected package dbus-session-bus-common.",
+        "Preparing to unpack .../4-dbus-session-bus-common_1.16.2-5_all.deb ...",
+        "Unpacking dbus-session-bus-common (1.16.2-5) ...",
+        "Selecting previously unselected package libapparmor1:amd64.",
+        "Preparing to unpack .../5-libapparmor1_4.1.8-2_amd64.deb ...",
+        "Unpacking libapparmor1:amd64 (4.1.8-2) ...",
+        "Selecting previously unselected package dbus-daemon.",
+        "Preparing to unpack .../6-dbus-daemon_1.16.2-5+b1_amd64.deb ...",
+        "Unpacking dbus-daemon (1.16.2-5+b1) ...",
+        "Selecting previously unselected package dbus-system-bus-common.",
+        "Preparing to unpack .../7-dbus-system-bus-common_1.16.2-5_all.deb ...",
+        "Unpacking dbus-system-bus-common (1.16.2-5) ...",
+        "Selecting previously unselected package dbus.",
+        "Preparing to unpack .../8-dbus_1.16.2-5+b1_amd64.deb ...",
+        "Unpacking dbus (1.16.2-5+b1) ...",
+        "Setting up libexpat1:amd64 (2.8.4-1) ...",
+        "Setting up systemd-sysv (262-1) ...",
+        "Setting up libapparmor1:amd64 (4.1.8-2) ...",
+        "Setting up libdbus-1-3:amd64 (1.16.2-5+b1) ...",
+        "Setting up dbus-session-bus-common (1.16.2-5) ...",
+        "Setting up dbus-system-bus-common (1.16.2-5) ...",
+        "Failed to connect to audit log, ignoring: Invalid argument",
+        "Creating group 'messagebus' with GID 996.",
+        "Creating user 'messagebus' (System Message Bus) with UID 996 and GID 996.",
+        "Setting up dbus-bin (1.16.2-5+b1) ...",
+        "Setting up dbus-daemon (1.16.2-5+b1) ...",
+        "Setting up dbus (1.16.2-5+b1) ...",
+        "invoke-rc.d: could not determine current runlevel",
+        "invoke-rc.d: policy-rc.d denied execution of start.",
+        "Processing triggers for libc-bin (2.43-6) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.42.3 /usr/local/share/perl/5.42.3 /usr/lib/x86_64-linux-gnu/perl5/5.42 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.42 /usr/share/perl/5.42 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 11.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "apt-get",
+        "--yes",
+        "--no-install-recommends",
+        "install",
+        "ca-certificates",
+        "locales"
+      ],
+      "delta": {
+        "changed_bytes_net": 0,
+        "changed_packages": 0,
+        "new_installed_bytes": 24147968,
+        "new_names": [
+          "ca-certificates",
+          "libc-l10n",
+          "locales",
+          "openssl"
+        ],
+        "new_packages": 4
+      },
+      "phase": "ips-install",
+      "rc": 0,
+      "root_bytes": 122096866,
+      "seconds": 5.5,
+      "tail": [
+        "Setting up libc-l10n (2.43-6) ...",
+        "Setting up locales (2.43-6) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.42.3 /usr/local/share/perl/5.42.3 /usr/lib/x86_64-linux-gnu/perl5/5.42 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.42 /usr/share/perl/5.42 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Generating locales (this might take a while)...",
+        "Generation complete.",
+        "Setting up openssl (3.6.4-1) ...",
+        "Setting up ca-certificates (20260816) ...",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.42.3 /usr/local/share/perl/5.42.3 /usr/lib/x86_64-linux-gnu/perl5/5.42 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.42 /usr/share/perl/5.42 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive",
+        "Updating certificates in /etc/ssl/certs...",
+        "121 added, 0 removed; done.",
+        "Processing triggers for ca-certificates (20260816) ...",
+        "Updating certificates in /etc/ssl/certs...",
+        "0 added, 0 removed; done.",
+        "Running hooks in /etc/ca-certificates/update.d...",
+        "done.",
+        "debconf: unable to initialize frontend: Dialog",
+        "debconf: (TERM is not set, so the dialog frontend is not usable.)",
+        "debconf: falling back to frontend: Readline",
+        "debconf: unable to initialize frontend: Readline",
+        "debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.42.3 /usr/local/share/perl/5.42.3 /usr/lib/x86_64-linux-gnu/perl5/5.42 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.42 /usr/share/perl/5.42 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 4.)",
+        "debconf: falling back to frontend: Teletype",
+        "debconf: unable to initialize frontend: Teletype",
+        "debconf: (This frontend requires a controlling tty.)",
+        "debconf: falling back to frontend: Noninteractive"
+      ]
+    },
+    {
+      "argv": [
+        "localedef",
+        "-i",
+        "en_US",
+        "-f",
+        "UTF-8",
+        "en_US.UTF-8"
+      ],
+      "phase": "ips-step-0",
+      "rc": 0,
+      "root_bytes": 122096866,
+      "seconds": 1.0,
+      "tail": []
+    },
+    {
+      "phase": "check-init",
+      "rc": 0,
+      "readlink": "/usr/lib/systemd/systemd",
+      "seconds": 0.1
+    },
+    {
+      "cache_du_after": "1701410\t/var/cache\n0\t/var/lib/apt/lists",
+      "cache_du_before": "1701410\t/var/cache\n34431137\t/var/lib/apt/lists",
+      "entries": [
+        {
+          "argv": [
+            "apt-get",
+            "clean"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "rm",
+            "-rf",
+            "/var/lib/apt/lists"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        },
+        {
+          "argv": [
+            "mkdir",
+            "-p",
+            "/var/lib/apt/lists/partial"
+          ],
+          "rc": 0,
+          "seconds": 0.1,
+          "tail": []
+        }
+      ],
+      "pacman_pkg_cache_entries_after": "0",
+      "phase": "clean",
+      "root_bytes_after_clean": 170584708,
+      "root_bytes_before_clean": 205015845
+    },
+    {
+      "kinds": {
+        "A": 2646,
+        "C": 198,
+        "D": 1
+      },
+      "lines": 2845,
+      "phase": "diff",
+      "rc": 0,
+      "stub_like": 0,
+      "top_level": {
+        "/etc": 315,
+        "/root": 2,
+        "/run": 22,
+        "/tmp": 5,
+        "/usr": 2376,
+        "/var": 125
+      }
+    },
+    {
+      "phase": "stop",
+      "rc": 0
+    },
+    {
+      "change_argv": [
+        "--change",
+        "USER 0",
+        "--change",
+        "ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "--change",
+        "ENV LANG=C.UTF-8",
+        "--change",
+        "LABEL io.ginn.provision=",
+        "--change",
+        "LABEL io.ginn.init-set=2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "--change",
+        "LABEL io.ginn.base-digest=sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54"
+      ],
+      "image_id": "a314fd5e35d2c996a41bcaead51811dbb89c929c5256dbbb1beb2ec1db428f4b",
+      "phase": "commit-stage",
+      "rc": 0,
+      "root_bytes": 173370977,
+      "seconds": 0.8,
+      "stderr": "Getting image source signatures\nCopying blob sha256:52ed1a34df98b2f7ebef4c85d7d7577c631d4b4243bb219261346f89ed7f4b51\nCopying blob sha256:0a533ef420149df5e5b7f3b0cca5b5f45c098b96badac6a02f64f3fd5e71823d\nCopying config sha256:a314fd5e35d2c996a41bcaead51811dbb89c929c5256dbbb1beb2ec1db428f4b\nWriting manifest to image destination",
+      "tmp_bytes": 380046
+    },
+    {
+      "argv": [
+        "create",
+        "--name",
+        "ginn_reset_s11-kali_g1",
+        "--entrypoint",
+        "[]",
+        "localhost/ginn-init-s11-kali-stage:g1"
+      ],
+      "phase": "reset-create",
+      "rc": 0,
+      "stderr": ""
+    },
+    {
+      "image_id": "5fbf88a92c7cc8717bcbecbd9742bb6300848c3dc2f35f5c471617b9f5d0360f",
+      "phase": "commit",
+      "rc": 0,
+      "root_bytes": 173394577,
+      "seconds": 0.1,
+      "stderr": "Getting image source signatures\nCopying blob sha256:52ed1a34df98b2f7ebef4c85d7d7577c631d4b4243bb219261346f89ed7f4b51\nCopying blob sha256:0a533ef420149df5e5b7f3b0cca5b5f45c098b96badac6a02f64f3fd5e71823d\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:5fbf88a92c7cc8717bcbecbd9742bb6300848c3dc2f35f5c471617b9f5d0360f\nWriting manifest to image destination",
+      "tmp_bytes": 382401
+    },
+    {
+      "cmd": null,
+      "entrypoint": null,
+      "env_extra_in_derived": [
+        "container=podman"
+      ],
+      "env_missing_in_derived": [],
+      "labels_changed": {},
+      "labels_extra": {
+        "io.ginn.base-digest": "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+        "io.ginn.init-set": "2fed8dc801687a32daafa1bfbee35efaf21a4ea24dad76e34193ee1e7c2e996b",
+        "io.ginn.provision": ""
+      },
+      "labels_missing": [],
+      "phase": "compare",
+      "size_base": 125316242,
+      "size_delta": 53003644,
+      "size_derived": 178319886,
+      "user": "0"
+    },
+    {
+      "phase": "rm-provision",
+      "rc": 0,
+      "root_bytes_after": 173350970,
+      "root_bytes_before": 173377948
+    }
+  ],
+  "pinned_digest": "sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+  "pinned_ref": "docker.io/kalilinux/kali-rolling@sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54",
+  "pull": {
+    "rc": 0,
+    "seconds": 6.6,
+    "stderr": "Trying to pull docker.io/kalilinux/kali-rolling@sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54...\nGetting image source signatures\nCopying blob sha256:f49e481bab6384e4b0a3c97ddc62d3a1d5a277850b3dcf33e8c5ec3550eeb2e8\nCopying config sha256:91b400198c517f11ed10e768277f3158c06a57887bb8aa2de94f0b852ba38fe6\nWriting manifest to image destination"
+  },
+  "rmi": {
+    "base_inspect_after_id_rmi": "Error: 91b400198c517f11ed10e768277f3158c06a57887bb8aa2de94f0b852ba38fe6: image not known",
+    "base_rmi_after_children": {
+      "rc": 1,
+      "stderr": "Error: 91b400198c517f11ed10e768277f3158c06a57887bb8aa2de94f0b852ba38fe6: image not known",
+      "stdout": ""
+    },
+    "base_rmi_by_id_while_children": {
+      "rc": 0,
+      "stderr": "",
+      "stdout": "Untagged: docker.io/kalilinux/kali-rolling@sha256:ffc5b42d5585f96a6a4a0bc30b5461ed3fc2f31e0fc55b16ea16a509cacb6b54"
+    },
+    "child_run_after_base_rmi": {
+      "rc": 0,
+      "stderr": ""
+    },
+    "children_present": [
+      "localhost/ginn-init-s11-kali:g1",
+      "localhost/ginn-init-s11-kali-stage:g1"
+    ],
+    "containers_on_base": [],
+    "derived_rmi": {
+      "keep-id": {
+        "rc": 0,
+        "stderr": "",
+        "stdout": "Untagged: localhost/ginn-init-s11-kali:g1\nDeleted: 5fbf88a92c7cc8717bcbecbd9742bb6300848c3dc2f35f5c471617b9f5d0360f"
+      },
+      "keep-id-stage": {
+        "rc": 0,
+        "stderr": "",
+        "stdout": "Untagged: localhost/ginn-init-s11-kali-stage:g1\nDeleted: a314fd5e35d2c996a41bcaead51811dbb89c929c5256dbbb1beb2ec1db428f4b"
+      }
+    }
+  },
+  "root_bytes_after_pull": 121705670,
+  "root_bytes_after_rmi": 139543,
+  "root_bytes_before_rmi": 173351920,
+  "sampler_peak": {
+    "root": 173368311,
+    "tmp": 566410
+  },
+  "stage_name": "localhost/ginn-init-s11-kali-stage:g1",
+  "started": "2026-10-15T00:26:02+0530",
+  "user_store_after": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  },
+  "user_store_before": {
+    "ctime_ns": 1791786933346658657,
+    "mtime_ns": 1791786933346658657,
+    "path": "/home/soubarna/.local/share/containers"
+  }
+}

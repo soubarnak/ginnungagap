@@ -1,0 +1,464 @@
+# Must FR and NFR requirements with no automated test yet, or only unit-level tests (NFR-061,
+# Appendix C). Each entry names the roadmap milestone (docs/roadmap.md) that owns the proving test.
+# `partial = true` marks an ID whose unit-level tests can run while its host-only or end-to-end
+# acceptance proof is still deferred to that milestone. Only a partial entry may keep tests.
+# tools/traceability.py --check fails when an entry lacks a milestone, names an ID that is not
+# a Must FR or NFR, or has gained a test without `partial = true` (delete the entry if the tests
+# prove the whole requirement).
+
+[[deferred]]
+id = "FR-001"
+milestone = "M3"
+partial = true
+reason = "the root check, the Host Setup Record and the subid, service and link writes are unit-tested (T3.4). G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran setup on a Void host: the record listed 11 paths and each subid file gained one line. The first ginn doctor run then had one FAIL (runsvdir): the run script waits for ~/.local/state/ginn/sv, which setup does not create, by design. Doctor now reports that idle supervisor as WARN, with mkdir -m 0700 -p as the fix (code change, not re-run on the host), so no FAIL right after setup (CL-13). Not yet observed on a host: that run, and AC-1 with the subid, record and doctor checks together"
+
+[[deferred]]
+id = "FR-002"
+milestone = "M3"
+partial = true
+reason = "a rerun that changes no byte or mtime is unit-tested (T3.4). G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran setup once and undo once on a Void host and did not rerun setup, so the host-level rerun, byte-identical files and the 'already configured' message are still unproven"
+
+[[deferred]]
+id = "FR-005"
+milestone = "M10"
+partial = true
+reason = "unit tests run for tools/host-diff.sh (T10.2); the host run that proves write confinement is deferred to M10"
+
+[[deferred]]
+id = "FR-006"
+milestone = "M5"
+partial = true
+reason = "the fingerprint, baseline, pending change, acknowledgement and ginn integrity are unit-tested under temporary roots (T3.8); AC-1 needs a host-level run that alters /etc during ginn install arch htop, which needs ginn install (M5) Gap note (T4.11): until T4.11, a host change found after a start, a stop, a delete or an enter re-attach was dropped by the return inside mutating() and never reached the CLI. T4.11 hands these warnings to the caller (ops start_realm, stop_realm and delete_realm; runtime enter notify) and the CLI shows them. Unit tests prove the hand-over (test_ops_lifecycle, test_ops_delete, test_runtime_enter, test_cli_lifecycle, test_cli_delete, test_cli_enter); no host run has shown it yet, so the FR-006 host proof stays open"
+
+[[deferred]]
+id = "FR-007"
+milestone = "M3"
+partial = true
+reason = "every doctor check with its PASS and FAIL cases, the text and JSON report and the exit codes are unit-tested under a fake host (T3.6, T3.7). G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran ginn doctor as the user on a Void host: the first run had 15 PASS, 1 WARN, 1 FAIL, printed the FAIL's fix and exited non-zero (GINN-E-DOCTOR-FAILED); after the state directory existed (run report, not saved) it had 16 PASS, 1 WARN, 0 FAIL. Since then an idle supervisor without its state directory is a WARN, not a FAIL (code change, not re-run on the host). Not yet proven on a host: AC-1 for a missing subid entry (only the unit test covers it, and G1's subid check passed), and AC-2 (every check PASS, exit 0), which the podman WARN blocks until a realm writes the podman config (CL-13)"
+
+[[deferred]]
+id = "FR-010"
+milestone = "M4"
+partial = true
+reason = "ops/create.py (T4.4) is unit-tested on FakePodman: the phase order, the final stopped Basic record with services off (AC-1), the --with install (AC-2), AC-3 with the existing record byte-identical, the disk and digest refusals, the retries, a failure of each podman call and of each step, rollback after an interrupt at each journal step and inside the create call, the pull, the home mkdir and the record write, and the realm user check (the entry sent, the mismatch rollback, the host home refusal). Unverified until the T4.9 host gate: the installed-package list of a real image (AC-1, AC-2); the realm user check (`getent passwd` after start, against the `--passwd-entry` the create sent; T4.9b, ADR-006 amendment). The T4.9b host gate ran it on debian and it passed (d-create-product-argv), and the arch and fedora images are not run. The CLI create (T4.11, tests/unit/test_cli_create.py) runs the same create on FakePodman with the refusals of the options that are not built yet: GINN-E-NOT-SUPPORTED-YET with the milestone, and GINN-E-OPTION-INVALID for --everything off Kali (FR-014 AC-3). The host smoke (tests/integration/test_cli_real.py; spikes/results/T4.11-cli-real.md, 2026-10-13) runs ginn create debian with the package steps off (Gate 3), and the create passes its digest and realm user checks on the Void host. A real create with its package steps is T4.9, and the installed-package list (AC-1, AC-2) is still unproven"
+[[deferred]]
+id = "FR-011"
+milestone = "M4"
+partial = true
+reason = "the pinned-digest pull, the digest check after the pull, and the image removal on a mismatch are unit-tested on FakePodman (T4.4). A failed create leaves no image that it pulled. Not yet proven on a host: a tampered image in a real registry, and the layers in real storage (T4.9)"
+[[deferred]]
+id = "FR-012"
+milestone = "M5"
+partial = true
+reason = "unit tests check that no create or install step passes a flag that disables a native signature check, for every distribution, verb and check-updates step, with gpgcheck, trusted=yes, no-check-sig and SigLevel scanned in any case (T4.4, T5.1, tests/unit/test_packages_manager.py and test_distros_loader.py). A signature error maps to GINN-E-PKG-SIGNATURE with exit 65, and it wins over network text, which is not retried (T5.1, T5.3, tests/unit/test_packages_manager.py, test_ops_packages.py). Not yet proven on a host: a repository that serves a bad signature (AC-1), which is gate 3 of M5 and is not approved; the package-manager config after rebuild and update (AC-2) waits for M8. T5.8: makepkg's checksum and PGP checks stay on for an AUR build, and no argv passes --skipchecksums, --skippgpcheck, --skipinteg or --asroot (tests/unit/test_packages_aur.py)"
+[[deferred]]
+id = "FR-013"
+milestone = "M4"
+partial = true
+reason = "unit tests (T4.4) check the Integration Package Set and its locale steps for each distribution, the LANG handling and the fallback note. Not yet proven on a host: the package diff of a new realm against its image (AC-1), which is T4.9"
+[[deferred]]
+id = "FR-015"
+milestone = "M4"
+partial = true
+reason = "unit tests (T4.4) create two realms of one distribution, with separate homes and containers. A second create of the same distribution while one runs is refused at once with GINN-E-REALM-BUSY, by the per-distribution image lock (ops/create.py, store/locks.py image_lock). Not yet proven on a host: independent roots and homes in real storage (AC-1), which is T4.9"
+[[deferred]]
+id = "FR-016"
+milestone = "M4"
+partial = true
+reason = "unit tests on the fake podman cover start (the container starts, grants attach, the record reads running), the idempotent start and stop, the crash restart, a failed attach that stops the realm again and leaves it stopped, the refusal of an unknown realm and of a DR-020 state, the stop timeout of 30 s, the services-on and tier refusals, a failed podman start, a stop that fails with the realm failed, a crash between the started and attached steps, a podman error that is never read as stopped, and a stop that asks podman for a stopped record (T4.5, ops/lifecycle.py); the start-to-running time of NFR-005 (20 cycles, p95 0.107 s) and the services-off stop (0.05 s with --init, exit 143; 30 s and exit 137 without it) were measured on a Void host with debian (T4.9, tests/integration/test_lifecycle_real.py). The CLI start and stop (T4.11, tests/unit/test_cli_lifecycle.py) are unit-tested on LifecyclePodman, with their text, JSON and exit codes; the host smoke ran both through the CLI on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13)"
+
+[[deferred]]
+id = "FR-017"
+milestone = "M5"
+partial = true
+reason = "auto-start on enter and exec is unit-tested on FakePodman (T4.6, runtime/enter.py): a stopped realm starts once through start_realm, its grants are attached and recorded, and the command then runs (test_runtime_enter); a launch of an exported app (AC-1, the desktop menu) waits for export (M5, T5.4), and the start time of NFR-005 is proven on a Void host (T4.9). The CLI enter starts a stopped realm before it runs the shell or the command (T4.11, tests/unit/test_cli_enter.py)"
+
+[[deferred]]
+id = "FR-019"
+milestone = "M4"
+partial = true
+reason = "unit tests on the fake podman (T4.7, ops/delete.py, test_ops_delete.py) cover: the stop of a running realm, and a failed graceful stop that is noted and followed by rm --force; the removal of the containers, the image and the record; a failed rmi that keeps the image, with a note, and lets the delete finish; a shared image kept when another container shows it by digest, id or name; a container with no image name skipped, with a note; an absent container tolerated; the purge of the Realm Home with and without confirmation; a homes directory or realm home that is a link, refused before the record moves; a mount point refused before the record moves, found in the mount table (at or below the home) and by the mount id of each directory the walk opens (a bind mount from the same file system keeps its st_dev, so st_dev alone does not catch it); a tree deeper than the limit refused; a mount table or a mount id that cannot be read refused (fail closed); a mount that appears after the check stopped before the walk enters it; a read-only owned directory, an unreadable owned directory and an inner symlink, with the symlink target kept; an entry the user does not own stopping the purge with GINN-E-HOME-UNSAFE, with its filename in the details and a remedy that depends on the reason; an interrupted delete at every journal step settled by recovery and by a GinnError, and a delete refused before recovery; the audit entries; and the refusals. AC-2 needs the `ginn delete --purge-home` confirmation in the CLI (T4.11). The host run of the purge refusal and its podman unshare remedy passed on debian (T4.9). The exported entries, the Install Manifest and the supervision entry have no code yet (M5, M7). The CLI delete (T4.11, tests/unit/test_cli_delete.py) asks for the purge confirmation on a terminal (y or yes confirms, default no), takes --yes for scripts, refuses a purge without a terminal or --yes before anything runs, and runs check_purge before the prompt, so a refused purge asks nothing. The host smoke deleted a realm through the CLI with its Realm Home kept (spikes/results/T4.11-cli-real.md, 2026-10-13). AC-2 still needs a host run of a confirmed purge of a real Realm Home through the CLI"
+
+[[deferred]]
+id = "FR-020"
+milestone = "M4"
+partial = true
+reason = "unit tests on the fake podman cover status and list (T4.5, ops/lifecycle.py): the record state beside podman's container state with the mismatch flag, the shares skipped and the restart flag, the stable JSON keys, the name order, a corrupt record listed with its error, the Realm Home disk walk (links not followed, entry budget), and that both commands write no journal, audit or record entry; the container layer size is a gap: container_bytes is null because the CLI never asks podman for a size, and T8.2 (disk module) or a new named task must add it; the host run that shows real disk use is T4.9; the app count waits for export/ (M5). The CLI status and list (T4.11, tests/unit/test_cli_lifecycle.py) print the pinned JSON keys, a table and a recovery line for each broken realm; the host smoke ran status --json and list --json on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13)"
+
+[[deferred]]
+id = "FR-021"
+milestone = "M8"
+partial = true
+reason = "the CLI rebuild and the operation are unit-tested on FakePodman: tests/unit/test_cli_rebuild.py (the command, its JSON and text, the GINN-W-REPLAY-MISSING output, the refusals before any write, a running realm and the progress lines) and tests/unit/test_ops_rebuild.py (the generation beside the old one, the Realm Home, tier, services and permissions kept, the manifest replayed, a running realm stopped and started again, the Kali everything set replayed from the manifest with no second prompt, the swap as one record write). The 132-case fault matrix (test_ops_rebuild_faults.py) backs NFR-031. The GUI rebuild control is on and its parity row passes (test_gui_detail.py, test_gui_parity.py). Not run on a host: a real rebuild of an arch realm that keeps ~/notes.txt and an AUR test package (AC-1), and a services-on replay under runit; both are the M8 host gate"
+
+[[deferred]]
+id = "FR-022"
+milestone = "M8"
+partial = true
+reason = "the replay is unit-tested on FakePodman (tests/unit/test_ops_rebuild.py, test_cli_rebuild.py): a repository package that the package manager refuses in one transaction is tried on its own, a package refused again is left out of the new manifest and reported as GINN-W-REPLAY-MISSING, the other packages are installed and the swap completes (AC-1). Only a refusal that the distribution's own pattern names is that evidence: a full disk, a time or output limit and a network failure fail the rebuild with the old realm kept (docs/clarifications.md, CL-17). The CLI prints the warning (the JSON `warnings` key, or stderr in text mode). Beyond AC-1: when every package of a group is refused, the batch error is raised and the rebuild fails with the old realm kept (docs/clarifications.md, FR-022). Not yet proven on a host: a package that is really gone from a real repository, through the real package manager (AC-1), which is the M8 host gate"
+
+[[deferred]]
+id = "FR-023"
+milestone = "M8"
+partial = true
+reason = "update unit-tested on FakePodman (argv, refresh rule, state moves, restore, --all); Gate 3 and real distros not run."
+
+[[deferred]]
+id = "FR-025"
+milestone = "M4"
+partial = true
+reason = "a start, a stop, a status or a delete of an unknown realm is refused with GINN-E-NO-SUCH-REALM before any write (unit-tested in test_ops_lifecycle, T4.5, and test_ops_delete, T4.7); a delete under another user's Owned Paths does not see the realm (test_ops_delete); the Owned Paths 0700 mode is tested in test_store_paths (T4.8); the rest of the requirement, including bob's list and enter, is a host run with a second host user (M4). The CLI (T4.11) takes its Owned Paths from the running user only (cli/_context.py owned_paths), so bob's list and enter still need that run"
+
+[[deferred]]
+id = "FR-026"
+milestone = "M4"
+partial = true
+reason = "the golden argv proves --network host for non-Kali realms (T4.1), and --network pasta with one --cap-add NET_RAW for Kali, services off and on (T10.1). No Kali realm has been created on a host through ginn, so the outbound and raw-socket proof is open"
+
+[[deferred]]
+id = "FR-040"
+milestone = "M5"
+partial = true
+reason = "install is unit-tested on FakePodman (T5.1, T5.3, tests/unit/test_ops_packages.py and test_cli_packages.py): the argv of each verb, the refresh rule of ADR-011, the names checked before any podman call (AC-2), with a trailing '-' refused on every distribution (apt reads it as a removal) and a Fedora name ending in .rpm refused (dnf reads it as a file). Version and arch suffix forms (`gimp-2.10.38`, `foo.x86_64`) pass the pattern, because dnf reads them as such, and the manifest records the name as typed. The start of a stopped realm, the failure codes, the realistic network retries (FR-120), and the Install Manifest entry are unit-tested too; a failed install records the requested names the realm now lists. Residual, not covered and not closed by the rebuild (it replays the manifest as it stands): recovery replays an interrupted install or remove only from its journal steps `installed` and `removed`, so an interrupt before them, and a failed install or remove whose explicit list cannot be read, leave the Install Manifest as it was while the native change may already have happened. Not yet proven on a host: the package set grows by exactly the package and its dependency closure (AC-1), which is gate 3 of M5 and is not approved"
+[[deferred]]
+id = "FR-041"
+milestone = "M5"
+partial = true
+reason = "remove is unit-tested on FakePodman (T5.3, tests/unit/test_ops_packages.py and test_cli_packages.py): the dry run first where the distribution defines it (ADR-011), the GINN-E-PKG-DEPENDENTS refusal before any removal, the refusal of an unread or over-capped dry run (an apt heading with no Remv line included), the Install Manifest entry dropped, and a failed removal drops the names the realm no longer lists. Dependent names are escaped in the refusal. Residual, not covered and not closed by the rebuild (it replays the manifest as it stands): recovery replays an interrupted install or remove only from its journal steps `installed` and `removed`, so an interrupt before them, and a failed install or remove whose explicit list cannot be read, leave the Install Manifest as it was while the native change may already have happened. Not yet proven: the removal of an exported entry (AC-1, which needs FR-045 on a host) and the dry-run output formats on a host (ADR-011, M4)"
+[[deferred]]
+id = "FR-042"
+milestone = "M5"
+partial = true
+reason = "ginn enter --root and ginn exec --root run as container root inside the realm (user 0:0; HOME and the workdir at /root, never the bound Realm Home, since keep-id maps container root to a subordinate uid, so a root write could not be deleted by the user; the SRS does not say which HOME `--root` gets, and this is a decision of 2026-10-13). The no-privilege argv is unit-tested in test_podman_cli, and the rest on FakePodman (T4.6, test_runtime_enter); AC-1 installs htop with pacman and records it in the Install Manifest, which needs the package set (M5) and a Void host (T4.9). The CLI enter and exec take --root (T4.11, tests/unit/test_cli_enter.py: user 0:0, HOME and workdir /root), and the host smoke ran exec --root echo ok on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13). T5.2 (tests/unit/test_ops_native.py, test_cli_root_session.py): the explicit-package diff of a --root session records each new package as native (AC-1), with the two reads as root under the locale, and a non-root command makes no read (NFR-004). Not yet proven on a host: pacman -S htop run inside a real realm (AC-1, gate 3 of M5)"
+
+[[deferred]]
+id = "FR-043"
+milestone = "M5"
+partial = true
+reason = "the AUR build is unit-tested on FakePodman and a dependency-graph fake (T5.8 review and final verify, tests/unit/test_packages_aur.py, test_ops_packages.py, test_cli_packages.py, test_ops_recovery.py, test_store_journal.py, test_podman_bounded.py): the steps in order (git, dependencies, toolchain, upgrading, built, removed) with their journaled package sets (added, removable), the build as the realm user and never root (makepkg refuses root), the clone limited to https from the AUR host (protocol.allow), the .SRCINFO read inside the realm (IR-023), the requested name checked against the pkgnames, -debug and unneeded sibling files never handed to pacman, requested packages built in dependency order with sibling pkgnames installed as dependencies first, the build-only set as added minus the closure of the requested, runtime and sibling names (the closure follows Provides; a runtime dependency that git also pulled is kept), a refused removal as a residual retried once without the names pacman says it needs, the restore after a failure before built (AC-2), the network and PGP mappings, the output and time limits (the build keeps only the tail of its output), and the flag scan (--skipchecksums, --skippgpcheck, --skipinteg and --asroot are never passed). No AUR helper is installed. Recovery replays the AUR manifest from upgrading, built and removed, removes the journaled removable set at built and the added set before built, validates every journaled name, and treats an overflowed journal (params_overflow) as unknown sets: nothing is removed and the reason says so; a whole-set step clears the marker. At upgrading a failed query keeps the entry, and a stopped realm records the requested names unchecked with a warning, because the upgrade may have run (no verification of those names until the realm is queried). OPEN DECISION for the user (no behaviour change here): the build keyring is empty, so a source that validpgpkeys signs fails the PGP check with GINN-E-PKG-SIGNATURE; importing keys into the build needs a key-trust ADR. Not yet proven on a host: a real build and install in a realm (AC-1), which is gate 3 of M5 and is not approved; the makepkg package file name and the pacman refusal and query layouts are unverified on a host. Residual: a crash before built leaves the build-only set until recovery removes it, and recovery cannot remove it when the realm is not running (a warning names it; the rebuild does not close this); a dependency that exists only in the AUR is refused and restored; a virtual dependency is followed only through Provides as pacman lists them; a killed client may leave a build running in the realm (podman exec has no kill of its own)."
+[[deferred]]
+id = "FR-044"
+milestone = "M5"
+partial = true
+reason = "the Desktop Entry allowlist, the icon checks, the bounded listings and the sync diff and apply are unit-tested on fakes (T5.4, T5.5, T5.6); the trigger, ginn-watch, is unit-tested on a temporary directory (T5.9): a .desktop create or delete runs the command after a debounced batch, and other names do not. Not proven on a host: the entry appears in a real menu, its launch from there, and the 5 s export (gate 3). Starting and stopping the watcher is M7. Known limit: realm my with app arch-firefox and realm my-arch with app firefox both name ginn-my-arch-firefox.desktop, which FR-044 AC-1 pins; the second realm is refused with a warning, never overwritten. A package transaction runs the menu sync under the same lock (T5.3, ops/packages.py): a successful install or remove syncs once, under the lock, with the absolute ginn path; a sync that lists nothing or cannot save its state is the GINN-W-EXPORT-SYNC warning, an entry whose host write fails is skipped with GINN-W-EXPORT-SKIPPED, and the change stands either way, while a journal write error still fails it; a realm that does not run is skipped silently (tests/unit/test_ops_packages.py, test_cli_packages.py, test_export_sync.py). The listing uses GNU find -printf: gate 3 must check every image (all four distributions) for GNU findutils"
+
+[[deferred]]
+id = "FR-045"
+milestone = "M5"
+partial = true
+reason = "the removal of an entry and its icon copy on the next sync is unit-tested on fakes (T5.6), and a removed desktop file runs the sync trigger (ginn-watch, T5.9, unit-tested on a temporary directory); the removal inside a real realm and the 5 s unexport on a host (gate 3) are not, so this entry waits on the M5 host gate"
+
+[[deferred]]
+id = "FR-046"
+milestone = "M6"
+partial = true
+reason = "the session env and the display, audio and authority attach plan are unit-tested (T4.2, T4.3), and the exported Exec line is unit-tested to reach ginn exec with the original argv (T5.4); the menu launch on a host and the audio connection and Wayland renderer (T6.6) are not, so this entry waits on T6.6"
+
+[[deferred]]
+id = "FR-048"
+milestone = "M4"
+partial = true
+reason = "the Realm Home mount at the host home path is unit-tested in the create argv (T4.1) and the mount plan (T4.2); enter runs the distribution login shell as the realm user, with HOME at the host home path, the workdir there and a TTY only on a terminal (T4.6, test_runtime_enter); the realm user is the keep-id passwd entry with the host home and the login shell (T4.9b, ADR-006 amendment): on debian, the T4.9b host gate read HOME inside the realm as the host home path (d-create-product-argv). `ls ~`, and the arch and fedora images, are not run. The CLI enter (T4.11) runs the login shell with no -t when stdin and stdout are not terminals, and the host smoke ran it that way on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13). The HOME check of AC-1 inside that shell is not run through the CLI"
+
+[[deferred]]
+id = "FR-049"
+milestone = "M4"
+partial = true
+reason = "the exit status of the inner command comes back unchanged (0, 7 and 137 are unit-tested on FakePodman, T4.6, test_runtime_enter), and the argv, the user, the workdir and the session environment are checked there too; the real `sh -c 'exit 7'` inside a Debian realm, which is AC-1, ran through the CLI on the Void host (spikes/results/T4.11-cli-real.md, 2026-10-13; tests/integration/test_cli_real.py) and returned 7. The entry stays partial until the T4.9 gate records that run"
+
+[[deferred]]
+id = "FR-060"
+milestone = "M6"
+partial = true
+reason = "the tier is stored on the record and chosen at create (ops/create.py, cli create --tier basic, development or custom, unit-tested on FakePodman in test_ops_create and test_cli_create); a tier change with `ginn tier` (T6.2, unit-tested in test_ops_permissions and test_cli_tier) and the status output of AC-1 are checked by unit tests only. Not yet proven on a host: the Development container of AC-3 and the realm's real grants, which are the host-only test_tiers_real.py (M6 host gate, not yet written)"
+
+[[deferred]]
+id = "FR-061"
+milestone = "M6"
+partial = true
+reason = "T6.8 host gate (spikes/results/T6.8-tiers-real.md) PASS on debian and rootless podman: AC-1 (a file written in the realm Downloads reaches the host) and AC-2 (the realm does not see the host Documents). Not proven: the other Basic grants (display, audio, GPU, fonts, the X11 authority file) on a host. the Basic create argv has only the stable binds, devices and the tmpfs, and no variable grant (T4.1); the Basic binds and session env are unit-tested (T4.2 mounts, T4.3 env); AC-1 and AC-2 need a Void host (T4.9: socket, directory and file attach, read-only, the recursive read-only on a child mount, the busy directory and the EBUSY case are measured in tests/integration/test_lifecycle_real.py, see spikes/results/T4.9-lifecycle-real.md), the attach executor and the helper's argv are unit-tested on a fake helper (T4.10), and the table comparison closes in T6.1; T4.6 passes the proxy names as `--env NAME` only, so no value reaches an argument (unit-tested on FakePodman and on the replay shim, test_runtime_enter and test_podman_cli)"
+
+[[deferred]]
+id = "FR-062"
+milestone = "M6"
+partial = true
+reason = "T6.8 host gate: AC-2 PASS (the host .bashrc is read-only in a Development realm, and it keeps its bytes) and the /dev/kvm read-write open PASS on this host. Not run: AC-1 (ssh key round trip), AC-3 (nested podman run, needs an image pull inside the realm), AC-4 ioctls, and the ssh-add refusal (the image has no ssh-add). the Development create argv (outer devices, the seccomp profile, unmask and keep-groups), the Realm Home config files, the sethostname-only seccomp profile, the attach grants of ~/Projects and the shell files, and the create and start refusals are unit-tested (T6.1, T6.7; tests/unit/test_security_caps.py, test_security_seccomp.py, test_ops_create.py, test_runtime_spec.py). Not proven on a host: AC-1 (ssh with the agent, Agent Proxy, T6.4), AC-2 (the read-only file write), AC-3 (`podman run --rm <image> true` inside the realm, with services off), and AC-4 (KVM acceleration), all in the host-only test_tiers_real.py (M6 gate, not yet written)"
+
+[[deferred]]
+id = "FR-065"
+milestone = "M4"
+partial = true
+reason = "identical paths are unit-tested in the T4.2 create and attach plans; a drive mounted after realm start appears inside only after a lazy re-attach at enter or launch, since host mounts are private and propagation into a running realm is not assumed; a drive mounted below a folder is a change that forces a re-attach, and the mount table is read by its real path and undoes its escapes (unit-tested in T4.10); the host proof is T4.9 Resolution A: a drive mounted below a mount root after start reaches the realm at the next enter, read as uid 1000"
+
+[[deferred]]
+id = "FR-066"
+milestone = "M6"
+partial = true
+reason = "T6.8 host gate: an attach-only change (the projects toggle) on a running Custom realm is flagged restart-required and applies at the next start (PASS). AC-1 (Basic to Development) is built with the rebuild of the next start (T8.3, ADR-006 amendment of 2026-10-13); its host proof is open. a tier or permission change on a running or stopped realm (ops/permissions.py, T6.2) sets restart_required on a running realm and applies at the next start. FR-066 AC-1 (Basic to Development, then ~/Projects after a restart) is built with the rebuild of the next start (T8.3, ADR-006 amendment of 2026-10-13): the grant list is planned from the record at each start (test_ops_permissions, test_ops_lifecycle, test_ops_rebuild), and a change of create-time options is recorded at once, not refused (ops/permissions.py). Its host proof is open. The re-attach at enter and launch is unit-tested on a fake helper (T4.10): only a changed grant is passed, with --force, a read-only file is not written into again, the grant list fixed at start is kept with a to_dict and from_dict round trip, a session path takes its host from the current session by its fixed realm path, and keeps its recorded host while the source exists, a refused mount is unmounted, a mismatched device or inode, or a realm with fewer mounts below it, is skipped and held until the host identity changes (a repeated mismatch costs no helper run at enter), a file grant whose source is gone is unmounted under unshare -Urm, and a failure records nothing; a half-done attach is finished by the next run under unshare -Urm (native test, T4.10); the host proof of the attach and the lazy re-attach ran in T4.9 on debian (a changed source is re-attached with the init pid unchanged, a busy directory detaches with MNT_DETACH, and a drive mounted on the host after start reaches the realm at the next enter (T4.9 Resolution A, variant (c)), while a mount made only in the store's namespace does not); the list is recomputed and saved on the record at each start by T4.5 (ops/lifecycle.py, unit-tested), and status reports the restart_required flag, which only the M6 tier and permission change sets; the change of the grant list at the next start is M6; enter re-attaches only a changed grant, under the realm lock, saves the record only when it changed, and a failed re-attach fails that enter and leaves the realm running (T4.6, test_runtime_enter)"
+
+[[deferred]]
+id = "FR-067"
+milestone = "M6"
+partial = true
+reason = "T6.8 host gate: with the built ginn-agent-filter and a host ssh-agent, the filter socket is present in the realm and the filter stops with the last Development realm (PASS). AC-1 (ssh-add -D refused) is SKIPPED: the image has no ssh-add. AC-2 (gpg export refused) is not run: the gpg extra socket is not resolved in the gate. the SSH filter is unit-tested on the compiled helper (native/ginn-agent-filter.c, tests/unit/test_native_agent_filter.py, tests/property/test_agent_framing.py): key-changing and extension requests (ssh-add -D among them) get a failure and never reach the agent, list and sign pass with their replies, and the frame limits hold. The plan (tests/unit/test_security_agent.py) binds the filter socket and the gpg extra socket at fixed realm names, sets SSH_AUTH_SOCK, and is Development-only; the filter runs while a Development realm runs and an agent exists. AC-1 (ssh-add -D on a host agent, keys unchanged) and AC-2 (gpg --export-secret-keys in a realm) need the host gate: the gpg restriction is gpg-agent's own extra-socket policy, not a ginn filter, so AC-2 is proven only there. Not yet proven on a host: the attach of the filter socket after podman start, the gpgconf path, and the cross-process lifetime of the filter"
+
+[[deferred]]
+id = "FR-069"
+milestone = "M6"
+partial = true
+reason = "T6.8: the realm wiring is unit-tested (the CDI grant at create, the spec written once per digest, LD_LIBRARY_PATH only with the grant, musl and absent as notes, GINN-E-NVIDIA-STALE refused before any write). The host gate ran with the probe reporting no driver, so no CDI device was made on crun (pending T6.6). the CDI spec of ADR-012 is unit-tested on a fake host (tests/unit/test_security_nvidia.py, security/nvidia.py): containerEdits.env carries LD_LIBRARY_PATH, the libraries and nodes are read-only and named by the host, the argv is --cdi-spec-dir with --device nvidia.com/gpu=all, a stale library refuses the start, and musl and an absent driver are informational. AC-2 (NVIDIA on musl is informational) is also unit-tested through the doctor check (T3.6). AC-1 needs an NVIDIA glibc host and runs in M6 (T6.6 host gate: nvidia-smi through the CDI env field, crun, and the keep-groups question)"
+
+[[deferred]]
+id = "FR-080"
+milestone = "M7"
+partial = true
+reason = "arch PASS on the glibc host (T7.7 review round, spikes/results/T7.7-services-real.md): the crun argv, cronie active before and after a restart, PID 1 systemd, runsv in the supervisor leaf. That run predates F6 (machine-id, CL-28), so its 7 failed units are the pre-fix state. debian and fedora are refused at create with GINN-E-NO-INIT, since their pinned images have no /sbin/init (F1, F3; the fix is ADR-015, proposed). The argv, the create path, the machine-id copy and the init check are unit-tested (tests/unit/test_ops_create.py, test_runtime_spec.py). The host re-gate of F6 is pending. The musl leg is not run (no musl host)."
+
+[[deferred]]
+id = "FR-081"
+milestone = "M7"
+partial = true
+reason = "AC-1 (sv shows the realm up) and AC-2 (restart within 10 s, state running, 7.64 s on the re-run) PASS on arch on the glibc host (T7.7). AC-3 (five crashes leave the realm failed) FAIL on the host (F10): a crash during a supervised start stops the realm, so the give-up reads stopped. The user decision of 2026-10-14 (a DR-020 amendment) is implemented on the F2 branch. The musl leg is not run. The supervised start, finish and sv control are unit-tested (tests/unit/test_ops_service.py, test_ops_lifecycle.py, test_services_supervisor.py)."
+
+[[deferred]]
+id = "FR-082"
+milestone = "M4"
+partial = true
+reason = "the services-off create argv carries --init, a keep-alive entrypoint and no systemd option (T4.1); no systemd process inside a running realm was measured on a Void host with debian only (T4.9, test_f_no_systemd_process_and_minimal_init: PID 1 is podman-init, and no systemd); arch and fedora are not run, so the requirement stays partial"
+
+[[deferred]]
+id = "FR-083"
+milestone = "M7"
+partial = true
+reason = "AC-1 (a services change keeps htop and makes systemd PID 1) FAIL on arch on the glibc host: the lazy rebuild's grant attach runs from the CLI session and is deferred (F2/F7). The mode record and the rebuild are unit-tested (tests/unit/test_ops_service.py, test_ops_rebuild.py, test_cli_services.py)."
+
+[[deferred]]
+id = "FR-100"
+milestone = "M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
+
+[[deferred]]
+id = "FR-101"
+milestone = "M9"
+partial = true
+reason = "unit tests run (tests/unit/test_gui_viewmodels.py, test_gui_parity.py) and the Xvfb smoke test runs the wizard, its Kali estimate step and the confirmation that shows the sizes (T8.8); the view and host proofs are deferred to M9."
+
+[[deferred]]
+id = "FR-102"
+milestone = "M9"
+partial = true
+reason = "the detail confirmations, the delete purge box that is unchecked by default, and each action's argv are unit-tested (tests/unit/test_gui_detail.py, test_gui_parity.py) and smoke-tested under Xvfb (tests/gui/test_views_smoke.py, which skips without GTK 4 and Xvfb). The rebuild control is on since T8.3, behind its confirmation, and the host run of the views is M9"
+
+[[deferred]]
+id = "FR-103"
+milestone = "M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
+
+[[deferred]]
+id = "FR-105"
+milestone = "M9"
+partial = true
+reason = "unit tests run; the view and host proofs are deferred to M9"
+
+[[deferred]]
+id = "FR-106"
+milestone = "M9"
+partial = true
+reason = "the parity test (tests/unit/test_gui_parity.py) maps every IR-001..IR-006 control to its CLI verb and parses each argv with the real parser. Every control's verb is a registered command, so no control is an expected failure (rebuild since T8.3), and the view-to-CLI run on a host is M9"
+
+[[deferred]]
+id = "FR-120"
+milestone = "M8"
+partial = true
+reason = "install and update network retry covered; broken gated with no production db check; the rebuild's pull and replay use the same retry hook (ops/rebuild.py, T8.3), and no rebuild test or host run faults a network error yet."
+[[deferred]]
+id = "FR-121"
+milestone = "M8"
+partial = true
+reason = "the create precheck refuses before any download when free space on the podman root and the Realm Home filesystems is below the estimate times 1.10, rounded up (ops/disk.py). The Kali everything set is checked the same way before its install (T8.7). The --with estimate is missing, and the apt-cache estimate has not run on a host"
+[[deferred]]
+id = "FR-122"
+milestone = "M8"
+partial = true
+reason = "the create rollback, the creating record kept after a crash mid-pull, the broken record when a rollback step fails, and the journal entry kept after an unexpected exception are unit-tested (T4.4). Recovery (T2.8, ops/recovery.py) is unit-tested on dead, live and damaged journal files (FIFOs, symlinks, oversized and deeply nested files), the realm lock, the start step rule, the podman fallback, the create, delete, install, update, stop and rebuild verdicts, and a second run (test_ops_recovery.py). Since T8.5 and T8.6, --resume is unit-tested (ops/resume.py, test_ops_create_resume.py), and the in-process SIGKILL sweep covers every journal step of every operation, resume included (test_crash_safety.py). A killed Kali estimate's leftovers are swept by ops/recovery.py `sweep_estimates` at the next create, resume, delete, rebuild or update, and after the next Kali estimate's own work, and tested in tests/unit/test_ops_estimate.py and tests/unit/test_cli_context.py. Not yet covered: a real SIGKILL on a host (M10). Recovery runs at the start of each realm command (T4.11, cli/_context.py settle_interrupted; tests/unit/test_cli_lifecycle.py, test_cli_context.py), and the broken state of AC-1 is shown with both recovery commands (create --resume is ops/resume.py)"
+[[deferred]]
+id = "FR-123"
+milestone = "M8"
+partial = true
+reason = "the realm lock (T2.7) and the choke point (T3.9) refuse a second operation at once, naming the running one; a real second process is unit-tested; AC-1 needs ginn rebuild and ginn install from two terminals (M8)"
+
+[[deferred]]
+id = "FR-124"
+milestone = "M6"
+partial = true
+reason = "the choke point (T3.9) writes one audit entry per operation with user, realm, op, params, before and after permissions and outcome, and the audit log (T2.9) is unit-tested; AC-1 needs a real tier change on arch, which lands with ginn tier (M6). Recovery (T2.8) writes the entry that a killed operation never wrote, under the operation's op_id with its start as ts. When an entry with that op_id already exists and is finished, it writes nothing. When one exists and is unfinished, it writes a separate op 'recover' entry with its own op_id and params.recovers naming the operation. It never writes the original op_id again (test_ops_recovery.py)"
+
+[[deferred]]
+id = "NFR-001"
+milestone = "M10"
+partial = true
+reason = "unit tests run for tools/measure; the 1 MiB RSS bound for the resident runsvdir needs a host measurement in M10"
+
+[[deferred]]
+id = "NFR-002"
+milestone = "M10"
+partial = true
+reason = "unit tests run for tools/measure; the RSS budget for the helpers needs a host measurement in M10"
+
+[[deferred]]
+id = "NFR-003"
+milestone = "M7"
+partial = true
+reason = "ginn-wait (T7.2) is unit-tested as a growth guard (tests/unit/test_native_wait.py). The ADR-007 create-time forms a, b and d are on by default since CL-23 (SERVICES_MITIGATIONS is True; tests/unit/test_runtime_services_forms.py). The T7.7 host gate (test_services_real) measured arch at a VmRSS median of 87.11 MiB against 40: FAIL, known gap F11 (the budget method is open). That run predates F6 (machine-id copy and logind mask, CL-28, ADR-007 D8), which is unit-tested and whose host re-gate is pending. The probe's hand-argv medians are 40.29 MiB with the machine-id and 33.27 MiB with logind masked too (spikes/results/F6-F1-probe.md). debian and fedora are refused at create with GINN-E-NO-INIT (F1, F3). The musl leg is not run."
+
+[[deferred]]
+id = "NFR-004"
+milestone = "M4"
+partial = true
+reason = "the podman calls of the enter hot path are unit-tested (T4.6, test_runtime_enter): a running realm with no host change costs one podman ps, makes no write and no helper call, and the pre-check itself makes no podman call. The enter path runs one listing per enter, in place of the record pid and /proc check of ADR-010, as ADR-010's amendment of 2026-10-13 records. On a Void host with debian (T4.9, reported run) the p95 of 100 enters on crun, in-process from runtime/enter.py with the pre-check and the listing, was 129.1 ms at 1-minute load 5 to 8. One loaded run (load 24) measured 453 ms; it predates the session isolation and the hiding of the real mount roots, so the number depends on an idle host and NFR-004 is not closed by it. The CLI import (T4.11) is not in the number, so the CLI path is still open"
+
+[[deferred]]
+id = "NFR-005"
+milestone = "M4"
+partial = true
+reason = "the start time of a stopped realm was measured on a Void host with debian over 20 cycles (T4.9, tests/integration/test_lifecycle_real.py, p95 0.107 s); NFR-005 asks for 50 cycles per distribution, so arch and fedora are not run and the requirement is partial"
+
+[[deferred]]
+id = "NFR-006"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-007"
+milestone = "M4"
+partial = true
+reason = "the create was timed once on a Void host with debian, zero packages and no refresh, with the image removed first so that the pull is inside the number (T4.9, tests/integration/test_lifecycle_real.py, test_c_create_timing: 4.76 s); NFR-007 asks for three runs per distribution with the packages on a 100 Mbps link, which the gate does not run (Gate 3), so the requirement is partial"
+
+[[deferred]]
+id = "NFR-008"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-009"
+milestone = "M5"
+partial = true
+reason = "the sync costs a fixed number of podman calls, counted on 200 entries with a fixed per-call cost (T5.6); the trigger batches a burst into one run and bounds the wait for a steady stream to its max latency (ginn-watch, T5.9); the 5 s bound on installed applications, 20 runs, is host-only and waits for gate 3. That gate must check every image for GNU findutils (find -printf), since the listing needs it"
+
+
+[[deferred]]
+id = "NFR-010"
+milestone = "M9"
+partial = true
+reason = "unit tests run; the parity proof is deferred to M9"
+
+[[deferred]]
+id = "NFR-011"
+milestone = "M10"
+partial = true
+reason = "the 5000-file before and after pair is unit-tested under temporary roots (T3.8). This host has about 44,600 entries in scope, and one capture takes about 2.4 s there. NFR-011 is scoped to at most 5000 files, so host timing in T10.4 must measure a scope within that limit"
+
+[[deferred]]
+id = "NFR-030"
+milestone = "M10"
+partial = true
+reason = "NFR-030 is SIGKILL crash safety. tests/unit/test_crash_safety.py (T8.6) kills every mutating op at every durable-effect point in-process, with per-op counts asserted at 50 or more, and at one point per op with a real SIGKILL, then runs recovery and checks the result (test_hostsetup_undo.py injects faults at each undo step, which is not a kill). Not gated there: autostart, idle-stop, service-exit, reattach, sync/export, a services-on running realm, and a development-tier create. G1 (spikes/results/G1-host-setup-roundtrip.md, 2026-10-12) ran one clean setup and undo on a Void host with no kill, and undo left only /run/lock/ginn-host-setup.lock, which ADR-013 Decision 11 documents; that is not a crash proof. The host SIGKILL runs, on a Void host with rootless Podman, remain for M10"
+
+[[deferred]]
+id = "NFR-031"
+milestone = "M8"
+partial = true
+reason = "the fault matrix runs on FakePodman: a fault at each of the 327 rebuild cases (the rebuild steps, the fault kind, the previous state and the services change, the two record saves and the lazy tier rebuild, tests/unit/test_ops_rebuild_faults.py) leaves the old realm usable, or the swap is settled by recovery, and keeps the Realm Home. A crash before the swap removes the orphan new root (test_ops_rebuild_faults.py, test_ops_recovery.py). The faults are in-process, not a SIGKILL. Not yet proven: the 50 fault-injection runs of this NFR on a host, with a real rebuild and a kill, which is the M8 host gate (GINN_INTEGRATION=1 tests/integration/test_rebuild_real.py)"
+
+[[deferred]]
+id = "NFR-033"
+milestone = "M7"
+partial = true
+reason = "ginn-wait (T7.2) is unit-tested: it exits 1 when conmon dies, and runs one podman stop on SIGTERM (tests/unit/test_native_wait.py). The 5 s restart delay and the give-up after five crashes in 60 s (AS-028) are unit-tested in tests/unit/test_ops_service.py and test_services_supervisor.py. The 10 s restart on a host is T7.7 (test_services_real)"
+
+[[deferred]]
+id = "NFR-041"
+milestone = "M3"
+partial = true
+reason = "DEP-1 (podman and its helpers: crun, conmon, newuidmap, newgidmap, and pasta or slirp4netns), DEP-2 (cgroup v2, user namespaces, overlay or FUSE), DEP-6 (runit supervision) and each Host Setup item have checks, and every FAIL names a fix (unit-tested, T3.6, T3.7). DEP-4 and DEP-5 (network) are outside doctor's scope. DEP-3 is covered only by the elogind config check (ADR-004). The checklist audit against a real Void host runs at the M3 gate"
+
+[[deferred]]
+id = "NFR-043"
+milestone = "M10"
+partial = true
+reason = "the choke point (T3.9) writes exactly one audit entry per operation, for success, GinnError, KeyboardInterrupt and other exceptions, and the audit log (T2.9) is unit-tested; host-integrity events are separate FR-124 events (realm None), written at least once, and a crash between the audit append and the pending record can duplicate one, so the M10 suite-wide count must count operations and host-integrity events separately; that count is a release-gate check in M10. Recovery (T2.8) writes exactly one entry under each op_id: the operation's own entry when none exists, nothing when the existing entry is finished, and otherwise a separate op 'recover' entry with params.recovers. A crash between the entry and the journal removal adds no entry for a finished operation and at most one recover entry otherwise. The original op_id is never written twice (test_ops_recovery.py)"
+
+[[deferred]]
+id = "NFR-060"
+milestone = "M4"
+partial = true
+reason = "domain, loader and store accept a new distribution definition with no code change (the _test fixture and a renamed copy, through DistroId, PackageName and RealmRecord); the lifecycle half (create and the Trust Manifest pull, ops/create in T4.4) is not built yet"
+
+[[deferred]]
+id = "NFR-062"
+milestone = "M10"
+reason = "not covered yet; the Must-FR suite must pass on the glibc and musl CI matrix, an M10 release gate"
+
+[[deferred]]
+id = "NFR-063"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-SEC-001"
+milestone = "M4"
+partial = true
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M4"
+
+[[deferred]]
+id = "NFR-SEC-002"
+milestone = "M6"
+partial = true
+reason = "tests/unit/test_security_caps.py parses docs/capabilities.md and compares the Development create options, the Basic options, the attach rows, the Custom toggle names and the Adds-at-create column of each toggle with the code. TierExtras is an allowlist, and tests/unit/test_podman_createspec.py refuses every security-option spelling that lowers a confinement at argv time (NFR-SEC-001). It checks that no tier adds a capability, a privileged flag or an unconfined option. The host-side dump of the created container (podman inspect, host-only) is pending in test_tiers_real.py (M6 gate, not yet written)"
+
+[[deferred]]
+id = "NFR-SEC-003"
+milestone = "M10"
+reason = "not covered yet; the M10 package job scans the built .xbps for setuid or setgid files (the source scan is AS-003)"
+
+[[deferred]]
+id = "NFR-SEC-004"
+milestone = "M4"
+partial = true
+reason = "realm_spec takes its image from the Trust Manifest; RealmSpec refuses a tag (T4.1). The pull by digest, the verification and the package-manager signature checks need ops/create.py and a Void host (T4.4, T4.9)"
+
+[[deferred]]
+id = "NFR-SEC-005"
+milestone = "M2"
+partial = true
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M2"
+
+[[deferred]]
+id = "NFR-SEC-006"
+milestone = "M6"
+partial = true
+reason = "unit or property tests cover part of the requirement; the remaining acceptance criteria need M6"
+
+[[deferred]]
+id = "NFR-SEC-007"
+milestone = "M6"
+partial = true
+reason = "the framing tests show that the agent channel forwards only list and sign requests and their replies, so no add, export or key-changing message reaches the agent (tests/property/test_agent_framing.py, tests/unit/test_native_agent_filter.py). The realm filesystem search for key files after signing tests needs a host realm and is not run"
+
+[[deferred]]
+id = "NFR-SEC-008"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"
+
+[[deferred]]
+id = "NFR-SEC-009"
+milestone = "M9"
+partial = true
+reason = "Control Plane to backend same-user channel is the GUI backend (T9.1); unit tests run, the host proof is deferred to M9"
+
+[[deferred]]
+id = "NFR-SEC-010"
+milestone = "M10"
+reason = "not covered yet; the roadmap assigns its test to M10"

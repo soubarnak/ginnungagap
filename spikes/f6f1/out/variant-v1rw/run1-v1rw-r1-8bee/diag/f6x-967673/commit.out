@@ -1,0 +1,16 @@
+× systemd-machine-id-commit.service - Save Transient machine-id to Disk
+     Loaded: loaded (/usr/lib/systemd/system/systemd-machine-id-commit.service; static)
+     Active: failed (Result: exit-code) since Wed 2026-10-14 17:08:00 UTC; 8s ago
+ Invocation: 990f8649a0eb40f8982b0476a80937d5
+       Docs: man:systemd-machine-id-commit.service(8)
+    Process: 40 ExecStart=systemd-machine-id-setup --commit (code=exited, status=1/FAILURE)
+   Main PID: 40 (code=exited, status=1/FAILURE)
+   Mem peak: 2.2M
+        CPU: 10ms
+
+Oct 14 17:08:00 xserve systemd-machine-id-setup[40]: /etc/machine-id is not on a temporary file system.
+Oct 14 17:08:00 xserve systemd[1]: systemd-machine-id-commit.service: Failed with result 'exit-code'.
+Oct 14 17:08:00 xserve systemd[1]: Failed to start Save Transient machine-id to Disk.
+Oct 14 17:08:00 xserve systemd-machine-id-setup[40]: /etc/machine-id is not on a temporary file system.
+Oct 14 17:08:00 xserve systemd[1]: systemd-machine-id-commit.service: Failed with result 'exit-code'.
+Oct 14 17:08:00 xserve systemd[1]: Failed to start Save Transient machine-id to Disk.

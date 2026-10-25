@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-09 image: Kali rolling plus the four tools the procedure probes with.
+# Built by spikes/s09_kali_netns.sh; not a Realm image.
+FROM docker.io/kalilinux/kali-rolling
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nmap iproute2 iputils-ping tcpdump \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*

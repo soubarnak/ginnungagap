@@ -1,0 +1,127 @@
+{
+  "env": {
+    "HOME": "/home/soubarna",
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin",
+    "XDG_RUNTIME_DIR": "/run/ginn/1000"
+  },
+  "out": "/home/soubarna/Documents/bongbetic-wip/ginnungagap/spikes/f6f1/out/product-exec/f6x-e4ee26",
+  "steps": [
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.local/share/ginn/podman",
+        "--runroot",
+        "/run/ginn/1000/podman",
+        "--tmpdir",
+        "/run/ginn/1000/podman-tmp",
+        "--runtime",
+        "crun",
+        "--cdi-spec-dir",
+        "/home/soubarna/.local/share/ginn/cdi",
+        "exec",
+        "b5c45d1bd191",
+        "sh",
+        "-c",
+        "systemctl cat dbus-broker.service --no-pager | head -40"
+      ],
+      "name": "c0",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.local/share/ginn/podman",
+        "--runroot",
+        "/run/ginn/1000/podman",
+        "--tmpdir",
+        "/run/ginn/1000/podman-tmp",
+        "--runtime",
+        "crun",
+        "--cdi-spec-dir",
+        "/home/soubarna/.local/share/ginn/cdi",
+        "exec",
+        "b5c45d1bd191",
+        "sh",
+        "-c",
+        "grep -a -o '[ -~]*machine[ -~]*' /usr/bin/dbus-broker-launch | sort -u | head -20"
+      ],
+      "name": "c1",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.local/share/ginn/podman",
+        "--runroot",
+        "/run/ginn/1000/podman",
+        "--tmpdir",
+        "/run/ginn/1000/podman-tmp",
+        "--runtime",
+        "crun",
+        "--cdi-spec-dir",
+        "/home/soubarna/.local/share/ginn/cdi",
+        "exec",
+        "b5c45d1bd191",
+        "sh",
+        "-c",
+        "grep -a -o '[ -~]*audit[ -~]*' /usr/bin/dbus-broker-launch | sort -u | head -12"
+      ],
+      "name": "c2",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.local/share/ginn/podman",
+        "--runroot",
+        "/run/ginn/1000/podman",
+        "--tmpdir",
+        "/run/ginn/1000/podman-tmp",
+        "--runtime",
+        "crun",
+        "--cdi-spec-dir",
+        "/home/soubarna/.local/share/ginn/cdi",
+        "exec",
+        "b5c45d1bd191",
+        "sh",
+        "-c",
+        "dbus-broker-launch --help 2>&1 | head -30"
+      ],
+      "name": "c3",
+      "timeout": 600.0
+    },
+    {
+      "argv": [
+        "/usr/bin/podman",
+        "--remote=false",
+        "--root",
+        "/home/soubarna/.local/share/ginn/podman",
+        "--runroot",
+        "/run/ginn/1000/podman",
+        "--tmpdir",
+        "/run/ginn/1000/podman-tmp",
+        "--runtime",
+        "crun",
+        "--cdi-spec-dir",
+        "/home/soubarna/.local/share/ginn/cdi",
+        "exec",
+        "b5c45d1bd191",
+        "sh",
+        "-c",
+        "ls -l /etc/machine-id /var/lib/dbus 2>&1"
+      ],
+      "name": "c4",
+      "timeout": 600.0
+    }
+  ],
+  "tail": null
+}

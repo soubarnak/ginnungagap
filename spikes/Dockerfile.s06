@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-06 image: Debian stable with Mesa GL/EGL/Vulkan and Wayland/X11 test tools.
+# Built by spikes/s06_gpu.sh; not a Realm image. No NVIDIA userspace here: the
+# NVIDIA driver files come from the host through the CDI spec that
+# spikes/s06/nvidia-cdi.py writes.
+FROM docker.io/library/debian:stable
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      mesa-utils mesa-utils-extra libgl1-mesa-dri libegl-mesa0 libgles2 \
+      mesa-vulkan-drivers vulkan-tools glmark2 wayland-utils x11-apps pciutils \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*

@@ -1,0 +1,83 @@
+{
+  "T1 create --entrypoint [] (no cmd)": {
+    "commit_err": "Writing manifest to image destination",
+    "commit_rc": 0,
+    "container_config": {
+      "Cmd": null,
+      "Entrypoint": null
+    },
+    "create_err": "",
+    "create_rc": 0,
+    "image_cmd": null,
+    "image_entrypoint": null
+  },
+  "T2 create --entrypoint \"\" (no cmd)": {
+    "commit_err": "Writing manifest to image destination",
+    "commit_rc": 0,
+    "container_config": {
+      "Cmd": null,
+      "Entrypoint": [
+        ""
+      ]
+    },
+    "create_err": "",
+    "create_rc": 0,
+    "image_cmd": null,
+    "image_entrypoint": [
+      ""
+    ]
+  },
+  "T3 create --entrypoint [] with cmd infinity": {
+    "commit_err": "Writing manifest to image destination",
+    "commit_rc": 0,
+    "container_config": {
+      "Cmd": [
+        "infinity"
+      ],
+      "Entrypoint": null
+    },
+    "create_err": "",
+    "create_rc": 0,
+    "image_cmd": [
+      "infinity"
+    ],
+    "image_entrypoint": null
+  },
+  "T4 create --entrypoint [sleep] with cmd infinity, commit --change ENTRYPOINT (no arg)": {
+    "commit_err": "Writing manifest to image destination",
+    "commit_rc": 0,
+    "container_config": {
+      "Cmd": [
+        "infinity"
+      ],
+      "Entrypoint": [
+        "sleep"
+      ]
+    },
+    "create_err": "",
+    "create_rc": 0,
+    "image_cmd": [
+      "/bin/sh",
+      "-c"
+    ],
+    "image_entrypoint": null
+  },
+  "T5 create --entrypoint [sleep,infinity] no cmd": {
+    "commit_err": "Writing manifest to image destination",
+    "commit_rc": 0,
+    "container_config": {
+      "Cmd": null,
+      "Entrypoint": [
+        "sleep",
+        "infinity"
+      ]
+    },
+    "create_err": "",
+    "create_rc": 0,
+    "image_cmd": null,
+    "image_entrypoint": [
+      "sleep",
+      "infinity"
+    ]
+  }
+}

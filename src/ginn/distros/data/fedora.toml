@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fedora distribution definition (NFR-060). Read by src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps), {tmpdir} (check-updates steps). Write {{ and }} for literal braces.
+# Every command is an argv list.
+#
+# Image: trust_key names [distro.fedora] in src/ginn/trust/data/trust.toml (DR-040). The image is
+# fedora-minimal:44 with dnf5 5.4.6 (S-10b). Its only missing Integration package is
+# glibc-langpack-en. Its locale data needs no generation step, so there are no steps.
+# The image sets %_install_langs en_US (S-10 section 5). Other LANG values need that overridden,
+# which is an M4 item. dnf needs a writable HOME (runtime, not here).
+# Not verified on a host (M4): every verb. gpgcheck is never disabled (FR-012).
+schema = 1
+id = "fedora"
+trust_key = "fedora"
+shell = "/bin/bash"
+# DR-003 (Fedora), matched with fullmatch.
+# DR-003, and a name ending in .rpm is refused: dnf reads it as a local file path (FR-040).
+package_name_regex = '(?!.*\.rpm\Z)[A-Za-z0-9_][A-Za-z0-9._+-]{0,127}'
+# FR-012: dnf messages for a failed GPG check or a missing public key.
+signature_error_regex = '(?i)gpg check failed|public key for .* is not installed|signature verification failed'
+# ADR-011: dnf's message for a package file the mirror no longer has. Runtime text, not verified
+# until M4.
+stale_metadata_regex = 'Status code: 404'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = "Curl error \\(|Couldn't resolve host|Timeout was reached|Failed to connect to"
+# FR-022 AC-1: dnf's refusal of a name that no repository has. Runtime text, not verified until M4.
+missing_package_regex = 'No match for argument|Unable to find a match'
+# ADR-011: dnf5 refreshes expired metadata by itself (metadata_expire, 48 hours, dnf5.conf(5)), and
+# check-updates and upgrade force a refresh, so no verb needs one first.
+refresh_before = []
+# FR-024: dnf5 check-upgrade exits 100 when updates exist, and 0 when none (dnf5 check-upgrade(8)).
+# Its rows are not counted until M4, so the count is left unread (the default).
+check_updates_exit_for_updates = 100
+# FR-120 AC-2, ADR-011: rpm --verifydb checks the rpm database. Exit 0 is consistent. Any other
+# status is inconsistent, except the statuses podman uses when it cannot run the command (loader.py).
+# The rpm command is not checked in the image: if it is missing, the verb exits 127 and is unknown,
+# not broken. Not verified until M4.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = false
+
+[integration]
+packages = ["glibc-langpack-{lang}"]
+steps = []
+
+[verbs]
+# --refresh is a dnf5 global option: it forces a metadata refresh before the command. makecache
+# then downloads the metadata. It never upgrades an installed package (ADR-011).
+refresh = ["dnf", "--refresh", "makecache"]
+# install_weak_deps=False: only hard dependencies are installed (FR-040, CR-007).
+install = ["dnf", "--assumeyes", "--setopt=install_weak_deps=False", "install", "{packages}"]
+# dnf5 also removes now-unneeded dependencies (clean_requirements_on_remove, default on). It does
+# not refuse packages that need the named one: the ops layer pre-checks that with remove-check.
+remove = ["dnf", "--assumeyes", "remove", "{packages}"]
+# remove-check is the dry run the ops layer reads before remove (ADR-011, FR-041). --assumeno prints
+# the transaction and changes nothing. dnf exits 1 after the no answer, as for resolve (above).
+# --no-autoremove keeps unneeded dependencies out of the list, so it holds the named packages and
+# the packages that need them. Output format is not verified until M4.
+remove-check = ["dnf", "--assumeno", "--no-autoremove", "remove", "{packages}"]
+# Full upgrade (FR-023 AC-2). --refresh forces fresh metadata before the upgrade, so it works from
+# the mirror's current metadata and not from metadata up to 48 hours old (dnf5.conf(5), ADR-011).
+upgrade = ["dnf", "--refresh", "--assumeyes", "--setopt=install_weak_deps=False", "upgrade"]
+# --refresh forces fresh metadata, so the check the Control Plane runs reflects the mirror (FR-024).
+# check-upgrade exits 100 when updates exist and 0 when none, read by check_updates_exit_for_updates
+# above. A one-step list (see arch.toml).
+check-updates = [["dnf", "--refresh", "check-upgrade"]]
+# db-check reads the rpm database (FR-120 AC-2). It names no package and no placeholder. The result
+# is read by the db_check_* keys above. Not verified until M4.
+db-check = ["rpm", "--verifydb"]
+# repoquery --userinstalled: names of packages installed by hand (DR-007). Format is rpm's %{name}.
+list-explicit = ["dnf", "repoquery", "--userinstalled", "--queryformat", '%{{name}}\n']
+# --assumeno: print the transaction and make no change. dnf exits 1 after the no answer.
+resolve = [
+    "dnf", "--assumeno", "--setopt=install_weak_deps=False", "install", "{packages}",
+]
+# repoquery with download and install sizes per package, one line each. Changes nothing.
+estimate = [
+    "dnf", "repoquery",
+    "--queryformat", '%{{name}} %{{downloadsize}} %{{installsize}}\n',
+    "{packages}",
+]

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07e follow-up realm stand-in: stock Debian stable with the S-07 package set (podman, fuse-overlayfs,
+# slirp4netns, passt, uidmap, catatonit, ca-certificates) and no dev user. The realm user is then created the
+# way a realm would create it, with REALM_USERADD. The build logs the subuid and subgid files and login.defs
+# before and after useradd. Built twice by spikes/s07e_no_subuid.sh: plain useradd (default) and the
+# SUB_UID_COUNT=0 / SUB_GID_COUNT=0 form. Nothing else differs. Not a Realm image.
+FROM docker.io/library/debian:stable
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      podman fuse-overlayfs slirp4netns passt uidmap catatonit ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+ARG REALM_USERADD="-m -u 1000 dev"
+RUN echo "== before useradd"; ls -l /etc/subuid /etc/subgid; grep -E '^SUB_[UG]ID_(MIN|MAX|COUNT)' /etc/login.defs; \
+    useradd $REALM_USERADD; \
+    echo "== after useradd $REALM_USERADD"; echo "-- /etc/subuid"; cat /etc/subuid; echo "-- /etc/subgid"; cat /etc/subgid; id dev

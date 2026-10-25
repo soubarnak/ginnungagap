@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07f Debian realm image (FR-062 AC-3, FR-013, CR-007). Not a Realm image.
+# Base: the Debian stable-slim platform digest pinned in src/ginn/trust/data/trust.toml.
+# Packages: the S-07e2 set (podman, fuse-overlayfs, slirp4netns, passt, uidmap, catatonit, ca-certificates).
+# The realm user is created with REALM_USERADD. The spike passes the decided form
+# (useradd -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0). The RUN echoes /etc/subuid and /etc/subgid around useradd, but a
+# cached rebuild does not re-run it, so the evidence in S-07.md is useradd-state.txt (run by the spike script).
+FROM docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      podman fuse-overlayfs slirp4netns passt uidmap catatonit ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+ARG REALM_USERADD="-K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 -m -u 1000 dev"
+RUN echo "== before useradd"; ls -l /etc/subuid /etc/subgid 2>&1 || true; \
+    echo "== useradd $REALM_USERADD"; useradd $REALM_USERADD; \
+    echo "-- /etc/subuid"; cat /etc/subuid 2>&1 || echo absent; \
+    echo "-- /etc/subgid"; cat /etc/subgid 2>&1 || echo absent; \
+    id dev

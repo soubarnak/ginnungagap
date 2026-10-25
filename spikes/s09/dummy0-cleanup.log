@@ -1,0 +1,25 @@
+== gate checks 2026-10-12T14:35:37+05:30
+11: dummy0: <BROADCAST,NOARP> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
+    link/ether <mac> brd <mac> promiscuity 0 allmulti 0 minmtu 0 maxmtu 0 
+    dummy addrgenmode eui64 numtxqueues 1 numrxqueues 1 gso_max_size 65536 gso_max_segs 65535 tso_max_size 65536 tso_max_segs 65535 gro_max_size 65536 gso_ipv4_max_size 65536 gro_ipv4_max_size 65536 
+ok: no addresses
+dummy0 ifindex=11
+ok: no packet socket bound (/proc/net/packet)
+ls: cannot access '/sys/class/net/dummy0/holders': No such file or directory
+ok: no holders
+ok: no routes or neighbours
+dummy module refcount=0
+pre-existed this run: before-record 14:27:11 and run start snapshot both list dummy0 (see rerunC-host-before.txt and host-start.txt)
+sudo -n ok
+gate result ok=1
++ sudo -n ip link del dummy0
+rc=0
++ sudo -n rmmod dummy
+rc=0
+== after 2026-10-12T14:35:37+05:30
+lo               UNKNOWN        <mac> <LOOPBACK,UP,LOWER_UP> 
+eno1             UP             <mac> <BROADCAST,MULTICAST,UP,LOWER_UP> 
+wlp4s0           DOWN           <mac> <BROADCAST,MULTICAST> 
+virbr0           DOWN           <mac> <NO-CARRIER,BROADCAST,MULTICAST,UP> 
+--
+(dummy module not loaded)

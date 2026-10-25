@@ -1,0 +1,2589 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Realm create: order, final record, refusals, retries, digest, rollback at every step (T4.4).
+
+Covers ops/create.py and ops/_rollback.py against FakePodman. The fake runs no podman. Its helper
+rows come from the host, the way ginn-rebind reports them, so the attach path runs for real.
+No test runs podman, sudo or the helper binary (AGENTS.md).
+
+Failure outcomes are checked the way the choke point records them: a GINN-E error rolls back and
+finishes the journal, a KeyboardInterrupt becomes GINN-E-INTERRUPTED after the rollback, and any
+other exception keeps the journal entry and rolls nothing back (ops/_mutating.py, FR-122).
+
+Test isolation. Two autouse or pinned settings keep the host out. `attach_at_start` reads source
+identities with os.stat, not through a hook, so `host_identity_is_read_only_under_tmp` answers
+only for paths under tmp_path. Every request pins XDG_RUNTIME_DIR to an empty tmp directory,
+because the test host has a live session under /run/user/1000 (a PipeWire socket), and a real
+socket would bind an audio grant and run a mkdir that the test does not expect.
+"""
+
+import errno
+import json
+import os
+import re
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from ginn.distros import Verb
+from ginn.distros import load as load_distro
+from ginn.domain import (
+    InstallMethod,
+    InstallSource,
+    ManifestEntry,
+    RealmName,
+    RealmState,
+    Tier,
+)
+from ginn.domain.permissions import BASIC_TOGGLES, Permissions, Toggle
+from ginn.errors import GinnError, make
+from ginn.ops import _create_plan
+from ginn.ops import create as create_ops
+from ginn.ops import estimate as estimate_ops
+from ginn.ops._create_plan import SizeEstimate
+from ginn.ops._mutating import OpEnv
+from ginn.ops.create import (
+    CreateHooks,
+    CreateRequest,
+    CreateResult,
+    create_realm,
+    required_bytes,
+)
+from ginn.ops.disk import estimate_required
+from ginn.podman.adapter import CreateSpec, ExecTarget
+from ginn.podman.models import ContainerState, ExecResult, ImageInfo
+from ginn.runtime import attach
+from ginn.runtime.realm_security import SecurityHooks
+from ginn.runtime.spec import MACHINE_ID_PATH, RUN_USER_TMPFILES_PATH
+from ginn.security.nvidia import NvidiaPlan, Status
+from ginn.services.runit_user import journald_dropin
+from ginn.store.locks import image_lock
+from ginn.store.paths import OwnedPaths
+from ginn.store.records import RealmRecord, RealmStore
+from ginn.store.scratch import SCRATCH_PREFIX
+from ginn.trust import manifest as trust
+from tests.fakes.clock import FakeClock
+from tests.fakes.fake_podman import FakePodman
+
+DIRECT_TARGET = ExecTarget(realm="test", services=False, mutating=False)
+
+UID = 1000
+GID = 1000
+USER = "alice"
+AMPLE = 10**15
+BASE_MOUNTINFO = (
+    "36 35 98:0 / / rw,relatime shared:1 - ext4 /dev/root rw\n"
+    "37 36 98:1 / /opt rw - ext4 /dev/root rw\n"
+)
+SCOPE = ("etc", "var/db/xbps", "var/service", "usr/local", "opt")
+STEPS = (
+    "checked",
+    "space-checked",
+    "recorded",
+    "homed",
+    "pulled",
+    "created",
+    "started",
+    "attached",
+    "user",
+    "integrated",
+    "packages",
+    "stopped",
+)
+GINN_PROGRAM = "/usr/bin/ginn"
+"""The absolute ginn command the services-on run and finish scripts name (ADR-003)."""
+SERVICES_STEPS = (
+    "checked",
+    "space-checked",
+    "recorded",
+    "homed",
+    "pulled",
+    "created",
+    "service",
+    "stopped",
+)
+"""A services-on create makes the container and stops there: nothing runs in it (ADR-003)."""
+FORBIDDEN_TOKENS = frozenset(
+    {
+        "--privileged",
+        "--nogpgcheck",
+        "--no-verify",
+        "--allow-unauthenticated",
+        "--allow-untrusted",
+        "--force-yes",
+        "--ignore-signature",
+        "--no-gpg-checks",
+        "--skip-signature",
+    }
+)
+FORBIDDEN_SUBSTRINGS = ("gpgcheck=0", "SigLevel", "--cap-add")
+
+
+class _Vfs:
+    """A statvfs answer with `available` bytes for an unprivileged user (ops/disk.py)."""
+
+    def __init__(self, available: int) -> None:
+        self.f_bavail = available
+        self.f_frsize = 1
+
+
+def _statvfs(available: int) -> Callable[[str], _Vfs]:
+    """A statvfs seam that reports the same free space for every path."""
+    return lambda _path: _Vfs(available)
+
+
+def _helper_rows(argv: Sequence[str], root: str) -> str:
+    """The helper's stdout for `argv`: one row per group, read from the host as ginn-rebind does.
+
+    Only paths under `root` exist for this test, so the real host (its /media, its sockets) never
+    answers a row.
+    """
+    rows: list[str] = []
+    tokens = list(argv[2:])
+    while tokens:
+        if tokens[0] == "--unmount":
+            rows.append("missing")
+            tokens = tokens[2:]
+            continue
+        while tokens[0].startswith("--"):
+            tokens = tokens[1:]
+        host = tokens[0]
+        tokens = tokens[2:]
+        if host.startswith(root) and os.path.exists(host):
+            st = os.stat(host)
+            rows.append(f"attached {st.st_dev} {st.st_ino}")
+        else:
+            rows.append("missing")
+    return "".join(f"{index} {row}\n" for index, row in enumerate(rows))
+
+
+class ScriptedPodman(FakePodman):
+    """The fake plus the answers that the real podman and helper give (test seams only).
+
+    `created_specs` keeps each CreateSpec, so a test can read the argv. `exec_errors` raises a
+    queued error once for one exact argv. `pull_error` is raised by the next pull, which stands in
+    for a kill during the download.
+    """
+
+    def __init__(self, *, root: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.root = root
+        self.created_specs: list[CreateSpec] = []
+        self.exec_errors: dict[tuple[str, ...], list[GinnError]] = {}
+        self.pull_error: BaseException | None = None
+        self.interrupt_after_create = False
+        self.interrupt_after_pull = False
+
+    def create(self, spec: CreateSpec) -> str:
+        self.created_specs.append(spec)
+        cid = super().create(spec)
+        if self.interrupt_after_create:
+            raise KeyboardInterrupt  # the container exists, and the call never returns its id
+        return cid
+
+    def pull(self, ref_with_digest: str, *, retry_hook: Any = None) -> ImageInfo:
+        if self.pull_error is not None:
+            self._record("pull", ref_with_digest)
+            raise self.pull_error
+        image = super().pull(ref_with_digest, retry_hook=retry_hook)
+        if self.interrupt_after_pull:
+            raise KeyboardInterrupt  # the image is stored, and the call never returns
+        return image
+
+    def exec(self, container_id: str, argv: Sequence[str], **kwargs: Any) -> ExecResult:
+        queued = self.exec_errors.get(tuple(argv))
+        if queued:
+            self.exec_users.append(kwargs.get("user"))
+            self._record("exec", container_id, tuple(argv))
+            raise queued.pop(0)
+        return super().exec(container_id, argv, **kwargs)
+
+    def unshare(self, argv: Sequence[str]) -> ExecResult:
+        if self.unshare_results:
+            return super().unshare(argv)
+        self._record("unshare", tuple(argv))
+        return ExecResult(0, _helper_rows(argv, self.root), "")
+
+
+@pytest.fixture
+def paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[OwnedPaths]:
+    """Owned Paths under tmp_path, with every XDG variable pinned (as in test_ops_mutating)."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "runtime").mkdir(mode=0o700)
+    monkeypatch.setenv("GINN_RUNTIME_DIR", str(tmp_path / "runtime"))
+    resolved = OwnedPaths.from_env(uid=os.getuid())
+    resolved.ensure()
+    yield resolved
+
+
+@pytest.fixture
+def host(tmp_path: Path) -> Path:
+    root = tmp_path / "host"
+    for scope in SCOPE:
+        (root / scope).mkdir(parents=True)
+    (root / "etc" / "hosts").write_text("127.0.0.1 localhost\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def env(paths: OwnedPaths, host: Path) -> OpEnv:
+    return OpEnv.for_paths(paths, USER, root_dir=host, clock=FakeClock())
+
+
+@pytest.fixture
+def home(tmp_path: Path) -> Path:
+    """The host home of the user. Under tmp_path, so it is outside Owned Paths."""
+    path = tmp_path / "home" / USER
+    path.mkdir(parents=True)
+    return path
+
+
+@pytest.fixture
+def fake(tmp_path: Path) -> ScriptedPodman:
+    return ScriptedPodman(root=str(tmp_path))
+
+
+@pytest.fixture
+def sleeps() -> list[float]:
+    return []
+
+
+@pytest.fixture(autouse=True)
+def host_identity_is_read_only_under_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """attach_at_start reads source identities with os.stat, not through a hook. Only tmp exists."""
+    real = attach.read_identity
+
+    def identity(host: str, *, mountinfo: Path = attach.MOUNTINFO) -> attach.SourceIdentity | None:
+        if not str(host).startswith(str(tmp_path)):
+            return None
+        return real(host, mountinfo=mountinfo)
+
+    monkeypatch.setattr(attach, "read_identity", identity)
+
+
+@pytest.fixture
+def mountinfo(tmp_path: Path) -> Path:
+    path = tmp_path / "mountinfo"
+    path.write_text(BASE_MOUNTINFO, encoding="utf-8")
+    return path
+
+
+class _AbsentProbe:
+    """A host with no NVIDIA driver: no proc file, no device, no library and no musl loader."""
+
+    def read_text(self, path: str) -> str | None:
+        return None
+
+    def glob(self, pattern: str) -> list[str]:
+        return []
+
+    def realpath(self, path: str) -> str:
+        return path
+
+    def char_device(self, path: str) -> tuple[int, int] | None:
+        return None
+
+    def which(self, name: str) -> str | None:
+        return None
+
+
+def hooks_for(
+    tmp_path: Path, sleeps: list[float], mountinfo: Path, **overrides: Any
+) -> CreateHooks:
+    """Hooks for a test. Only paths under tmp_path exist, so no host state changes a plan.
+
+    The NVIDIA probe answers as a host with no driver, so a test never reads the real driver.
+    """
+
+    def under_tmp(path: str) -> bool:
+        return str(path).startswith(str(tmp_path))
+
+    values: dict[str, Any] = {
+        "statvfs": _statvfs(AMPLE),
+        "sleep": sleeps.append,
+        "exists": under_tmp,
+        "mountinfo": mountinfo,
+        "security": SecurityHooks(nvidia_probe=_AbsentProbe()),
+    }
+    values.update(overrides)
+    return CreateHooks(**values)
+
+
+def request(
+    home: Path, name: str = "debian", distro: str = "debian", **kwargs: Any
+) -> CreateRequest:
+    """A request whose host session is empty: its runtime directory is an empty tmp directory."""
+    runtime = home.parent / "xdg-runtime"
+    runtime.mkdir(exist_ok=True)
+    host_env = {"XDG_RUNTIME_DIR": str(runtime), **kwargs.pop("host_env", {})}
+    return CreateRequest(
+        name=RealmName(name),
+        distro=distro,
+        uid=UID,
+        gid=GID,
+        host_home=home,
+        host_env=host_env,
+        **kwargs,
+    )
+
+
+def ops_of(fake: FakePodman) -> list[str]:
+    return [call.op for call in fake.calls]
+
+
+def execs(fake: FakePodman) -> list[list[str]]:
+    return [list(call.args[1]) for call in fake.calls if call.op == "exec"]  # type: ignore[misc]
+
+
+def create_entries(env: OpEnv, name: str = "debian") -> list[Any]:
+    return [entry for entry in env.audit.read() if entry.op == "create" and entry.realm == name]
+
+
+def assert_nothing_left(env: OpEnv, fake: FakePodman, name: str = "debian") -> None:
+    """No container, Realm Home, record, journal entry or pulled image is left behind."""
+    assert fake.containers == {}
+    assert not (env.paths.homes / name).exists()
+    assert not env.paths.realms.joinpath(f"{name}.json").exists()
+    assert env.journal.pending() == []
+    assert fake.images == {}
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-011")
+@pytest.mark.fr("AS-013")
+def test_a_clean_create_leaves_a_stopped_basic_realm_with_services_off(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    steps: list[str] = []
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append)
+    result = create_realm(env, fake, request(home), hooks=hooks)
+    record = result.record
+    entry = trust.load().entry("debian")
+    assert record.state is RealmState.STOPPED
+    assert record.settings.tier is Tier.BASIC
+    assert record.settings.services is False
+    assert record.settings.autostart is False
+    assert record.generation == 1
+    assert record.image_ref == trust.pull_reference("debian")
+    assert record.image_digest == entry.digest
+    assert record.container_id in fake.containers
+    assert [c.state for c in fake.containers.values()] == [ContainerState.EXITED]
+    assert RealmStore(env.paths).load(RealmName("debian")) == record
+    assert steps == list(STEPS)
+    assert env.journal.pending() == []
+    assert [(e.outcome, e.error_code) for e in create_entries(env)] == [("ok", None)]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_a_services_on_create_copies_the_run_user_drop_in_before_any_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.28, T716-1: the services-on container runs as root, so the runtime tmpfs stays `U`. The
+    realm user's owner line goes in with `podman cp` after the create and before any start."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == [f"/run/user/{UID}:mode=0700,U"]
+    content, mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
+    assert content == f"d /run/user/{UID} 0700 {UID} {GID} -\n".encode("ascii")
+    assert mode == 0o644
+    ops = ops_of(fake)
+    assert ops.index("create") < ops.index("cp_into")
+    assert "start" not in ops
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_the_drop_in_carries_the_realm_uid_and_gid_it_was_planned_for(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """T7.28: the uid and the gid are different numbers here, so the line must name each one."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    wanted = replace(request(home, services=True), uid=1001, gid=1002)
+    record = create_realm(env, fake, wanted, hooks=hooks).record
+    content, _mode = fake.containers[record.container_id].copied[RUN_USER_TMPFILES_PATH]
+    assert content == b"d /run/user/1001 0700 1001 1002 -\n"
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == ["/run/user/1001:mode=0700,U"]
+
+
+@pytest.mark.fr("FR-080")
+def test_the_drop_in_is_copied_as_a_directory_into_etc_after_the_machine_id(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """podman cp of the staged `tmpfiles.d` directory into `/etc/` makes or merges the directory."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    destinations = [call.args[1] for call in fake.calls if call.op == "cp_into"]
+    assert destinations == [MACHINE_ID_PATH, "/etc/"]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+def test_the_staged_drop_in_directory_is_0755_even_under_a_077_umask(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T7.28: under a 077 umask mkdir's 0755 would stage as 0700, and podman cp applies the staged
+    mode to /etc/tmpfiles.d. The mode is read at the copy, while the directory still exists."""
+    modes: list[int] = []
+    real_copy = fake.cp_into
+
+    def record_then_copy(container_id: str, src: Path, dst: str) -> None:
+        if dst == "/etc/":
+            modes.append(src.stat().st_mode & 0o777)
+        real_copy(container_id, src, dst)
+
+    monkeypatch.setattr(fake, "cp_into", record_then_copy)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    previous = os.umask(0o077)
+    try:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    finally:
+        os.umask(previous)
+    assert modes == [0o755]
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("FR-083")
+@pytest.mark.parametrize("failure", ["os-error", "ginn-error"])
+def test_a_failed_drop_in_copy_names_its_step_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Only the drop-in copy fails. The machine-id copy before it lands, and the create is refused
+    with GINN-E-INTERNAL naming the drop-in, with no container, record or pending journal entry."""
+    real_copy = fake.cp_into
+
+    def copy_fails_for_the_drop_in(container_id: str, src: Path, dst: str) -> None:
+        if dst != "/etc/":
+            real_copy(container_id, src, dst)
+            return
+        if failure == "os-error":
+            raise OSError(errno.EIO, "Input/output error")
+        raise make("GINN-E-INTERNAL")
+
+    monkeypatch.setattr(fake, "cp_into", copy_fails_for_the_drop_in)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    detail = caught.value.details["detail"]
+    assert isinstance(detail, str)
+    assert detail.startswith("tmpfiles.d drop-in: ")
+    if failure == "os-error":
+        assert detail == "tmpfiles.d drop-in: Input/output error"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-083")
+def test_a_services_off_create_copies_no_run_user_drop_in(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """Services off runs as the realm user, so `U` owns the runtime tmpfs. No drop-in is needed."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home), hooks=hooks).record
+    (spec,) = fake.created_specs
+    assert spec.tmpfs == [f"/run/user/{UID}:mode=0700,U"]
+    assert RUN_USER_TMPFILES_PATH not in fake.containers[record.container_id].copied
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    steps: list[str] = []
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=steps.append, program=GINN_PROGRAM)
+    result = create_realm(env, fake, request(home, services=True), hooks=hooks)
+    record = result.record
+    assert record.state is RealmState.STOPPED
+    assert record.settings.services is True
+    service = env.paths.sv / "debian"
+    assert sorted(p.name for p in service.iterdir()) == ["down", "finish", "run"]
+    assert record.container_id in fake.containers
+    assert [c.state for c in fake.containers.values()] == [ContainerState.CREATED]
+    assert record.grants == []
+    assert record.manifest == []
+    assert steps == list(SERVICES_STEPS)
+    assert {"start", "exec", "stop", "unshare"}.isdisjoint(ops_of(fake))
+    assert [w.code for w in result.warnings] == ["GINN-W-SERVICES-PENDING"]
+    (spec,) = fake.created_specs
+    argv = spec.to_argv()
+    assert "--systemd=always" in argv
+    assert "--init" not in argv
+    assert argv[-1] == "/sbin/init"
+    assert RealmStore(env.paths).load(RealmName("debian")) == record
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("NFR-003")
+@pytest.mark.fr("FR-080")
+def test_the_journald_drop_in_exists_before_podman_binds_it_at_create(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Podman reads a bind source when it creates the container, so ginn must write the drop-in
+    first (ADR-007 a). The fake checks the source at the call, as podman would."""
+    seen: list[bool] = []
+    original = fake.create
+
+    def create_checking_source(spec: CreateSpec) -> str:
+        seen.append(journald_dropin(env.paths).is_file())
+        return original(spec)
+
+    monkeypatch.setattr(fake, "create", create_checking_source)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert seen == [True]
+    assert "source=" + str(journald_dropin(env.paths)) in " ".join(fake.created_specs[0].to_argv())
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-080")
+def test_a_services_on_create_with_packages_is_refused_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            request(home, services=True, with_packages=("htop",)),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert (
+        "--with packages on a services-on create (the CLI cannot start a services-on container, "
+        "ADR-003) arrives in ginn install, after the realm's first supervised start"
+        in caught.value.message
+    )
+    assert fake.calls == []
+    assert not (env.paths.homes / "debian").exists()
+    assert create_entries(env) == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-011")
+@pytest.mark.fr("FR-013")
+def test_pull_then_create_then_start_then_root_steps_then_stop_in_that_order(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    ops = ops_of(fake)
+    assert ops.index("image_exists") < ops.index("pull") < ops.index("create")
+    assert ops.index("create") < ops.index("start") < ops.index("exec") < ops.index("stop")
+    assert fake.ops().count("pull") == 1
+    assert fake.exec_users == ["0:0", "0:0", "0:0"]
+    assert execs(fake) == [
+        ["getent", "passwd", str(UID)],
+        ["apt-get", "update"],
+        ["apt-get", "--yes", "--no-install-recommends", "install", "ca-certificates", "locales"],
+    ]
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-048")
+def test_the_realm_user_is_the_passwd_entry_podman_writes_and_no_useradd_runs(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    argv = fake.created_specs[0].to_argv()
+    assert argv[argv.index("--passwd-entry") + 1] == f"alice:*:1000:1000:alice:{home}:/bin/bash"
+    assert "--passwd=false" not in argv
+    assert not any("useradd" in token for call in execs(fake) for token in call)
+    assert execs(fake)[0] == ["getent", "passwd", str(UID)]
+    assert fake.exec_users[0] == "0:0"
+
+
+@pytest.mark.fr("FR-013")
+def test_the_locale_steps_follow_the_host_lang(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    host_env = {"LANG": "en_US.UTF-8"}
+    result = create_realm(
+        env, fake, request(home, host_env=host_env), hooks=hooks_for(tmp_path, sleeps, mountinfo)
+    )
+    assert execs(fake)[-1] == ["localedef", "-i", "en_US", "-f", "UTF-8", "en_US.UTF-8"]
+    assert result.locale_note is None
+
+
+@pytest.mark.fr("FR-013")
+def test_integrate_false_runs_no_refresh_and_no_package_step(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The host gate's seam (T4.9, Gate 3): no refresh, no integration package, no locale step."""
+    result = create_realm(
+        env,
+        fake,
+        request(home),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, integrate=False),
+    )
+    assert result.record.state == RealmState.STOPPED
+    assert not any("apt-get" in argv or "localedef" in argv for argv in execs(fake))
+    assert not any("install" in argv or "update" in argv for argv in execs(fake))
+
+
+@pytest.mark.fr("FR-013")
+def test_integrate_false_reports_no_locale_note_even_for_an_unusable_lang(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """With integrate=False the locale note is not set: no locale step was decided or run."""
+    result = create_realm(
+        env,
+        fake,
+        request(home, host_env={"LANG": "en.UTF-8"}),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, integrate=False),
+    )
+    assert result.locale_note is None
+    assert not any("localedef" in argv for argv in execs(fake))
+
+
+@pytest.mark.fr("FR-013")
+def test_an_unusable_host_lang_is_reported_and_the_create_goes_on(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    result = create_realm(
+        env,
+        fake,
+        request(home, host_env={"LANG": "en.UTF-8"}),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    assert result.locale_note is not None
+    assert "en.UTF-8" in result.locale_note
+    assert not any("localedef" in argv for argv in execs(fake))
+    assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-013")
+@pytest.mark.parametrize(
+    ("distro", "lang", "install"),
+    [
+        ("arch", None, ["pacman", "--sync", "--needed", "--noconfirm", "ca-certificates"]),
+        (
+            "debian",
+            None,
+            [
+                "apt-get",
+                "--yes",
+                "--no-install-recommends",
+                "install",
+                "ca-certificates",
+                "locales",
+            ],
+        ),
+        # The Fedora langpack needs a LANG, so with none set the Integration Package Set is empty.
+        ("fedora", None, None),
+        (
+            "fedora",
+            "en_US.UTF-8",
+            [
+                "dnf",
+                "--assumeyes",
+                "--setopt=install_weak_deps=False",
+                "install",
+                "glibc-langpack-en",
+            ],
+        ),
+    ],
+)
+def test_the_integration_set_is_the_only_addition_on_each_distribution(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    distro: str,
+    lang: str | None,
+    install: list[str] | None,
+) -> None:
+    host_env = {} if lang is None else {"LANG": lang}
+    create_realm(
+        env,
+        fake,
+        request(home, name=distro, distro=distro, host_env=host_env),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    refresh = load_distro(distro).argv(Verb.REFRESH)
+    assert execs(fake)[1] == refresh
+    if install is None:
+        assert len(execs(fake)) == 2
+    else:
+        assert execs(fake)[2] == install
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-011")
+@pytest.mark.fr("AS-027")
+def test_with_packages_install_after_the_integration_set(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(
+        env,
+        fake,
+        request(home, with_packages=("htop",)),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    assert execs(fake)[-1] == ["apt-get", "--yes", "--no-install-recommends", "install", "htop"]
+    assert create_entries(env)[0].params["with"] == ["htop"]
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("NFR-SEC-005")
+def test_an_invalid_package_name_is_refused_before_any_podman_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            request(home, with_packages=("gimp*",)),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert caught.value.code == "GINN-E-PKG-NAME-INVALID"
+    assert fake.calls == []
+    assert not (env.paths.homes / "debian").exists()
+    assert create_entries(env) == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize(
+    ("name", "distro", "kwargs", "expected"),
+    [
+        ("debian", "debian", {"everything": True}, GinnError),
+        ("nosuch", "nosuch", {}, GinnError),
+    ],
+)
+def test_requests_the_code_does_not_support_are_refused_with_no_side_effect(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    name: str,
+    distro: str,
+    kwargs: dict[str, Any],
+    expected: type[BaseException],
+) -> None:
+    with pytest.raises(expected):
+        create_realm(
+            env,
+            fake,
+            request(home, name=name, distro=distro, **kwargs),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert fake.calls == []
+    assert create_entries(env, name) == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("NFR-SEC-005")
+def test_a_user_name_that_a_realm_user_cannot_take_is_refused_before_any_podman_call(
+    paths: OwnedPaths,
+    host: Path,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    bad_env = OpEnv.for_paths(paths, "-rf /", root_dir=host, clock=FakeClock())
+    with pytest.raises(GinnError) as caught:
+        create_realm(bad_env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert caught.value.details["realm"] == "debian"
+    assert "'-rf /'" in caught.value.details["detail"]
+    assert fake.calls == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-015")
+def test_a_taken_name_is_refused_and_the_existing_realm_stays_byte_identical(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    create_realm(env, fake, request(home), hooks=hooks)
+    record_path = env.paths.realms / "debian.json"
+    before = record_path.read_bytes()
+    home_before = sorted(p.name for p in (env.paths.homes / "debian").iterdir())
+    calls_before = len(fake.calls)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-NAME-TAKEN"
+    assert caught.value.exit_code == 4
+    assert record_path.read_bytes() == before
+    assert sorted(p.name for p in (env.paths.homes / "debian").iterdir()) == home_before
+    assert len(fake.calls) == calls_before
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-010")
+def test_a_realm_home_without_a_record_also_takes_the_name(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    (env.paths.homes / "debian").mkdir(parents=True)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-NAME-TAKEN"
+    assert fake.calls == []
+
+
+@pytest.mark.fr("FR-015")
+def test_two_realms_of_one_distribution_have_separate_homes_and_containers(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    first = create_realm(env, fake, request(home), hooks=hooks).record
+    second = create_realm(env, fake, request(home, name="debian-dev"), hooks=hooks).record
+    assert first.name != second.name
+    assert (env.paths.homes / "debian").is_dir()
+    assert (env.paths.homes / "debian-dev").is_dir()
+    names = sorted(spec.name for spec in fake.created_specs)
+    assert names == ["ginn-debian-dev-g1", "ginn-debian-g1"]
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("AS-023")
+def test_free_space_below_the_estimate_refuses_before_any_download(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    needed = required_bytes(trust.load().entry("debian"))
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed - 1))
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.exit_code == 73
+    assert caught.value.details["needed"] == f"{needed} bytes"
+    assert caught.value.details["path"] == str(env.paths.podman_root)
+    assert "pull" not in ops_of(fake)
+    assert "create" not in ops_of(fake)
+    assert_nothing_left(env, fake)
+    assert [e.error_code for e in create_entries(env)] == ["GINN-E-DISK-SPACE"]
+
+
+@pytest.mark.fr("FR-121")
+def test_free_space_equal_to_the_estimate_times_1_10_is_enough(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    needed = required_bytes(trust.load().entry("debian"))
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, statvfs=_statvfs(needed))
+    result = create_realm(env, fake, request(home), hooks=hooks)
+    assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-121")
+def test_the_space_check_covers_the_podman_root_and_the_realm_home(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both filesystems that the create fills are checked, each with the same requirement."""
+    checked: list[tuple[list[Path], int]] = []
+
+    def record(paths: Sequence[Path], required: int, **_: object) -> None:
+        checked.append((list(paths), required))
+
+    monkeypatch.setattr(create_ops, "check_free_paths", record)
+    create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert checked == [
+        ([env.paths.podman_root, env.paths.homes], required_bytes(trust.load().entry("debian")))
+    ]
+
+
+@pytest.mark.fr("FR-121")
+def test_the_base_requirement_is_the_estimate_rounded_up_after_the_factor() -> None:
+    entry = trust.load().entry("debian")
+    estimate = entry.compressed_size_bytes + entry.estimated_installed_bytes
+    assert required_bytes(entry) == estimate_required(estimate)
+    assert required_bytes(entry) == (estimate * 110 + 99) // 100
+
+
+KALI_LISTING = (
+    "kali-linux-everything\n"
+    "  Depends: alpha\n"
+    "  Depends: <virtual-thing>\n"
+    "alpha\n"
+    "  Depends: beta\n"
+    "<virtual-thing>\n"
+    "beta\n"
+)
+"""An `apt-cache depends --recurse` listing: names at column 0, the dependency lines indented, and
+a virtual package in angle brackets."""
+KALI_SHOW = (
+    "Package: kali-linux-everything\nVersion: 2026.3\nSize: 1000\nInstalled-Size: 1\n\n"
+    "Package: alpha\nVersion: 1.0\nSize: 2000\nInstalled-Size: 2\n\n"
+    "Package: beta\nVersion: 1.0\nSize: 3000\nInstalled-Size: 3\n"
+)
+"""The `apt-cache show` stanzas of that closure. Size is in bytes and Installed-Size in KiB."""
+EVERYTHING_DOWNLOAD = 1000 + 2000 + 3000
+EVERYTHING_INSTALLED = (1 + 2 + 3) * 1024
+EVERYTHING_TOTAL = EVERYTHING_DOWNLOAD + EVERYTHING_INSTALLED
+
+
+def _everything_request(home: Path, **kwargs: Any) -> CreateRequest:
+    return request(home, name="kali", distro="kali", everything=True, **kwargs)
+
+
+def _kali_everything_answers(fake: ScriptedPodman) -> None:
+    """The realm's package-list answers for the Kali everything closure (one chunk)."""
+    kali = load_distro("kali")
+    fake.exec_results[tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))] = ExecResult(
+        0, KALI_LISTING, ""
+    )
+    fake.exec_results[
+        tuple(kali.argv(Verb.ESTIMATE, ["kali-linux-everything", "alpha", "beta"]))
+    ] = ExecResult(0, KALI_SHOW, "")
+
+
+@pytest.mark.fr("FR-026")
+@pytest.mark.fr("FR-027")
+def test_a_kali_realm_runs_on_pasta_and_adds_only_net_raw(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    result = create_realm(
+        env,
+        fake,
+        request(home, name="kali", distro="kali"),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    assert result.record.state is RealmState.STOPPED
+    (spec,) = fake.created_specs
+    argv = spec.to_argv()
+    assert argv[argv.index("--network") + 1] == "pasta"
+    assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--cap-add"] == ["NET_RAW"]
+    assert "--privileged" not in argv
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.fr("FR-121")
+def test_the_everything_set_is_estimated_then_confirmed_then_installed(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    _kali_everything_answers(fake)
+    prompts: list[str] = []
+    steps: list[str] = []
+
+    def answer_yes(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, confirm=answer_yes, on_step=steps.append)
+    result = create_realm(env, fake, _everything_request(home), hooks=hooks)
+    assert result.estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    (prompt,) = prompts
+    assert "kali-linux-everything" in prompt and "3 packages" in prompt
+    kali = load_distro("kali")
+    assert kali.argv(Verb.INSTALL, ["kali-linux-everything"]) in execs(fake)
+    assert steps.index("integrated") < steps.index("estimated")
+    assert steps.index("estimated") < steps.index("everything") < steps.index("packages")
+    (name,) = RealmStore(env.paths).list_names()
+    record = RealmStore(env.paths).load(name)
+    assert record.manifest == [
+        ManifestEntry(
+            name="kali-linux-everything", source=InstallSource.REPO, method=InstallMethod.GINN
+        )
+    ]
+    assert record.settings.everything is True
+
+
+def _no(_prompt: str) -> bool:
+    return False
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize("confirm", [None, _no], ids=["no-confirm-hook", "answered-no"])
+def test_without_a_yes_the_everything_set_is_not_installed_and_the_realm_is_rolled_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    confirm: Callable[[str], bool] | None,
+) -> None:
+    _kali_everything_answers(fake)
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            _everything_request(home),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=confirm),
+        )
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    kali = load_distro("kali")
+    assert kali.argv(Verb.INSTALL, ["kali-linux-everything"]) not in execs(fake)
+    assert_nothing_left(env, fake, name="kali")
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.fr("FR-014")
+def test_a_short_disk_for_the_everything_set_is_refused_before_the_prompt(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The base image fits, then the disk fills while the realm is refreshed: the estimate of the
+    everything set is checked against what is left, before anyone is asked."""
+    _kali_everything_answers(fake)
+    free = [AMPLE]
+
+    def fill_after_integration(step: str) -> None:
+        if step == "integrated":
+            free[0] = estimate_required(EVERYTHING_TOTAL) - 1
+
+    prompts: list[str] = []
+
+    def answer_yes(prompt: str) -> bool:
+        prompts.append(prompt)
+        return True
+
+    hooks = hooks_for(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        statvfs=lambda _path: _Vfs(free[0]),
+        on_step=fill_after_integration,
+        confirm=answer_yes,
+    )
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, _everything_request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-DISK-SPACE"
+    assert caught.value.details["needed"] == f"{estimate_required(EVERYTHING_TOTAL)} bytes"
+    assert prompts == []
+    assert_nothing_left(env, fake, name="kali")
+
+
+@pytest.mark.fr("FR-014")
+def test_the_everything_closure_is_read_in_chunks_and_the_totals_add_up(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The closure is read by ops/estimate.py, which the create and the estimate share.
+    monkeypatch.setattr(estimate_ops, "EVERYTHING_CHUNK", 2)
+    kali = load_distro("kali")
+    fake.exec_results[tuple(kali.argv(Verb.RESOLVE, ["kali-linux-everything"]))] = ExecResult(
+        0, KALI_LISTING, ""
+    )
+    for chunk in (["kali-linux-everything", "alpha"], ["beta"]):
+        fake.exec_results[tuple(kali.argv(Verb.ESTIMATE, chunk))] = ExecResult(0, KALI_SHOW, "")
+    result = create_realm(
+        env,
+        fake,
+        _everything_request(home),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=lambda _prompt: True),
+    )
+    assert result.estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    assert kali.argv(Verb.ESTIMATE, ["beta"]) in execs(fake)
+
+
+@pytest.mark.fr("FR-014")
+def test_everything_on_a_services_on_realm_is_refused_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    _kali_everything_answers(fake)
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            _everything_request(home, services=True),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo, confirm=_no),
+        )
+    assert caught.value.code == "GINN-E-NOT-SUPPORTED-YET"
+    assert fake.calls == []
+    assert create_entries(env, "kali") == []
+
+
+@pytest.mark.fr("FR-014")
+def test_the_closure_names_are_the_column_zero_packages_once_in_order() -> None:
+    pattern = load_distro("kali").name_pattern
+    names = _create_plan.closure_names(KALI_LISTING, pattern, realm="kali", step="estimate")
+    assert names == ["kali-linux-everything", "alpha", "beta"]
+
+
+@pytest.mark.fr("FR-014")
+def test_a_closure_name_the_pattern_rejects_and_an_empty_listing_are_refused() -> None:
+    pattern = load_distro("kali").name_pattern
+    with pytest.raises(GinnError) as caught:
+        _create_plan.closure_names("Bad_Name\n", pattern, realm="kali", step="estimate")
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    with pytest.raises(GinnError) as empty:
+        _create_plan.closure_names("", pattern, realm="kali", step="estimate")
+    assert empty.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-014")
+def test_size_is_bytes_and_installed_size_is_kib_and_each_package_counts_once() -> None:
+    names = ["kali-linux-everything", "alpha", "beta"]
+    estimate = _create_plan.size_totals(KALI_SHOW, names, realm="kali", step="estimate")
+    assert estimate == SizeEstimate(
+        packages=3, download_bytes=EVERYTHING_DOWNLOAD, installed_bytes=EVERYTHING_INSTALLED
+    )
+    repeated = KALI_SHOW + "\nPackage: alpha\nSize: 9\nInstalled-Size: 9\n"
+    again = _create_plan.size_totals(repeated, ["alpha"], realm="kali", step="estimate")
+    assert again == SizeEstimate(packages=1, download_bytes=2000, installed_bytes=2 * 1024)
+
+
+@pytest.mark.fr("FR-014")
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Package: alpha\nSize: 2000\n",
+        "Package: alpha\nSize: 2000\nInstalled-Size: many\n",
+        "Package: beta\nSize: 3000\nInstalled-Size: 3\n",
+    ],
+    ids=["no-installed-size", "bad-installed-size", "no-stanza-for-the-name"],
+)
+def test_a_missing_size_is_refused_and_never_counted_as_zero(text: str) -> None:
+    with pytest.raises(GinnError) as caught:
+        _create_plan.size_totals(text, ["alpha"], realm="kali", step="estimate")
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+
+
+@pytest.mark.fr("FR-121")
+@pytest.mark.parametrize(
+    ("count", "text"),
+    [
+        (0, "0 bytes"),
+        (1023, "1023 bytes"),
+        (1024, "1.0 KiB"),
+        (1536 * 1024, "1.5 MiB"),
+        (2 * 1024**3, "2.0 GiB"),
+    ],
+)
+def test_human_bytes_uses_the_largest_binary_unit_that_keeps_one_or_more(
+    count: int, text: str
+) -> None:
+    assert _create_plan.human_bytes(count) == text
+
+
+@pytest.mark.fr("FR-011")
+@pytest.mark.fr("NFR-SEC-004")
+def test_a_pull_is_by_the_pinned_digest_and_never_by_tag(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    pulls = [call.args[0] for call in fake.calls if call.op == "pull"]
+    assert pulls == [trust.pull_reference("debian")]
+    assert "@sha256:" in str(pulls[0])
+
+
+@pytest.mark.fr("FR-011")
+def test_a_digest_mismatch_removes_the_image_and_leaves_no_record(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.pull_digest_override = "sha256:" + "0" * 64
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-IMAGE-UNVERIFIED"
+    assert caught.value.exit_code == 65
+    assert "rmi" in ops_of(fake)
+    assert "create" not in ops_of(fake)
+    assert_nothing_left(env, fake)
+    assert [e.error_code for e in create_entries(env)] == ["GINN-E-IMAGE-UNVERIFIED"]
+
+
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("AS-023")
+def test_network_failure_retries_three_times_with_5_15_and_45_seconds_then_rolls_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.fail_pull_with = "GINN-E-NETWORK"
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-NETWORK"
+    assert caught.value.exit_code == 69
+    assert ops_of(fake).count("pull") == 4
+    assert sleeps == [5.0, 15.0, 45.0]
+    assert_nothing_left(env, fake)
+    assert [e.error_code for e in create_entries(env)] == ["GINN-E-NETWORK"]
+
+
+@pytest.mark.fr("FR-120")
+def test_a_network_failure_that_clears_on_the_third_attempt_completes_the_create(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.fail_pull_with = "GINN-E-NETWORK"
+    fake.fail_pull_times = 2
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert result.record.state is RealmState.STOPPED
+    assert ops_of(fake).count("pull") == 3
+    assert sleeps == [5.0, 15.0]
+
+
+@pytest.mark.fr("FR-120")
+def test_a_network_error_raised_by_exec_is_retried_before_the_step_runs_again(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.exec_errors[("apt-get", "update")] = [make("GINN-E-NETWORK")]
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert result.record.state is RealmState.STOPPED
+    assert sleeps == [5.0]
+    assert execs(fake).count(["apt-get", "update"]) == 2
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-120")
+@pytest.mark.fr("DR-018")
+@pytest.mark.parametrize("failing_step", STEPS)
+def test_a_ginn_error_after_any_step_rolls_back_every_artifact(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    failing_step: str,
+) -> None:
+    def fail_at(step: str) -> None:
+        if step == failing_step:
+            raise make("GINN-E-INTERNAL")
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert_nothing_left(env, fake)
+    entries = create_entries(env)
+    assert [(e.outcome, e.error_code) for e in entries] == [("error", "GINN-E-INTERNAL")]
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("DR-018")
+@pytest.mark.parametrize("cancel_step", STEPS)
+def test_a_cancel_rolls_back_then_reports_interrupted_and_finishes_the_journal(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    cancel_step: str,
+) -> None:
+    def cancel_at(step: str) -> None:
+        if step == cancel_step:
+            raise KeyboardInterrupt
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=cancel_at)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert caught.value.exit_code == 130
+    assert isinstance(caught.value.__cause__, KeyboardInterrupt)
+    assert_nothing_left(env, fake)
+    assert [(e.outcome, e.error_code) for e in create_entries(env)] == [
+        ("error", "GINN-E-INTERRUPTED")
+    ]
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("NFR-030")
+def test_an_unexpected_exception_rolls_nothing_back_and_keeps_the_journal_entry(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    def crash_at(step: str) -> None:
+        if step == "created":
+            raise RuntimeError("simulated crash after create")
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=crash_at)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert len(fake.containers) == 1
+    assert (env.paths.homes / "debian").is_dir()
+    assert RealmStore(env.paths).load(RealmName("debian")).state is RealmState.CREATING
+    pending = env.journal.pending()
+    assert [(entry.op, entry.step) for entry in pending] == [("create", "created")]
+    assert [e.error_code for e in create_entries(env)] == [None]
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("FR-011")
+def test_a_kill_during_the_pull_leaves_a_creating_record_for_recovery(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.pull_error = RuntimeError("simulated kill during the download")
+    with pytest.raises(RuntimeError):
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert RealmStore(env.paths).load(RealmName("debian")).state is RealmState.CREATING
+    assert [entry.op for entry in env.journal.pending()] == ["create"]
+
+
+@pytest.mark.fr("FR-122")
+@pytest.mark.fr("DR-020")
+def test_a_rollback_step_that_fails_keeps_the_error_and_marks_the_record_broken(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+
+    def fail_at(step: str) -> None:
+        if step == "created":
+            raise make("GINN-E-PKG-MANAGER", realm="debian")
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert any(note.startswith("rollback: container:") for note in caught.value.__notes__)
+    assert RealmStore(env.paths).load(RealmName("debian")).state is RealmState.BROKEN
+    assert len(fake.containers) == 1
+    assert not (env.paths.homes / "debian").exists()
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("DR-018")
+def test_an_image_that_was_already_present_is_kept_when_the_create_fails(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    ref = trust.pull_reference("debian")
+    fake.images[ref] = ImageInfo(
+        id="0" * 64,
+        digest=trust.load().entry("debian").digest,
+        repo_digests=(ref,),
+        size=1,
+        created="",
+    )
+
+    def fail_at(step: str) -> None:
+        if step == "created":
+            raise make("GINN-E-INTERNAL")
+
+    with pytest.raises(GinnError):
+        create_realm(
+            env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at)
+        )
+    assert "rmi" not in ops_of(fake)
+    assert ref in fake.images
+
+
+@pytest.mark.fr("FR-010")
+def test_a_container_that_names_the_pulled_image_by_its_digest_keeps_it_on_rollback(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The rollback of a create removes the image it pulled, unless a container uses it. Podman
+    shows an image by name, digest or id, so a container that names only the pinned digest uses it
+    (ops/images.py `uses_image`). An equality test would miss it and remove the image."""
+    ref = trust.pull_reference("debian")
+    digest = trust.load().entry("debian").digest
+    stray = f"mirror.example.org/debian@{digest}"
+
+    def fail_at(step: str) -> None:
+        if step == "pulled":
+            fake.create(
+                CreateSpec(name="stray-user", image_digest_ref=stray, network="pasta", labels={})
+            )
+        if step == "created":
+            raise make("GINN-E-INTERNAL")
+
+    with pytest.raises(GinnError):
+        create_realm(
+            env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at)
+        )
+    assert "rmi" not in ops_of(fake)
+    assert ref in fake.images
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("DR-018")
+@pytest.mark.parametrize(
+    ("answer", "fragment"),
+    [
+        (ExecResult(2, "", ""), "getent passwd exited 2"),
+        (ExecResult(127, "", ""), "getent passwd exited 127"),
+        # The entry podman writes when no --passwd-entry is sent: home / and shell /bin/sh.
+        (
+            ExecResult(0, "alice:*:1000:1000:Alice:/:/bin/sh\n", ""),
+            "found 'alice:*:1000:1000:Alice:/:/bin/sh'",
+        ),
+    ],
+)
+def test_a_realm_user_that_is_not_the_entry_sent_is_refused_and_rolls_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    answer: ExecResult,
+    fragment: str,
+) -> None:
+    fake.exec_results[("getent", "passwd", str(UID))] = answer
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert caught.value.details["realm"] == "debian"
+    assert fragment in caught.value.details["detail"]
+    assert caught.value.details["expected"] == f"alice:*:1000:1000:alice:{home}:/bin/bash"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-048")
+@pytest.mark.fr("NFR-SEC-005")
+@pytest.mark.parametrize("name", ["a$b", "a:b", "a\nb"])
+def test_a_host_home_the_passwd_entry_cannot_carry_is_refused_before_any_podman_call(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    name: str,
+) -> None:
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env, fake, request(home.parent / name), hooks=hooks_for(tmp_path, sleeps, mountinfo)
+        )
+    assert caught.value.code == "GINN-E-REALM-USER"
+    assert "must not be empty or hold" in caught.value.details["detail"]
+    assert fake.calls == []
+
+
+@pytest.mark.fr("FR-012")
+@pytest.mark.fr("FR-010")
+def test_a_signature_failure_in_a_package_step_maps_to_pkg_signature(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    argv = ("apt-get", "--yes", "--no-install-recommends", "install", "htop")
+    fake.exec_results[argv] = ExecResult(
+        100, "", "W: GPG error\nNO_PUBKEY 0123456789ABCDEF signatures were invalid\n"
+    )
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            request(home, with_packages=("htop",)),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert caught.value.code == "GINN-E-PKG-SIGNATURE"
+    assert caught.value.exit_code == 65
+    assert caught.value.details["step"] == "with"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-040")
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("DR-018")
+def test_a_failed_package_step_maps_to_pkg_manager_with_the_decisive_line(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    argv = ("apt-get", "--yes", "--no-install-recommends", "install", "htop")
+    fake.exec_results[argv] = ExecResult(100, "", "E: Unable to locate package htop\n")
+    with pytest.raises(GinnError) as caught:
+        create_realm(
+            env,
+            fake,
+            request(home, with_packages=("htop",)),
+            hooks=hooks_for(tmp_path, sleeps, mountinfo),
+        )
+    assert caught.value.code == "GINN-E-PKG-MANAGER"
+    assert caught.value.exit_code == 1
+    assert caught.value.details["detail"] == "E: Unable to locate package htop"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-012")
+@pytest.mark.fr("NFR-SEC-001")
+@pytest.mark.parametrize("distro", ["arch", "debian", "fedora"])
+def test_no_signature_check_is_disabled_and_no_capability_is_added(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    distro: str,
+) -> None:
+    create_realm(
+        env,
+        fake,
+        request(home, name=distro, distro=distro, with_packages=("htop",)),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    for argv in execs(fake):
+        assert not FORBIDDEN_TOKENS.intersection(argv), argv
+        assert not any(sub in token for token in argv for sub in FORBIDDEN_SUBSTRINGS), argv
+    for spec in fake.created_specs:
+        argv = spec.to_argv()
+        assert "--privileged" not in argv
+        assert "--cap-add" not in argv
+        assert spec.caps_add == []
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-064")
+@pytest.mark.fr("FR-066")
+def test_a_present_download_folder_is_attached_and_its_grant_is_recorded(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    (home / "Downloads").mkdir()
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    grants = {grant.realm: grant for grant in result.record.grants}
+    downloads = grants[str(home / "Downloads")]
+    assert downloads.identity is not None
+    assert downloads.mode == "rw"
+    assert "unshare" in ops_of(fake)
+    assert "share skipped: /run/media/alice (missing)" in result.record.share_skipped
+    reloaded = RealmStore(env.paths).load(RealmName("debian"))
+    assert reloaded.grants == result.record.grants
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-064")
+def test_a_failed_attach_stops_the_realm_and_rolls_back_the_create(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    (home / "Downloads").mkdir()
+    fake.unshare_results.append(ExecResult(1, "", "ginn-rebind: boom\n"))
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-ATTACH-FAILED"
+    ops = ops_of(fake)
+    unshare_at = ops.index("unshare")
+    assert ops[unshare_at + 1 :][:3] == ["ps", "stop", "rm"]
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-010")
+def test_a_stop_failure_at_the_end_rolls_the_whole_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.fail_ops["stop"] = "GINN-E-INTERNAL"
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-124")
+@pytest.mark.fr("FR-010")
+def test_the_audit_entry_names_the_distribution_tier_services_and_packages(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(
+        env,
+        fake,
+        request(home, with_packages=("htop",)),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    (entry,) = create_entries(env)
+    assert entry.outcome == "ok"
+    assert entry.params["distro"] == "debian"
+    assert entry.params["tier"] == "basic"
+    assert entry.params["services"] is False
+    assert entry.params["with"] == ["htop"]
+    assert entry.user == USER
+
+
+@pytest.mark.fr("FR-010")
+def test_a_create_returns_its_result_type_and_no_host_warning_when_nothing_changed(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert isinstance(result, CreateResult)
+    assert result.warnings == []
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("FR-122")
+def test_a_cancel_whose_rollback_fails_keeps_the_notes_and_marks_the_record_broken(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.fail_ops["rm"] = "GINN-E-INTERNAL"
+
+    def cancel_at(step: str) -> None:
+        if step == "created":
+            raise KeyboardInterrupt
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=cancel_at)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert any(note.startswith("rollback: container:") for note in caught.value.__notes__)
+    assert RealmStore(env.paths).load(RealmName("debian")).state is RealmState.BROKEN
+    assert len(fake.containers) == 1
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("DR-018")
+@pytest.mark.parametrize("failing_op", ["create", "start", "inspect", "stop"])
+def test_a_failure_of_any_podman_call_in_the_body_rolls_the_whole_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    failing_op: str,
+) -> None:
+    fake.fail_ops[failing_op] = "GINN-E-INTERNAL"
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert_nothing_left(env, fake)
+    assert [(e.outcome, e.error_code) for e in create_entries(env)] == [
+        ("error", "GINN-E-INTERNAL")
+    ]
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("DR-018")
+def test_an_interrupt_inside_the_create_call_leaves_nothing(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """The container exists, but the id was never kept. The undo still finds it by its labels."""
+    fake.interrupt_after_create = True
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert len(fake.created_specs) == 1
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("DR-018")
+@pytest.mark.parametrize("stored", [False, True], ids=["before-store", "after-store"])
+def test_an_interrupt_during_the_pull_leaves_nothing(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    stored: bool,
+) -> None:
+    if stored:
+        fake.interrupt_after_pull = True
+    else:
+        fake.pull_error = KeyboardInterrupt()
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("DR-018")
+def test_an_interrupt_inside_the_realm_home_mkdir_leaves_nothing(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The directory is made, and then the call is interrupted before it returns."""
+    real_mkdir = Path.mkdir
+
+    def mkdir_then_interrupt(self: Path, *args: Any, **kwargs: Any) -> None:
+        real_mkdir(self, *args, **kwargs)
+        if self.name == "debian":
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_then_interrupt)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("AS-018")
+@pytest.mark.fr("DR-018")
+def test_an_interrupt_just_after_the_creating_record_is_written_leaves_nothing(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record file is written, and then the call is interrupted before the store returns."""
+    real_save = RealmStore.save
+
+    def save_then_interrupt(self: RealmStore, record: RealmRecord) -> None:
+        real_save(self, record)
+        if record.state is RealmState.CREATING and record.container_id is None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(RealmStore, "save", save_then_interrupt)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-INTERRUPTED"
+    assert_nothing_left(env, fake)
+
+
+@pytest.mark.fr("FR-015")
+@pytest.mark.fr("FR-123")
+def test_a_second_create_of_the_same_distribution_is_refused_while_one_holds_the_image(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    with image_lock(env.paths, "debian", "create of debian image"):
+        with pytest.raises(GinnError) as caught:
+            create_realm(env, fake, request(home, name="debian-dev"), hooks=hooks)
+        assert caught.value.code == "GINN-E-REALM-BUSY"
+        assert caught.value.exit_code == 75
+        assert fake.calls == []
+        assert not (env.paths.homes / "debian-dev").exists()
+    result = create_realm(env, fake, request(home, name="debian-dev"), hooks=hooks)
+    assert result.record.state is RealmState.STOPPED
+
+
+@pytest.mark.fr("FR-010")
+@pytest.mark.fr("DR-007")
+def test_with_packages_are_recorded_in_the_install_manifest_as_ginn_installs(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    create_realm(
+        env,
+        fake,
+        request(home, with_packages=("htop", "vim")),
+        hooks=hooks_for(tmp_path, sleeps, mountinfo),
+    )
+    (name,) = RealmStore(env.paths).list_names()
+    record = RealmStore(env.paths).load(name)
+    assert record.manifest == [
+        ManifestEntry(name="htop", source=InstallSource.REPO, method=InstallMethod.GINN),
+        ManifestEntry(name="vim", source=InstallSource.REPO, method=InstallMethod.GINN),
+    ]
+
+
+SECCOMP_SOURCE = {
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "syscalls": [
+        {
+            "names": ["sethostname", "setdomainname"],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [],
+            "includes": {"caps": ["CAP_SYS_ADMIN"]},
+        },
+        {"names": ["read"], "action": "SCMP_ACT_ALLOW", "args": []},
+    ],
+}
+NESTED_OPTIONS = [
+    "device=/dev/fuse",
+    "device=/dev/kvm",
+    "device=/dev/net/tun",
+    "group-add=keep-groups",
+    "security-opt=seccomp",
+    "security-opt=unmask",
+]
+
+
+def _seccomp_source(tmp_path: Path) -> Path:
+    source = tmp_path / "containers-seccomp.json"
+    source.write_text(json.dumps(SECCOMP_SOURCE), encoding="utf-8")
+    return source
+
+
+NESTED_HOST_DEVICES = ("/dev/fuse", "/dev/net/tun")
+
+
+def _kvm_hooks(
+    tmp_path: Path, sleeps: list[float], mountinfo: Path, *, kvm: bool = True, **overrides: Any
+) -> CreateHooks:
+    """Hooks for a host with `/dev/kvm` and the nested devices, and a fixture profile source.
+
+    `kvm` False is a host without `/dev/kvm`. Every other path answers as `tmp_path` does.
+    """
+    base = hooks_for(tmp_path, sleeps, mountinfo, **overrides)
+    under_tmp = base.exists
+
+    def exists(path: str) -> bool:
+        if path in NESTED_HOST_DEVICES:
+            return True
+        return (kvm and path == "/dev/kvm") or under_tmp(path)
+
+    return replace(base, exists=exists)
+
+
+@pytest.mark.fr("FR-060")
+@pytest.mark.fr("FR-062")
+@pytest.mark.fr("NFR-SEC-002")
+def test_a_development_create_adds_the_nested_options_and_writes_the_tier_files(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = _kvm_hooks(tmp_path, sleeps, mountinfo, seccomp_source=_seccomp_source(tmp_path))
+    result = create_realm(env, fake, request(home, tier=Tier.DEVELOPMENT), hooks=hooks)
+    record = result.record
+    assert record.state is RealmState.STOPPED
+    assert record.settings.tier is Tier.DEVELOPMENT
+    assert record.created_options == NESTED_OPTIONS
+    assert record.kvm_at_create is True
+    argv = fake.created_specs[0].to_argv()
+    pairs = _pairs(argv)
+    for option in (
+        ("--device", "/dev/fuse"),
+        ("--device", "/dev/net/tun"),
+        ("--device", "/dev/kvm"),
+        ("--group-add", "keep-groups"),
+        ("--security-opt", "unmask=/proc/*"),
+    ):
+        assert option in pairs
+    assert "--privileged" not in argv and "--cap-add" not in argv
+    assert "--passwd-entry" in argv
+    # T6.7: the realm user is the passwd entry podman writes, so no useradd runs for it.
+    assert not any(command and command[0] == "useradd" for command in execs(fake))
+    # The name is the hash of the generated profile, so the directory holds one file.
+    (profile,) = list(env.paths.seccomp.glob("*.json"))
+    assert profile.is_file()
+    assert b'"sethostname"' in profile.read_bytes()
+    assert ("--security-opt", f"seccomp={profile}") in pairs
+    config = env.paths.homes / "debian" / ".config" / "containers"
+    assert 'driver = "overlay"' in (config / "storage.conf").read_text(encoding="utf-8")
+    assert "cgroup_manager" in (config / "containers.conf").read_text(encoding="utf-8")
+    reloaded = RealmStore(env.paths).load(RealmName("debian"))
+    assert reloaded.created_options == NESTED_OPTIONS
+    assert reloaded.kvm_at_create is True
+
+
+def _pairs(argv: list[str]) -> list[tuple[str, str]]:
+    """The (flag, value) pairs of an argv, for every flag that takes a value."""
+    return [(token, argv[i + 1]) for i, token in enumerate(argv[:-1]) if token.startswith("--")]
+
+
+@pytest.mark.fr("FR-060")
+@pytest.mark.fr("FR-063")
+def test_a_custom_create_starts_with_the_basic_toggles_and_no_option(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    result = create_realm(
+        env, fake, request(home, tier=Tier.CUSTOM), hooks=hooks_for(tmp_path, sleeps, mountinfo)
+    )
+    assert result.record.permissions.toggles == BASIC_TOGGLES
+    assert result.record.permissions.shares == ()
+    assert result.record.created_options == []
+    assert not (home / ".config" / "containers").exists()
+
+
+@pytest.mark.fr("FR-062")
+@pytest.mark.fr("AS-010")
+def test_a_development_create_attaches_projects_and_the_shell_files(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    present = {str(home / "Projects"), str(home / ".bashrc"), *NESTED_HOST_DEVICES}
+    hooks = hooks_for(
+        tmp_path,
+        sleeps,
+        mountinfo,
+        seccomp_source=_seccomp_source(tmp_path),
+        exists=present.__contains__,
+    )
+    result = create_realm(env, fake, request(home, tier=Tier.DEVELOPMENT), hooks=hooks)
+    grants = {grant.realm: grant for grant in result.record.grants}
+    assert grants[str(home / "Projects")].mode == "rw"
+    assert grants[str(home / ".bashrc")].mode == "ro"
+    # A missing shell file is no grant and no skip (FR-062, AS-010).
+    assert str(home / ".zshrc") not in grants
+    assert not any(".zshrc" in message for message in result.record.share_skipped)
+
+
+@pytest.mark.fr("FR-062")
+@pytest.mark.fr("DR-010")
+def test_a_development_create_with_no_host_profile_is_refused_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-006: no profile means no nested realm, and never `seccomp=unconfined`."""
+    hooks = _kvm_hooks(tmp_path, sleeps, mountinfo, seccomp_source=tmp_path / "absent.json")
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, tier=Tier.DEVELOPMENT), hooks=hooks)
+    assert caught.value.code == "GINN-E-SECCOMP-SOURCE"
+    assert_nothing_left(env, fake)
+    assert not env.paths.seccomp.exists()
+    assert create_entries(env) == []
+
+
+@pytest.mark.fr("FR-062")
+@pytest.mark.fr("NFR-SEC-002")
+def test_a_host_without_a_nested_device_refuses_the_create_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-006: the inner podman needs /dev/fuse and /dev/net/tun, and the host is checked first."""
+    under_tmp = hooks_for(tmp_path, sleeps, mountinfo).exists
+    hooks = replace(
+        hooks_for(tmp_path, sleeps, mountinfo, seccomp_source=_seccomp_source(tmp_path)),
+        exists=lambda path: path != "/dev/fuse" and under_tmp(path),
+    )
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, tier=Tier.DEVELOPMENT), hooks=hooks)
+    assert caught.value.code == "GINN-E-HOST-DEVICE"
+    assert "/dev/fuse" in caught.value.message
+    assert_nothing_left(env, fake)
+    assert not env.paths.seccomp.exists()
+
+
+@pytest.mark.fr("FR-062")
+def test_a_development_create_on_a_host_without_kvm_records_that(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = _kvm_hooks(
+        tmp_path, sleeps, mountinfo, kvm=False, seccomp_source=_seccomp_source(tmp_path)
+    )
+    result = create_realm(env, fake, request(home, tier=Tier.DEVELOPMENT), hooks=hooks)
+    assert result.record.kvm_at_create is False
+    assert "device=/dev/kvm" not in result.record.created_options
+    assert "device=/dev/fuse" in result.record.created_options
+
+
+def _gpu(status: Status, root: Path, **overrides: Any) -> NvidiaPlan:
+    """A grant plan of `status`, with its spec and drop-in under `root` (the Owned data dir)."""
+    values: dict[str, Any] = {
+        "status": status,
+        "reason": "test host",
+        "spec_path": str(root / "cdi" / "nvidia.json"),
+        "spec_text": '{"cdiVersion": "0.6.0"}\n',
+        "ld_path": str(root / "ld" / "ginn-nvidia.conf"),
+        "ld_text": "/usr/lib/ginn-nvidia\n",
+    }
+    values.update(overrides)
+    return NvidiaPlan(**values)
+
+
+@pytest.mark.fr("FR-069")
+def test_a_ready_nvidia_grant_is_a_cdi_device_with_its_spec_written_once(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _create_plan, "nvidia_plan", lambda paths, hooks: _gpu(Status.READY, paths.data)
+    )
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert result.record.gpu_cdi is True
+    assert result.gpu_note is None
+    spec = env.paths.cdi / "nvidia.json"
+    assert spec.read_text(encoding="utf-8") == '{"cdiVersion": "0.6.0"}\n'
+    created = fake.created_specs[0]
+    assert created.cdi_devices == ["nvidia.com/gpu=all"]
+    assert created.cdi_spec_dir == str(env.paths.cdi)
+    assert created.global_flags() == ["--cdi-spec-dir", str(env.paths.cdi)]
+    assert ("--device", "nvidia.com/gpu=all") in _pairs(created.to_argv())
+
+
+@pytest.mark.fr("FR-069")
+def test_a_host_without_a_driver_gets_a_note_and_no_device(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """FR-069 AC-2 and R-005: an absent driver is informational; the create goes on without it."""
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert result.record.gpu_cdi is False
+    assert result.gpu_note is not None and "no NVIDIA kernel driver" in result.gpu_note
+    assert fake.created_specs[0].cdi_devices == []
+    assert not (env.paths.cdi / "nvidia.json").exists()
+
+
+@pytest.mark.fr("FR-069")
+def test_a_musl_host_is_informational_and_not_a_failure(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    musl = _gpu(Status.MUSL, env.paths.data, reason="NVIDIA unsupported on musl")
+    monkeypatch.setattr(_create_plan, "nvidia_plan", lambda paths, hooks: musl)
+    result = create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert result.record.state is RealmState.STOPPED
+    assert result.gpu_note is not None and "musl" in result.gpu_note
+
+
+@pytest.mark.fr("FR-069")
+def test_a_stale_driver_refuses_the_create_before_any_write(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stale(paths: OwnedPaths, hooks: object) -> NvidiaPlan:
+        raise make("GINN-E-NVIDIA-STALE", detail="driver 595, library names libnvidia-x.so.1")
+
+    monkeypatch.setattr(_create_plan, "nvidia_plan", stale)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home), hooks=hooks_for(tmp_path, sleeps, mountinfo))
+    assert caught.value.code == "GINN-E-NVIDIA-STALE"
+    assert_nothing_left(env, fake)
+    assert not (env.paths.cdi / "nvidia.json").exists()
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-069")
+def test_a_create_records_the_gpu_and_fonts_toggles_it_made(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    def host_has_dri(path: str) -> bool:
+        return path == "/dev/dri" or str(path).startswith(str(tmp_path))
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, exists=host_has_dri)
+    result = create_realm(env, fake, request(home), hooks=hooks)
+    assert (result.record.gpu_at_create, result.record.fonts_at_create) == (True, True)
+    assert ("--device", "/dev/dri") in _pairs(fake.created_specs[0].to_argv())
+
+
+@pytest.mark.fr("FR-061")
+@pytest.mark.fr("FR-063")
+@pytest.mark.fr("FR-069")
+def test_a_custom_create_without_the_gpu_toggle_has_no_device_no_cdi_and_no_spec_file(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with a ready NVIDIA driver, a realm whose GPU toggle is off gets no `/dev/dri` device,
+    no CDI grant and no CDI spec. create starts Custom from the Basic toggles, so the stored
+    toggles are set here through `initial_permissions`."""
+    off = Permissions(toggles=BASIC_TOGGLES - {Toggle.GPU})
+    monkeypatch.setattr(_create_plan, "initial_permissions", lambda tier: off)
+    monkeypatch.setattr(
+        _create_plan, "nvidia_plan", lambda paths, hooks: _gpu(Status.READY, paths.data)
+    )
+    result = create_realm(
+        env, fake, request(home, tier=Tier.CUSTOM), hooks=hooks_for(tmp_path, sleeps, mountinfo)
+    )
+    created = fake.created_specs[0]
+    assert ("--device", "/dev/dri") not in _pairs(created.to_argv())
+    assert created.cdi_devices == []
+    assert result.record.gpu_cdi is False
+    assert result.record.gpu_at_create is False
+    assert not (env.paths.cdi / "nvidia.json").exists()
+
+
+@pytest.mark.fr("FR-081")
+@pytest.mark.fr("FR-010")
+def test_a_services_on_create_that_fails_after_its_service_directory_removes_it(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    def fail_at_stopped(name: str) -> None:
+        if name == "stopped":
+            raise make("GINN-E-INTERNAL")
+
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, on_step=fail_at_stopped, program=GINN_PROGRAM)
+    with pytest.raises(GinnError):
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert not (env.paths.sv / "debian").exists(), "the rollback removes the service directory"
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+
+
+@pytest.mark.fr("FR-081")
+def test_a_services_on_create_without_an_absolute_ginn_command_is_refused_before_it_stops(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program="ginn")
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert not (env.paths.sv / "debian").exists()
+
+
+@pytest.mark.fr("FR-080")
+@pytest.mark.fr("NFR-003")
+def test_a_services_on_create_copies_a_machine_id_into_the_container_before_any_start(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """ADR-007, F6: the realm's machine-id goes into /etc/machine-id with podman cp, after the
+    create and before any start. The record keeps the same id, which a later rebuild reuses."""
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    record = create_realm(env, fake, request(home, services=True), hooks=hooks).record
+    content, mode = fake.containers[record.container_id].copied[MACHINE_ID_PATH]
+    assert re.fullmatch(rb"[0-9a-f]{32}\n", content)
+    assert mode == 0o644
+    assert record.machine_id == content.decode("ascii").strip()
+    assert RealmStore(env.paths).load(RealmName("debian")).machine_id == record.machine_id
+    ops = ops_of(fake)
+    assert ops.index("create") < ops.index("cp_into")
+    assert "start" not in ops
+
+
+@pytest.mark.fr("FR-080")
+def test_a_services_off_create_writes_no_machine_id_and_checks_no_init(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    hooks = hooks_for(tmp_path, sleeps, mountinfo)
+    record = create_realm(env, fake, request(home), hooks=hooks).record
+    assert record.machine_id is None
+    assert {"cp_from", "cp_into"}.isdisjoint(ops_of(fake))
+
+
+@pytest.mark.fr("FR-080")
+def test_a_services_on_image_without_sbin_init_is_refused_as_no_init_and_rolled_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    """F3: an image with no /sbin/init fails the create with GINN-E-NO-INIT, which names the image
+    and the realm, instead of a start error. The rollback removes the container, the Realm Home and
+    the record, and nothing is started."""
+    fake.init_absent = True
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-NO-INIT"
+    assert caught.value.details["realm"] == "debian"
+    assert "@sha256:" in caught.value.details["image"]
+    assert fake.containers == {}
+    assert "start" not in ops_of(fake)
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert not (env.paths.homes / "debian").exists()
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_init_check_failure_that_is_not_a_missing_path_stays_internal(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only podman's not-found reason means an absent init. Any other copy failure is still
+    GINN-E-INTERNAL, so a broken podman is not reported as a missing systemd."""
+
+    def copy_fails(container_id: str, src: str, dst: Path) -> None:
+        raise make("GINN-E-INTERNAL")
+
+    monkeypatch.setattr(fake, "cp_from", copy_fails)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert fake.containers == {}
+
+
+def _scratch_left(env: OpEnv) -> list[str]:
+    return sorted(p.name for p in env.paths.runtime.iterdir() if p.name.startswith(SCRATCH_PREFIX))
+
+
+@pytest.mark.fr("FR-080")
+def test_the_init_check_stages_its_copy_in_a_create_scratch_directory_that_is_then_gone(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A killed create leaves its scratch directory behind, so the scratch carries the prefix that
+    the recovery sweep looks for (store/scratch.py). A finished create leaves none."""
+    staged: list[str] = []
+    original = fake.cp_from
+
+    def cp_from_recording(container_id: str, src: str, dst: Path) -> None:
+        staged.append(dst.parent.name)
+        original(container_id, src, dst)
+
+    monkeypatch.setattr(fake, "cp_from", cp_from_recording)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert len(staged) == 1
+    assert staged[0].startswith(SCRATCH_PREFIX)
+    assert _scratch_left(env) == []
+
+
+@pytest.mark.fr("FR-080")
+def test_a_refused_create_removes_its_scratch_directory_on_the_way_out(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+) -> None:
+    fake.init_absent = True
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-NO-INIT"
+    assert _scratch_left(env) == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_os_error_making_the_create_scratch_is_internal_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scratch directory that cannot be made is GINN-E-INTERNAL, so run_journaled rolls the create
+    back: the container, the Realm Home and the record go. An OSError that escaped would skip the
+    rollback and leave a half-made realm."""
+
+    def no_scratch(paths: OwnedPaths) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(create_ops, "scratch_dir", no_scratch)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert caught.value.details["detail"] == "create scratch directory: No space left on device"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert not (env.paths.homes / "debian").exists()
+    assert env.journal.pending() == []
+
+
+@pytest.mark.fr("FR-080")
+def test_an_os_error_staging_the_machine_id_is_internal_and_rolls_the_create_back(
+    env: OpEnv,
+    fake: ScriptedPodman,
+    home: Path,
+    tmp_path: Path,
+    sleeps: list[float],
+    mountinfo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def copy_fails(container_id: str, src: Path, dst: str) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(fake, "cp_into", copy_fails)
+    hooks = hooks_for(tmp_path, sleeps, mountinfo, program=GINN_PROGRAM)
+    with pytest.raises(GinnError) as caught:
+        create_realm(env, fake, request(home, services=True), hooks=hooks)
+    assert caught.value.code == "GINN-E-INTERNAL"
+    assert fake.containers == {}
+    assert not RealmStore(env.paths).exists(RealmName("debian"))
+    assert env.journal.pending() == []

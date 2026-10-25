@@ -1,0 +1,63 @@
+#!/bin/sh
+# Log service for the ginn supervisor of alice (FR-081). Runs as root. It creates the log
+# directory as the user, then drops to the user for svlogd, with the same setpriv as run.
+set -eu
+
+PATH=/usr/bin:/bin
+export PATH
+
+# The log directory is 0755 whatever umask runit passed in (ADR-013, Decision 27).
+umask 022
+
+UID_NUM=1000
+GID_NUM=1000
+SV_DIR=/home/alice/.local/state/ginn/sv
+LOG_DIR=/home/alice/.local/state/ginn/log/supervisor
+
+log() {
+    printf '%s\n' "ginn-supervisor-log: $*" >&2
+}
+
+# The same wait as run, so nothing is created under a state home that is not mounted yet.
+exec 3<&0
+cat <&3 >/dev/null &
+reader=$!
+sleep_pid=
+stop_reader() {
+    kill "$reader" 2>/dev/null || :
+    wait "$reader" 2>/dev/null || :
+}
+stop_wait() {
+    if [ -n "$sleep_pid" ]; then
+        kill "$sleep_pid" 2>/dev/null || :
+        wait "$sleep_pid" 2>/dev/null || :
+    fi
+    stop_reader
+    exit 0
+}
+trap stop_wait TERM INT HUP
+waited=0
+while [ ! -d "$SV_DIR" ]; do
+    if [ "$waited" -ge 60 ]; then
+        stop_reader
+        log "$SV_DIR missing after 60 s; exiting so runsv restarts this service"
+        exit 1
+    fi
+    sleep 1 &
+    sleep_pid=$!
+    wait "$sleep_pid" || :
+    sleep_pid=
+    waited=$((waited + 1))
+    if ! kill -0 "$reader" 2>/dev/null; then
+        log "the log input closed before $SV_DIR existed, so runsv stopped this service"
+        exit 0
+    fi
+done
+trap - TERM INT HUP
+stop_reader
+exec 3<&-
+
+setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \
+mkdir -p "$LOG_DIR"
+exec setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --init-groups --inh-caps=-all --reset-env \
+svlogd -tt "$LOG_DIR"

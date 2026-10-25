@@ -1,0 +1,9 @@
+dbus-broker-launch [GLOBALS...] ...
+
+Linux D-Bus Message Broker Launcher
+
+  -h --help             Show this help
+     --version          Show package version
+     --audit            Enable audit support
+     --config-file PATH Specify path to configuration file
+     --scope SCOPE      Scope of message bus

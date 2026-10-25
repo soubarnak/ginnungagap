@@ -1,90 +1,63 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Builds the native helpers: ginn-wait (FR-081, NFR-033), ginn-rebind (ADR-008), ginn-watch
+# (FR-044, NFR-009), ginn-agent-filter (FR-067, NFR-SEC-007), ginn-idle (FR-018) and the exec relay
+# ginn-exec-relay, ginn-exec-worker, ginn-exec-run and ginn-exec-kill (ADR-014, FR-049). `make check` compiles each with
+# gcc and clang with warnings as errors, and checks the 200-line limit (AGENTS.md). A helper that
+# includes ginn-exec-frame.h counts the header's lines toward its limit. `make` builds into build/
+# only; `make install` copies the helpers to $(DESTDIR)$(LIBEXECDIR), and no target installs by default.
+
+GCC ?= gcc
+CLANG ?= clang
 CC ?= cc
-PYTHON ?= python3
-CPPFLAGS ?=
-CFLAGS ?= -O2 -std=gnu11 -fstack-protector-strong -fPIC -Wall -Wextra -Werror
-LDFLAGS ?= -Wl,-z,relro,-z,now
+WARN := -std=c11 -Wall -Wextra -Werror -O2
+# The hardened build (xbps-src passes FORTIFY): _FORTIFY_SOURCE turns on the warn_unused_result attributes.
+HARDEN := $(WARN) -D_FORTIFY_SOURCE=2
 PREFIX ?= /usr
-LIBEXECDIR ?= $(PREFIX)/lib/spaces
-GUESTDIR ?= $(LIBEXECDIR)/guest
-DESTDIR ?=
-TARGET_ARCH ?= $(shell uname -m)
+LIBEXECDIR ?= $(PREFIX)/libexec/ginn
+BUILD := build
+HELPERS := ginn-wait ginn-rebind ginn-watch ginn-agent-filter ginn-idle ginn-exec-relay ginn-exec-worker ginn-exec-run ginn-exec-kill
+LINE_LIMIT := 200
 
-.PHONY: all check-guest-abi clean install
+all: $(addprefix $(BUILD)/,$(HELPERS))
 
-all: pam_spaces.so spaces-pam spaces spaces-portal \
-	spaces-secret-helper spaces-open spaces-broker spaces-system-broker
+$(BUILD)/%: %.c
+	@mkdir -p $(BUILD)
+	$(CC) $(WARN) -o $@ $<
 
-pam_spaces.so: pam_spaces.c protocol.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -shared -o $@ pam_spaces.c \
-		$(LDFLAGS) -lpam
+# The frame header is a prerequisite of every helper that includes it (ADR-014, Wire protocol). The kill
+# helper does not include it (its one define is written out in the source), so the frame's lines are not its.
+$(BUILD)/ginn-exec-relay $(BUILD)/ginn-exec-worker $(BUILD)/ginn-exec-run: ginn-exec-frame.h
 
-spaces-pam: spaces_pam.c protocol.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces_pam.c \
-		$(LDFLAGS) -lpam
+check: lines
+	@mkdir -p $(BUILD)/check
+	@for h in $(HELPERS); do \
+		$(GCC) $(WARN) -o $(BUILD)/check/$$h.gcc $$h.c && \
+		$(CLANG) $(WARN) -o $(BUILD)/check/$$h.clang $$h.c || exit 1; \
+	done
+	@echo "$(HELPERS): gcc and clang clean with $(WARN)"
+	@for h in $(HELPERS); do \
+		$(GCC) $(HARDEN) -o $(BUILD)/check/$$h.fortify $$h.c || exit 1; \
+	done
+	@echo "$(HELPERS): gcc clean with $(HARDEN) (the hardened build Void uses)"
 
-spaces: spaces.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ spaces.c \
-		$(LDFLAGS) -Wl,--wrap=__libc_start_main
+lines:
+	@hdr=$$(wc -l < ginn-exec-frame.h); \
+	for h in $(HELPERS); do \
+		n=$$(wc -l < $$h.c); \
+		if grep -q '^#include "ginn-exec-frame.h"' $$h.c; then n=$$((n + hdr)); fi; \
+		if [ "$$n" -gt $(LINE_LIMIT) ]; then \
+			echo "$$h.c: $$n lines with its shared header, limit $(LINE_LIMIT) (AGENTS.md)"; exit 1; \
+		fi; \
+		echo "$$h.c: $$n lines (limit $(LINE_LIMIT))"; \
+	done
 
-spaces-portal: spaces_portal.c dbus_message.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
-		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_portal.c $(LDFLAGS) \
-		-Wl,--wrap=__libc_start_main \
-		$$(pkg-config --libs gio-unix-2.0)
-
-spaces-secret-helper: spaces_secret_helper.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
-		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_secret_helper.c $(LDFLAGS) \
-		-Wl,--wrap=__libc_start_main \
-		$$(pkg-config --libs gio-unix-2.0)
-
-spaces-open: spaces_open.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
-		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_open.c $(LDFLAGS) \
-		-Wl,--wrap=__libc_start_main \
-		$$(pkg-config --libs gio-unix-2.0)
-
-spaces-broker: spaces_broker.c lifeline.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
-		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_broker.c $(LDFLAGS) \
-		$$(pkg-config --libs gio-unix-2.0)
-
-spaces-system-broker: spaces_system_broker.c system_bus_policy.h dbus_message.h
-	$(CC) $(CPPFLAGS) $(CFLAGS) \
-		$$(pkg-config --cflags gio-unix-2.0) \
-		-o $@ spaces_system_broker.c $(LDFLAGS) \
-		-Wl,--wrap=__libc_start_main \
-		$$(pkg-config --libs gio-unix-2.0)
-
-check-guest-abi: all
-	$(PYTHON) check_guest_abi.py --target $(TARGET_ARCH) \
-		--glibc-max 2.17 \
-		--guest pam_spaces.so spaces spaces-portal \
-			spaces-secret-helper spaces-open spaces-system-broker \
-		--host spaces-pam spaces-broker
-
-install: check-guest-abi
-	install -Dm755 spaces-system-broker $(DESTDIR)$(GUESTDIR)/spaces-system-broker
-	install -Dm755 spaces-system-broker $(DESTDIR)$(LIBEXECDIR)/spaces-system-broker
-	install -Dm755 pam_spaces.so \
-		$(DESTDIR)$(GUESTDIR)/pam_spaces.so
-	install -Dm755 spaces-pam \
-		$(DESTDIR)$(LIBEXECDIR)/spaces-pam
-	install -Dm755 spaces \
-		$(DESTDIR)$(GUESTDIR)/spaces
-	install -Dm755 spaces-portal \
-		$(DESTDIR)$(GUESTDIR)/spaces-portal
-	install -Dm755 spaces-secret-helper \
-		$(DESTDIR)$(GUESTDIR)/spaces-secret-helper
-	install -Dm755 spaces-open \
-		$(DESTDIR)$(GUESTDIR)/spaces-open
-	install -Dm755 spaces-broker \
-		$(DESTDIR)$(LIBEXECDIR)/spaces-broker
+install: all
+	@for h in $(HELPERS); do \
+		install -D -m 0755 $(BUILD)/$$h $(DESTDIR)$(LIBEXECDIR)/$$h || exit 1; \
+	done
 
 clean:
-	rm -f pam_spaces.so spaces-pam spaces \
-		spaces-portal spaces-secret-helper spaces-open spaces-broker spaces-system-broker
+	rm -rf $(BUILD)
+
+.PHONY: all check lines install clean

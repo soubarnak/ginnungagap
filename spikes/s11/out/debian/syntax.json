@@ -1,0 +1,109 @@
+{
+  "base": {
+    "cmd": [
+      "bash"
+    ],
+    "entrypoint": null,
+    "id": "787cd32c15da653c63f8689246f8199870afdbe8d822b7e560d651e20d6def02",
+    "user": null
+  },
+  "base_ref": "docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a",
+  "distro": "debian",
+  "images_after_name_rmi": [
+    "113a1361edca localhost/s11-syntax-debian-3:1",
+    "394575c47501 localhost/s11-syntax-debian-2:1",
+    "d1c2b2b6a33c localhost/s11-syntax-debian-1:1",
+    "d914dd3c0c16 localhost/s11-syntax-debian-0:1"
+  ],
+  "pull_rc": 0,
+  "rmi_base_by_id_with_child": {
+    "rc": 0,
+    "stderr": "",
+    "stdout": "Untagged: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a"
+  },
+  "rmi_base_by_name_with_child": {
+    "rc": 1,
+    "stderr": "Error: docker.io/library/debian@sha256:d405c1e1d9eecbf30022d23766a0eea235e7f499aa33e357dfd29271a839f82a: image not known",
+    "stdout": ""
+  },
+  "rmi_child": {
+    "rc": 0,
+    "stderr": ""
+  },
+  "variants": {
+    "empty-array": {
+      "change": [
+        "--change",
+        "ENTRYPOINT []",
+        "--change",
+        "CMD []"
+      ],
+      "cmd": [
+        "infinity"
+      ],
+      "commit_rc": 0,
+      "commit_stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:d914dd3c0c16ad384039668ce273a1e9eecac83bbeac6e92272984a2be108a65\nWriting manifest to image destination",
+      "entrypoint": [
+        "sleep"
+      ],
+      "user": null
+    },
+    "empty-array-no-cmd": {
+      "change": [
+        "--change",
+        "ENTRYPOINT []"
+      ],
+      "cmd": [
+        "infinity"
+      ],
+      "commit_rc": 0,
+      "commit_stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:113a1361edca5ca9638bf376c60b7f226fb816e1ab8a357806690721a985df25\nWriting manifest to image destination",
+      "entrypoint": [
+        "sleep"
+      ],
+      "user": null
+    },
+    "empty-string": {
+      "change": [
+        "--change",
+        "ENTRYPOINT \"\"",
+        "--change",
+        "CMD \"\""
+      ],
+      "cmd": [
+        "/bin/sh",
+        "-c",
+        "\"\""
+      ],
+      "commit_rc": 0,
+      "commit_stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:d1c2b2b6a33ca09d249b40c3e2e87f1ea1d482d31760ebbb587cd51ffcab269d\nWriting manifest to image destination",
+      "entrypoint": [
+        "/bin/sh",
+        "-c",
+        "\"\""
+      ],
+      "user": null
+    },
+    "null-word": {
+      "change": [
+        "--change",
+        "ENTRYPOINT null",
+        "--change",
+        "CMD null"
+      ],
+      "cmd": [
+        "/bin/sh",
+        "-c",
+        "null"
+      ],
+      "commit_rc": 0,
+      "commit_stderr": "Getting image source signatures\nCopying blob sha256:75bbc6c906935bef75c0bf6168204f4641277e1d5aa83b71ca7f586f605ad3d2\nCopying blob sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef\nCopying config sha256:394575c47501f11e4aef743f735cb1f7f4ebf4df3d9852b0cdec80e83951b435\nWriting manifest to image destination",
+      "entrypoint": [
+        "/bin/sh",
+        "-c",
+        "null"
+      ],
+      "user": null
+    }
+  }
+}

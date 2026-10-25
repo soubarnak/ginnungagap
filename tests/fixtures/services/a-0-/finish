@@ -1,0 +1,5 @@
+#!/bin/sh
+# ginn services-on realm a-0- (FR-081, ADR-003).
+# Written by ginn. ginn rewrites this file; do not edit it.
+# runsv passes the exit code of run and the signal that ended it (runsv(8)).
+exec '/opt/gin'\''s tools/ginn' _service-finish 'a-0-' "$1" "$2"

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ginnungagap
+Comment=Manage isolated distribution realms on rootless Podman
+Exec=ginn-gui
+Icon=org.bongbetic.ginn
+Categories=System;Utility;
+Keywords=ginn;ginnungagap;realm;container;podman;distribution;sandbox;
+Terminal=false
+StartupNotify=true

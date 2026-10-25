@@ -1,0 +1,11 @@
+  UNIT                        LOAD   ACTIVE SUB     DESCRIPTION
+  systemd-journald.service    loaded active running Journal Service
+  systemd-logind.service      loaded active running User Login Management
+  systemd-nsresourced.service loaded active running Namespace Resource Manager
+  systemd-userdbd.service     loaded active running User Database Manager
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+4 loaded units listed.

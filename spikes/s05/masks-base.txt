@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-05 mitigation (b): default units masked by symlink to /dev/null.
+# The udev sockets are masked too, so socket activation cannot start the masked udevd.
+systemd-udevd.service
+systemd-udevd-control.socket
+systemd-udevd-kernel.socket
+systemd-udev-trigger.service
+getty@tty1.service
+console-getty.service
+apt-daily.timer
+apt-daily-upgrade.timer
+e2scrub_all.timer
+fstrim.timer

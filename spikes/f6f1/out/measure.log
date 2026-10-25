@@ -1,0 +1,31 @@
+=== variant v0
+MEASURE {"procs": 14, "pss_mib": 25.53, "run": 1, "unread": 0, "variant": "v0", "vmrss_mib": 96.74}
+MEASURE {"procs": 15, "pss_mib": 26.18, "run": 2, "unread": 0, "variant": "v0", "vmrss_mib": 103.12}
+MEASURE {"procs": 13, "pss_mib": 24.86, "run": 3, "unread": 0, "variant": "v0", "vmrss_mib": 91.04}
+MEASURE {"procs": 13, "pss_mib": 24.44, "run": 4, "unread": 0, "variant": "v0", "vmrss_mib": 87.96}
+MEASURE {"procs": 15, "pss_mib": 26.16, "run": 5, "unread": 0, "variant": "v0", "vmrss_mib": 100.57}
+=== variant v1cp
+MEASURE {"procs": 5, "pss_mib": 20.33, "run": 1, "unread": 0, "variant": "v1cp", "vmrss_mib": 40.36}
+MEASURE {"procs": 5, "pss_mib": 20.21, "run": 2, "unread": 0, "variant": "v1cp", "vmrss_mib": 40.16}
+MEASURE {"procs": 5, "pss_mib": 20.17, "run": 3, "unread": 0, "variant": "v1cp", "vmrss_mib": 39.99}
+MEASURE {"procs": 5, "pss_mib": 20.27, "run": 4, "unread": 0, "variant": "v1cp", "vmrss_mib": 40.29}
+MEASURE {"procs": 5, "pss_mib": 20.28, "run": 5, "unread": 0, "variant": "v1cp", "vmrss_mib": 40.29}
+=== variant v3cp
+MEASURE {"procs": 5, "pss_mib": 20.1, "run": 1, "unread": 0, "variant": "v3cp", "vmrss_mib": 40.0}
+MEASURE {"procs": 5, "pss_mib": 20.46, "run": 2, "unread": 0, "variant": "v3cp", "vmrss_mib": 40.7}
+MEASURE {"procs": 5, "pss_mib": 19.64, "run": 3, "unread": 0, "variant": "v3cp", "vmrss_mib": 38.31}
+MEASURE {"procs": 5, "pss_mib": 19.97, "run": 4, "unread": 0, "variant": "v3cp", "vmrss_mib": 40.01}
+MEASURE {"procs": 5, "pss_mib": 20.27, "run": 5, "unread": 0, "variant": "v3cp", "vmrss_mib": 40.5}
+=== variant v4cp
+MEASURE {"procs": 4, "pss_mib": 19.24, "run": 1, "unread": 0, "variant": "v4cp", "vmrss_mib": 33.73}
+MEASURE {"procs": 4, "pss_mib": 19.13, "run": 2, "unread": 0, "variant": "v4cp", "vmrss_mib": 33.27}
+MEASURE {"procs": 4, "pss_mib": 19.3, "run": 3, "unread": 0, "variant": "v4cp", "vmrss_mib": 33.48}
+MEASURE {"procs": 4, "pss_mib": 19.02, "run": 4, "unread": 0, "variant": "v4cp", "vmrss_mib": 33.02}
+MEASURE {"procs": 4, "pss_mib": 18.0, "run": 5, "unread": 0, "variant": "v4cp", "vmrss_mib": 30.27}
+=== product f6-arch
+MEASURE {"procs": 13, "pss_mib": 21.62, "run": 1, "unread": 0, "variant": "product", "vmrss_mib": 69.02}
+MEASURE {"procs": 14, "pss_mib": 25.19, "run": 2, "unread": 0, "variant": "product", "vmrss_mib": 94.97}
+MEASURE {"procs": 13, "pss_mib": 24.55, "run": 3, "unread": 0, "variant": "product", "vmrss_mib": 88.46}
+MEASURE {"procs": 14, "pss_mib": 25.19, "run": 4, "unread": 0, "variant": "product", "vmrss_mib": 95.17}
+MEASURE {"procs": 13, "pss_mib": 24.42, "run": 5, "unread": 0, "variant": "product", "vmrss_mib": 88.68}
+ALL-DONE

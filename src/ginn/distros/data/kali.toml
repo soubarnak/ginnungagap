@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: Apache-2.0
+# Kali Linux distribution definition, data only (NFR-060, FR-014 not covered here). Read by
+# src/ginn/distros/loader.py.
+#
+# Placeholders: {packages} (verbs, whole element only), {lang} (integration packages),
+# {locale} (integration steps), {tmpdir} (check-updates steps). Write {{ and }} for literal braces.
+# Every command is an argv list.
+#
+# Image: trust_key names [distro.kali] in src/ginn/trust/data/trust.toml (DR-040). The channel is
+# kali-rolling, a proposal (S-10 section 2; AS-024 does not cover Kali). The Integration packages
+# and the locale step are the same as Debian. Not verified on a host (M4), and not tested with
+# network. The network (pasta) and NET_RAW settings are not here: runtime/spec.py sets them for
+# this distribution only (FR-026, FR-027).
+schema = 1
+id = "kali"
+trust_key = "kali"
+shell = "/bin/bash"
+# DR-003 (Debian and Kali), matched with fullmatch.
+package_name_regex = '[a-z0-9][a-z0-9.+-]{1,127}'
+# FR-012: apt messages for a missing public key, an invalid signature or an unsigned repository.
+signature_error_regex = 'NO_PUBKEY|public key is not available|signatures were invalid|is not signed'
+# ADR-011: apt's messages when the lists name files the mirror no longer has. Runtime text, not
+# verified until M4.
+stale_metadata_regex = 'Unable to fetch some archives, maybe run apt-get update|404\s+Not Found'
+# FR-120: a non-zero status whose output matches this is a transient network failure, retried
+# with the FR-120 delays. A signature match wins over it, and stale metadata is not a network
+# failure (ADR-011). Runtime text, not verified until M4.
+network_error_regex = 'Temporary failure resolving|Could not resolve|Connection timed out|Connection failed|Connection refused|Connection reset by peer'
+# FR-022 AC-1: apt's refusal of a name that no index lists. Runtime text, not verified until M4.
+missing_package_regex = 'Unable to locate package|has no installation candidate'
+# ADR-011: apt-get update refreshes the package lists only and never upgrades, so these verbs run it
+# first. remove and list-explicit need no lists.
+refresh_before = ["install", "upgrade", "check-updates", "resolve", "estimate"]
+# FR-014: the metapackage of the --everything option. Its closure is the download and the
+# installed size that `ginn create kali --everything` estimates (resolve, then estimate, inside the
+# realm after the refresh). Not verified on a host (M4), and only Kali has one (DR-013).
+everything = ["kali-linux-everything"]
+# FR-024: apt marks each upgradable package with `[upgradable from:`. The header and the warnings do
+# not carry the mark, so the count is the number of lines that carry it.
+check_updates_count = "lines-matching"
+check_updates_count_regex = '\[upgradable from: '
+# FR-120 AC-2, ADR-011: dpkg --audit lists each broken or partially installed package on stdout
+# (dpkg(1)). With exit 0, any stdout means inconsistent. A non-zero status is also read as
+# inconsistent (loader.py). Not verified until M4.
+db_check_ok_exit = [0]
+db_check_stdout_inconsistent = true
+
+[integration]
+packages = ["ca-certificates", "locales"]
+steps = [["localedef", "-i", "{locale}", "-f", "UTF-8", "{locale}.UTF-8"]]
+
+[verbs]
+# apt-get update fetches the package lists, and only the lists. Realm creation runs it once before
+# the first install, because the image ships none (ADR-011).
+refresh = ["apt-get", "update"]
+# --no-install-recommends: only declared dependencies are installed (FR-040, CR-007).
+install = ["apt-get", "--yes", "--no-install-recommends", "install", "{packages}"]
+# No --no-remove: apt-get aborts on any removal, including the named package. No --auto-remove:
+# apt-get leaves unneeded dependencies alone. apt-get also removes packages that need the named one;
+# the ops layer pre-checks that with remove-check (ADR-011).
+remove = ["apt-get", "--yes", "remove", "{packages}"]
+# remove-check is the dry run the ops layer reads before remove (ADR-011, FR-041). --simulate changes
+# nothing (apt-get(8)). It lists the packages a removal would take, so the ops layer refuses any name
+# it did not request. Output format is not verified until M4.
+remove-check = ["apt-get", "--simulate", "remove", "{packages}"]
+# Full upgrade (FR-023 AC-2). dist-upgrade, not upgrade: a plain upgrade leaves a package at its
+# installed version when the new version needs a dependency that is not installed yet, and
+# dist-upgrade installs that dependency. dist-upgrade may also remove a package to resolve a
+# dependency (apt-get(8)). That removal is part of the full upgrade, and FR-041 does not apply to
+# it (ADR-011). --no-install-recommends is a global apt-get option (apt-get(8)). Needs current
+# package lists first: refresh_before lists it (ADR-011).
+upgrade = ["apt-get", "--yes", "--no-install-recommends", "dist-upgrade"]
+# A one-step list: check-updates is a list of steps (see arch.toml). apt list --upgradable reads the
+# lists as last refreshed. apt warns on stderr that its CLI is unstable.
+check-updates = [["apt", "list", "--upgradable"]]
+# db-check reads the package database for broken or half-installed packages (FR-120 AC-2). It names
+# no package and no placeholder. The result is read by the db_check_* keys above. Not verified until
+# M4.
+db-check = ["dpkg", "--audit"]
+# apt-mark showmanual: names of packages installed by hand (DR-007).
+list-explicit = ["apt-mark", "showmanual"]
+# apt-cache depends --recurse: the dependency closure, without recommends or suggests. Changes
+# nothing. Output includes <virtual> lines that the caller filters.
+resolve = [
+    "apt-cache", "depends", "--recurse",
+    "--no-recommends", "--no-suggests", "--no-conflicts",
+    "--no-breaks", "--no-replaces", "--no-enhances",
+    "{packages}",
+]
+# apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
+estimate = ["apt-cache", "show", "{packages}"]

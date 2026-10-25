@@ -1,0 +1,50 @@
+{
+  "container_proc_names": [
+    "14913:systemd",
+    "15059:systemd-journal",
+    "15064:systemd-userdbd",
+    "15069:systemd-userwor",
+    "15070:systemd-userwor",
+    "15071:systemd-userwor",
+    "15072:systemd-nsresou",
+    "15073:systemd-nsresou",
+    "15074:systemd-nsresou",
+    "15075:systemd-nsresou",
+    "15076:systemd-nsresou",
+    "15077:systemd-nsresou",
+    "15109:systemd-logind"
+  ],
+  "container_procs": 13,
+  "helpers": {
+    "conmon": [
+      14910
+    ],
+    "ginn-wait": [
+      14891
+    ],
+    "pause": [
+      20029
+    ],
+    "runsv": [
+      13878
+    ]
+  },
+  "host": {
+    "MemAvailable_kib": 6868228,
+    "psi": "some avg10=0.00 avg60=0.01 avg300=0.19 total=83457337"
+  },
+  "kib": {
+    "Pss": 25008,
+    "RssAnon": 12248,
+    "RssFile": 78432,
+    "VmRSS": 90812
+  },
+  "pss_mib_readable": 24.42,
+  "pss_unreadable": 0,
+  "run": 5,
+  "settle": [
+    "degraded",
+    "degraded"
+  ],
+  "vmrss_mib": 88.68
+}

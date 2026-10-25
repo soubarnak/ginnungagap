@@ -1,0 +1,2 @@
+14:36:48 stopping spike pause process pid=2227 cmd=catatonit -P 
+teardown ok: /home/soubarna/.local/share/ginn-spike-s09/podman /run/user/1000/ginn-spike-s09c-xrd/runroot /run/user/1000/ginn-spike-s09c-xrd removed; no spike processes

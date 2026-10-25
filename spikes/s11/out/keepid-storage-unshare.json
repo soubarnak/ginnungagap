@@ -1,0 +1,37 @@
+{
+  "keep-id": {
+    "create_rc": 0,
+    "start_rc": 0,
+    "upper_unshare_after_create": [
+      0,
+      ""
+    ],
+    "upper_unshare_after_start": [
+      1350,
+      ""
+    ],
+    "upper_unshare_after_write": [
+      62915910,
+      ""
+    ],
+    "write_rc": 0
+  },
+  "no-keep": {
+    "create_rc": 0,
+    "start_rc": 0,
+    "upper_unshare_after_create": [
+      0,
+      ""
+    ],
+    "upper_unshare_after_start": [
+      12,
+      ""
+    ],
+    "upper_unshare_after_write": [
+      62914572,
+      ""
+    ],
+    "write_rc": 0
+  },
+  "pull": 0
+}

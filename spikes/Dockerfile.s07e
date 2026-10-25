@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# S-07e no-subuid stand-in: the S-07 image (Dockerfile.s07, built unchanged as localhost/ginn-s07e:base)
+# with the realm user's /etc/subuid and /etc/subgid lines removed. Nothing else changes: no setcap,
+# no libcap package, the setuid helpers stay as the base image ships them. Built by
+# spikes/s07e_no_subuid.sh; not a Realm image.
+FROM localhost/ginn-s07e:base
+RUN sed -i '/^dev:/d' /etc/subuid /etc/subgid
