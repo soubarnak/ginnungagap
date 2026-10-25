@@ -3,6 +3,24 @@
 
 This document is the roadmap to v1 of GINN-SRS-001. It sets the target architecture, the spikes that retire the main technical risks, the milestones and their tasks, the testing strategy and the checks that close each milestone. The SRS remains the single source of truth for requirement IDs and behaviour.
 
+## Status 2026-10-25 — release readiness and next course
+
+Snapshot after hygiene fix (commit a90c2f2). Baseline reset now committed (2455 files, CR-004/005). `pytest tests/unit/test_repo_hygiene.py` 3 passed. `pytest --collect-only` 5599 tests (ginn suites only, legacy spaces tests excluded via `testpaths`).
+
+Done: M0 skeleton/CI/packaging (T0.1–T0.8), M1 spikes S-01..S-10 with residuals documented, M2 domain/store/podman/distros, M3 hostsetup/doctor/integrity, M4 realm lifecycle (arch/debian/fedora, ADR-010), M5 packages/export/AUR, M6 tiers/perms/Agent/D-Bus/NVIDIA, M7 services/runit/idle (T7.1–T7.6, T7.9–T7.15, T7.28–T7.29), M8 rebuild/update/crash-safety, M9 GUI backend/views. Traceability `tools/traceability.py --check` 79 deferred (72 partial), 0 missing.
+
+Left, blocking release gates (§9):
+- **ADR-015 wave T7.17–T7.27** not built. Services-on fails on debian/fedora/kali (no `/sbin/init`, F1). Depends on ADR-014 Proposed → Accepted.
+- **Host gates:** T7.27 (13 items, 4 distros), T7.8 real logout (S-04/S-08), S-03 musl host, NVIDIA host, M5 gate 3 (export/AUR), T10.2 host-diff, T10.3 trace-no-xbps, provenance scan. Verification report draft unsigned, gates 1–8 NOT RUN/FAIL (NFR-003 VmRSS 87 vs 40, NFR-021 437 vs 200).
+- **Packaging:** `pyproject.toml` 0.1.0.dev0 vs `packaging/void/srcpkgs/ginn/template` 1.0.0; `release.sh check` needs clean tree and version alignment.
+- **Deferred Should:** FR-085 (dockerd), FR-014 nmap file-cap, AUR PGP key-trust ADR.
+
+Next course (implementation-ready, one commit per task, stage only owned files):
+1. Accept ADR-014/015 (Proposed → Accepted), close CL-30..34 wording.
+2. Wave 1A T7.17 distro data, Wave 1B T7.20 adapter + T7.18 spec/provision + T7.19 records, Wave 2 T7.21 provision, Wave 3 T7.22–T7.26. Each proves its `fr` marks, `ruff`/`mypy`/`traceability` gates.
+3. Host gates one at a time on Void glibc host (`GINN_INTEGRATION=1`), then musl/NVIDIA hosts, recording `spikes/results/`.
+4. T10.5 two-user/security, T10.2/10.3 host-diff/provenance, fill and sign verification report, `release.sh check/cut` with signed repo (tag `ginn-vX.Y.Z`, needs explicit push/tag OK).
+
 ## Target architecture
 
 ```

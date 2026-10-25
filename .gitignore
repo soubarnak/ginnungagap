@@ -10,8 +10,8 @@ dist/
 *.egg-info/
 spikes/out/
 native/ginn-*
-!native/*.c
-!native/*.h
+!native/ginn-*.c
+!native/ginn-*.h
 *.pem
 *.key
 CLAUDE.local.md
