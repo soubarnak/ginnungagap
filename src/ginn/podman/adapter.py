@@ -23,6 +23,7 @@ MAX_NETWORK_RETRIES: Final = 3
 """Retries after the first attempt. M8 wires the 5, 15 and 45 s delays into the hook (FR-120)."""
 
 _DIGEST_REF: Final = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}")
+_IMAGE_ID_REF: Final = re.compile(r"sha256:[0-9a-f]{64}")
 _NAME: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _ENV_KEY: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _USER: Final = re.compile(r"[0-9]+:[0-9]+")
@@ -58,6 +59,12 @@ def require_digest_ref(ref: str) -> None:
     """Raise ValueError unless `ref` is `repo@sha256:<64 hex>` (FR-011: pull by digest only)."""
     if _DIGEST_REF.fullmatch(ref) is None:
         raise ValueError(f"FR-011: image must be pulled by digest repo@sha256:<hex>, got {ref!r}")
+
+
+def require_image_id_ref(ref: str) -> None:
+    """Raise ValueError unless `ref` is a bare image ID `sha256:<64 hex>` (ADR-015 Decision 4)."""
+    if _IMAGE_ID_REF.fullmatch(ref) is None:
+        raise ValueError(f"image id must be sha256:<64 hex>, got {ref!r}")
 
 
 def require_arg(value: str, what: str) -> str:
@@ -140,6 +147,8 @@ class CreateSpec:
     """The CDI spec directory of `cdi_devices`, passed as the global `--cdi-spec-dir` (ADR-012)."""
     entrypoint_argv: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)
+    image_id: str | None = None
+    """Bare image ID for the reset create (ADR-015 Decision 4). When set, the image is the ID."""
 
     def to_argv(self) -> list[str]:
         """Return the `podman create` argv (without the podman binary or global flags).
@@ -187,9 +196,17 @@ class CreateSpec:
             argv += ["--security-opt", opt]
         for group in self.group_add:
             argv += ["--group-add", group]
+        # ADR-015 Decision 4: the reset create uses the committed image ID and a cleared entrypoint.
+        if self.image_id is not None and self.name.startswith("ginn_provision_"):
+            argv += ["--entrypoint", "[]"]
+            argv.append(self.image_id)
+            _refuse_privileged(argv, self.caps_add)
+            return argv
         if self.entrypoint_argv:
             argv += ["--entrypoint", json.dumps(self.entrypoint_argv)]
-        argv.append(self.image_digest_ref)
+        # When image_id is set outside the provision case, use it as the image.
+        image_ref = self.image_id if self.image_id is not None else self.image_digest_ref
+        argv.append(image_ref)
         argv += self.command
         _refuse_privileged(argv, self.caps_add)
         return argv
@@ -213,8 +230,12 @@ def _opt(argv: list[str], flag: str, value: str | None) -> None:
 
 def _check_spec(spec: CreateSpec) -> None:
     require_digest_ref(spec.image_digest_ref)
+    if spec.image_id is not None:
+        require_image_id_ref(spec.image_id)
     if _NAME.fullmatch(spec.name) is None:
         raise ValueError(f"container name {spec.name!r} is not a valid podman name")
+    if spec.name.startswith("ginn_provision_") and spec.image_id is None:
+        raise ValueError("ginn_provision_ name requires image_id")
     if spec.user is not None and _USER.fullmatch(spec.user) is None:
         raise ValueError(f"user must be uid:gid, got {spec.user!r}")
     if spec.userns not in (None, "keep-id"):
@@ -344,6 +365,29 @@ class Podman(Protocol):
     def image_inspect(self, ref: str) -> ImageInfo: ...
 
     def rmi(self, ref: str) -> None: ...
+
+    def commit(
+        self,
+        container_id: str,
+        image_ref: str,
+        *,
+        changes: Sequence[str] = (),
+        pause: bool = True,
+    ) -> str:
+        """Commit a container to an image and return the new image ID (ADR-015 Decision 4)."""
+        ...
+
+    def image_id(self, ref: str) -> str:
+        """Return the bare image ID for `ref` (ADR-015 Decision 4)."""
+        ...
+
+    def diff(self, container_id: str) -> list[str]:
+        """Return the container's diff as a list of `podman diff` lines."""
+        ...
+
+    def images_by_name(self, name: str) -> list[ImageInfo]:
+        """Return images whose repository name is `name`, each with labels (Open question 13)."""
+        ...
 
     def create(self, spec: CreateSpec) -> str:
         """Create a container and return its ID."""

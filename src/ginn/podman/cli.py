@@ -635,6 +635,65 @@ class PodmanCli:
         result = self._run(["rmi", require_arg(ref, "image")])
         self._expect("rmi", result)
 
+    def commit(
+        self,
+        container_id: str,
+        image_ref: str,
+        *,
+        changes: Sequence[str] = (),
+        pause: bool = True,
+    ) -> str:
+        args: list[str] = ["commit", f"--pause={str(pause).lower()}"]
+        for change in changes:
+            args += ["--change", change]
+        args += [require_arg(container_id, "container"), require_arg(image_ref, "image")]
+        result = self._run(args)
+        self._expect("commit", result)
+        image_id = result.stdout.strip()
+        if not image_id:
+            raise _internal("commit: podman printed no image id")
+        return image_id
+
+    def image_id(self, ref: str) -> str:
+        result = self._run(
+            ["image", "inspect", "--format", "{{.Id}}", require_arg(ref, "image")]
+        )
+        self._expect("image inspect", result)
+        image_id = result.stdout.strip()
+        if not image_id:
+            raise _internal("image inspect: podman printed no image id")
+        return image_id
+
+    def diff(self, container_id: str) -> list[str]:
+        result = self._run(["diff", require_arg(container_id, "container")])
+        self._expect("diff", result)
+        text = result.stdout.strip()
+        if not text:
+            return []
+        return text.splitlines()
+
+    def images_by_name(self, name: str) -> list[ImageInfo]:
+        from ginn.podman.models import ImageInfo as _ImageInfo
+
+        result = self._run(["images", "--format", "json"])
+        self._expect("images", result)
+        items = _objects("images", self._json("images", result))
+        out: list[ImageInfo] = []
+        for item in items:
+            # Podman images json includes Names and RepoTags with repo:tag
+            names: list[str] = []
+            for key in ("Names", "RepoTags"):
+                value = item.get(key)
+                if isinstance(value, list):
+                    names.extend(str(v) for v in value)
+            # Match repository name before colon or @
+            for n in names:
+                repo = n.split(":")[0].split("@")[0]
+                if repo == name or repo.endswith("/" + name):
+                    out.append(_ImageInfo.from_inspect(item))
+                    break
+        return out
+
     def create(self, spec: CreateSpec) -> str:
         result = self._run(spec.to_argv(), spec.global_flags())
         self._expect("create", result)

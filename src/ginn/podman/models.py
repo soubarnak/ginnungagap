@@ -102,15 +102,21 @@ class ImageInfo:
     repo_digests: tuple[str, ...]
     size: int
     created: str
+    labels: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_inspect(cls, obj: Mapping[str, object]) -> "ImageInfo":
+        # Podman image inspect nests Labels under Config, while `podman images`
+        # puts them at the top level. Check both so images_by_name can reuse it.
+        config = _sub(obj, "Config")
+        labels = _labels(config, "Labels") or _labels(obj, "Labels")
         return cls(
             id=_text(obj, "Id"),
             digest=_text(obj, "Digest"),
             repo_digests=_texts(obj, "RepoDigests"),
             size=_int(obj, "Size"),
             created=_text(obj, "Created"),
+            labels=labels,
         )
 
 

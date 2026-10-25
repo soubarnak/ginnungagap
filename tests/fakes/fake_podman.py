@@ -247,6 +247,68 @@ class FakePodman:
         if self.images.pop(ref, None) is None:
             raise make("GINN-E-INTERNAL")
 
+    def commit(
+        self,
+        container_id: str,
+        image_ref: str,
+        *,
+        changes: Sequence[str] = (),
+        pause: bool = True,
+    ) -> str:
+        self._record("commit", container_id, image_ref, tuple(changes), pause)
+        self._take_op_failure("commit")
+        container = self._container(container_id)
+        # Simulate commit by creating a new image with a deterministic ID
+        digest = hashlib.sha256(f"{container_id}:{image_ref}:{len(changes)}".encode()).hexdigest()
+        image_id = f"sha256:{digest}"
+        # Store image with ref as key and also by ID
+        info = ImageInfo(
+            id=image_id,
+            digest=f"sha256:{digest}",
+            repo_digests=(),
+            size=_FAKE_IMAGE_SIZE,
+            created=_FAKE_IMAGE_CREATED,
+            labels={},
+        )
+        # Simplify: store under image_ref and also under image_id
+        self.images[image_ref] = info
+        self.images[image_id] = info
+        # Update container's image to new image_id for diff tracking
+        container.image = image_id
+        return image_id
+
+    def image_id(self, ref: str) -> str:
+        self._record("image_id", ref)
+        self._take_op_failure("image_id")
+        info = self.images.get(ref)
+        if info is None:
+            # Try lookup by ID substring or exact
+            for img in self.images.values():
+                if img.id == ref:
+                    return img.id
+            raise make("GINN-E-INTERNAL")
+        return info.id
+
+    def diff(self, container_id: str) -> list[str]:
+        self._record("diff", container_id)
+        self._take_op_failure("diff")
+        self._container(container_id)
+        # Fake: return empty diff; provision tests check that diff is handled
+        return []
+
+    def images_by_name(self, name: str) -> list[ImageInfo]:
+        self._record("images_by_name", name)
+        self._take_op_failure("images_by_name")
+        out: list[ImageInfo] = []
+        for ref, info in self.images.items():
+            # Match repository name before colon or @, similar to CLI
+            repo = ref.split(":")[0].split("@")[0]
+            if repo == name or repo.endswith("/" + name):
+                # Avoid duplicates when stored under both ref and ID
+                if info not in out:
+                    out.append(info)
+        return out
+
     def create(self, spec: CreateSpec) -> str:
         self._record("create", spec.name)
         self._take_op_failure("create")
@@ -255,10 +317,11 @@ class FakePodman:
             raise make("GINN-E-INTERNAL")
         container_id = f"{self._next:064x}"
         self._next += 1
+        image_ref = spec.image_id if spec.image_id is not None else spec.image_digest_ref
         self.containers[container_id] = _Container(
             id=container_id,
             name=spec.name,
-            image=spec.image_digest_ref,
+            image=image_ref,
             labels=dict(spec.labels),
             passwd_entry=spec.passwd_entry,
         )
