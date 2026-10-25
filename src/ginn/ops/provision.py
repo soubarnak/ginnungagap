@@ -69,7 +69,9 @@ def check_init(podman: Podman, container_id: str, image: str, realm: str) -> Non
         # must start with SCRATCH_PREFIX. Use a temp dir that mimics that.
         import tempfile
 
-        tmp = tempfile.mkdtemp(prefix="ginn-scratch-")
+        from ginn.store.scratch import SCRATCH_PREFIX
+
+        tmp = tempfile.mkdtemp(prefix=SCRATCH_PREFIX)
         scratch = Path(tmp)
         try:
             try:
