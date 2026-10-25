@@ -154,8 +154,9 @@ GOLDEN_ARCH_SERVICES_ON = [
     "/run/user/1000:mode=0700,U",
     "--device",
     "/dev/dri",
+    "--entrypoint",
+    '["/sbin/init"]',
     DIGEST,
-    "/sbin/init",
 ]
 
 
@@ -487,7 +488,7 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str 
     assert "--security-opt" not in argv
     assert "--init" not in argv
     assert "--init-path" not in argv
-    assert "--entrypoint" not in argv
+    assert option_values(argv, "--entrypoint") == ['["/sbin/init"]']
     assert not any(arg.startswith("--cgroups") for arg in argv)
     assert "--systemd=always" in argv
     assert option_values(argv, "--user") == ["0:0"]
@@ -501,7 +502,9 @@ def assert_services_on_argv(argv: list[str], *, distro: str = "arch", name: str 
     assert option_values(argv, "--env") == ["SYSTEMD_LOG_LEVEL=warning"]
     entry = argv[argv.index("--passwd-entry") + 1]
     assert entry.endswith(f":alice:/home/alice:{load_distro(distro).shell}")
-    assert argv[-2:] == [pull_reference(distro) if distro == "kali" else DIGEST, "/sbin/init"]
+    assert argv[-1] == (pull_reference(distro) if distro == "kali" else DIGEST)
+    assert argv[-1] != "/sbin/init"
+    assert argv.count("/sbin/init") == 0
 
 
 @pytest.mark.fr("FR-080")

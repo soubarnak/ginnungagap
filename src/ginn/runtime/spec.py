@@ -72,7 +72,7 @@ from typing import Final
 from ginn.domain.enums import DistroId, Tier
 from ginn.domain.names import RealmName
 from ginn.domain.permissions import Permissions, effective_toggles
-from ginn.podman.adapter import CreateSpec, Mount, require_digest_ref
+from ginn.podman.adapter import CreateSpec, Mount, require_digest_ref, require_image_id_ref
 from ginn.runtime.mounts import CreateBinds, Exists, create_binds, runtime_dir
 from ginn.security.caps import CreateOptions, TierExtras, create_options
 from ginn.trust.manifest import TrustManifest, pull_reference
@@ -90,8 +90,6 @@ KEEP_ALIVE_COMMAND: Final[tuple[str, ...]] = ("infinity",)
 are both given, so the container keeps running whatever podman does with the image's CMD."""
 INIT_PATH: Final = "/sbin/init"
 """The path of systemd in a services-on image. The create checks it exists (GINN-E-NO-INIT, F3)."""
-SERVICES_COMMAND: Final[tuple[str, ...]] = (INIT_PATH,)
-"""The services-on realm's command: systemd as PID 1 (ADR-003). It follows the image."""
 MACHINE_ID_PATH: Final = "/etc/machine-id"
 """Where a services-on container gets its machine-id, copied in with `podman cp` before the
 first start (ADR-007, F6). A bind mount is not used: it breaks systemd-machine-id-commit.service."""
@@ -177,6 +175,8 @@ class RealmSpec:
     login_shell: str
     home: Path
     binds: CreateBinds
+    image_id: str | None = None
+    """The committed stage image ID for the reset create (ADR-015 Decision 4)."""
     tier: Tier = Tier.BASIC
     services: bool = False
     """Services on: systemd is the realm's init, and only its runit entry starts it (ADR-003)."""
@@ -198,6 +198,8 @@ class RealmSpec:
         if not isinstance(self.binds, CreateBinds):
             raise TypeError("binds must be CreateBinds from mounts.create_binds")
         require_digest_ref(self.image)
+        if self.image_id is not None:
+            require_image_id_ref(self.image_id)
         # The passwd entry checks its fields (no ":", "$" or newline), so a bad one fails here.
         realm_passwd_entry(self.user, self.uid, self.gid, self.home, self.login_shell)
         if self.tier is Tier.BASIC and replace(self.options, cdi=None) != CreateOptions():
@@ -393,6 +395,7 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
     base = CreateSpec(
         name=spec.container_name,
         image_digest_ref=spec.image,
+        image_id=spec.image_id,
         network=network_of(spec.distro),
         user=f"{spec.uid}:{spec.gid}",
         userns="keep-id",
@@ -417,8 +420,8 @@ def create_spec(spec: RealmSpec) -> CreateSpec:
         base,
         user="0:0",
         init=False,
-        entrypoint_argv=[],
-        command=list(SERVICES_COMMAND),
+        entrypoint_argv=[INIT_PATH],
+        command=[],
         systemd="always",
         cgroupns="private",
         cgroup_parent=services_cgroup_parent(spec.uid, spec.name),
