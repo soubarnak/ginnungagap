@@ -64,7 +64,8 @@ PKG_MANAGERS = frozenset(
 )
 # Tools a check-updates step may run besides a package manager: Arch makes its scratch path with
 # mkdir and links the installed-package database into it with ln (arch.toml).
-SCRATCH_TOOLS = frozenset({"mkdir", "ln"})
+# ADR-015 clean adds rm, mkdir -p and find (arch, debian/kali, fedora).
+SCRATCH_TOOLS = frozenset({"mkdir", "ln", "rm", "find"})
 # The scratch path a caller would pass to check_updates(). The loader never creates it.
 CHECK_TMP = "/srv/ginn-check-0001"
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "-c"})
@@ -133,11 +134,13 @@ def _check_steps_of(name: str) -> list[list[str]]:
 
 
 def _every_argv(name: str) -> list[tuple[str, list[str]]]:
-    """Each verb's argv (check-updates excluded), then each check-updates step, labelled."""
+    """Each verb's argv (check-updates and clean excluded), then each step, labelled."""
     definition = load(name)
     out: list[tuple[str, list[str]]] = []
     for verb in Verb:
         if verb is Verb.CHECK_UPDATES:
+            continue
+        if verb is Verb.CLEAN:
             continue
         if verb is Verb.REMOVE_CHECK and not definition.has_remove_check:
             continue
@@ -147,6 +150,8 @@ def _every_argv(name: str) -> list[tuple[str, list[str]]]:
         out.append((verb.value, definition.argv(verb, packages)))
     for index, step in enumerate(_check_steps_of(name)):
         out.append((f"check-updates[{index}]", step))
+    for index, step in enumerate(definition.clean_steps):
+        out.append((f"clean[{index}]", list(step)))
     return out
 
 
@@ -183,11 +188,12 @@ def test_each_shipped_distribution_loads_with_every_verb() -> None:
         assert definition.id == name
         assert definition.trust_key == name
         assert definition.shell == "/bin/bash"
-        expected = set(Verb) - {Verb.CHECK_UPDATES}
+        expected = set(Verb) - {Verb.CHECK_UPDATES, Verb.CLEAN}
         if name not in REMOVE_CHECK_DISTROS:
             expected.discard(Verb.REMOVE_CHECK)
         assert set(definition.verbs) == expected, name
         assert definition.check_steps
+        assert definition.clean_steps
 
 
 @pytest.mark.fr("NFR-060")

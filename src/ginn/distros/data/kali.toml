@@ -44,6 +44,9 @@ check_updates_count_regex = '\[upgradable from: '
 # inconsistent (loader.py). Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = true
+# ADR-015 Decision 3 and 11: init set and its estimated installed bytes (S-11).
+services_packages = ["systemd", "systemd-sysv", "dbus"]
+services_estimated_installed_bytes = 22935552
 
 [integration]
 packages = ["ca-certificates", "locales"]
@@ -89,3 +92,5 @@ resolve = [
 ]
 # apt-cache show: Installed-Size and Size fields for the named packages. Changes nothing.
 estimate = ["apt-cache", "show", "{packages}"]
+# ADR-015 Decision 3: clean the apt cache and lists.
+clean = [["apt-get", "clean"], ["rm", "-rf", "/var/lib/apt/lists"], ["mkdir", "-p", "/var/lib/apt/lists/partial"]]

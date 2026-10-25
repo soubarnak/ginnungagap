@@ -131,6 +131,8 @@ _OPTIONAL_TOP_KEYS: Final = frozenset(
         "check_updates_exit_for_updates",
         "db_check_ok_exit",
         "db_check_stdout_inconsistent",
+        "services_packages",
+        "services_estimated_installed_bytes",
     }
 )
 # The keys that read the db-check result. A file that defines the db-check verb must define them.
@@ -151,10 +153,13 @@ class Verb(StrEnum):
     LIST_EXPLICIT = "list-explicit"
     RESOLVE = "resolve"
     ESTIMATE = "estimate"
+    CLEAN = "clean"
 
 
 # The verb keys a distribution file must define, and the ones it may omit (see the Verb docstring).
-_OPTIONAL_VERB_KEYS: Final = frozenset({Verb.REMOVE_CHECK.value, Verb.DB_CHECK.value})
+_OPTIONAL_VERB_KEYS: Final = frozenset(
+    {Verb.REMOVE_CHECK.value, Verb.DB_CHECK.value, Verb.CLEAN.value}
+)
 _REQUIRED_VERB_KEYS: Final = frozenset(verb.value for verb in Verb) - _OPTIONAL_VERB_KEYS
 
 
@@ -271,6 +276,12 @@ class DistroDef:
     Empty when the distribution defines no db-check verb."""
     db_check_stdout_inconsistent: bool = False
     """True when, with an ok exit status, any stdout of the db-check verb means inconsistent."""
+    services_packages: tuple[str, ...] = ()
+    """The init set for services-on realms (ADR-015 Decision 3). Empty on arch."""
+    services_estimated_installed_bytes: int = 0
+    """Estimated installed bytes of the init set (ADR-015 Decision 11). Zero on arch."""
+    clean_steps: tuple[tuple[str, ...], ...] = ()
+    """The clean verb steps (ADR-015 Decision 3). Empty when the distribution omits clean."""
 
     def argv(self, verb: Verb, packages: Sequence[str] = ()) -> list[str]:
         """Return the argv for `verb`, with `packages` spliced in at `{packages}`.
@@ -584,10 +595,16 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
     everything = _everything(reader, raw.get("everything", []), name_pattern)
     refresh_before = _refresh_before(reader, raw["refresh_before"])
     integration = _integration(reader, raw["integration"], name_pattern)
-    verbs, check_steps = _verbs(reader, raw["verbs"])
+    verbs, check_steps, clean_steps = _verbs(reader, raw["verbs"])
     count, count_regex = _check_count(reader, raw)
     exit_for_updates = _exit_for_updates(reader, raw, len(check_steps))
     ok_exit, stdout_inconsistent = _db_check(reader, raw, Verb.DB_CHECK in verbs)
+    services_packages = _services_packages(
+        reader, raw.get("services_packages", []), name_pattern
+    )
+    services_estimated = _services_estimated(
+        reader, raw.get("services_estimated_installed_bytes", 0)
+    )
     return DistroDef(
         id=distro_id,
         source=source,
@@ -609,6 +626,9 @@ def from_mapping(raw: Mapping[str, object], source: str = "<mapping>") -> Distro
         check_exit_for_updates=exit_for_updates,
         db_check_ok_exit=ok_exit,
         db_check_stdout_inconsistent=stdout_inconsistent,
+        services_packages=services_packages,
+        services_estimated_installed_bytes=services_estimated,
+        clean_steps=clean_steps,
     )
 
 
@@ -742,13 +762,15 @@ def _integration(reader: "_Reader", value: object, name_pattern: re.Pattern[str]
 
 def _verbs(
     reader: "_Reader", value: object
-) -> tuple[dict[Verb, tuple[str, ...]], tuple[tuple[str, ...], ...]]:
+) -> tuple[dict[Verb, tuple[str, ...]], tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...]]:
     table = reader.table(value, "verbs")
     _only_keys(reader, table, _REQUIRED_VERB_KEYS, "verbs", _OPTIONAL_VERB_KEYS)
     allowed = frozenset({"packages"})
     verbs: dict[Verb, tuple[str, ...]] = {}
     for key in table:
         if key == Verb.CHECK_UPDATES.value:
+            continue
+        if key == Verb.CLEAN.value:
             continue
         if key == Verb.DB_CHECK.value:
             # db-check names no package, so no placeholder is allowed in it at all.
@@ -758,7 +780,11 @@ def _verbs(
         if key == Verb.REMOVE_CHECK.value and PACKAGES_ELEMENT not in argv:
             raise reader.fail(f"verbs.{key}", "must include {packages} as one element")
         verbs[Verb(key)] = argv
-    return verbs, _check_steps(reader, table[Verb.CHECK_UPDATES.value])
+    check_steps = _check_steps(reader, table[Verb.CHECK_UPDATES.value])
+    clean_steps: tuple[tuple[str, ...], ...] = ()
+    if Verb.CLEAN.value in table:
+        clean_steps = _clean_steps(reader, table[Verb.CLEAN.value])
+    return verbs, check_steps, clean_steps
 
 
 def _check_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...]:
@@ -772,6 +798,41 @@ def _check_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...
             raise reader.fail(field, "every step must be an argv list")
         steps.append(reader.argv(step, field, frozenset({TMPDIR_FIELD}), frozenset()))
     return tuple(steps)
+
+
+def _clean_steps(reader: "_Reader", value: object) -> tuple[tuple[str, ...], ...]:
+    """Validate the clean verb: a non-empty list of argv lists (ADR-015 Decision 3)."""
+    field = f"verbs.{Verb.CLEAN.value}"
+    if not isinstance(value, list) or not value:
+        raise reader.fail(field, "must be a non-empty list of argv lists")
+    steps: list[tuple[str, ...]] = []
+    for step in value:
+        if not isinstance(step, list):
+            raise reader.fail(field, "every step must be an argv list")
+        # clean steps take no packages and no tmpdir, no placeholders
+        steps.append(reader.argv(step, field, frozenset(), frozenset()))
+    return tuple(steps)
+
+
+def _services_packages(
+    reader: "_Reader", value: object, name_pattern: re.Pattern[str]
+) -> tuple[str, ...]:
+    """The init set for services-on (ADR-015 Decision 3): a list of package names."""
+    names = reader.strings(value, "services_packages")
+    for name in names:
+        if name_pattern.fullmatch(name) is None:
+            raise reader.fail("services_packages", f"{name!r} does not match package_name_regex")
+    if len(set(names)) != len(names):
+        raise reader.fail("services_packages", "must not repeat a package")
+    return names
+
+
+def _services_estimated(reader: "_Reader", value: object) -> int:
+    """Estimated installed bytes of the init set (ADR-015 Decision 11)."""
+    field = "services_estimated_installed_bytes"
+    if type(value) is not int or value < 0:
+        raise reader.fail(field, "must be a non-negative integer")
+    return value
 
 
 class _Reader:

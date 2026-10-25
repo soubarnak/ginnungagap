@@ -48,6 +48,10 @@ refresh_before = []
 # Not verified until M4: pacman(8) documents no exit statuses for -D.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015 Decision 3 and 11: init set for services-on and its estimated installed bytes.
+# Arch has no init set.
+services_packages = []
+services_estimated_installed_bytes = 0
 
 [integration]
 # ca-certificates is in the image (S-10b), so under --needed the install changes nothing. It is the
@@ -104,3 +108,5 @@ list-explicit = ["pacman", "--query", "--explicit", "--quiet"]
 resolve = ["pacman", "--sync", "--print", "--print-format", "%n", "{packages}"]
 # --info is -Si: repository info, including Download Size and Installed Size. Changes nothing.
 estimate = ["pacman", "--sync", "--info", "{packages}"]
+# ADR-015 Decision 3: clean the pacman package cache (untested, Open question 11).
+clean = [["find", "/var/cache/pacman/pkg", "-mindepth", "1", "-delete"]]

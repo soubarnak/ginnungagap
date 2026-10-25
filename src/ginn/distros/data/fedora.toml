@@ -41,6 +41,9 @@ check_updates_exit_for_updates = 100
 # not broken. Not verified until M4.
 db_check_ok_exit = [0]
 db_check_stdout_inconsistent = false
+# ADR-015 Decision 3 and 11: init set and its estimated installed bytes (S-11).
+services_packages = ["systemd", "dbus-broker"]
+services_estimated_installed_bytes = 24586672
 
 [integration]
 packages = ["glibc-langpack-{lang}"]
@@ -82,3 +85,5 @@ estimate = [
     "--queryformat", '%{{name}} %{{downloadsize}} %{{installsize}}\n',
     "{packages}",
 ]
+# ADR-015 Decision 3: clean the dnf cache.
+clean = [["dnf", "clean", "all"]]
