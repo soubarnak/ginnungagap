@@ -562,7 +562,9 @@ def test_a_services_on_create_makes_the_container_and_stops_with_no_start(
     argv = spec.to_argv()
     assert "--systemd=always" in argv
     assert "--init" not in argv
-    assert argv[-1] == "/sbin/init"
+    assert "--entrypoint" in argv
+    assert argv[argv.index("--entrypoint") + 1] == '["/sbin/init"]'
+    assert argv[-1] != "/sbin/init"
     assert RealmStore(env.paths).load(RealmName("debian")) == record
     assert env.journal.pending() == []
 
