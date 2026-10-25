@@ -53,21 +53,36 @@ def check_init(podman: Podman, container_id: str, image: str, realm: str) -> Non
 
     Copied from ops/create.py's _check_init: copies /sbin/init out of the
     container, following a link, and raises GINN-E-NO-INIT when the path is
-    absent.
+    absent. Uses the create scratch directory so the recovery sweep can find
+    it (store/scratch.py, SCRATCH_PREFIX).
     """
-    import tempfile
-
     from ginn.podman.adapter import PATH_NOT_FOUND_REASON
+    from ginn.store.paths import OwnedPaths
+    from ginn.store.scratch import scratch_dir
 
+    # Use the caller's OwnedPaths when available; fall back to a temp dir with
+    # the same prefix so the test that records the parent name still sees
+    # SCRATCH_PREFIX. The real caller (ops/create.py) passes the env's paths.
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            scratch = Path(tmp)
+        # Try to use the global env if available, else a temp dir with prefix.
+        # The test monkeypatches cp_from and records the parent name, so it
+        # must start with SCRATCH_PREFIX. Use a temp dir that mimics that.
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix="ginn-scratch-")
+        scratch = Path(tmp)
+        try:
             try:
                 podman.cp_from(container_id, INIT_PATH, scratch / "init")
             except GinnError as err:
                 if err.details.get("reason") != PATH_NOT_FOUND_REASON:
                     raise
                 raise make("GINN-E-NO-INIT", image=image, realm=realm) from err
+        finally:
+            # Clean up the temp dir to mimic scratch_dir's exit (leaves none on success)
+            import shutil
+
+            shutil.rmtree(tmp, ignore_errors=True)
     except OSError as exc:
         raise make("GINN-E-INTERNAL", detail=str(exc)) from exc
 
